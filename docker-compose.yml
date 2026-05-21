@@ -1,0 +1,52 @@
+# Local dev stack: postgres, memcached, optional atlantis service (profile: isolated).
+
+services:
+  postgres:
+    # TimescaleDB image bundles Postgres + Timescale; we layer pgvector on top.
+    image: timescale/timescaledb-ha:pg16-all
+    environment:
+      POSTGRES_USER: atlantis
+      POSTGRES_PASSWORD: atlantis
+      POSTGRES_DB: atlantis
+    ports:
+      - "5432:5432"
+    volumes:
+      - atl-pg:/home/postgres/pgdata/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "atlantis"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  memcached:
+    # Upstream memcached for local dev. Production swaps in Grafana's patched fork (not public).
+    image: memcached:1.6.29-alpine
+    ports:
+      - "11211:11211"
+    command: ["-m", "256", "-I", "5m", "-v"]
+
+  atlantis:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      memcached:
+        condition: service_started
+    environment:
+      PG_URL: postgres://atlantis:atlantis@postgres:5432/atlantis?sslmode=disable
+      MEMCACHED_ADDR: memcached:11211
+      LOG_LEVEL: debug
+      # Apply migrations on boot. Off in production; operators run tidectl migrate-up explicitly.
+      AUTO_MIGRATE: "true"
+      MIGRATIONS_DIR: /app/migrations
+      # Dev only: allow tide apply to push schema, mirror received .atl to disk.
+      # Off in production (schema lands via CI).
+      ATL_MIRROR_SCHEMA: "true"
+      ATL_MIRROR_DIR: /app/schema
+      ATL_ALLOW_APPLY_MUTATION: "true"
+    ports:
+      - "9090:9090"
+    profiles: ["isolated"]
+
+volumes:
+  atl-pg:

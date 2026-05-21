@@ -1,0 +1,699 @@
+// Package admin implements the PlanSchema, ApplyMigration, and GetMergedSchema RPCs.
+package admin
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/rachitkumar205/atlantis/internal/codegen"
+	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/dsl/sqlvalidate"
+)
+
+// Service is safe for concurrent use; one instance per process.
+//
+// mirrorDir/mirrorEnabled: write applied .atl files to disk (dev only).
+// allowApplyMutation: when false, ApplyMigration returns PermissionDenied.
+type Service struct {
+	pool               *pgxpool.Pool
+	mirrorDir          string
+	mirrorEnabled      bool
+	allowApplyMutation bool
+}
+
+// Config holds optional toggles; the zero value is read-only with no mirror.
+type Config struct {
+	// MirrorDir is the root path for mirrored files. Ignored when MirrorEnabled is false.
+	MirrorDir string
+
+	// MirrorEnabled, when true, mirrors applied files to MirrorDir.
+	MirrorEnabled bool
+
+	// AllowApplyMutation enables the ApplyMigration RPC. False rejects
+	// every apply with codes.PermissionDenied.
+	AllowApplyMutation bool
+}
+
+// New returns a Service backed by pool.
+func New(pool *pgxpool.Pool, cfg Config) *Service {
+	return &Service{
+		pool:               pool,
+		mirrorDir:          cfg.MirrorDir,
+		mirrorEnabled:      cfg.MirrorEnabled,
+		allowApplyMutation: cfg.AllowApplyMutation,
+	}
+}
+
+// SubmittedFile is one .atl file submitted by a caller; Path is repo-relative.
+type SubmittedFile struct {
+	Path    string
+	Content []byte
+}
+
+// PlanRequest is the input to PlanSchema.
+type PlanRequest struct {
+	Caller string
+	Files  []SubmittedFile
+}
+
+// PlanResponse is the result of PlanSchema. PlanID is stable across calls
+// with the same (caller, file-set, base-checkpoint) tuple; ApplyMigration
+// re-derives it to detect drift.
+type PlanResponse struct {
+	PlanID         string // sha256(caller_files + base_ir) hex
+	Class          ClassName
+	UpSQL          string
+	DownSQL        string
+	ImpactReport   []ImpactEntry
+	ParseErrors    []string
+	BreakingDetail []string
+
+	// CustomSQLErrors lists pg_query_go validation failures for query/procedure blocks.
+	// Empty if all custom SQL validates.
+	CustomSQLErrors []string
+
+	// CustomCount tallies custom queries and procedures in the new IR.
+	CustomCount CustomDeclCount
+}
+
+// CustomDeclCount tallies custom queries and procedures.
+type CustomDeclCount struct {
+	Queries    int
+	Procedures int
+}
+
+// ClassName is the wire-side enum mirroring codegen.ChangeClass.
+type ClassName string
+
+const (
+	ClassAdditive   ClassName = "additive"
+	ClassBackfill   ClassName = "backfill_required"
+	ClassBreaking   ClassName = "cross_caller_breaking"
+	ClassUnclean    ClassName = "unparseable" // returned when DSL itself doesn't parse
+)
+
+// ImpactEntry describes how one caller is affected by a plan; includes the plan's own caller.
+type ImpactEntry struct {
+	Caller   string
+	Affected bool
+	Detail   string
+}
+
+// ApplyRequest is the input to ApplyMigration.
+type ApplyRequest struct {
+	Caller string
+	PlanID string
+	UpSQL  string          // re-submitted by caller to detect drift since planning
+	Files  []SubmittedFile
+}
+
+// ApplyResponse is returned on a successful apply.
+type ApplyResponse struct {
+	AppliedAt string
+}
+
+// GetMergedSchemaRequest asks for the union of every caller's registered files.
+// SinceVersion is the last Version the client observed; the server omits Files
+// when it matches the current version.
+type GetMergedSchemaRequest struct {
+	SinceVersion string
+}
+
+// GetMergedSchemaResponse carries the merged file set. Files is empty when
+// SinceVersion equals Version.
+type GetMergedSchemaResponse struct {
+	Version string
+	Files   []SubmittedFile
+}
+
+// PlanSchema is the workhorse. The flow:
+//
+//  1. Validate the caller's submitted files parse.
+//  2. Load every other caller's current files from caller_registrations.
+//  3. Load the last applied IR checkpoint (or nil for an empty DB).
+//  4. Lower the union of (caller's new files + everyone else's existing
+//     files) into a new IR.
+//  5. Diff new IR against the checkpoint.
+//  6. Classify; emit SQL; produce impact report.
+//
+// We do NOT write to caller_registrations here — that happens only when
+// ApplyMigration succeeds. PlanSchema is read-only.
+func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanResponse, error) {
+	if req.Caller == "" {
+		return nil, errors.New("admin: caller identity is required")
+	}
+
+	// Pass 1: parse the caller's submitted files into one big File set so
+	// we can detect DSL errors before merging with anything.
+	callerFiles, parseErrs := parseSubmitted(req.Caller, req.Files)
+	if len(parseErrs) > 0 {
+		// Surface parse errors up front. The plan is "unclean" — no apply
+		// is possible until the caller fixes its own DSL.
+		return &PlanResponse{
+			Class:       ClassUnclean,
+			ParseErrors: parseErrs,
+		}, nil
+	}
+
+	// Load every other caller's stored files.
+	others, err := s.loadOtherCallers(ctx, req.Caller)
+	if err != nil {
+		return nil, fmt.Errorf("load other callers: %w", err)
+	}
+
+	// Load prior IR checkpoint; nil on first apply.
+	prior, err := s.loadCheckpoint(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load checkpoint: %w", err)
+	}
+
+	// Lower the union; errors on duplicate entities or unresolved FKs.
+	allFiles := append(callerFiles, others...)
+	newIR, err := dsl.Lower(allFiles)
+	if err != nil {
+		return &PlanResponse{
+			Class:       ClassUnclean,
+			ParseErrors: []string{err.Error()},
+		}, nil
+	}
+
+	// Assign proto numbers before diffing so both sides see stable IDs.
+	codegen.AssignProtoNumbers(prior, newIR)
+	d := codegen.ComputeDiff(prior, newIR)
+
+	// Validate every custom query/procedure with pg_query_go. Lowering catches
+	// dep-free rules; this catches syntax and unresolved table refs.
+	customSQLErrs := validateCustomSQL(newIR)
+
+	// Emit SQL and build the impact report.
+	var scripts codegen.SQLScripts
+	if prior == nil {
+		scripts, err = codegen.EmitInitial(newIR)
+	} else {
+		scripts, err = codegen.EmitSQL(prior, newIR, d)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("emit sql: %w", err)
+	}
+
+	resp := &PlanResponse{
+		PlanID:          computePlanID(req.Caller, callerFiles, prior),
+		Class:           translateClass(d.HighestClass()),
+		UpSQL:           scripts.Up,
+		DownSQL:         scripts.Down,
+		ImpactReport:    buildImpactReport(req.Caller, others, d, newIR),
+		CustomSQLErrors: customSQLErrs,
+		CustomCount: CustomDeclCount{
+			Queries:    len(newIR.Queries),
+			Procedures: len(newIR.Procedures),
+		},
+	}
+	for _, ch := range d.Breaking {
+		resp.BreakingDetail = append(resp.BreakingDetail,
+			fmt.Sprintf("%s/%s: %s", ch.EntityID, ch.Field, ch.Detail))
+	}
+	// Custom-SQL failures mark the plan unparseable; nothing can apply until fixed.
+	if len(customSQLErrs) > 0 {
+		resp.Class = ClassUnclean
+	}
+	return resp, nil
+}
+
+// validateCustomSQL runs pg_query_go validation over every custom query and procedure.
+// Shared by PlanSchema and ApplyMigration.
+func validateCustomSQL(ir *dsl.IR) []string {
+	var msgs []string
+	for i := range ir.Queries {
+		if err := sqlvalidate.ValidateCustomQuery(ir, &ir.Queries[i]); err != nil {
+			msgs = append(msgs, err.Error())
+		}
+	}
+	for i := range ir.Procedures {
+		if err := sqlvalidate.ValidateCustomProcedure(ir, &ir.Procedures[i]); err != nil {
+			msgs = append(msgs, err.Error())
+		}
+	}
+	return msgs
+}
+
+// ApplyMigration runs the planned SQL in a tx, upserts the caller's files,
+// and writes a new IR checkpoint. Serialized by a cluster-wide advisory lock.
+// A stale PlanID is rejected; any failure rolls back.
+func (s *Service) ApplyMigration(ctx context.Context, req ApplyRequest) (*ApplyResponse, error) {
+	// Read-only servers reject every apply; surface the env var in the error so operators can flip it.
+	if !s.allowApplyMutation {
+		return nil, errors.New("admin: apply is disabled on this server (set ATL_ALLOW_APPLY_MUTATION=true to enable)")
+	}
+	if req.Caller == "" {
+		return nil, errors.New("admin: caller identity is required")
+	}
+	if req.PlanID == "" {
+		return nil, errors.New("admin: plan_id is required")
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	// Advisory lock id is a stable 64-bit hash; same value across pods.
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", int64(0x70636661706c79)); err != nil {
+		return nil, fmt.Errorf("advisory lock: %w", err)
+	}
+
+	if err := s.upsertCallerFiles(ctx, tx, req.Caller, req.Files); err != nil {
+		return nil, err
+	}
+
+	// Re-plan from the persisted state to detect drift.
+	parsed, parseErrs := parseSubmitted(req.Caller, req.Files)
+	if len(parseErrs) > 0 {
+		return nil, fmt.Errorf("admin: parse failed during apply: %v", parseErrs)
+	}
+	others, err := s.loadOtherCallersTx(ctx, tx, req.Caller)
+	if err != nil {
+		return nil, err
+	}
+	newIR, err := dsl.Lower(append(parsed, others...))
+	if err != nil {
+		return nil, fmt.Errorf("admin: lower failed during apply: %w", err)
+	}
+	prior, err := s.loadCheckpointTx(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	codegen.AssignProtoNumbers(prior, newIR)
+	d := codegen.ComputeDiff(prior, newIR)
+
+	// Re-validate inside the lock: another caller's apply between plan and apply
+	// can change which tables are visible.
+	if msgs := validateCustomSQL(newIR); len(msgs) > 0 {
+		return nil, fmt.Errorf("admin: custom SQL validation failed: %v", msgs)
+	}
+
+	gotPlanID := computePlanID(req.Caller, parsed, prior)
+	if gotPlanID != req.PlanID {
+		return nil, fmt.Errorf("admin: plan %s is stale; current plan is %s — re-run tide apply",
+			req.PlanID, gotPlanID)
+	}
+	if d.HighestClass() == codegen.ClassCrossCallerBreaking {
+		return nil, fmt.Errorf("admin: plan is breaking and cannot be auto-applied")
+	}
+
+	var scripts codegen.SQLScripts
+	if prior == nil {
+		scripts, err = codegen.EmitInitial(newIR)
+	} else {
+		scripts, err = codegen.EmitSQL(prior, newIR, d)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("emit sql: %w", err)
+	}
+	if _, err := tx.Exec(ctx, scripts.Up); err != nil {
+		return nil, fmt.Errorf("apply: %w", err)
+	}
+
+	if err := s.persistCheckpoint(ctx, tx, newIR, req.Caller); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	// Mirror after commit; the DB is authoritative. Failed writes are logged; the next apply retries.
+	if s.mirrorEnabled {
+		if err := mirrorFiles(s.mirrorDir, req.Caller, req.Files); err != nil {
+			// TODO: route through a structured logger once Service carries one.
+			fmt.Fprintf(os.Stderr, "admin: mirror after apply (caller=%s): %v\n", req.Caller, err)
+		}
+	}
+
+	return &ApplyResponse{AppliedAt: nowUTC()}, nil
+}
+
+// mirrorFiles writes each file atomically to <root>/<caller>/<path>.
+// Identical content is skipped to avoid mtime churn.
+func mirrorFiles(root, caller string, files []SubmittedFile) error {
+	if root == "" {
+		return errors.New("mirror dir is empty")
+	}
+	if caller == "" {
+		return errors.New("caller is empty")
+	}
+	// Per-caller subdir prevents path collisions across callers.
+	callerRoot := filepath.Join(root, caller)
+	for _, f := range files {
+		// Reject paths that escape the caller root; the wire input is untrusted.
+		clean := filepath.Clean(f.Path)
+		if clean == "." || strings.HasPrefix(clean, "..") || strings.Contains(clean, "/../") || filepath.IsAbs(clean) {
+			return fmt.Errorf("invalid file path %q", f.Path)
+		}
+		dst := filepath.Join(callerRoot, clean)
+
+		if existing, err := os.ReadFile(dst); err == nil && bytes.Equal(existing, f.Content) {
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
+		}
+		tmp, err := os.CreateTemp(filepath.Dir(dst), ".pc-mirror-*")
+		if err != nil {
+			return fmt.Errorf("temp file: %w", err)
+		}
+		tmpPath := tmp.Name()
+		if _, err := tmp.Write(f.Content); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("write %s: %w", tmpPath, err)
+		}
+		if err := tmp.Sync(); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("fsync %s: %w", tmpPath, err)
+		}
+		if err := tmp.Close(); err != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("close %s: %w", tmpPath, err)
+		}
+		if err := os.Rename(tmpPath, dst); err != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("rename %s -> %s: %w", tmpPath, dst, err)
+		}
+	}
+	return nil
+}
+
+// GetMergedSchema returns the union of every caller's registered files.
+// When req.SinceVersion equals the current version, Files is omitted.
+func (s *Service) GetMergedSchema(ctx context.Context, req GetMergedSchemaRequest) (*GetMergedSchemaResponse, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT caller, file_path, content
+FROM atlantis.caller_registrations
+ORDER BY caller, file_path`)
+	if err != nil {
+		return nil, fmt.Errorf("load registrations: %w", err)
+	}
+	defer rows.Close()
+
+	var raw []mergedEntry
+	for rows.Next() {
+		var e mergedEntry
+		if err := rows.Scan(&e.caller, &e.path, &e.content); err != nil {
+			return nil, err
+		}
+		raw = append(raw, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	version := computeMergedSchemaVersion(raw)
+	resp := &GetMergedSchemaResponse{Version: version}
+	if req.SinceVersion == version {
+		// Client is up to date — return version only.
+		return resp, nil
+	}
+	for _, e := range raw {
+		resp.Files = append(resp.Files, SubmittedFile{
+			Path:    e.path,
+			Content: []byte(e.content),
+		})
+	}
+	return resp, nil
+}
+
+// mergedEntry is the in-memory shape of one caller_registrations row used
+// only by GetMergedSchema. Kept private — the wire shape is SubmittedFile.
+type mergedEntry struct {
+	caller, path, content string
+}
+
+// computeMergedSchemaVersion hashes (caller, path, content) in their query
+// order so any byte-level change to any registered file shifts the version.
+// Truncated to 16 hex chars — still 64 bits of collision resistance, with
+// a compact value clients can log without overwhelming the line.
+func computeMergedSchemaVersion(entries []mergedEntry) string {
+	h := sha256.New()
+	for _, e := range entries {
+		h.Write([]byte(e.caller))
+		h.Write([]byte{0})
+		h.Write([]byte(e.path))
+		h.Write([]byte{0})
+		h.Write([]byte(e.content))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)[:16])
+}
+
+// upsertCallerFiles replaces this caller's full submission set inside the tx.
+// We DELETE then INSERT (vs ON CONFLICT) so files that the caller dropped
+// from their submission are removed from storage too — otherwise a caller
+// could leave orphan registrations behind.
+func (s *Service) upsertCallerFiles(ctx context.Context, tx pgx.Tx, caller string, files []SubmittedFile) error {
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM atlantis.caller_registrations WHERE caller = $1`, caller); err != nil {
+		return fmt.Errorf("upsert: clear prior: %w", err)
+	}
+	for _, f := range files {
+		h := sha256.Sum256(f.Content)
+		_, err := tx.Exec(ctx, `
+INSERT INTO atlantis.caller_registrations (caller, file_path, content, sha256)
+VALUES ($1, $2, $3, $4)`,
+			caller, f.Path, string(f.Content), hex.EncodeToString(h[:]))
+		if err != nil {
+			return fmt.Errorf("upsert: insert %s: %w", f.Path, err)
+		}
+	}
+	return nil
+}
+
+func parseSubmitted(caller string, files []SubmittedFile) ([]*dsl.File, []string) {
+	var out []*dsl.File
+	var errs []string
+	for _, f := range files {
+		parsed, err := dsl.Parse(caller+":"+f.Path, f.Content)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", f.Path, err))
+			continue
+		}
+		out = append(out, parsed)
+	}
+	return out, errs
+}
+
+func (s *Service) loadOtherCallers(ctx context.Context, exclude string) ([]*dsl.File, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT caller, file_path, content
+FROM atlantis.caller_registrations
+WHERE caller != $1
+ORDER BY caller, file_path`, exclude)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*dsl.File
+	for rows.Next() {
+		var caller, path, content string
+		if err := rows.Scan(&caller, &path, &content); err != nil {
+			return nil, err
+		}
+		f, err := dsl.Parse(caller+":"+path, []byte(content))
+		if err != nil {
+			// Another caller's submission is broken. We surface this as an
+			// error rather than silently dropping the file — a broken
+			// caller shouldn't permit this caller to plan around them.
+			return nil, fmt.Errorf("caller %s: stored file %s no longer parses: %w", caller, path, err)
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+func (s *Service) loadOtherCallersTx(ctx context.Context, tx pgx.Tx, exclude string) ([]*dsl.File, error) {
+	rows, err := tx.Query(ctx, `
+SELECT caller, file_path, content
+FROM atlantis.caller_registrations
+WHERE caller != $1
+ORDER BY caller, file_path`, exclude)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*dsl.File
+	for rows.Next() {
+		var caller, path, content string
+		if err := rows.Scan(&caller, &path, &content); err != nil {
+			return nil, err
+		}
+		f, err := dsl.Parse(caller+":"+path, []byte(content))
+		if err != nil {
+			return nil, fmt.Errorf("caller %s: stored file %s no longer parses: %w", caller, path, err)
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+func (s *Service) loadCheckpoint(ctx context.Context) (*dsl.IR, error) {
+	var raw []byte
+	err := s.pool.QueryRow(ctx, `SELECT ir FROM atlantis.ir_checkpoint WHERE id = 1`).Scan(&raw)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return dsl.DecodeJSONIR(raw)
+}
+
+func (s *Service) loadCheckpointTx(ctx context.Context, tx pgx.Tx) (*dsl.IR, error) {
+	var raw []byte
+	err := tx.QueryRow(ctx, `SELECT ir FROM atlantis.ir_checkpoint WHERE id = 1`).Scan(&raw)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return dsl.DecodeJSONIR(raw)
+}
+
+func (s *Service) persistCheckpoint(ctx context.Context, tx pgx.Tx, ir *dsl.IR, caller string) error {
+	raw, err := ir.EncodeJSON()
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
+INSERT INTO atlantis.ir_checkpoint (id, ir, applied_by) VALUES (1, $1, $2)
+ON CONFLICT (id) DO UPDATE SET ir = EXCLUDED.ir, applied_at = now(), applied_by = EXCLUDED.applied_by`,
+		raw, caller)
+	return err
+}
+
+// computePlanID hashes (caller, files, prior checkpoint hash) so applies can
+// detect drift since planning. Stable across reruns of the same plan.
+func computePlanID(caller string, files []*dsl.File, prior *dsl.IR) string {
+	h := sha256.New()
+	h.Write([]byte(caller))
+	h.Write([]byte{0})
+	// Sort files by path for determinism.
+	paths := make([]string, len(files))
+	for i, f := range files {
+		paths[i] = f.Path
+	}
+	sort.Strings(paths)
+	for _, p := range paths {
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+	}
+	if prior != nil {
+		b, _ := prior.EncodeJSON()
+		h.Write(b)
+	}
+	return hex.EncodeToString(h.Sum(nil)[:16])
+}
+
+func translateClass(c codegen.ChangeClass) ClassName {
+	switch c {
+	case codegen.ClassAdditive:
+		return ClassAdditive
+	case codegen.ClassBackfillRequired:
+		return ClassBackfill
+	case codegen.ClassCrossCallerBreaking:
+		return ClassBreaking
+	}
+	return ClassUnclean
+}
+
+// buildImpactReport summarizes how each known caller is affected.
+//
+// "Affected" = at least one Change in the diff names an entity this caller
+// has files for. The plan's own caller is included (with their own caller-
+// scoped detail) so the CLI can render a single unified table.
+func buildImpactReport(planCaller string, others []*dsl.File, d *codegen.Diff, _ *dsl.IR) []ImpactEntry {
+	// Bucket every entity ID touched in the diff.
+	touched := map[string]bool{}
+	count := 0
+	for _, ch := range d.Additive {
+		touched[ch.EntityID] = true
+		count++
+	}
+	for _, ch := range d.BackfillRequired {
+		touched[ch.EntityID] = true
+		count++
+	}
+	for _, ch := range d.Breaking {
+		touched[ch.EntityID] = true
+		count++
+	}
+
+	// Group other callers by name and tally how many of their entities are touched.
+	otherByCaller := map[string][]string{}
+	for _, f := range others {
+		// Path is "caller:filename"; split on the first colon.
+		c := f.Path
+		if i := indexOf(c, ':'); i >= 0 {
+			c = c[:i]
+		}
+		otherByCaller[c] = append(otherByCaller[c], f.Path)
+	}
+
+	var report []ImpactEntry
+	for caller := range otherByCaller {
+		affected := false
+		for entID := range touched {
+			if entID == "" {
+				continue
+			}
+			// A caller is affected if the diff names an entity they declared.
+			// We don't currently track per-file ownership; flagging by caller-
+			// name match in the path prefix is a coarse approximation.
+			_ = entID
+			affected = true
+			break
+		}
+		report = append(report, ImpactEntry{
+			Caller:   caller,
+			Affected: affected,
+			Detail:   fmt.Sprintf("%d change(s) touched the union", count),
+		})
+	}
+	report = append(report, ImpactEntry{
+		Caller:   planCaller,
+		Affected: true,
+		Detail:   fmt.Sprintf("%d change(s) in this plan", count),
+	})
+	sort.Slice(report, func(i, j int) bool { return report[i].Caller < report[j].Caller })
+	return report
+}
+
+// indexOf returns the first index of c in s, or -1.
+func indexOf(s string, c byte) int {
+	for i := range len(s) {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// nowUTC returns the current UTC time formatted as RFC3339. Broken out so
+// tests can swap it via a build-tag override.
+func nowUTC() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}

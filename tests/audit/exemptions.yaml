@@ -1,0 +1,37 @@
+# Audit exemptions — direct-pool callsites that the audit gate skips.
+#
+# Each entry is one file path relative to a caller-repo root (the parent
+# directory of internal/). Glob patterns are accepted; prefer exact-file
+# entries so each cutover PR removes one line.
+#
+# Every entry should disappear by the time Step 9b completes. The target
+# is an empty list — at that point the audit goes red on any direct-pool
+# callsite in the monorepo. Leaving an exemption in place after its
+# replacement lands means the gate is no longer protecting anything.
+#
+# Note: a single entry matches the same relative path in every caller
+# repo. `internal/auth/postgres_repository.go` exempts both backend's
+# and vendor-platform's auth repository — both will be removed by their
+# respective cutover PRs, both belong on the list now.
+
+files:
+  # Pool-construction files. Deleted once the caller-side pool itself
+  # goes away.
+  - "internal/platform/database/postgres.go"        # backend pool setup
+  - "internal/platform/database/database.go"        # vendor-platform pool setup
+
+  # Bucket B repositories awaiting caller cutover (Step 9b). One entry
+  # per file; each PR removes the file and the corresponding entry.
+  - "internal/auth/postgres_repository.go"          # backend + vendor-platform
+  - "internal/cart/postgres_repository.go"          # backend cart
+  - "internal/catalog/postgres_inventory.go"        # vendor-platform catalog
+  - "internal/catalog/postgres_orders.go"           # vendor-platform catalog
+  - "internal/catalog/postgres_products.go"         # vendor-platform catalog
+  - "internal/catalog/postgres_repository.go"       # vendor-platform catalog
+  - "internal/csvimport/postgres_repository.go"     # vendor-platform csvimport
+  - "internal/moodboard/postgres_repository.go"     # backend moodboard
+  - "internal/outfit/postgres_repository.go"        # backend outfit
+  - "internal/search/syncer.go"                     # backend search
+  - "internal/shopify/postgres_repository.go"       # backend + vendor-platform
+  - "internal/useritems/postgres_repository.go"     # backend useritems
+  - "internal/vibesearch/postgres_repository.go"    # backend vibesearch

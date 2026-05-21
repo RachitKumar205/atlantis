@@ -1,0 +1,40 @@
+# atlantis linter config.
+#
+# Philosophy: enable the small set of linters that catch real bugs without
+# generating high-friction noise. Anything stylistic (line length, comment
+# capitalization) is left alone — gofmt + goimports handle the shape and
+# code review handles taste.
+#
+# Tag-aware: integration tests live behind `//go:build integration` and
+# are skipped by default. CI invokes with the tag separately.
+
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - unused
+    - ineffassign
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # Generated code: the codegen knows what it's emitting. Squelch lint
+    # noise on the gen/ tree so a regen doesn't fail CI cosmetically.
+    - path: gen/
+      linters:
+        - errcheck
+        - staticcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

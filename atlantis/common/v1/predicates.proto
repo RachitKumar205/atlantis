@@ -1,0 +1,149 @@
+// Shared predicate messages. Entity codegen embeds these in QueryXFilter;
+// the runtime translator (internal/codegen/query/translator.go) walks the
+// set oneof arm to build the SQL fragment.
+//
+// New `op` arms must take the next free number; reuse a number only after
+// the old arm has a 'reserved' line.
+
+edition = "2023";
+
+package atlantis.common.v1;
+
+option features.field_presence = IMPLICIT;
+
+import "google/protobuf/timestamp.proto";
+
+// StringPredicate covers text / varchar / citext / uuid. The LIKE-flavored
+// arms (prefix/suffix/contains/ilike) escape `%` and `_` in caller input.
+message StringPredicate {
+  oneof op {
+    string eq = 1;
+    string neq = 2;
+    StringList in = 3;
+    StringList not_in = 4;
+    string prefix = 5;
+    string suffix = 6;
+    string contains = 7;
+    string ilike = 8;
+    bool is_null = 9;
+    bool is_not_null = 10;
+  }
+}
+
+// Int32Predicate handles smallint + int. `between` is inclusive;
+// lo > hi is rejected (likely caller bug).
+message Int32Predicate {
+  oneof op {
+    int32 eq = 1;
+    int32 neq = 2;
+    int32 lt = 3;
+    int32 lte = 4;
+    int32 gt = 5;
+    int32 gte = 6;
+    Int32List in = 7;
+    Int32List not_in = 8;
+    Int32Range between = 9;
+    bool is_null = 10;
+    bool is_not_null = 11;
+  }
+}
+
+message Int64Predicate {
+  oneof op {
+    int64 eq = 1;
+    int64 neq = 2;
+    int64 lt = 3;
+    int64 lte = 4;
+    int64 gt = 5;
+    int64 gte = 6;
+    Int64List in = 7;
+    Int64List not_in = 8;
+    Int64Range between = 9;
+    bool is_null = 10;
+    bool is_not_null = 11;
+  }
+}
+
+message BoolPredicate {
+  oneof op {
+    bool eq = 1;
+    bool is_null = 2;
+    bool is_not_null = 3;
+  }
+}
+
+// TimestampPredicate uses google.protobuf.Timestamp. `between` is inclusive.
+// Out-of-range timestamps are rejected by the proto codec.
+message TimestampPredicate {
+  oneof op {
+    google.protobuf.Timestamp eq = 1;
+    google.protobuf.Timestamp neq = 2;
+    google.protobuf.Timestamp lt = 3;
+    google.protobuf.Timestamp lte = 4;
+    google.protobuf.Timestamp gt = 5;
+    google.protobuf.Timestamp gte = 6;
+    TimestampRange between = 7;
+    bool is_null = 8;
+    bool is_not_null = 9;
+  }
+}
+
+// BytesPredicate covers bytea and (for now) jsonb. JSONB equality is
+// byte-for-byte against PG's normalized rendering; value-level JSON
+// predicates are not supported yet.
+message BytesPredicate {
+  oneof op {
+    bytes eq = 1;
+    bytes neq = 2;
+    BytesList in = 3;
+    bool is_null = 4;
+    bool is_not_null = 5;
+  }
+}
+
+// NumericPredicate carries numeric/decimal columns as decimal strings;
+// the translator casts to PG numeric on both sides of the comparison.
+message NumericPredicate {
+  oneof op {
+    string eq = 1;
+    string neq = 2;
+    string lt = 3;
+    string lte = 4;
+    string gt = 5;
+    string gte = 6;
+    StringList in = 7;
+    bool is_null = 8;
+    bool is_not_null = 9;
+  }
+}
+
+message StringList {
+  repeated string values = 1;
+}
+
+message Int32List {
+  repeated int32 values = 1;
+}
+
+message Int64List {
+  repeated int64 values = 1;
+}
+
+message BytesList {
+  repeated bytes values = 1;
+}
+
+message Int32Range {
+  int32 lo = 1;
+  int32 hi = 2;
+}
+
+message Int64Range {
+  int64 lo = 1;
+  int64 hi = 2;
+}
+
+message TimestampRange {
+  google.protobuf.Timestamp lo = 1;
+  google.protobuf.Timestamp hi = 2;
+}

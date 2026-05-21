@@ -1,0 +1,23 @@
+# Caller schema manifest, consumed by `tidectl codegen --workspace`.
+# CI clones each caller at the pinned ref and unions the listed .atl files.
+# Local dev uses `tide apply` instead; this file is not read.
+#
+# Template: callers list is empty. To activate, fill in repo + ref per caller
+# and switch the Makefile codegen target to pass --workspace.
+
+version: 1
+
+# Example:
+#   callers:
+#     - name: consumer        # becomes the IR namespace; must match [a-z][a-z0-9_]*
+#       source: git
+#       repo: https://github.com/your-org/backend.git
+#       ref: main             # branch, tag, or SHA
+#       paths:
+#         - internal/auth/schema.atl
+#         - internal/cart/schema.atl
+#
+# tidectl shells out to `git`; auth (SSH agent, gh CLI, PAT) comes from the
+# surrounding environment.
+
+callers: []

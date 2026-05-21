@@ -1,0 +1,32 @@
+// PageToken is an opaque keyset cursor returned in QueryXResponse and
+// echoed back unchanged. The embedded entity_id prevents using a
+// cursor from one entity against another.
+
+edition = "2023";
+
+package atlantis.common.v1;
+
+option features.field_presence = IMPLICIT;
+
+import "google/protobuf/timestamp.proto";
+
+// PageToken carries the ORDER BY values + PK tiebreaker of the last
+// row of a page. entity_id is "<namespace>.<EntityName>"; the decoder
+// rejects cursors whose entity_id doesn't match the current request.
+message PageToken {
+  string entity_id = 1;
+  repeated PageTokenValue values = 2;
+}
+
+// One value per ORDER BY column plus PK tiebreaker. Numeric is sent
+// as decimal string (gRPC has no arbitrary-precision decimal).
+message PageTokenValue {
+  oneof v {
+    string s = 1;
+    int64 i = 2;
+    bool b = 3;
+    google.protobuf.Timestamp ts = 4;
+    bytes raw = 5;
+    string num = 6;
+  }
+}

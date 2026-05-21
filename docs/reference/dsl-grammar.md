@@ -1,0 +1,228 @@
+# DSL reference
+
+Syntax reference for `.atl` files.
+
+## Notation
+
+In the grammar productions below:
+
+- `[X]` is optional.
+- `{X}` is zero or more.
+- `X | Y` is alternation.
+- Quoted text appears literally; `Ident`, `Type`, etc. are productions.
+
+Whitespace separates tokens but is otherwise insignificant. Line comments start with `//` and run to end of line. There are no block comments.
+
+## Top-level
+
+```
+File         = { Declaration }
+Declaration  = Entity | Hypertable | Query | Procedure
+```
+
+## Entities
+
+```
+Entity = "entity" Ident "in" Ident "{" EntityBody "}"
+
+EntityBody =
+    { FieldDecl }
+    [ "composite_pk" "by" IdentList ]
+    { "unique" "by" IdentList }
+    { "index" "by" IdentList }
+    { "index" "partial" "by" IdentList "where" SQLExpr }
+    [ "soft_delete" "by" Ident ]
+    [ "touch_on_update" "by" Ident ]
+    [ "partition" "by" Ident ]
+    [ CacheBlock ]
+
+IdentList = Ident { "," Ident }
+```
+
+Entity names use `PascalIdent`; namespaces use `SnakeIdent`. Underscores are syntactically valid in namespaces but not conventional.
+
+The namespace becomes the package segment under `output_dir/` and the schema prefix on the generated table name: `<namespace>_<snake_entity>`.
+
+### Fields
+
+```
+FieldDecl = Ident Type { Modifier }
+
+Modifier =
+    "primary"
+  | "serial"
+  | "not" "null"
+  | "default" DefaultExpr
+  | "unique"
+  | "references" QualifiedField [ "on" "delete" RefAction ]
+  | "check" "\"" SQLExpr "\""
+
+DefaultExpr =
+    FunctionCall      // e.g. now(), gen_random_uuid()
+  | NumericLiteral    // e.g. 0, 3.14
+  | StringLiteral     // single-quoted, e.g. 'pending'
+  | BooleanLiteral    // true, false
+
+QualifiedField = [ Namespace "." ] Entity "." Field
+
+RefAction = "cascade" | "set" "null" | "restrict" | "no" "action"
+```
+
+Field names use `SnakeIdent`. Modifier order is flexible, but the lexer rejects incompatible combinations: `serial` with `default`, two `primary` modifiers on different fields, etc.
+
+`QualifiedField`: same-namespace references can omit the namespace (`Customer.id`); cross-namespace references qualify (`vendor.Product.id`). The referenced field must be declared `primary` or have a column-level `unique`.
+
+`check`: the string body is parsed as a Postgres boolean expression. Anything valid inside `CREATE TABLE ... CHECK (...)` is accepted.
+
+### Field types
+
+| Type | PostgreSQL | Notes |
+|---|---|---|
+| `bigint` | `BIGINT` | |
+| `int` | `INTEGER` | |
+| `smallint` | `SMALLINT` | |
+| `real` | `REAL` | 32-bit float |
+| `double` | `DOUBLE PRECISION` | 64-bit float |
+| `boolean` | `BOOLEAN` | |
+| `varchar(N)` | `VARCHAR(N)` | |
+| `text` | `TEXT` | |
+| `citext` | `CITEXT` | case-insensitive text |
+| `jsonb` | `JSONB` | |
+| `bytea` | `BYTEA` | binary |
+| `timestamptz` | `TIMESTAMPTZ` | timestamp with timezone |
+| `date` | `DATE` | |
+| `interval` | `INTERVAL` | |
+| `numeric(p, s)` | `NUMERIC(p,s)` | arbitrary precision |
+| `uuid` | `UUID` | |
+| `vector(N)` | `vector(N)` | pgvector extension; index syntax in [Known gaps](#known-gaps) |
+| `[]T` | `T[]` | array; element type `T` is any scalar above except `vector` and `[]T` |
+
+Go and proto mappings are in [the type mapping reference](dsl-types.md).
+
+### Modifier semantics
+
+- `primary` — primary key. Exactly one field, unless `composite_pk by` is used at the entity level. The two are mutually exclusive.
+- `serial` — Postgres assigns the value via a sequence. Valid only with `bigint primary` or `int primary`. Incompatible with `default`.
+- `not null` — disallows null. Implied by `primary`.
+- `default <expr>` — Postgres default expression. See `DefaultExpr` above.
+- `unique` — Postgres column-level `UNIQUE`. For multi-column, use `unique by` at the entity level.
+- `references <Entity>.<field>` — foreign key. `on delete` accepts `cascade`, `set null`, `restrict`, `no action`. `on update` is not supported; see [Known gaps](#known-gaps).
+- `check "<predicate>"` — Postgres `CHECK` constraint.
+
+### Entity-level clauses
+
+- `composite_pk by f1, f2` — composite primary key. Member fields must each be `not null`. Mutually exclusive with per-field `primary`.
+- `unique by f1, f2` — multi-column unique constraint. May appear multiple times. For a single column, use the per-field `unique` modifier instead.
+- `index by f1, f2` — non-unique B-tree index. May appear multiple times.
+- `index partial by f1, f2 where <expr>` — partial index. The `<expr>` is any expression valid in `CREATE INDEX ... WHERE (...)`.
+- `soft_delete by <field>` — replaces row deletion with setting `<field>` (must be `timestamptz`) to `now()`. Reads filter `<field> IS NULL` automatically.
+- `touch_on_update by <field>` — Postgres trigger sets `<field>` (must be `timestamptz`) to `now()` on every `UPDATE`.
+- `partition by <field>` — Atlantis-level multi-tenant partition. Not Postgres table partitioning. Generated read RPCs inject `<field> = <caller-partition>` into the predicate; callers cannot override. The caller partition is read from the auth context.
+
+### Cache block
+
+```
+CacheBlock = "cache" "{" "read_through" "ttl" "=" Duration [ "tag" "=" StringLiteral ] "}"
+
+Duration = Integer DurationUnit
+DurationUnit = "ns" | "us" | "ms" | "s" | "m" | "h"
+```
+
+`read_through` is currently the only supported caching mode.
+
+The `tag` is a double-quoted string with `{field_name}` interpolation placeholders. Field names inside `{...}` must exist on the entity. Cache entries with the same resolved tag are invalidated as a group. See [Caching and invalidation](../concepts/caching-and-invalidation.md).
+
+## Queries
+
+```
+Query = "query" Ident "for" Ident "{" QueryBody "}"
+
+QueryBody =
+    "input"  "{" ParamList "}"
+    OutputDecl
+    SqlBlock
+
+OutputDecl = "output" "as" Ident
+           | "output" "{" ParamList "}"
+
+ParamList = Ident ":" Type { "," Ident ":" Type }
+
+SqlBlock = "sql" "touches" "(" IdentList ")" "{" SQL "}"
+```
+
+The `for <Ident>` after the query name names the entity the query semantically belongs to. It becomes a method on that entity's generated client and must appear in `touches(...)`.
+
+- `output as <Entity>` returns rows of that entity. The SQL must project every column the entity declares.
+- `output { ... }` returns an ad-hoc row type. The SQL must project columns matching the declared names and types.
+
+Parameters in the SQL body use `$name` syntax. Atlantis rewrites them to Postgres positional placeholders (`$1`, `$2`, ...) before execution. The body is validated when you run `tide apply`.
+
+`touches(...)` lists the entities the query reads. The cache layer uses it for query-result invalidation.
+
+## Procedures
+
+```
+Procedure = "procedure" Ident "for" Ident "{" ProcedureBody "}"
+
+ProcedureBody =
+    "input" "{" ParamList "}"
+    "steps" "{" SqlBlock { SqlBlock } "}"
+```
+
+The `for <Ident>` after the procedure name names the entity the procedure belongs to (same semantics as a query). It becomes a method on that entity's generated client.
+
+Steps run inside one Postgres transaction. The transaction commits when every step succeeds; any error rolls back the entire transaction. Each step's `touches(...)` declares the write set the cache outbox invalidates after commit.
+
+Procedures do not return rows. Read the result with a separate query.
+
+## Hypertables
+
+```
+Hypertable = "hypertable" Ident "in" Ident "{" HypertableBody "}"
+
+HypertableBody =
+    { FieldDecl }
+    "partition_field" Ident
+    "chunk_time_interval" Duration
+    [ other EntityBody clauses... ]
+```
+
+`partition_field` is the TimescaleDB hypertable partition column and must be a `timestamptz` field declared in the body. The entity-level `partition by` clause is a different mechanism (Atlantis multi-tenant partition); both may coexist on one hypertable.
+
+`chunk_time_interval` uses the same `Duration` syntax as cache TTLs.
+
+Hypertables accept every entity-body clause (indexes, unique constraints, soft delete, cache block, the multi-tenant `partition by`).
+
+## Identifiers
+
+```
+PascalIdent = [A-Z][A-Za-z0-9]*
+SnakeIdent  = [a-z][a-z0-9_]*
+```
+
+Entity, namespace, query, and procedure names use `PascalIdent`. Field, input, and output names use `SnakeIdent`.
+
+## Reserved words
+
+The following are reserved everywhere and cannot be used as identifiers:
+
+```
+entity, hypertable, query, procedure,
+in, for, input, output, steps, sql, touches, as,
+primary, serial, not, null, default, unique, references, check,
+on, update, delete, cascade, set, restrict, no, action,
+composite_pk, index, partial, where,
+soft_delete, touch_on_update, partition, by,
+cache
+```
+
+The following are contextual — they are keywords only inside specific blocks and may otherwise be used as identifiers:
+
+```
+read_through, ttl, tag         // only inside cache { ... }
+partition_field, chunk_time_interval   // only inside hypertable { ... }
+```
+
+## Known gaps
+
+This reference does not yet cover: vector-index syntax (`hnsw` / `ivfflat`), explicit index methods (`using gin`, `using gist`), `on update` foreign-key actions, enum types, view declarations, and import statements. Tracked in the project issue tracker.
