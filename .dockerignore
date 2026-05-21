@@ -1,0 +1,42 @@
+# Build context lives at the atlantis/ root. Everything not needed
+# inside the Docker build context is excluded here — the alternative
+# (transferring it and then ignoring it inside Dockerfile COPY) costs
+# every build the transfer time. The previous unfiltered context was
+# ~87 MB dominated by `bin/` (47 MB of host-arch dev binaries the
+# Dockerfile never references).
+
+# Git metadata — never needed for the build, large.
+.git
+.gitignore
+.gitattributes
+
+# Host-arch build outputs — the Dockerfile compiles fresh in-container.
+bin/
+
+# Editor / OS noise
+.DS_Store
+.idea
+.vscode
+*.swp
+
+# Local env files — `.env` is for `make dev` (host-side), the container
+# reads env from docker-compose.yml. Never bake secrets into images.
+.env
+.env.*
+!.env.example
+
+# Logs + caches
+*.log
+.cache
+node_modules
+
+# Docs that don't change the build
+*.md
+docs/
+
+# Tests' large fixtures don't ship in the runtime binary either; the
+# `go build ./cmd/server` only needs the import graph. Test files
+# themselves are skipped by `go build` so we keep _test.go files in
+# context (they're tiny and excluding them via dockerignore breaks
+# `go test` inside the container if anyone runs it).
+tests/integration/testdata/large

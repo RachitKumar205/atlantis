@@ -1,0 +1,74 @@
+# Compiled binaries
+/atlantis-server
+/server
+/tide
+/tidectl
+/bin/
+/dist/
+
+# Go test / coverage artifacts
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Go module local overrides
+/vendor/
+
+# Env / secrets
+.env
+.env.local
+*.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Air hot-reload (see .air.toml)
+.air/
+tmp/
+
+# Docker layer cache
+.docker-cache/
+
+# Workspace-cache: clones of caller repos resolved by `tidectl codegen --workspace`
+.workspace-cache/
+
+# Dev-loop scratch: `make dev-watch` writes throwaway codegen + migration
+# output here as it iterates against testdata/schema/. The path is dev-only
+# so the real `migrations/tidectl/` path stays clean for operator forks
+# (operators run tidectl plan/approve against their own workspace and commit
+# the result to *their* repo at the conventional path).
+.dev/
+
+# Local tide cache (in case someone runs `tide` from within this repo)
+.tide-cache/
+
+# Local IR scratch files
+*.last-ir.scratch.json
+
+# Generated tree is NOT committed. A fresh clone runs `make codegen` to
+# produce gen/, clients/go/client/, clients/go/pb/, and the per-namespace
+# proto dirs under atlantis/. The .atl fixtures, clients/go/go.mod, and
+# the hand-written common protos (atlantis/common/) are the committed
+# inputs; everything below is derived output.
+/gen/
+/clients/go/client/
+/clients/go/pb/
+# Per-namespace proto dirs are generated. atlantis/common/ is hand-written
+# and stays tracked; ignore everything else.
+/atlantis/*/
+!/atlantis/common/
+
+# migrations/tidectl/ is also derived — populated by operators running
+# tidectl plan/approve against their own workspace. (See note above on .dev/.)

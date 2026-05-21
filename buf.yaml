@@ -1,0 +1,14 @@
+# buf module. Name is reserved for future BSR push; works locally without an account.
+version: v2
+modules:
+  - path: .
+    name: buf.build/rachitkumar205/atlantis
+    excludes:
+      - gen
+      - tests
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - WIRE_JSON
