@@ -34,6 +34,7 @@ EntityBody =
     [ "soft_delete" "by" Ident ]
     [ "touch_on_update" "by" Ident ]
     [ "partition" "by" Ident ]
+    [ "table" StringLiteral ]
     [ CacheBlock ]
 
 IdentList = Ident { "," Ident }
@@ -118,6 +119,7 @@ Go and proto mappings are in [the type mapping reference](dsl-types.md).
 - `soft_delete by <field>` — replaces row deletion with setting `<field>` (must be `timestamptz`) to `now()`. Reads filter `<field> IS NULL` automatically.
 - `touch_on_update by <field>` — Postgres trigger sets `<field>` (must be `timestamptz`) to `now()` on every `UPDATE`.
 - `partition by <field>` — Atlantis-level multi-tenant partition. Not Postgres table partitioning. Generated read RPCs inject `<field> = <caller-partition>` into the predicate; callers cannot override. The caller partition is read from the auth context.
+- `table "<schema.table>"` — overrides the physical table name. Without it, atlantis stores the entity at `atlantis.<namespace>_<snake_entity>`. The value's shape is `[schema.]table`, each segment matching `[A-Za-z_][A-Za-z0-9_]*`; a bare name (`table "vendors"`) lands in `public`. Foreign keys whose target carries the modifier render `REFERENCES "<schema>"."<table>"`. Changing the value on a previously-applied entity is classified `cross_caller_breaking` and rejected by `tide plan`; atlantis does not auto-rename. Used when adopting an existing database — see [Adopt an existing database](../guides/adopt-an-existing-database.md).
 
 ### Cache block
 
@@ -213,6 +215,7 @@ primary, serial, not, null, default, unique, references, check,
 on, update, delete, cascade, set, restrict, no, action,
 composite_pk, index, partial, where,
 soft_delete, touch_on_update, partition, by,
+table,
 cache
 ```
 
