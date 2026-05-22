@@ -477,3 +477,42 @@ func TestDiff_FromNilToSomething(t *testing.T) {
 		t.Errorf("nil → IR should report entity added")
 	}
 }
+
+// TestDiff_TableNameChanged_IsBreaking: shifting the `table "..."` value
+// is cross-caller-breaking because atlantis won't auto-rename. The
+// operator runs ALTER TABLE RENAME themselves and re-applies.
+func TestDiff_TableNameChanged_IsBreaking(t *testing.T) {
+	oldIR := lower(t, `entity A in x {
+  table "consumer.accounts"
+  id bigint primary
+}`)
+	newIR := lower(t, `entity A in x {
+  table "consumer.accts"
+  id bigint primary
+}`)
+	d := ComputeDiff(oldIR, newIR)
+	c := findChange(t, d, KindEntityTableChanged)
+	if c == nil {
+		t.Fatal("expected KindEntityTableChanged change")
+	}
+	if c.Class != ClassCrossCallerBreaking {
+		t.Errorf("class: got %v want ClassCrossCallerBreaking", c.Class)
+	}
+}
+
+// TestDiff_TableNameAppeared_IsBreaking: appearing or disappearing
+// counts as a move too — atlantis would otherwise route writes from the
+// computed flat name to the override and silently miss existing rows.
+func TestDiff_TableNameAppeared_IsBreaking(t *testing.T) {
+	oldIR := lower(t, `entity A in x {
+  id bigint primary
+}`)
+	newIR := lower(t, `entity A in x {
+  table "consumer.accounts"
+  id bigint primary
+}`)
+	d := ComputeDiff(oldIR, newIR)
+	if c := findChange(t, d, KindEntityTableChanged); c == nil {
+		t.Error("expected KindEntityTableChanged on table-override appearance")
+	}
+}

@@ -53,6 +53,12 @@ const (
 	KindEntityAdded   ChangeKind = "entity_added"
 	KindEntityRemoved ChangeKind = "entity_removed"
 
+	// KindEntityTableChanged: the entity's `table "<schema.table>"` value
+	// moved (or appeared, or disappeared). Atlantis won't auto-rename the
+	// physical table; an operator runs their own ALTER TABLE RENAME (or
+	// follows whichever data-migration path they prefer) before re-applying.
+	KindEntityTableChanged ChangeKind = "entity_table_changed"
+
 	KindFieldAdded   ChangeKind = "field_added"
 	KindFieldRemoved ChangeKind = "field_removed"
 
@@ -191,10 +197,29 @@ func ComputeDiff(oldIR, newIR *dsl.IR) *Diff {
 // ---- per-entity diffs ----
 
 func diffEntity(oldE, newE *dsl.Entity, d *Diff) {
+	diffTableName(oldE, newE, d)
 	diffFields(oldE, newE, d)
 	diffIndexes(oldE, newE, d)
 	diffCache(oldE, newE, d)
 	diffQueryTimeout(oldE, newE, d)
+}
+
+// diffTableName flags moves of the `table "..."` modifier as cross-caller
+// breaking. atlantis won't generate a rename automatically; the operator
+// runs ALTER TABLE RENAME themselves before re-applying. Either direction
+// counts: appearing, disappearing, or swapping schemas.
+func diffTableName(oldE, newE *dsl.Entity, d *Diff) {
+	if oldE.TableName == newE.TableName {
+		return
+	}
+	d.Breaking = append(d.Breaking, Change{
+		Kind:     KindEntityTableChanged,
+		Class:    ClassCrossCallerBreaking,
+		EntityID: newE.ID(),
+		Detail:   fmt.Sprintf("table override changed: %q -> %q (manual ALTER TABLE RENAME required)", oldE.TableName, newE.TableName),
+		From:     oldE.TableName,
+		To:       newE.TableName,
+	})
 }
 
 func diffFields(oldE, newE *dsl.Entity, d *Diff) {

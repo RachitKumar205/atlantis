@@ -212,7 +212,7 @@ func buildPhaseSplit(d *Diff, newByID, oldByID map[string]*dsl.Entity) (pre, pre
 		idxName := backfillIndexName(e, fieldName)
 		preIdx.linef("CREATE INDEX CONCURRENTLY IF NOT EXISTS %s ON %s (%s) WHERE %s IS NULL;",
 			quoteIdent(idxName), qualifiedTable(e), quoteIdent(pk), quoteIdent(fieldName))
-		postIdx.linef(`DROP INDEX CONCURRENTLY IF EXISTS "atlantis".%s;`, quoteIdent(idxName))
+		postIdx.linef(`DROP INDEX CONCURRENTLY IF EXISTS %s.%s;`, quoteIdent(entitySchema(e)), quoteIdent(idxName))
 		fields = append(fields, BackfillField{
 			EntityID:   entityID,
 			Field:      fieldName,
@@ -412,6 +412,13 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 		// behavior verification); no auto-SQL today.
 		up.line("-- (no SQL: serial flip requires explicit operator coordination)")
 		down.line("-- (no SQL: serial flip requires explicit operator coordination)")
+	case KindEntityTableChanged:
+		// Atlantis won't auto-rename a physical table; if the `table "..."`
+		// value moved, the operator runs ALTER TABLE RENAME themselves
+		// before re-applying. We surface the intent as a comment so the
+		// migration file is self-explaining.
+		up.linef("-- TABLE NAME CHANGED — manual ALTER TABLE RENAME required: %s", ch.Detail)
+		down.linef("-- TABLE NAME CHANGED — manual ALTER TABLE RENAME required: %s", ch.Detail)
 	}
 	up.blank()
 	down.blank()
@@ -634,11 +641,41 @@ func renderPartialPred(p *dsl.PartialPred) string {
 }
 
 // qualifiedTable returns the schema-qualified, double-quoted table name.
-// Quoting is defense-in-depth — the lexer constrains identifiers today, but
-// a future grammar that lets a field be named after a Postgres reserved
-// word would silently break SQL otherwise.
+// Honors the `table "<schema.table>"` modifier when set; otherwise falls
+// back to the computed `atlantis.<namespace>_<snake>` form.
+//
+// Quoting is defense-in-depth — the lexer constrains identifiers today,
+// but a future grammar that lets a field be named after a Postgres
+// reserved word would silently break SQL otherwise.
 func qualifiedTable(e *dsl.Entity) string {
-	return `"atlantis".` + quoteIdent(tableName(e))
+	return quoteIdent(entitySchema(e)) + "." + quoteIdent(entityPhysicalTable(e))
+}
+
+// entitySchema returns the schema where this entity's physical objects
+// (the table + its indexes) live. `table "<schema.table>"` overrides the
+// default; bare `table "<name>"` (no schema prefix) lives in `public`;
+// no override at all lives in `atlantis`.
+func entitySchema(e *dsl.Entity) string {
+	if e.TableName != "" {
+		if i := strings.IndexByte(e.TableName, '.'); i >= 0 {
+			return e.TableName[:i]
+		}
+		return "public"
+	}
+	return "atlantis"
+}
+
+// entityPhysicalTable returns just the bare table name — the part that
+// goes inside `"<schema>"."<table>"`. Without an override it's the
+// computed flat name; with one it's the table portion of the override.
+func entityPhysicalTable(e *dsl.Entity) string {
+	if e.TableName != "" {
+		if i := strings.IndexByte(e.TableName, '.'); i >= 0 {
+			return e.TableName[i+1:]
+		}
+		return e.TableName
+	}
+	return tableName(e)
 }
 
 // quoteIdent wraps a SQL identifier in double quotes, escaping any embedded
@@ -779,10 +816,14 @@ func fkConstraintInline(e *dsl.Entity, f *dsl.Field) string {
 // between inline (CREATE TABLE) and standalone (ALTER TABLE) forms. Every
 // identifier — local column, target table, target column — is quoted so
 // reserved-word names roundtrip through Postgres unchanged.
+//
+// Honors a `table "..."` override on the target entity via
+// Ref.TargetTableName, populated at IR-lower time. Without the override,
+// falls back to `"atlantis"."<flat>"`.
 func fkConstraintBody(f *dsl.Field) string {
-	target := tableNameFromID(f.Ref.TargetID)
-	out := fmt.Sprintf(`FOREIGN KEY (%s) REFERENCES "atlantis".%s (%s)`,
-		quoteIdent(f.Name), quoteIdent(target), quoteIdent(f.Ref.TargetField))
+	target := fkTargetRef(f.Ref)
+	out := fmt.Sprintf(`FOREIGN KEY (%s) REFERENCES %s (%s)`,
+		quoteIdent(f.Name), target, quoteIdent(f.Ref.TargetField))
 	if f.Ref.OnDelete != dsl.RefActionUnset {
 		out += " ON DELETE " + f.Ref.OnDelete.String()
 	}
@@ -790,6 +831,21 @@ func fkConstraintBody(f *dsl.Field) string {
 		out += " ON UPDATE " + f.Ref.OnUpdate.String()
 	}
 	return out
+}
+
+// fkTargetRef renders the schema-qualified, quoted table reference for
+// the right-hand side of a REFERENCES clause. Mirrors the splitting
+// logic in entitySchema / entityPhysicalTable but operates on the Ref
+// directly so callers don't need the target Entity pointer.
+func fkTargetRef(r *dsl.Ref) string {
+	if r.TargetTableName != "" {
+		schema, table := "public", r.TargetTableName
+		if i := strings.IndexByte(r.TargetTableName, '.'); i >= 0 {
+			schema, table = r.TargetTableName[:i], r.TargetTableName[i+1:]
+		}
+		return quoteIdent(schema) + "." + quoteIdent(table)
+	}
+	return `"atlantis".` + quoteIdent(tableNameFromID(r.TargetID))
 }
 
 // tableNameFromID converts a canonical "namespace.Entity" into our flat table name.
@@ -832,10 +888,11 @@ func indexName(e *dsl.Entity, idx dsl.Index) string {
 	return prefix + "_idx"
 }
 
-// qualifiedIndexName: indexes live in the same schema as the table.
-// Both parts are quoted for the same defense-in-depth reason as table names.
+// qualifiedIndexName: indexes live in the same schema as the table they
+// attach to, so honoring a `table "..."` override here is mandatory —
+// otherwise DROP INDEX targets the wrong schema and silently no-ops.
 func qualifiedIndexName(e *dsl.Entity, idx dsl.Index) string {
-	return `"atlantis".` + quoteIdent(indexName(e, idx))
+	return quoteIdent(entitySchema(e)) + "." + quoteIdent(indexName(e, idx))
 }
 
 func joinFieldNames(fs []dsl.IndexField) string {

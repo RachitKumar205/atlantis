@@ -236,6 +236,10 @@ func (p *Parser) parseEntityMembers() []EntityMember {
 			if m := p.parsePartitionByDecl(); m != nil {
 				members = append(members, m)
 			}
+		case TokTable:
+			if m := p.parseTableNameDecl(); m != nil {
+				members = append(members, m)
+			}
 		case TokIdent:
 			if m := p.parseField(); m != nil {
 				members = append(members, m)
@@ -295,6 +299,12 @@ func (p *Parser) parsePartitionByDecl() *PartitionByDecl {
 	p.expect(TokBy)
 	field := p.expect(TokIdent)
 	return &PartitionByDecl{Pos: kw.Pos, Field: field.Value}
+}
+
+func (p *Parser) parseTableNameDecl() *TableNameDecl {
+	kw := p.expect(TokTable)
+	name := p.expect(TokString)
+	return &TableNameDecl{Pos: kw.Pos, Name: name.Value}
 }
 
 func (p *Parser) parsePrimaryDecl() *PrimaryDecl {

@@ -4,11 +4,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 )
+
+// tableNamePat matches the `[schema.]table` shape allowed in the
+// `table "..."` entity modifier. Each segment is the standard unquoted
+// Postgres identifier shape. Stricter than Postgres itself — we don't
+// accept anything that would need quoting, because the codegen already
+// quotes everything.
+var tableNamePat = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$`)
 
 // IR is the resolved, validated, JSON-serializable schema.
 //
@@ -221,6 +229,14 @@ type Entity struct {
 	// Empty means no partition predicate is injected.
 	PartitionField string `json:"partition_field,omitempty"`
 
+	// TableName overrides the physical table name codegen would otherwise
+	// compute as `atlantis.<namespace>_<snake>`. Format: `[schema.]table`,
+	// each part matching `[A-Za-z_][A-Za-z0-9_]*`. Used when adopting an
+	// existing database — declare `table "consumer.accounts"` on an entity
+	// and atlantis points at that table instead of creating its own.
+	// Empty means atlantis uses the computed default.
+	TableName string `json:"table_name,omitempty"`
+
 	// RetiredProtoNumbers lists protobuf field numbers that previously existed
 	// on this entity but have since been removed. Tracked here (persisted in
 	// the IR checkpoint) so we never reuse them — protobuf forbids reuse of
@@ -335,11 +351,17 @@ const (
 
 // Ref is a resolved foreign-key reference. TargetID is the canonical
 // "namespace.Name" of the target entity; TargetField is the column on it.
+//
+// TargetTableName mirrors the target entity's `table "..."` modifier
+// when it has one — captured at Lower time so the codegen can render
+// the FK against the correct physical schema/table without re-walking
+// the IR. Empty when the target uses default atlantis naming.
 type Ref struct {
-	TargetID    string    `json:"target_id"`
-	TargetField string    `json:"target_field"`
-	OnDelete    RefAction `json:"on_delete,omitempty"`
-	OnUpdate    RefAction `json:"on_update,omitempty"`
+	TargetID        string    `json:"target_id"`
+	TargetField     string    `json:"target_field"`
+	TargetTableName string    `json:"target_table_name,omitempty"`
+	OnDelete        RefAction `json:"on_delete,omitempty"`
+	OnUpdate        RefAction `json:"on_update,omitempty"`
 }
 
 // Relation mirrors a parser RelationDecl but with Target resolved to an
@@ -487,6 +509,28 @@ func Lower(files []*File) (*IR, error) {
 		errs = append(errs, validateEntity(e, byID)...)
 	}
 
+	// Pass 2.5: cross-entity invariants. Today: two entities can't claim
+	// the same physical table (the `table "<schema.table>"` modifier).
+	// Localizing it here keeps validateEntity entity-scoped.
+	errs = append(errs, validateUniqueTableNames(ir.Entities)...)
+
+	// Pass 2.6: thread the target entity's `table "..."` override onto
+	// every Ref so the codegen renders FKs against the override location
+	// without needing the IR map. Skipped Refs (dangling TargetID, no
+	// override on target) leave TargetTableName empty and fall through to
+	// the computed atlantis name at emit time.
+	for i := range ir.Entities {
+		for j := range ir.Entities[i].Fields {
+			ref := ir.Entities[i].Fields[j].Ref
+			if ref == nil {
+				continue
+			}
+			if target, ok := byID[ref.TargetID]; ok && target.TableName != "" {
+				ref.TargetTableName = target.TableName
+			}
+		}
+	}
+
 	// Pass 3: lower queries and procedures now that every entity exists.
 	// Each construct's owning namespace is the namespace of its target;
 	// unqualified entity references inside `for`, `touches`, and typed
@@ -602,6 +646,8 @@ func lowerMembers(_ string, ms []EntityMember, e *Entity) []error {
 			e.TouchOnUpdateField = mm.Field
 		case *PartitionByDecl:
 			e.PartitionField = mm.Field
+		case *TableNameDecl:
+			e.TableName = mm.Name
 		case *CacheBlock:
 			c, cerrs := lowerCache(mm, e)
 			errs = append(errs, cerrs...)
@@ -919,6 +965,16 @@ func validateEntity(e *Entity, byID map[string]*Entity) []error {
 		}
 	}
 
+	// Rule: `table "<schema.table>"` value must be a well-formed identifier
+	// pair. Format: `[schema.]table`, each part matching the standard
+	// Postgres unquoted-identifier shape. Defense-in-depth against the
+	// emitter wrapping a malicious value into the SQL it executes.
+	if e.TableName != "" {
+		if err := validateTableNameShape(e.TableName); err != nil {
+			errs = append(errs, fmt.Errorf("%s: invalid table name %q: %v", e.ID(), e.TableName, err))
+		}
+	}
+
 	// Rule: soft_delete by <field> must reference an existing timestamptz
 	// column. The column itself stays declared by the engineer; this
 	// declaration just opts in to the soft-delete generated behavior.
@@ -1087,6 +1143,40 @@ func validateEntity(e *Entity, byID map[string]*Entity) []error {
 //  2. If exactly one entity in `preferNS` matches the bare name, return it.
 //  3. If exactly one entity across all namespaces matches, return it.
 //  4. Multiple cross-namespace matches → ambiguous, no hit.
+//
+// validateUniqueTableNames enforces that no two entities claim the same
+// physical table via the `table "<schema.table>"` modifier. A duplicate
+// would silently route writes for one entity into another entity's
+// rows; we fail loud at lower time instead.
+func validateUniqueTableNames(entities []Entity) []error {
+	seen := map[string]string{} // table-name -> first entity ID that claimed it
+	var errs []error
+	for i := range entities {
+		e := &entities[i]
+		if e.TableName == "" {
+			continue
+		}
+		if prior, ok := seen[e.TableName]; ok {
+			errs = append(errs, fmt.Errorf("table %q is claimed by both %s and %s — each `table \"...\"` value must be unique",
+				e.TableName, prior, e.ID()))
+			continue
+		}
+		seen[e.TableName] = e.ID()
+	}
+	return errs
+}
+
+// validateTableNameShape rejects values that aren't well-formed
+// `[schema.]table` pairs. The codegen later splits on the first `.` and
+// emits `"<schema>"."<table>"` verbatim, so anything that wouldn't be a
+// safe Postgres unquoted identifier has to fail here.
+func validateTableNameShape(name string) error {
+	if !tableNamePat.MatchString(name) {
+		return fmt.Errorf("must match [schema.]table where each part is [A-Za-z_][A-Za-z0-9_]*")
+	}
+	return nil
+}
+
 func resolveByNameInNS(byID map[string]*Entity, name string, preferNS string) (*Entity, bool) {
 	if strings.Contains(name, ".") {
 		if e, ok := byID[name]; ok {

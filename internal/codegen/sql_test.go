@@ -361,3 +361,111 @@ func TestSnakeCase(t *testing.T) {
 		}
 	}
 }
+
+// TestEmit_TableOverride_SchemaQualified verifies that the `table
+// "<schema.table>"` modifier moves the emitted DDL out of the atlantis
+// schema and onto the operator's existing prod table. The whole point of
+// the modifier is to let atlantis run against pre-existing data.
+func TestEmit_TableOverride_SchemaQualified(t *testing.T) {
+	ir := lower(t, `entity Account in consumer {
+  table "consumer.accounts"
+  id    bigint primary
+  email text not null unique
+}`)
+	scripts, err := EmitInitial(ir)
+	if err != nil {
+		t.Fatalf("EmitInitial: %v", err)
+	}
+	assertContains(t, scripts.Up, `CREATE TABLE IF NOT EXISTS "consumer"."accounts"`)
+	assertContains(t, scripts.Down, `DROP TABLE IF EXISTS "consumer"."accounts" CASCADE`)
+	assertNotContains(t, scripts.Up, `"atlantis"."consumer_account"`)
+}
+
+// TestEmit_TableOverride_BareName: a value without a schema prefix
+// (`table "vendors"`) lands in public — matches the default Postgres
+// search_path behavior most callers configure.
+func TestEmit_TableOverride_BareName(t *testing.T) {
+	ir := lower(t, `entity Vendor in vendor {
+  table "vendors"
+  id bigint primary
+}`)
+	scripts, _ := EmitInitial(ir)
+	assertContains(t, scripts.Up, `CREATE TABLE IF NOT EXISTS "public"."vendors"`)
+}
+
+// TestEmit_TableOverride_NoOverride: regression guard. Entities without
+// the modifier keep emitting under `atlantis.<flat>` so existing fixtures
+// and the codegen-check CI gate stay byte-identical.
+func TestEmit_TableOverride_NoOverride(t *testing.T) {
+	ir := lower(t, `entity Account in consumer {
+  id    bigint primary
+  email text not null unique
+}`)
+	scripts, _ := EmitInitial(ir)
+	assertContains(t, scripts.Up, `CREATE TABLE IF NOT EXISTS "atlantis"."consumer_account"`)
+}
+
+// TestEmit_TableOverride_FKTargetsOverride: when an FK points at an
+// entity with `table "..."`, REFERENCES must use the override location.
+// If we ever regress here, FKs would silently target the wrong table.
+func TestEmit_TableOverride_FKTargetsOverride(t *testing.T) {
+	ir := lower(t, `
+entity Account in consumer {
+  table "consumer.accounts"
+  id bigint primary
+}
+
+entity Cart in consumer {
+  table "consumer.carts"
+  id         bigint primary
+  account_id bigint not null references consumer.Account.id
+}
+`)
+	scripts, err := EmitInitial(ir)
+	if err != nil {
+		t.Fatalf("EmitInitial: %v", err)
+	}
+	assertContains(t, scripts.Up, `REFERENCES "consumer"."accounts" ("id")`)
+	assertNotContains(t, scripts.Up, `REFERENCES "atlantis"."consumer_account"`)
+}
+
+// TestEmit_TableOverride_IndexCreateTargetsTable: indexes attach via
+// ON <table>, so the CREATE statement carries the override schema in
+// the table reference. (DROP INDEX rendering is exercised by the
+// incremental-emit path; initial down uses DROP SCHEMA CASCADE which
+// sweeps indexes implicitly.)
+func TestEmit_TableOverride_IndexCreateTargetsTable(t *testing.T) {
+	ir := lower(t, `entity Account in consumer {
+  table "consumer.accounts"
+  id         bigint primary
+  email      text not null
+  index by email
+}`)
+	scripts, _ := EmitInitial(ir)
+	assertContains(t, scripts.Up, `ON "consumer"."accounts"`)
+	assertNotContains(t, scripts.Up, `ON "atlantis"."consumer_account"`)
+}
+
+// TestEmit_TableOverride_IndexDropQualifies: an incremental "remove
+// index" change drops the index by name. The schema part must match the
+// table's, not atlantis — otherwise the DROP no-ops silently.
+func TestEmit_TableOverride_IndexDropQualifies(t *testing.T) {
+	old := lower(t, `entity Account in consumer {
+  table "consumer.accounts"
+  id    bigint primary
+  email text not null
+  index by email
+}`)
+	new := lower(t, `entity Account in consumer {
+  table "consumer.accounts"
+  id    bigint primary
+  email text not null
+}`)
+	d := ComputeDiff(old, new)
+	scripts, err := EmitSQL(old, new, d)
+	if err != nil {
+		t.Fatalf("EmitSQL: %v", err)
+	}
+	assertContains(t, scripts.Up, `DROP INDEX IF EXISTS "consumer".`)
+	assertNotContains(t, scripts.Up, `DROP INDEX IF EXISTS "atlantis".`)
+}
