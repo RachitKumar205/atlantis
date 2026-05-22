@@ -78,6 +78,7 @@ const (
 	TokSoftDelete
 	TokTouchOnUpdate
 	TokPartition
+	TokTable
 	TokExpr
 	TokAs
 	TokDeferrable
@@ -176,6 +177,7 @@ var tokenNames = map[TokenKind]string{
 	TokSoftDelete:     "soft_delete",
 	TokTouchOnUpdate:  "touch_on_update",
 	TokPartition:      "partition",
+	TokTable:          "table",
 	TokExpr:           "expr",
 	TokAs:             "as",
 	TokDeferrable:     "deferrable",
@@ -256,6 +258,7 @@ var keywords = map[string]TokenKind{
 	"soft_delete":     TokSoftDelete,
 	"touch_on_update": TokTouchOnUpdate,
 	"partition":       TokPartition,
+	"table":           TokTable,
 	"expr":            TokExpr,
 	"as":              TokAs,
 	"deferrable":      TokDeferrable,

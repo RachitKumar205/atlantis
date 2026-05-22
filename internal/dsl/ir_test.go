@@ -914,3 +914,103 @@ query Alpha for Account {
 		t.Errorf("query order: %v", []string{ir.Queries[0].Name, ir.Queries[1].Name})
 	}
 }
+
+func TestIR_TableModifier_SchemaQualified(t *testing.T) {
+	ir := mustLower(t, `
+entity Account in consumer {
+  table "consumer.accounts"
+  id    bigint primary
+  email text not null unique
+}
+`)
+	e := ir.Entities[0]
+	if e.TableName != "consumer.accounts" {
+		t.Errorf("table: got %q want %q", e.TableName, "consumer.accounts")
+	}
+}
+
+func TestIR_TableModifier_BareTable(t *testing.T) {
+	ir := mustLower(t, `
+entity Vendor in vendor {
+  table "vendors"
+  id bigint primary
+}
+`)
+	if e := ir.Entities[0]; e.TableName != "vendors" {
+		t.Errorf("table: got %q want %q", e.TableName, "vendors")
+	}
+}
+
+func TestIR_TableModifier_DuplicateRejected(t *testing.T) {
+	err := mustLowerErr(t, `
+entity Account in consumer {
+  table "consumer.accounts"
+  id bigint primary
+}
+
+entity Cart in consumer {
+  table "consumer.accounts"
+  id bigint primary
+}
+`)
+	if !strings.Contains(err.Error(), `claimed by both`) {
+		t.Errorf("expected duplicate-table error, got: %v", err)
+	}
+}
+
+func TestIR_TableModifier_BadShape(t *testing.T) {
+	cases := []struct {
+		name    string
+		invalid string
+	}{
+		{"two_dots", `table "a.b.c"`},
+		{"leading_digit", `table "1accounts"`},
+		{"space", `table "my accounts"`},
+		{"quote_inside", `table "ac\"ts"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := mustLowerErr(t, `entity A in x {
+  `+tc.invalid+`
+  id bigint primary
+}`)
+			if !strings.Contains(err.Error(), "invalid table name") {
+				t.Errorf("expected invalid-table-name error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestIR_TableModifier_RefCapturesTargetTableName(t *testing.T) {
+	// FK rendering needs the target's `table "..."` override propagated
+	// onto the Ref so codegen can route REFERENCES to the right schema
+	// without re-walking the IR.
+	ir := mustLower(t, `
+entity Account in consumer {
+  table "consumer.accounts"
+  id bigint primary
+}
+
+entity Cart in consumer {
+  table "consumer.carts"
+  id          bigint primary
+  account_id  bigint not null references consumer.Account.id
+}
+`)
+	var cart *Entity
+	for i := range ir.Entities {
+		if ir.Entities[i].Name == "Cart" {
+			cart = &ir.Entities[i]
+		}
+	}
+	if cart == nil {
+		t.Fatal("Cart entity not found")
+	}
+	f := cart.FindField("account_id")
+	if f.Ref == nil {
+		t.Fatal("account_id has no Ref")
+	}
+	if f.Ref.TargetTableName != "consumer.accounts" {
+		t.Errorf("TargetTableName: got %q want %q", f.Ref.TargetTableName, "consumer.accounts")
+	}
+}

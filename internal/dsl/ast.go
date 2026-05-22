@@ -466,6 +466,19 @@ type PartitionByDecl struct {
 func (*PartitionByDecl) isEntityMember()      {}
 func (p *PartitionByDecl) Position() Position { return p.Pos }
 
+// TableNameDecl: `table "<schema.table>"` — overrides the physical table
+// name codegen would otherwise compute as `atlantis.<namespace>_<snake>`.
+// Used when adopting an existing production database where the entity
+// already lives at a different name (e.g., `consumer.accounts`). Schema
+// prefix is optional; when omitted the table lives in `public`.
+type TableNameDecl struct {
+	Pos  Position
+	Name string
+}
+
+func (*TableNameDecl) isEntityMember()      {}
+func (t *TableNameDecl) Position() Position { return t.Pos }
+
 // ---- Custom query and procedure declarations ----
 //
 // QueryDecl + ProcedureDecl are the platform's escape hatch for caller
