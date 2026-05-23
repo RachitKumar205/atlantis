@@ -127,9 +127,13 @@ func (p *Parser) parseFile() *File {
 			if d := p.parseProcedure(); d != nil {
 				f.Decls = append(f.Decls, d)
 			}
+		case TokJob:
+			if d := p.parseJob(); d != nil {
+				f.Decls = append(f.Decls, d)
+			}
 		default:
-			p.errf(t.Pos, "expected 'entity', 'hypertable', 'query', or 'procedure', got %s", t.Kind)
-			p.recover(TokEntity, TokHypertable, TokQuery, TokProcedure)
+			p.errf(t.Pos, "expected 'entity', 'hypertable', 'query', 'procedure', or 'job', got %s", t.Kind)
+			p.recover(TokEntity, TokHypertable, TokQuery, TokProcedure, TokJob)
 		}
 	}
 }
@@ -1129,5 +1133,94 @@ func (p *Parser) parseDefaultExpr() Expr {
 		p.errf(t.Pos, "expected default value, got %s", t.Kind)
 		p.advance()
 		return nil
+	}
+}
+
+// ---- jobs ----
+//
+// `job <Name> in <namespace> { args { ... } retries N timeout D queue "..." schedule "..." }`
+//
+// The args block reuses the entity-field grammar (typed columns +
+// modifiers) — IR-lowering rejects modifiers that don't make sense for
+// args (primary, references, serial, identity, soft_delete, cache,
+// etc.). Block-level modifiers (retries / timeout / queue / schedule)
+// appear at most once each, in any order. parseJob accumulates them
+// and the lowering pass enforces the at-most-once rule with a clear
+// error citing the duplicate's position.
+func (p *Parser) parseJob() *JobDecl {
+	kw := p.expect(TokJob)
+	if kw.Kind == TokError {
+		p.recover(TokEntity, TokHypertable, TokQuery, TokProcedure, TokJob)
+		return nil
+	}
+	name := p.expect(TokIdent)
+	p.expect(TokIn)
+	ns := p.expect(TokIdent)
+	p.expect(TokLBrace)
+
+	job := &JobDecl{
+		Pos:       kw.Pos,
+		Name:      name.Value,
+		Namespace: ns.Value,
+	}
+
+	for {
+		t := p.peek()
+		switch t.Kind {
+		case TokRBrace, TokEOF:
+			p.expect(TokRBrace)
+			return job
+		case TokArgs:
+			job.Args = append(job.Args, p.parseJobArgs()...)
+		case TokRetries:
+			p.advance()
+			n := p.expect(TokInt)
+			if v, err := strconv.Atoi(n.Value); err == nil {
+				job.Retries = &JobRetries{Pos: t.Pos, Count: v}
+			}
+		case TokTimeout:
+			p.advance()
+			d := p.expect(TokDuration)
+			job.Timeout = &JobTimeout{Pos: t.Pos, Duration: d.Value}
+		case TokQueue:
+			p.advance()
+			s := p.expect(TokString)
+			job.Queue = &JobQueue{Pos: t.Pos, Name: s.Value}
+		case TokSchedule:
+			p.advance()
+			s := p.expect(TokString)
+			job.Schedule = &JobSchedule{Pos: t.Pos, CronSpec: s.Value}
+		default:
+			p.errf(t.Pos, "expected 'args', 'retries', 'timeout', 'queue', 'schedule', or '}', got %s", t.Kind)
+			p.recover(TokRBrace, TokArgs, TokRetries, TokTimeout, TokQueue, TokSchedule, TokEOF)
+		}
+	}
+}
+
+// parseJobArgs consumes a single `args { ... }` block. The block body
+// is a sequence of field declarations using the same parseField helper
+// the entity grammar uses — full type-parameter support (varchar(N),
+// numeric(P,S), []T arrays) and the existing field-modifier grammar.
+// Modifier eligibility is enforced at IR-lowering time (the caller
+// can write `default 42` or `not null check "..."`, but `primary` or
+// `references` on an arg is rejected with a clear error).
+func (p *Parser) parseJobArgs() []*FieldDecl {
+	p.expect(TokArgs)
+	p.expect(TokLBrace)
+	var fields []*FieldDecl
+	for {
+		t := p.peek()
+		if t.Kind == TokRBrace || t.Kind == TokEOF {
+			p.expect(TokRBrace)
+			return fields
+		}
+		if t.Kind != TokIdent {
+			p.errf(t.Pos, "expected arg name or '}', got %s", t.Kind)
+			p.recover(TokRBrace, TokIdent, TokEOF)
+			continue
+		}
+		if f := p.parseField(); f != nil {
+			fields = append(fields, f)
+		}
 	}
 }
