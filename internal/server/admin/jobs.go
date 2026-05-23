@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/rachitkumar205/atlantis/internal/jobs"
 )
 
 // SubmitJobRequest enqueues a new job onto atlantis.jobs. The shape
@@ -179,11 +181,13 @@ func (s *Service) SubmitJob(ctx context.Context, req SubmitJobRequest) (*SubmitJ
 		timeoutArg = spec.timeoutMS
 	}
 
+	traceCtx := jobs.CaptureTraceCtx(ctx)
+
 	const insertSQL = `
 INSERT INTO atlantis.jobs
-    (job_name, queue, args, max_retries, timeout_ms, scheduled_for, submitted_by)
+    (job_name, queue, args, max_retries, timeout_ms, scheduled_for, submitted_by, trace_ctx)
 VALUES
-    ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, now()), $7)
+    ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, now()), $7, $8)
 RETURNING id`
 	var id int64
 	if err := s.pool.QueryRow(ctx, insertSQL,
@@ -194,6 +198,7 @@ RETURNING id`
 		timeoutArg,
 		scheduledForArg,
 		req.SubmittedBy,
+		traceCtx,
 	).Scan(&id); err != nil {
 		return nil, fmt.Errorf("insert job: %w", err)
 	}
