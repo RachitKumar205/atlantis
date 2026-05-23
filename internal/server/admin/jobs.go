@@ -141,6 +141,7 @@ func (s *Service) SubmitJob(ctx context.Context, req SubmitJobRequest) (*SubmitJ
 				timeoutMS:   ir.Jobs[i].TimeoutMS,
 				timeoutNone: ir.Jobs[i].TimeoutNone,
 				queue:       ir.Jobs[i].Queue,
+				visibleTo:   ir.Jobs[i].VisibleTo,
 			}
 			break
 		}
@@ -148,6 +149,21 @@ func (s *Service) SubmitJob(ctx context.Context, req SubmitJobRequest) (*SubmitJ
 	if spec == nil {
 		return nil, fmt.Errorf("admin: unknown job %q (declare it in a .atl file and run `tide apply`)", req.JobName)
 	}
+	// RBAC: when the job declares `visible_to`, only the named caller
+	// (or "*" for any) can submit. The SubmittedBy field on the
+	// request carries the caller identity the interceptor resolved;
+	// we strip the "cli:" prefix if present so operator submissions
+	// match the DSL-declared caller name.
+	if spec.visibleTo != "" && spec.visibleTo != "*" {
+		submitter := req.SubmittedBy
+		if len(submitter) > 4 && submitter[:4] == "cli:" {
+			submitter = submitter[4:]
+		}
+		if submitter != spec.visibleTo {
+			return nil, fmt.Errorf("admin: caller %q is not allowed to submit %s (visible_to = %q)", submitter, req.JobName, spec.visibleTo)
+		}
+	}
+
 	if spec.queue == "" {
 		spec.queue = "default"
 	}
@@ -309,6 +325,7 @@ type jobSpec struct {
 	timeoutMS   int
 	timeoutNone bool
 	queue       string
+	visibleTo   string
 }
 
 // rowScanner is the common surface between pgx.Row and pgx.Rows so

@@ -104,6 +104,7 @@ type Job struct {
 	TimeoutNone bool     `json:"timeout_none,omitempty"`
 	Queue       string   `json:"queue,omitempty"`
 	Schedule    string   `json:"schedule,omitempty"`
+	VisibleTo   string   `json:"visible_to,omitempty"` // caller name or "*"; empty = unrestricted
 	SourcePath  string   `json:"source_path,omitempty"`
 	Pos         Position `json:"-"`
 }
@@ -1933,6 +1934,9 @@ func lowerJob(path string, d *JobDecl) (*Job, []error) {
 		// scheduler startup, not at DSL lowering, so a working
 		// `tide plan` doesn't depend on the cron library.
 		job.Schedule = d.Schedule.CronSpec
+	}
+	if d.VisibleTo != nil {
+		job.VisibleTo = d.VisibleTo.Caller
 	}
 
 	return job, errs
