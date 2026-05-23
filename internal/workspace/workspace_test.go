@@ -232,6 +232,177 @@ callers:
 	}
 }
 
+// TestLoad_AcceptsLocalSource: the second supported source kind. Same
+// validation surface as git but with path: instead of repo:/ref:.
+func TestLoad_AcceptsLocalSource(t *testing.T) {
+	p := writeManifest(t, `
+version: 1
+callers:
+  - name: backend
+    source: local
+    path: ../backend
+    paths: [internal]
+`)
+	w, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(w.Callers) != 1 || w.Callers[0].Source != "local" || w.Callers[0].Path != "../backend" {
+		t.Errorf("unexpected: %+v", w.Callers)
+	}
+}
+
+// TestLoad_AcceptsMixedSources: nothing forces every caller to use the
+// same source kind. A real adopter might pin one caller via git for
+// reproducibility and run another via local for active iteration.
+func TestLoad_AcceptsMixedSources(t *testing.T) {
+	p := writeManifest(t, `
+version: 1
+callers:
+  - name: backend
+    source: local
+    path: ../backend
+    paths: [internal]
+  - name: vendor_platform
+    source: git
+    repo: file:///nowhere
+    ref: main
+    paths: [internal]
+`)
+	if _, err := Load(p); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+}
+
+// TestLoad_LocalRejectsRepoAndRef: a local caller that also carries
+// git-only fields is almost certainly a typo (copy-pasted from a git
+// caller and partially edited). Refuse to load so the operator notices.
+func TestLoad_LocalRejectsRepoAndRef(t *testing.T) {
+	cases := map[string]string{
+		"with repo": `
+version: 1
+callers:
+  - name: backend
+    source: local
+    path: ../backend
+    repo: file:///x
+    paths: [internal]
+`,
+		"with ref": `
+version: 1
+callers:
+  - name: backend
+    source: local
+    path: ../backend
+    ref: main
+    paths: [internal]
+`,
+	}
+	for label, body := range cases {
+		t.Run(label, func(t *testing.T) {
+			if _, err := Load(writeManifest(t, body)); err == nil {
+				t.Errorf("want rejection")
+			}
+		})
+	}
+}
+
+// TestLoad_LocalRequiresPath: source: local without a path: is
+// unambiguously broken; reject at load time.
+func TestLoad_LocalRequiresPath(t *testing.T) {
+	p := writeManifest(t, `
+version: 1
+callers:
+  - name: backend
+    source: local
+    paths: [internal]
+`)
+	if _, err := Load(p); err == nil {
+		t.Fatal("want rejection")
+	}
+}
+
+// TestLoad_GitRejectsPath: symmetric guard — source: git with path: set
+// is a typo or paste error.
+func TestLoad_GitRejectsPath(t *testing.T) {
+	p := writeManifest(t, `
+version: 1
+callers:
+  - name: backend
+    source: git
+    repo: file:///x
+    ref: main
+    path: ../backend
+    paths: [internal]
+`)
+	if _, err := Load(p); err == nil {
+		t.Fatal("want rejection")
+	}
+}
+
+// TestResolve_Local_RelativeToManifestDir: relative paths in the
+// manifest resolve against the manifest's own directory, not the cwd
+// where tidectl was invoked. That keeps `path: ../backend` stable
+// regardless of where the operator runs the command from.
+func TestResolve_Local_RelativeToManifestDir(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "backend", "internal"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// .atl file inside the caller's tree so the paths walk picks it up.
+	if err := os.WriteFile(
+		filepath.Join(root, "backend", "internal", "a.atl"),
+		[]byte("entity A in x { id bigint primary }"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	manifestPath := filepath.Join(root, "atlantis", "atlantis.dev.yaml")
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
+		t.Fatalf("mkdir manifest: %v", err)
+	}
+	body := `
+version: 1
+callers:
+  - name: backend
+    source: local
+    path: ../backend
+    paths: [internal]
+`
+	if err := os.WriteFile(manifestPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	w, err := Load(manifestPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	resolved, err := w.Resolve(filepath.Join(t.TempDir(), "cache"))
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(resolved) != 1 || len(resolved[0].Files) != 1 {
+		t.Fatalf("unexpected resolved: %+v", resolved)
+	}
+	if !filepath.IsAbs(resolved[0].Files[0]) {
+		t.Errorf("not absolute: %s", resolved[0].Files[0])
+	}
+}
+
+// TestResolve_Local_MissingPath: typo'd or stale path: surfaces as a
+// load-time error, not a silent empty-resolution.
+func TestResolve_Local_MissingPath(t *testing.T) {
+	manifest := writeManifest(t, `
+version: 1
+callers:
+  - name: backend
+    source: local
+    path: /this/does/not/exist
+    paths: [internal]
+`)
+	w, _ := Load(manifest)
+	if _, err := w.Resolve(filepath.Join(t.TempDir(), "cache")); err == nil {
+		t.Fatal("want error for missing local path")
+	}
+}
+
 // ---- test helpers ----
 
 // writeManifest writes content to a fresh temp file and returns its path.
