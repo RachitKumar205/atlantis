@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
 // cmdPlan exits with:
@@ -111,28 +113,47 @@ func cmdPlan(args []string) int {
 // breaking detail.
 func printPlanReport(resp planResponse) {
 	if len(resp.ParseErrors) > 0 {
-		fmt.Println("schema validation failed:")
+		cliout.Errorf("schema validation failed:")
 		for _, e := range resp.ParseErrors {
-			fmt.Println("  ", e)
+			fmt.Printf("  %s %s\n", cliout.Red("✖"), e)
 		}
 		return
 	}
-	fmt.Printf("plan_id: %s\n", resp.PlanID)
-	fmt.Printf("class:   %s\n", resp.Class)
+	fmt.Printf("%s   %s\n", cliout.Grey("plan_id"), resp.PlanID)
+	fmt.Printf("%s     %s\n", cliout.Grey("class"), colorClass(resp.Class))
 	if len(resp.ImpactReport) > 0 {
-		fmt.Println("impact:")
+		fmt.Println(cliout.Bold("impact:"))
 		for _, e := range resp.ImpactReport {
-			mark := " "
+			mark := cliout.Grey("·")
+			caller := e.Caller
 			if e.Affected {
-				mark = "*"
+				mark = cliout.Yellow("●")
+				caller = cliout.Bold(e.Caller)
 			}
-			fmt.Printf("  %s %-24s %s\n", mark, e.Caller, e.Detail)
+			fmt.Printf("  %s %-32s %s\n", mark, caller, cliout.Grey(e.Detail))
 		}
 	}
 	if len(resp.BreakingDetail) > 0 {
-		fmt.Println("breaking:")
+		fmt.Println(cliout.Red("breaking:"))
 		for _, d := range resp.BreakingDetail {
-			fmt.Println("  ", d)
+			fmt.Printf("  %s %s\n", cliout.Red("✖"), d)
 		}
 	}
+}
+
+// colorClass paints the plan-class string by severity. Used in both
+// `tide plan` and the apply impact report so the eye picks up the
+// risk profile at a glance.
+func colorClass(class string) string {
+	switch class {
+	case "additive":
+		return cliout.Green(class)
+	case "backfill_required":
+		return cliout.Yellow(class)
+	case "cross_caller_breaking":
+		return cliout.Red(cliout.Bold(class))
+	case "unparseable":
+		return cliout.Red(class)
+	}
+	return class
 }

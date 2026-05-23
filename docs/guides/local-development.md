@@ -16,20 +16,23 @@ In the atlantis repo root:
 ```yaml
 version: 1
 callers:
-  - name: backend
+  - name: consumer
     source: local
     path: ../backend
     paths:
-      - internal
-  - name: vendor_platform
+      - internal/auth/schema.atl
+      - internal/cart/schema.atl
+  - name: vendor
     source: local
     path: ../vendor-platform
     paths:
-      - internal
+      - internal/auth/schema.atl
+      - internal/order/schema.atl
 ```
 
 - `source: local` reads the working tree. No `git clone`, no commit required. Edit a `.atl`, the next codegen run picks it up.
 - `path:` resolves against the manifest's own directory. `../backend` works regardless of where you invoke `tidectl dev` from.
+- `paths:` is a flat list of `.atl` files relative to the caller's `path`. The manifest is auditable — there is no globbing. Add a row when you add a schema file.
 
 For mixed setups (one caller pinned via git, one local), each row independently picks its source kind. `source: git` callers still need `repo:` and `ref:`.
 
