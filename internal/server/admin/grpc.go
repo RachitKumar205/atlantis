@@ -60,6 +60,7 @@ type AdminServer interface {
 	GetMergedSchema(context.Context, GetMergedSchemaRequest) (*GetMergedSchemaResponse, error)
 	BeginBackfillPlan(context.Context, BeginBackfillPlanRequest) (*BeginBackfillPlanResponse, error)
 	GetBackfillStatus(context.Context, GetBackfillStatusRequest) (*GetBackfillStatusResponse, error)
+	AdoptBaseline(context.Context, AdoptBaselineRequest) (*AdoptBaselineResponse, error)
 }
 
 // Compile-time check: *Service is the implementation of
@@ -86,6 +87,7 @@ var serviceDesc = grpc.ServiceDesc{
 		{MethodName: "GetMergedSchema", Handler: handleGetMergedSchema},
 		{MethodName: "BeginBackfillPlan", Handler: handleBeginBackfillPlan},
 		{MethodName: "GetBackfillStatus", Handler: handleGetBackfillStatus},
+		{MethodName: "AdoptBaseline", Handler: handleAdoptBaseline},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "atlantis/admin/v1/admin.proto",
@@ -253,6 +255,37 @@ func handleGetBackfillStatus(srv any, ctx context.Context, dec func(any) error, 
 
 func invokeGetBackfillStatus(svc *Service, ctx context.Context, req *GetBackfillStatusRequest) (any, error) {
 	resp, err := svc.GetBackfillStatus(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleAdoptBaseline(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req AdoptBaselineRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeAdoptBaseline(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/AdoptBaseline"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeAdoptBaseline(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeAdoptBaseline(svc *Service, ctx context.Context, req *AdoptBaselineRequest) (any, error) {
+	resp, err := svc.AdoptBaseline(ctx, *req)
 	if err != nil {
 		return nil, err
 	}

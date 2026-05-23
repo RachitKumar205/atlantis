@@ -44,6 +44,9 @@ tmp/
 # Workspace-cache: clones of caller repos resolved by `tidectl codegen --workspace`
 .workspace-cache/
 
+# Local-dev workspace manifest; operator-specific path: values
+atlantis.dev.yaml
+
 # Dev-loop scratch: `make dev-watch` writes throwaway codegen + migration
 # output here as it iterates against testdata/schema/. The path is dev-only
 # so the real `migrations/tidectl/` path stays clean for operator forks

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/rachitkumar205/atlantis/internal/cliout"
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/workspace"
@@ -131,7 +132,7 @@ func cmdCodegen(args []string) int {
 			return 1
 		}
 	}
-	fmt.Printf("codegen ok (%d files)\n", written)
+	cliout.Successf("codegen ok (%s files)", cliout.Bold(fmt.Sprintf("%d", written)))
 	return 0
 }
 

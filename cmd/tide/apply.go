@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
 // SubmittedFile mirrors internal/server/admin.SubmittedFile. We don't
@@ -237,18 +239,18 @@ func doBeginBackfill(ctx context.Context, client *adminClient, cfg *tideConfig, 
 	}
 	switch {
 	case resp.AlreadyComplete:
-		fmt.Printf("tide: backfill already complete (plan-hash=%s)\n", resp.PlanHash)
+		cliout.Successf("backfill already complete (plan-hash=%s)", cliout.Bold(resp.PlanHash))
 		return 0
 	case resp.AlreadyRunning:
-		fmt.Printf("tide: backfill already in flight (plan-hash=%s)\n", resp.PlanHash)
-		fmt.Printf("      monitor with: tide backfill status %s\n", resp.PlanHash)
+		cliout.Infof("backfill already in flight (plan-hash=%s)", cliout.Bold(resp.PlanHash))
+		fmt.Printf("      monitor with: %s %s\n", cliout.Bold("tide backfill status"), resp.PlanHash)
 		return 0
 	case resp.Accepted:
-		fmt.Printf("tide: ✓ backfill accepted (plan-hash=%s)\n", resp.PlanHash)
+		cliout.Successf("backfill accepted (plan-hash=%s)", cliout.Bold(resp.PlanHash))
 		if resp.Message != "" {
-			fmt.Printf("      %s\n", resp.Message)
+			fmt.Printf("      %s\n", cliout.Grey(resp.Message))
 		}
-		fmt.Printf("      monitor with: tide backfill status %s\n", resp.PlanHash)
+		fmt.Printf("      monitor with: %s %s\n", cliout.Bold("tide backfill status"), resp.PlanHash)
 		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "tide backfill: unexpected response: %+v\n", resp)
@@ -269,10 +271,9 @@ func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan pla
 		fmt.Fprintln(os.Stderr, "tide apply:", err)
 		return 3
 	}
-	fmt.Printf("tide: ✓ applied at %s\n", applyResp.AppliedAt)
+	cliout.Successf("applied at %s", applyResp.AppliedAt)
 	if cfg.OutputDir != "" {
-		fmt.Printf("tide: regenerate the typed client under %s with `buf generate` (v0.2 will run this automatically)\n",
-			cfg.OutputDir)
+		cliout.Infof("regenerate the typed client under %s with `buf generate` (v0.2 will run this automatically)", cfg.OutputDir)
 	}
 	return 0
 }
@@ -281,13 +282,15 @@ func printImpactReport(p planResponse) {
 	if len(p.ImpactReport) == 0 {
 		return
 	}
-	fmt.Println("tide: impact report:")
+	fmt.Println(cliout.Bold("impact report:"))
 	for _, e := range p.ImpactReport {
-		mark := " "
+		mark := cliout.Grey("·")
+		caller := e.Caller
 		if e.Affected {
-			mark = "*"
+			mark = cliout.Yellow("●")
+			caller = cliout.Bold(e.Caller)
 		}
-		fmt.Printf("  %s %-24s %s\n", mark, e.Caller, e.Detail)
+		fmt.Printf("  %s %-32s %s\n", mark, caller, cliout.Grey(e.Detail))
 	}
 	fmt.Println()
 }

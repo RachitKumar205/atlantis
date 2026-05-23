@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
 type backfillStatusRequest struct {
@@ -116,37 +118,51 @@ func cmdBackfillStatus(args []string) int {
 }
 
 func printBackfillStatus(s backfillStatusResponse) {
-	fmt.Printf("plan-hash: %s\n", s.PlanHash)
-	fmt.Printf("caller:    %s\n", s.Caller)
-	fmt.Printf("status:    %s\n", s.Status)
-	fmt.Printf("started:   %s\n", s.StartedAt)
+	fmt.Printf("%s %s\n", cliout.Grey("plan-hash:"), cliout.Bold(s.PlanHash))
+	fmt.Printf("%s    %s\n", cliout.Grey("caller:"), s.Caller)
+	fmt.Printf("%s    %s\n", cliout.Grey("status:"), colorBackfillStatus(s.Status))
+	fmt.Printf("%s   %s\n", cliout.Grey("started:"), s.StartedAt)
 	if s.CompletedAt != "" {
-		fmt.Printf("completed: %s\n", s.CompletedAt)
+		fmt.Printf("%s %s\n", cliout.Grey("completed:"), s.CompletedAt)
 	}
 	if s.ErrorMsg != "" {
-		fmt.Printf("error:     %s\n", s.ErrorMsg)
+		fmt.Printf("%s     %s\n", cliout.Red("error:"), s.ErrorMsg)
 	}
 	fmt.Println()
 
 	if len(s.Fields) == 0 {
-		fmt.Println("(no fields declared)")
+		fmt.Println(cliout.Grey("(no fields declared)"))
 		return
 	}
-	fmt.Println("fields:")
+	fmt.Println(cliout.Bold("fields:"))
 	for _, f := range s.Fields {
-		name := fmt.Sprintf("%s.%s", f.EntityID, f.Field)
+		name := fmt.Sprintf("%s.%s", f.EntityID, cliout.Cyan(f.Field))
 		extra := ""
 		if f.LastPK != "" && f.LastPK != "0" {
-			extra = fmt.Sprintf("   last_pk=%s", f.LastPK)
+			extra = cliout.Grey(fmt.Sprintf("   last_pk=%s", f.LastPK))
 		}
 		errInfo := ""
 		if f.ErrorMsg != "" {
-			errInfo = "   err=" + f.ErrorMsg
+			errInfo = "   " + cliout.Red("err="+f.ErrorMsg)
 		}
-		fmt.Printf("  %-40s  %-10s  rows=%d%s%s\n", name, f.Status, f.RowsProcessed, extra, errInfo)
+		fmt.Printf("  %-50s  %-20s  rows=%d%s%s\n", name, colorBackfillStatus(f.Status), f.RowsProcessed, extra, errInfo)
 	}
 	if s.Status == "phase2_running" {
 		fmt.Println()
-		fmt.Println("phase 3 (SET NOT NULL + DROP INDEX) runs automatically when every field is complete.")
+		fmt.Println(cliout.Grey("phase 3 (SET NOT NULL + DROP INDEX) runs automatically when every field is complete."))
 	}
+}
+
+func colorBackfillStatus(s string) string {
+	switch s {
+	case "complete":
+		return cliout.Green(s)
+	case "running", "phase2_running", "phase3_running":
+		return cliout.Yellow(s)
+	case "failed":
+		return cliout.Red(cliout.Bold(s))
+	case "pending":
+		return cliout.Grey(s)
+	}
+	return s
 }

@@ -635,6 +635,19 @@ func lowerMembers(_ string, ms []EntityMember, e *Entity) []error {
 		case *IndexDecl:
 			e.Indexes = append(e.Indexes, lowerIndex(mm))
 		case *UniqueDecl:
+			// Canonicalize: single-field `unique by foo` is the same shape
+			// as the field-level `unique` modifier. Lower both into
+			// Field.Unique so the IR has one spelling and downstream
+			// (adopt drift, codegen, diff) doesn't see them as different.
+			if len(mm.Fields) == 1 {
+				for i := range e.Fields {
+					if e.Fields[i].Name == mm.Fields[0] {
+						e.Fields[i].Unique = true
+						break
+					}
+				}
+				break
+			}
 			e.Uniques = append(e.Uniques, UniqueSpec{Fields: slices.Clone(mm.Fields)})
 		case *PrimaryDecl:
 			e.CompositePK = slices.Clone(mm.Fields)

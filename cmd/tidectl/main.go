@@ -44,6 +44,7 @@ func main() {
 		{"migrate-up", "Run golang-migrate up against $PG_URL", cmdMigrateUp},
 		{"migrate-down", "Run golang-migrate down 1 against $PG_URL", cmdMigrateDown},
 		{"dev", "Codegen + build + exec server from atlantis.dev.yaml (local iteration)", cmdDev},
+		{"adopt", "Verify the live DB matches the declared .atl files and seed the IR checkpoint as the baseline", cmdAdopt},
 		{"version", "Print tidectl version", cmdVersion},
 	}
 
