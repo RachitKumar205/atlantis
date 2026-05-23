@@ -65,6 +65,8 @@ type AdminServer interface {
 	GetJobStatus(context.Context, GetJobStatusRequest) (*GetJobStatusResponse, error)
 	ListDeadJobs(context.Context, ListDeadJobsRequest) (*ListDeadJobsResponse, error)
 	RetryDeadJob(context.Context, RetryDeadJobRequest) (*RetryDeadJobResponse, error)
+	StartWorkflow(context.Context, StartWorkflowRequest) (*StartWorkflowResponse, error)
+	GetWorkflowStatus(context.Context, GetWorkflowStatusRequest) (*GetWorkflowStatusResponse, error)
 }
 
 // Compile-time check: *Service is the implementation of
@@ -96,6 +98,8 @@ var serviceDesc = grpc.ServiceDesc{
 		{MethodName: "GetJobStatus", Handler: handleGetJobStatus},
 		{MethodName: "ListDeadJobs", Handler: handleListDeadJobs},
 		{MethodName: "RetryDeadJob", Handler: handleRetryDeadJob},
+		{MethodName: "StartWorkflow", Handler: handleStartWorkflow},
+		{MethodName: "GetWorkflowStatus", Handler: handleGetWorkflowStatus},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "atlantis/admin/v1/admin.proto",
@@ -426,6 +430,68 @@ func handleRetryDeadJob(srv any, ctx context.Context, dec func(any) error, inter
 
 func invokeRetryDeadJob(svc *Service, ctx context.Context, req *RetryDeadJobRequest) (any, error) {
 	resp, err := svc.RetryDeadJob(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleStartWorkflow(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req StartWorkflowRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeStartWorkflow(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/StartWorkflow"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeStartWorkflow(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeStartWorkflow(svc *Service, ctx context.Context, req *StartWorkflowRequest) (any, error) {
+	resp, err := svc.StartWorkflow(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleGetWorkflowStatus(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req GetWorkflowStatusRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeGetWorkflowStatus(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/GetWorkflowStatus"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeGetWorkflowStatus(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeGetWorkflowStatus(svc *Service, ctx context.Context, req *GetWorkflowStatusRequest) (any, error) {
+	resp, err := svc.GetWorkflowStatus(ctx, *req)
 	if err != nil {
 		return nil, err
 	}
