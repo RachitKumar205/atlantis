@@ -1210,9 +1210,13 @@ func (p *Parser) parseJob() *JobDecl {
 			p.advance()
 			s := p.expect(TokString)
 			job.Schedule = &JobSchedule{Pos: t.Pos, CronSpec: s.Value}
+		case TokVisibleTo:
+			p.advance()
+			s := p.expect(TokString)
+			job.VisibleTo = &JobVisibleTo{Pos: t.Pos, Caller: s.Value}
 		default:
-			p.errf(t.Pos, "expected 'args', 'retries', 'timeout', 'queue', 'schedule', or '}', got %s", t.Kind)
-			p.recover(TokRBrace, TokArgs, TokRetries, TokTimeout, TokQueue, TokSchedule, TokEOF)
+			p.errf(t.Pos, "expected 'args', 'retries', 'timeout', 'queue', 'schedule', 'visible_to', or '}', got %s", t.Kind)
+			p.recover(TokRBrace, TokArgs, TokRetries, TokTimeout, TokQueue, TokSchedule, TokVisibleTo, TokEOF)
 		}
 	}
 }

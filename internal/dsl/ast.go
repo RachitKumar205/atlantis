@@ -724,10 +724,21 @@ type JobDecl struct {
 
 	// Runtime modifiers. Zero values mean atlantis defaults
 	// (Retries = 0, Timeout = 30m, Queue = "default", Schedule = "").
-	Retries  *JobRetries
-	Timeout  *JobTimeout
-	Queue    *JobQueue
-	Schedule *JobSchedule
+	Retries   *JobRetries
+	Timeout   *JobTimeout
+	Queue     *JobQueue
+	Schedule  *JobSchedule
+	VisibleTo *JobVisibleTo
+}
+
+// JobVisibleTo: `visible_to "consumer"` or `visible_to "*"`. Restricts
+// which callers can submit this job via SubmitJob. When absent, any
+// caller can submit. When set, the server checks
+// atlantis.job_visibility at submit time and rejects unauthorized
+// callers.
+type JobVisibleTo struct {
+	Pos    Position
+	Caller string // caller name, or "*" for any
 }
 
 func (*JobDecl) isDecl()              {}
