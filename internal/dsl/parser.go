@@ -975,9 +975,14 @@ func (p *Parser) parseStepsBlock() []ProcedureStep {
 			if blk != nil {
 				out = append(out, ProcedureStep{Pos: blk.Pos, Raw: blk})
 			}
+		case TokEnqueue:
+			eq := p.parseEnqueueStep()
+			if eq != nil {
+				out = append(out, ProcedureStep{Pos: eq.Pos, Enqueue: eq})
+			}
 		default:
-			p.errf(t.Pos, "expected update/delete/insert/sql in steps block, got %s", t.Kind)
-			p.recover(TokRBrace, TokUpdate, TokDelete, TokInsert, TokSql)
+			p.errf(t.Pos, "expected update/delete/insert/sql/enqueue in steps block, got %s", t.Kind)
+			p.recover(TokRBrace, TokUpdate, TokDelete, TokInsert, TokSql, TokEnqueue)
 		}
 	}
 }
@@ -1223,4 +1228,34 @@ func (p *Parser) parseJobArgs() []*FieldDecl {
 			fields = append(fields, f)
 		}
 	}
+}
+
+// parseEnqueueStep: `enqueue [ns.]JobName(arg1: expr, arg2: expr, ...)`.
+// Comma-separated, named args; the lowering pass validates names + types
+// against the target job's args block. Zero args is legal (an empty
+// parenthesized list).
+func (p *Parser) parseEnqueueStep() *EnqueueStep {
+	kw := p.expect(TokEnqueue)
+	if kw.Kind == TokError {
+		p.recover(TokRBrace, TokUpdate, TokDelete, TokInsert, TokSql, TokEnqueue)
+		return nil
+	}
+	target := p.parseEntityRef()
+	p.expect(TokLParen)
+	eq := &EnqueueStep{Pos: kw.Pos, Target: target}
+	if p.peek().Kind == TokRParen {
+		p.advance()
+		return eq
+	}
+	for {
+		name := p.expect(TokIdent)
+		p.expect(TokColon)
+		val := p.parseExpr()
+		eq.Args = append(eq.Args, EnqueueAssignment{Pos: name.Pos, Name: name.Value, Value: val})
+		if _, ok := p.accept(TokComma); !ok {
+			break
+		}
+	}
+	p.expect(TokRParen)
+	return eq
 }

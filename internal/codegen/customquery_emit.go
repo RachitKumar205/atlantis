@@ -559,6 +559,10 @@ func emitCustomProcedureHandler(b *strings.Builder, ir *dsl.IR, p *dsl.CustomPro
 			for _, t := range step.Raw.Touches {
 				touchedSet[t] = true
 			}
+		case step.Enqueue != nil:
+			if err := emitProcedureEnqueueStep(b, step.Enqueue, inputOrdinal, p.Inputs, i, p.Name); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -918,4 +922,135 @@ func isLetterOrUnderscoreCG(c byte) bool {
 
 func isIdentRuneCG(c byte) bool {
 	return isLetterOrUnderscoreCG(c) || (c >= '0' && c <= '9')
+}
+
+// emitProcedureEnqueueStep renders the Go code for an
+// `enqueue Job(args)` step. The emitted block builds the args map,
+// JSON-marshals it, and INSERTs into atlantis.jobs against the
+// procedure's open transaction. The insert shares the tx so the job
+// is enqueued atomically with the procedure's other writes; a
+// rollback drops the job along with everything else.
+//
+// The queue / max_retries / timeout_ms values are baked in from the
+// job declaration at codegen time, so a runtime lookup against the
+// IR checkpoint isn't needed in the hot path. If the job
+// declaration changes, regenerating the procedure picks up the new
+// constants.
+func emitProcedureEnqueueStep(b *strings.Builder, eq *dsl.EnqueueStepIR, inputOrdinal map[string]int, inputs []dsl.QueryParam, idx int, procName string) error {
+	fmt.Fprintf(b, "\n\t// step %d: enqueue %s\n", idx+1, eq.TargetJobID)
+	fmt.Fprintf(b, "\t{\n")
+	b.WriteString("\t\targsMap := map[string]any{\n")
+	for _, a := range eq.Args {
+		if a.Value == nil {
+			continue
+		}
+		valExpr, err := enqueueArgGoExpr(a.Value, inputOrdinal, inputs)
+		if err != nil {
+			return fmt.Errorf("procedure %s step %d arg %q: %w", procName, idx+1, a.Name, err)
+		}
+		fmt.Fprintf(b, "\t\t\t%q: %s,\n", a.Name, valExpr)
+	}
+	b.WriteString("\t\t}\n")
+	b.WriteString("\t\targsJSON, err := json.Marshal(argsMap)\n")
+	b.WriteString("\t\tif err != nil {\n")
+	b.WriteString("\t\t\treturn nil, fmt.Errorf(\"marshal enqueue args: %w\", err)\n")
+	b.WriteString("\t\t}\n")
+	queue := eq.Queue
+	if queue == "" {
+		queue = "default"
+	}
+	timeoutMS := eq.TimeoutMS
+	if timeoutMS == 0 {
+		// Same default the worker assumes when the job declaration
+		// omits a timeout — 30 minutes. Stamped here so the INSERT
+		// row has a concrete value instead of NULL.
+		timeoutMS = 30 * 60 * 1000
+	}
+	fmt.Fprintf(b, "\t\tif _, err := tx.Exec(ctx, %q,\n",
+		`INSERT INTO atlantis.jobs (job_name, queue, args, max_retries, timeout_ms, submitted_by) VALUES ($1, $2, $3, $4, $5, $6)`)
+	fmt.Fprintf(b, "\t\t\t%q,\n", eq.TargetJobID)
+	fmt.Fprintf(b, "\t\t\t%q,\n", queue)
+	b.WriteString("\t\t\targsJSON,\n")
+	fmt.Fprintf(b, "\t\t\t%d,\n", eq.MaxRetries)
+	fmt.Fprintf(b, "\t\t\t%d,\n", timeoutMS)
+	fmt.Fprintf(b, "\t\t\t%q,\n", "procedure:"+procName)
+	b.WriteString("\t\t); err != nil {\n")
+	b.WriteString("\t\t\treturn nil, fmt.Errorf(\"enqueue job: %w\", err)\n")
+	b.WriteString("\t\t}\n")
+	b.WriteString("\t}\n")
+	return nil
+}
+
+// enqueueArgGoExpr converts one resolved enqueue-arg ExprIR into the
+// Go expression that goes into argsMap. Literals render verbatim;
+// $arg references resolve through the procedure's input ordinal to
+// the corresponding handler parameter.
+func enqueueArgGoExpr(e *dsl.ExprIR, inputOrdinal map[string]int, inputs []dsl.QueryParam) (string, error) {
+	switch e.Kind {
+	case dsl.ExprLiteralStr:
+		return fmt.Sprintf("%q", e.LitStr), nil
+	case dsl.ExprLiteralInt:
+		return fmt.Sprintf("int64(%d)", e.LitInt), nil
+	case dsl.ExprLiteralBool:
+		if e.LitBool {
+			return "true", nil
+		}
+		return "false", nil
+	case dsl.ExprLiteralNow:
+		return "time.Now().UTC()", nil
+	case dsl.ExprArg:
+		ord, ok := inputOrdinal[e.ArgName]
+		if !ok {
+			return "", fmt.Errorf("$%s not in inputs", e.ArgName)
+		}
+		// Inputs are declared on the request struct; the procedure
+		// handler reads them as `req.GetX()` -- matching the pattern
+		// the typed-step emitter uses for assignments.
+		_ = ord
+		// We mirror the existing helper that maps a $arg to its Go
+		// expression at this call site; fall through to the input's
+		// name in pascal-shaped form, matching the procedure server
+		// emitter's variable conventions.
+		return goLocalForInput(e.ArgName, inputs), nil
+	}
+	return "", fmt.Errorf("unsupported enqueue arg kind %q", e.Kind)
+}
+
+// goLocalForInput returns the Go local-variable name the procedure
+// emitter uses for a given input. The typed-step emitter declares
+// one local per input at the top of the handler body (e.g.
+// `vendorID := req.GetVendorId()`), and enqueue steps reference the
+// same local so the wiring is consistent.
+func goLocalForInput(name string, inputs []dsl.QueryParam) string {
+	// Match the existing convention: snake_case input names go to
+	// lowerCamel for the local variable. Mirror what the procedure
+	// emitter does (see emitProcedureTypedStep's argument resolution).
+	for _, in := range inputs {
+		if in.Name == name {
+			return lowerCamel(name)
+		}
+	}
+	return lowerCamel(name)
+}
+
+// lowerCamel converts snake_case to lowerCamelCase.
+func lowerCamel(s string) string {
+	var b strings.Builder
+	upper := false
+	for i, r := range s {
+		if r == '_' {
+			upper = true
+			continue
+		}
+		if i == 0 {
+			if r >= 'A' && r <= 'Z' {
+				r = r + ('a' - 'A')
+			}
+		} else if upper && r >= 'a' && r <= 'z' {
+			r = r - ('a' - 'A')
+		}
+		b.WriteRune(r)
+		upper = false
+	}
+	return b.String()
 }

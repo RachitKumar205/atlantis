@@ -153,11 +153,41 @@ type CustomOutput struct {
 }
 
 // ProcedureStepIR is one resolved step inside a procedure body.
-// Exactly one of Typed or Raw is populated.
+// Exactly one of Typed / Raw / Enqueue is populated.
 type ProcedureStepIR struct {
-	Typed *TypedStepIR `json:"typed,omitempty"`
-	Raw   *RawSQLIR    `json:"raw,omitempty"`
-	Pos   Position     `json:"-"`
+	Typed   *TypedStepIR   `json:"typed,omitempty"`
+	Raw     *RawSQLIR      `json:"raw,omitempty"`
+	Enqueue *EnqueueStepIR `json:"enqueue,omitempty"`
+	Pos     Position       `json:"-"`
+}
+
+// EnqueueStepIR is a resolved `enqueue Job(args)` step. The codegen
+// emits an INSERT into atlantis.jobs sharing the procedure's tx, so
+// the job is enqueued atomically with the procedure's other writes.
+//
+// TargetJobID is the canonical "namespace.JobName" id matching one of
+// IR.Jobs. Args lists the resolved argument expressions in the order
+// the codegen serializes them into the args JSON; argument-name
+// uniqueness + presence checks happen at IR-lowering time.
+//
+// Queue / MaxRetries / TimeoutMS are denormalized onto the step at
+// lower time so the codegen doesn't have to re-walk IR.Jobs at emit
+// time. If the target job's declaration later changes (different
+// queue, retries), regenerating the procedure picks up the new
+// values without a separate apply step.
+type EnqueueStepIR struct {
+	TargetJobID string                `json:"target_job_id"`
+	Args        []EnqueueAssignmentIR `json:"args,omitempty"`
+	Queue       string                `json:"queue,omitempty"`
+	MaxRetries  int                   `json:"max_retries,omitempty"`
+	TimeoutMS   int                   `json:"timeout_ms,omitempty"`
+}
+
+// EnqueueAssignmentIR is one resolved `name: value` pair in an
+// enqueue step's arg list.
+type EnqueueAssignmentIR struct {
+	Name  string  `json:"name"`
+	Value *ExprIR `json:"value"`
 }
 
 // TypedStepIR is a resolved typed mutation. Each field carries a
@@ -576,6 +606,40 @@ func Lower(files []*File) (*IR, error) {
 	// unqualified entity references inside `for`, `touches`, and typed
 	// steps inherit that namespace.
 	customSeen := map[string]Position{}
+
+	// Sub-pass 3a: lower jobs first so the byJobID lookup the
+	// procedure-step lowering needs (for `enqueue` step validation) is
+	// populated before any procedure runs through lowerProcedure.
+	for _, q := range deferred {
+		d, ok := q.decl.(*JobDecl)
+		if !ok {
+			continue
+		}
+		job, jerrs := lowerJob(q.file.Path, d)
+		errs = append(errs, jerrs...)
+		if job == nil {
+			continue
+		}
+		id := job.ID()
+		if first, ok := customSeen[id]; ok {
+			errs = append(errs, fmt.Errorf("%s: duplicate job %s (first declared at %s)", d.Position(), id, first))
+			continue
+		}
+		if first, ok := seen[id]; ok {
+			errs = append(errs, fmt.Errorf("%s: job %s collides with entity declared at %s", d.Position(), id, first))
+			continue
+		}
+		customSeen[id] = d.Position()
+		ir.Jobs = append(ir.Jobs, *job)
+	}
+	byJobID := make(map[string]*Job, len(ir.Jobs))
+	for i := range ir.Jobs {
+		byJobID[ir.Jobs[i].ID()] = &ir.Jobs[i]
+	}
+
+	// Sub-pass 3b: queries + procedures. Procedures with `enqueue`
+	// steps consult byJobID to resolve the target job and pull its
+	// queue / max_retries / timeout into the step IR.
 	for _, q := range deferred {
 		switch d := q.decl.(type) {
 		case *QueryDecl:
@@ -592,7 +656,7 @@ func Lower(files []*File) (*IR, error) {
 			customSeen[id] = d.Position()
 			ir.Queries = append(ir.Queries, *cq)
 		case *ProcedureDecl:
-			cp, perrs := lowerProcedure(q.file.Path, d, byID)
+			cp, perrs := lowerProcedure(q.file.Path, d, byID, byJobID)
 			errs = append(errs, perrs...)
 			if cp == nil {
 				continue
@@ -604,26 +668,6 @@ func Lower(files []*File) (*IR, error) {
 			}
 			customSeen[id] = d.Position()
 			ir.Procedures = append(ir.Procedures, *cp)
-		case *JobDecl:
-			job, jerrs := lowerJob(q.file.Path, d)
-			errs = append(errs, jerrs...)
-			if job == nil {
-				continue
-			}
-			id := job.ID()
-			if first, ok := customSeen[id]; ok {
-				errs = append(errs, fmt.Errorf("%s: duplicate job %s (first declared at %s)", d.Position(), id, first))
-				continue
-			}
-			if first, ok := seen[id]; ok {
-				// Job name collides with an entity name in the same
-				// namespace — both would generate Go identifiers that
-				// share a method receiver. Reject loudly.
-				errs = append(errs, fmt.Errorf("%s: job %s collides with entity declared at %s", d.Position(), id, first))
-				continue
-			}
-			customSeen[id] = d.Position()
-			ir.Jobs = append(ir.Jobs, *job)
 		}
 	}
 	sort.Slice(ir.Queries, func(i, j int) bool { return ir.Queries[i].ID() < ir.Queries[j].ID() })
@@ -1420,7 +1464,7 @@ func lowerQuery(path string, d *QueryDecl, byID map[string]*Entity) (*CustomQuer
 //     = $arg`).
 //   - touches() lists union out — duplicates collapsed because the
 //     codegen otherwise emits N identical generation bumps per step.
-func lowerProcedure(path string, d *ProcedureDecl, byID map[string]*Entity) (*CustomProcedure, []error) {
+func lowerProcedure(path string, d *ProcedureDecl, byID map[string]*Entity, byJobID map[string]*Job) (*CustomProcedure, []error) {
 	var errs []error
 	owner, err := resolveEntityRef(d.Target, byID, "")
 	if err != nil {
@@ -1482,6 +1526,17 @@ func lowerProcedure(path string, d *ProcedureDecl, byID map[string]*Entity) (*Cu
 				Raw: &RawSQLIR{SQL: step.Raw.Raw, Touches: touches},
 				Pos: step.Pos,
 			})
+		case step.Enqueue != nil:
+			es, eErrs := lowerEnqueueStep(step.Enqueue, byJobID, ownerNS, inputNames, i, d.Name)
+			errs = append(errs, eErrs...)
+			if es != nil {
+				cp.Steps = append(cp.Steps, ProcedureStepIR{Enqueue: es, Pos: step.Pos})
+				for _, a := range es.Args {
+					if a.Value != nil && a.Value.Kind == ExprArg {
+						usedAcrossSteps[a.Value.ArgName] = true
+					}
+				}
+			}
 		default:
 			errs = append(errs, fmt.Errorf("%s: procedure %s step %d: empty step", step.Pos, d.Name, i+1))
 		}
@@ -1871,4 +1926,107 @@ func lowerJob(path string, d *JobDecl) (*Job, []error) {
 	}
 
 	return job, errs
+}
+
+// lowerEnqueueStep resolves an `enqueue Job(args)` step against the
+// IR. Target job must exist in byJobID; arg names must match the
+// job's declared args block exactly (no extras, no duplicates, and
+// every NOT-NULL arg without a default must be supplied).
+//
+// Expression lowering accepts literals + $arg references; field
+// references (FieldExpr) are rejected because there's no entity
+// context in an enqueue step. Callers wanting to enqueue with a
+// row's column value should bind it to an input first.
+func lowerEnqueueStep(s *EnqueueStep, byJobID map[string]*Job, defaultNS string, inputs map[string]bool, idx int, procName string) (*EnqueueStepIR, []error) {
+	var errs []error
+
+	ns := s.Target.Namespace
+	if ns == "" {
+		ns = defaultNS
+	}
+	jobID := ns + "." + s.Target.Name
+	job, ok := byJobID[jobID]
+	if !ok {
+		return nil, []error{fmt.Errorf("%s: procedure %s step %d: unknown job %s", s.Pos, procName, idx+1, jobID)}
+	}
+
+	// Build a map of declared arg names so we can verify the caller's
+	// keys + spot duplicates + report missing required ones.
+	declared := make(map[string]*Field, len(job.Args))
+	for i := range job.Args {
+		declared[job.Args[i].Name] = &job.Args[i]
+	}
+	supplied := make(map[string]bool, len(s.Args))
+	out := &EnqueueStepIR{
+		TargetJobID: jobID,
+		Queue:       job.Queue,
+		MaxRetries:  job.Retries,
+		TimeoutMS:   job.TimeoutMS,
+	}
+	for _, a := range s.Args {
+		if _, isDup := supplied[a.Name]; isDup {
+			errs = append(errs, fmt.Errorf("%s: procedure %s step %d: duplicate enqueue arg %q", a.Pos, procName, idx+1, a.Name))
+			continue
+		}
+		if _, ok := declared[a.Name]; !ok {
+			errs = append(errs, fmt.Errorf("%s: procedure %s step %d: enqueue arg %q is not declared on job %s", a.Pos, procName, idx+1, a.Name, jobID))
+			continue
+		}
+		supplied[a.Name] = true
+		val, vErrs := lowerEnqueueValue(a.Value, inputs, procName, idx)
+		errs = append(errs, vErrs...)
+		if val == nil {
+			continue
+		}
+		out.Args = append(out.Args, EnqueueAssignmentIR{Name: a.Name, Value: val})
+	}
+
+	// Required args must be supplied. "Required" = NotNull with no
+	// default value declared; anything else has a fallback the worker
+	// can fill in from the column metadata at row-insert time.
+	for name, f := range declared {
+		if supplied[name] {
+			continue
+		}
+		if f.NotNull && f.Default == nil {
+			errs = append(errs, fmt.Errorf("%s: procedure %s step %d: enqueue %s is missing required arg %q", s.Pos, procName, idx+1, jobID, name))
+		}
+	}
+
+	return out, errs
+}
+
+// lowerEnqueueValue lowers a single enqueue argument expression.
+// Restricted to literals + $arg references; field references are
+// rejected because there's no entity context in an enqueue step.
+func lowerEnqueueValue(e Expr, inputs map[string]bool, procName string, stepIdx int) (*ExprIR, []error) {
+	switch x := e.(type) {
+	case *LiteralExpr:
+		switch x.Kind {
+		case "int":
+			n, err := strconv.ParseInt(x.Value, 10, 64)
+			if err != nil {
+				return nil, []error{fmt.Errorf("%s: procedure %s step %d: malformed integer literal %q", x.Pos, procName, stepIdx+1, x.Value)}
+			}
+			return &ExprIR{Kind: ExprLiteralInt, LitInt: n}, nil
+		case "string":
+			return &ExprIR{Kind: ExprLiteralStr, LitStr: x.Value}, nil
+		case "bool":
+			return &ExprIR{Kind: ExprLiteralBool, LitBool: x.Value == "true"}, nil
+		case "now":
+			return &ExprIR{Kind: ExprLiteralNow}, nil
+		default:
+			return nil, []error{fmt.Errorf("%s: procedure %s step %d: unknown literal kind %q in enqueue arg", x.Pos, procName, stepIdx+1, x.Kind)}
+		}
+	case *ArgExpr:
+		if !inputs[x.Name] {
+			return nil, []error{fmt.Errorf("%s: procedure %s step %d: $%s is not declared in input{}", x.Pos, procName, stepIdx+1, x.Name)}
+		}
+		return &ExprIR{Kind: ExprArg, ArgName: x.Name}, nil
+	case *FieldExpr:
+		return nil, []error{fmt.Errorf("%s: procedure %s step %d: enqueue arg cannot reference a row field; bind it to an input first", x.Pos, procName, stepIdx+1)}
+	case *BinaryExpr:
+		return nil, []error{fmt.Errorf("%s: procedure %s step %d: enqueue arg cannot be a compound expression", x.Pos, procName, stepIdx+1)}
+	}
+	return nil, []error{fmt.Errorf("procedure %s step %d: unknown enqueue arg type %T", procName, stepIdx+1, e)}
 }
