@@ -65,6 +65,7 @@ type Worker struct {
 	registry *Registry
 	queue    string
 	cfg      Config
+	workflow *WorkflowEngine
 
 	lastClaimNS atomic.Int64
 }
@@ -73,6 +74,11 @@ type Worker struct {
 // before Run is called — if a job arrives whose handler isn't
 // registered, the worker reports a transient claim error and the
 // row stays pending for the next deploy that has the handler.
+// SetWorkflowEngine attaches the workflow engine so the worker can
+// advance/compensate workflows on job completion. Optional; without
+// it, workflow_id on jobs is ignored.
+func (w *Worker) SetWorkflowEngine(e *WorkflowEngine) { w.workflow = e }
+
 func NewWorker(pool *pgxpool.Pool, registry *Registry, queue string, cfg Config) *Worker {
 	if cfg.Schema == "" {
 		cfg.Schema = "atlantis"
@@ -380,6 +386,9 @@ func (w *Worker) handleOne(ctx context.Context, r claimedRow) {
 		if cerr := w.markComplete(ctx, r.id); cerr != nil {
 			w.cfg.Logger.Warn("jobs markComplete", "row", r.id, "err", cerr)
 		}
+		if w.workflow != nil {
+			w.workflow.OnJobComplete(ctx, r.id)
+		}
 		return
 	}
 	w.reportFailure(ctx, r, err)
@@ -422,6 +431,9 @@ func (w *Worker) reportFailure(ctx context.Context, r claimedRow, handlerErr err
 	if r.attempts >= r.maxRetries {
 		if err := w.moveToDLQ(ctx, r.id, msg); err != nil {
 			w.cfg.Logger.Error("jobs moveToDLQ", "row", r.id, "err", err)
+		}
+		if w.workflow != nil {
+			w.workflow.OnJobFailed(ctx, r.id, msg)
 		}
 		return
 	}
