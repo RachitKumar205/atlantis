@@ -38,6 +38,7 @@ type IR struct {
 	Entities   []Entity          `json:"entities"`
 	Queries    []CustomQuery     `json:"queries,omitempty"`
 	Procedures []CustomProcedure `json:"procedures,omitempty"`
+	Jobs       []Job             `json:"jobs,omitempty"`
 }
 
 // CustomQuery is a resolved `query Name for Entity { ... }` declaration.
@@ -68,6 +69,46 @@ func (q *CustomQuery) ID() string {
 		return q.Owner[:i] + "." + q.Name
 	}
 	return q.Name
+}
+
+// Job is a resolved `job Name in ns { ... }` declaration.
+//
+// A job is a typed background-work declaration. atlantis-server emits
+// a SubmitX RPC and a typed handler interface from this IR; the
+// worker drains atlantis.jobs rows, deserializes Args JSON to the
+// generated typed struct, and routes to the handler the caller
+// registered at server startup. Retries / TimeoutMS / Queue /
+// Schedule govern the worker's runtime behavior.
+//
+// Args reuses the entity-field shape so the existing type system
+// (varchar(N), numeric(P,S), arrays, NOT NULL, defaults, checks)
+// applies verbatim. Args MUST NOT carry storage-only modifiers
+// (primary, identity, serial, unique, references, backfill); the
+// lowering pass enforces this and emits a precise rejection so the
+// caller knows which modifier to drop.
+//
+// Schedule is the raw cron spec verbatim — parsing + validation
+// happens at runtime in the scheduler (PR-B). The IR stores the
+// string so subsequent diff / codegen runs see a stable, comparable
+// value.
+type Job struct {
+	Name       string   `json:"name"`
+	Namespace  string   `json:"namespace"`
+	Args       []Field  `json:"args,omitempty"`
+	Retries    int      `json:"retries,omitempty"`
+	TimeoutMS  int      `json:"timeout_ms,omitempty"`
+	Queue      string   `json:"queue,omitempty"`
+	Schedule   string   `json:"schedule,omitempty"`
+	SourcePath string   `json:"source_path,omitempty"`
+	Pos        Position `json:"-"`
+}
+
+// ID returns the "namespace.Name" identifier used to disambiguate
+// jobs across callers. Mirrors Entity.ID() / CustomQuery.ID() so the
+// shared uniqueness check in Lower can treat all named decls the
+// same.
+func (j *Job) ID() string {
+	return j.Namespace + "." + j.Name
 }
 
 // CustomProcedure is a resolved `procedure Name for Entity { ... }`
@@ -470,7 +511,7 @@ func Lower(files []*File) (*IR, error) {
 	for _, f := range files {
 		for _, d := range f.Decls {
 			switch d.(type) {
-			case *QueryDecl, *ProcedureDecl:
+			case *QueryDecl, *ProcedureDecl, *JobDecl:
 				deferred = append(deferred, queryAST{file: f, decl: d})
 				continue
 			}
@@ -564,10 +605,31 @@ func Lower(files []*File) (*IR, error) {
 			}
 			customSeen[id] = d.Position()
 			ir.Procedures = append(ir.Procedures, *cp)
+		case *JobDecl:
+			job, jerrs := lowerJob(q.file.Path, d)
+			errs = append(errs, jerrs...)
+			if job == nil {
+				continue
+			}
+			id := job.ID()
+			if first, ok := customSeen[id]; ok {
+				errs = append(errs, fmt.Errorf("%s: duplicate job %s (first declared at %s)", d.Position(), id, first))
+				continue
+			}
+			if first, ok := seen[id]; ok {
+				// Job name collides with an entity name in the same
+				// namespace — both would generate Go identifiers that
+				// share a method receiver. Reject loudly.
+				errs = append(errs, fmt.Errorf("%s: job %s collides with entity declared at %s", d.Position(), id, first))
+				continue
+			}
+			customSeen[id] = d.Position()
+			ir.Jobs = append(ir.Jobs, *job)
 		}
 	}
 	sort.Slice(ir.Queries, func(i, j int) bool { return ir.Queries[i].ID() < ir.Queries[j].ID() })
 	sort.Slice(ir.Procedures, func(i, j int) bool { return ir.Procedures[i].ID() < ir.Procedures[j].ID() })
+	sort.Slice(ir.Jobs, func(i, j int) bool { return ir.Jobs[i].ID() < ir.Jobs[j].ID() })
 
 	if len(errs) > 0 {
 		return ir, errors.Join(errs...)
@@ -598,7 +660,7 @@ func lowerDecl(path string, d Decl) (*Entity, []error) {
 		}
 		errs = append(errs, lowerMembers(path, dd.Members, e)...)
 		return e, errs
-	case *QueryDecl, *ProcedureDecl:
+	case *QueryDecl, *ProcedureDecl, *JobDecl:
 		// Handled in Lower's pass 3 after every entity has resolved.
 		// The Lower dispatcher already skips these before calling
 		// lowerDecl; this case keeps the switch exhaustive.
@@ -1718,4 +1780,96 @@ func lowerCacheForCustom(cb *CacheBlock) *Cache {
 	// not entity fields, so cross-checking would produce false errors.
 	c, _ := lowerCache(cb, &Entity{})
 	return c
+}
+
+// lowerJob converts a JobDecl AST into an IR Job. The function performs
+// three categories of validation:
+//
+//  1. Arg modifier whitelist. Storage-only modifiers (primary, identity,
+//     serial, unique, references, backfill) don't make sense on a
+//     function-call argument; reject with a precise position. NotNull,
+//     Default, and Check survive — they constrain values the caller
+//     supplies on the wire.
+//
+//  2. Runtime modifier shape. retries must be non-negative. timeout
+//     parses through the shared parseDurationMS helper used by cache
+//     TTLs and query-timeout modifiers, so the DSL has a single
+//     duration grammar. queue and schedule are stored verbatim;
+//     cron-spec validation is deferred to the scheduler component
+//     (PR-B) where the cron library lives.
+//
+//  3. Uniqueness across the merged IR. Caller is responsible (via the
+//     customSeen / seen maps in Lower) — lowerJob only assembles the
+//     Job value; the caller intercepts collisions.
+func lowerJob(path string, d *JobDecl) (*Job, []error) {
+	var errs []error
+	job := &Job{
+		Name:       d.Name,
+		Namespace:  d.Namespace,
+		SourcePath: path,
+		Pos:        d.Pos,
+	}
+
+	// Args: each FieldDecl rows lowers through the shared lowerField
+	// helper to inherit the type system + default-value lowering, then
+	// we reject the modifiers that don't apply to function-call args.
+	for _, fd := range d.Args {
+		f, ferrs := lowerField(fd)
+		errs = append(errs, ferrs...)
+		// Reject storage-only modifiers. lowerField already populated
+		// the flags; we surface them as errors and zero them so the
+		// downstream IR is well-formed even when we keep going.
+		for _, mod := range fd.Modifiers {
+			switch mod.(type) {
+			case *ModPrimaryDecl:
+				errs = append(errs, fmt.Errorf("%s: job arg %q cannot be 'primary' — args are values, not stored rows", mod.Position(), fd.Name))
+			case *ModIdentityDecl:
+				errs = append(errs, fmt.Errorf("%s: job arg %q cannot be 'identity'", mod.Position(), fd.Name))
+			case *ModSerialDecl:
+				errs = append(errs, fmt.Errorf("%s: job arg %q cannot be 'serial'", mod.Position(), fd.Name))
+			case *ModUniqueDecl:
+				errs = append(errs, fmt.Errorf("%s: job arg %q cannot be 'unique'", mod.Position(), fd.Name))
+			case *ModReferencesDecl:
+				errs = append(errs, fmt.Errorf("%s: job arg %q cannot use 'references' — FKs are between stored rows", mod.Position(), fd.Name))
+			case *ModBackfillDecl:
+				errs = append(errs, fmt.Errorf("%s: job arg %q cannot use 'backfill' — that modifier applies to schema migrations only", mod.Position(), fd.Name))
+			}
+		}
+		f.Primary = false
+		f.Identity = false
+		f.Serial = false
+		f.Unique = false
+		f.Ref = nil
+		f.Backfill = ""
+		job.Args = append(job.Args, f)
+	}
+
+	if d.Retries != nil {
+		if d.Retries.Count < 0 {
+			errs = append(errs, fmt.Errorf("%s: retries must be non-negative, got %d", d.Retries.Pos, d.Retries.Count))
+		} else {
+			job.Retries = d.Retries.Count
+		}
+	}
+	if d.Timeout != nil {
+		ms, perr := parseDurationMS(d.Timeout.Duration)
+		if perr != nil {
+			errs = append(errs, fmt.Errorf("%s: invalid timeout %q: %v", d.Timeout.Pos, d.Timeout.Duration, perr))
+		} else {
+			job.TimeoutMS = ms
+		}
+	}
+	if d.Queue != nil {
+		job.Queue = d.Queue.Name
+	}
+	if d.Schedule != nil {
+		// Cron-spec validation is deferred to the scheduler runtime
+		// (PR-B) where the parser library is wired in. PR-A only
+		// preserves the spec verbatim; an invalid spec surfaces at
+		// scheduler startup, not at DSL lowering, so a working
+		// `tide plan` doesn't depend on the cron library.
+		job.Schedule = d.Schedule.CronSpec
+	}
+
+	return job, errs
 }

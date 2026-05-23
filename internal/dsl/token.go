@@ -109,6 +109,19 @@ const (
 	TokInvalidate
 	TokInsert
 	TokArgPlaceholder // a $arg reference inside a raw SQL block
+
+	// DSL constructs for declarative jobs. A `job` is a typed
+	// background-work declaration; the args block lists typed inputs the
+	// handler receives, retries / timeout / queue / schedule are runtime
+	// modifiers. Workers and the typed client SDK are emitted from
+	// these declarations by the codegen pipeline (Phase 1: jobs;
+	// Phase 3: workflows). See docs/concepts/jobs.md.
+	TokJob
+	TokArgs
+	TokSchedule
+	TokQueue
+	TokRetries
+	TokTimeout
 )
 
 var tokenNames = map[TokenKind]string{
@@ -201,6 +214,12 @@ var tokenNames = map[TokenKind]string{
 	TokInvalidate:     "invalidate",
 	TokInsert:         "insert",
 	TokArgPlaceholder: "$ARG",
+	TokJob:            "job",
+	TokArgs:           "args",
+	TokSchedule:       "schedule",
+	TokQueue:          "queue",
+	TokRetries:        "retries",
+	TokTimeout:        "timeout",
 }
 
 // String returns the textual form of the token kind.
@@ -284,6 +303,12 @@ var keywords = map[string]TokenKind{
 	// `invalidate` is the trailing clause on a procedure.
 	"invalidate": TokInvalidate,
 	"insert":     TokInsert,
+	"job":        TokJob,
+	"args":       TokArgs,
+	"schedule":   TokSchedule,
+	"queue":      TokQueue,
+	"retries":    TokRetries,
+	"timeout":    TokTimeout,
 }
 
 // Position is a 1-indexed source position used for error reporting,

@@ -668,3 +668,77 @@ type ProcedureInvalidate struct {
 	Pos    Position
 	TagTpl string // the tag template, e.g. "consumer:{account_id}"
 }
+
+// ---- Declarative jobs ----
+//
+// A `job` is a typed background-work declaration. The body lists the
+// args the handler receives (each is a FieldDecl: same field grammar
+// as an entity column, minus FK / index / cache modifiers) plus
+// block-level runtime modifiers: retries, timeout, queue, schedule.
+//
+// At codegen time atlantis emits, on the server SDK, a typed handler
+// interface (`<Job>Handler.Handle(ctx, args) error`); on the client SDK,
+// a typed submission method (`client.Submit<Job>(ctx, args) (jobID, error)`).
+// The atlantis worker drains atlantis.jobs rows, deserializes the
+// args JSON into the typed struct, and routes to the right handler.
+//
+// Runtime semantics — retries / timeout / queue / schedule — are
+// honored by atlantis-server's in-Postgres worker pool. See
+// internal/jobs/runner.go (added in PR-B).
+type JobDecl struct {
+	Pos       Position
+	Name      string
+	Namespace string
+
+	// Args is the typed input the handler receives. Each FieldDecl is
+	// the same grammar as an entity column (`name type modifiers`), but
+	// the parser rejects column-only modifiers (primary, references,
+	// soft_delete, cache, etc.) — args are inputs, not schema.
+	Args []*FieldDecl
+
+	// Runtime modifiers. Zero values mean atlantis defaults
+	// (Retries = 0, Timeout = 30m, Queue = "default", Schedule = "").
+	Retries  *JobRetries
+	Timeout  *JobTimeout
+	Queue    *JobQueue
+	Schedule *JobSchedule
+}
+
+func (*JobDecl) isDecl()              {}
+func (j *JobDecl) Position() Position { return j.Pos }
+func (j *JobDecl) DeclName() string   { return j.Name }
+
+// JobRetries: `retries N` — the maximum number of times a failing job
+// is re-attempted before being moved to atlantis.jobs_dead.
+type JobRetries struct {
+	Pos   Position
+	Count int
+}
+
+// JobTimeout: `timeout 30m` — per-attempt deadline. The worker
+// cancels the handler's context when the duration elapses. Lease
+// expiry is computed from this value (lease = timeout * 1.5 by
+// default; documented in jobs runtime config).
+type JobTimeout struct {
+	Pos      Position
+	Duration string // verbatim duration token text; parsed at IR-lowering time
+}
+
+// JobQueue: `queue "shopify"` — named queue this job belongs to.
+// Workers can be partitioned per queue for independent scaling
+// (e.g. one queue for low-latency notifications, another for
+// long-running imports).
+type JobQueue struct {
+	Pos  Position
+	Name string
+}
+
+// JobSchedule: `schedule "0 */15 * * *"` — cron spec (standard 5-field
+// form) that fires this job periodically. The atlantis scheduler
+// component evaluates the spec and INSERTs job rows when due. Empty
+// schedule = non-scheduled, submission via SDK / CLI / procedure
+// enqueue only.
+type JobSchedule struct {
+	Pos      Position
+	CronSpec string
+}
