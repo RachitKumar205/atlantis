@@ -684,7 +684,7 @@ type ProcedureInvalidate struct {
 //
 // Runtime semantics — retries / timeout / queue / schedule — are
 // honored by atlantis-server's in-Postgres worker pool. See
-// internal/jobs/runner.go (added in PR-B).
+// internal/jobs/runner.go.
 type JobDecl struct {
 	Pos       Position
 	Name      string

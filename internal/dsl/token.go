@@ -114,8 +114,7 @@ const (
 	// background-work declaration; the args block lists typed inputs the
 	// handler receives, retries / timeout / queue / schedule are runtime
 	// modifiers. Workers and the typed client SDK are emitted from
-	// these declarations by the codegen pipeline (Phase 1: jobs;
-	// Phase 3: workflows). See docs/concepts/jobs.md.
+	// these declarations by the codegen pipeline.
 	TokJob
 	TokArgs
 	TokSchedule

@@ -30,6 +30,7 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/cache/memcached"
 	"github.com/rachitkumar205/atlantis/internal/cache/queryresult"
 	"github.com/rachitkumar205/atlantis/internal/cache/read"
+	"github.com/rachitkumar205/atlantis/internal/jobs"
 	"github.com/rachitkumar205/atlantis/internal/obs"
 	"github.com/rachitkumar205/atlantis/internal/server/admin"
 	"github.com/rachitkumar205/atlantis/internal/server/interceptors"
@@ -253,6 +254,39 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 		}()
 		log.Info("backfill worker enabled")
 	}
+
+	// Jobs worker pool — one Worker per queue named in
+	// ATL_JOBS_QUEUES. The Registry stays empty in this slice; once
+	// caller code uses the generated SDK to RegisterJobHandlers, the
+	// worker's runtime lookups will resolve. Until then, submitted
+	// jobs sit in atlantis.jobs awaiting handler deployment.
+	var jobsRegistry *jobs.Registry
+	if cfg.JobsWorkerEnabled {
+		jobsRegistry = jobs.NewRegistry()
+		for _, queue := range cfg.JobsQueues {
+			queue := queue
+			w := jobs.NewWorker(pool.Raw(), jobsRegistry, queue, jobs.Config{
+				Schema:        "atlantis",
+				DrainInterval: time.Second,
+				BatchSize:     50,
+				Logger:        log.With("component", "jobs-worker", "queue", queue),
+			})
+			workerWG.Add(1)
+			go func() {
+				defer workerWG.Done()
+				defer func() {
+					if rec := recover(); rec != nil {
+						log.Error("jobs worker panic", "queue", queue, "panic", rec)
+					}
+				}()
+				if err := w.Run(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
+					log.Error("jobs worker exited", "queue", queue, "err", err)
+				}
+			}()
+			log.Info("jobs worker enabled", "queue", queue)
+		}
+	}
+	_ = jobsRegistry // exported via Server.JobsRegistry once PR-C wires the public surface
 
 	log.Debug("init: register entity services")
 	entityserver.Register(srv, entityserver.ServerDeps{
