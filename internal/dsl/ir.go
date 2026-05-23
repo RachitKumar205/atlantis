@@ -91,15 +91,21 @@ func (q *CustomQuery) ID() string {
 // happens at runtime in the scheduler. The IR stores the string so
 // subsequent diff / codegen runs see a stable, comparable value.
 type Job struct {
-	Name       string   `json:"name"`
-	Namespace  string   `json:"namespace"`
-	Args       []Field  `json:"args,omitempty"`
-	Retries    int      `json:"retries,omitempty"`
-	TimeoutMS  int      `json:"timeout_ms,omitempty"`
-	Queue      string   `json:"queue,omitempty"`
-	Schedule   string   `json:"schedule,omitempty"`
-	SourcePath string   `json:"source_path,omitempty"`
-	Pos        Position `json:"-"`
+	Name      string  `json:"name"`
+	Namespace string  `json:"namespace"`
+	Args      []Field `json:"args,omitempty"`
+	Retries   int     `json:"retries,omitempty"`
+	TimeoutMS int     `json:"timeout_ms,omitempty"`
+	// TimeoutNone is the explicit `timeout none` form. Distinguishes
+	// "no timeout was declared" (false, TimeoutMS=0; SubmitJob falls
+	// back to the 30m default) from "this handler opts out of any
+	// per-attempt deadline" (true; SubmitJob inserts NULL into
+	// atlantis.jobs.timeout_ms so the worker skips context.WithTimeout).
+	TimeoutNone bool     `json:"timeout_none,omitempty"`
+	Queue       string   `json:"queue,omitempty"`
+	Schedule    string   `json:"schedule,omitempty"`
+	SourcePath  string   `json:"source_path,omitempty"`
+	Pos         Position `json:"-"`
 }
 
 // ID returns the "namespace.Name" identifier used to disambiguate
@@ -1906,11 +1912,15 @@ func lowerJob(path string, d *JobDecl) (*Job, []error) {
 		}
 	}
 	if d.Timeout != nil {
-		ms, perr := parseDurationMS(d.Timeout.Duration)
-		if perr != nil {
-			errs = append(errs, fmt.Errorf("%s: invalid timeout %q: %v", d.Timeout.Pos, d.Timeout.Duration, perr))
+		if d.Timeout.Duration == "none" {
+			job.TimeoutNone = true
 		} else {
-			job.TimeoutMS = ms
+			ms, perr := parseDurationMS(d.Timeout.Duration)
+			if perr != nil {
+				errs = append(errs, fmt.Errorf("%s: invalid timeout %q: %v", d.Timeout.Pos, d.Timeout.Duration, perr))
+			} else {
+				job.TimeoutMS = ms
+			}
 		}
 	}
 	if d.Queue != nil {

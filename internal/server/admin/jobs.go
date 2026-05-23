@@ -63,6 +63,12 @@ type JobStatus struct {
 	CompletedAt  string          `json:"CompletedAt,omitempty"`
 	EnqueuedAt   string          `json:"EnqueuedAt"`
 	SubmittedBy  string          `json:"SubmittedBy,omitempty"`
+	// Progress carries the most recent Checkpoint write from the
+	// handler. ProgressPct is -1 when the handler hasn't reported
+	// (so the wire shape distinguishes "0% done" from "uninstrumented").
+	ProgressPct int    `json:"ProgressPct,omitempty"`
+	ProgressMsg string `json:"ProgressMsg,omitempty"`
+	ProgressAt  string `json:"ProgressAt,omitempty"`
 }
 
 // GetJobStatusResponse wraps a JobStatus so the wire shape stays
@@ -129,9 +135,10 @@ func (s *Service) SubmitJob(ctx context.Context, req SubmitJobRequest) (*SubmitJ
 	for i := range ir.Jobs {
 		if ir.Jobs[i].ID() == req.JobName {
 			spec = &jobSpec{
-				maxRetries: ir.Jobs[i].Retries,
-				timeoutMS:  ir.Jobs[i].TimeoutMS,
-				queue:      ir.Jobs[i].Queue,
+				maxRetries:  ir.Jobs[i].Retries,
+				timeoutMS:   ir.Jobs[i].TimeoutMS,
+				timeoutNone: ir.Jobs[i].TimeoutNone,
+				queue:       ir.Jobs[i].Queue,
 			}
 			break
 		}
@@ -142,8 +149,9 @@ func (s *Service) SubmitJob(ctx context.Context, req SubmitJobRequest) (*SubmitJ
 	if spec.queue == "" {
 		spec.queue = "default"
 	}
-	if spec.timeoutMS == 0 {
-		// DSL default — 30m. Mirrors what the worker would assume.
+	if spec.timeoutMS == 0 && !spec.timeoutNone {
+		// DSL default when neither `timeout 30m` nor `timeout none` was
+		// declared. Mirrors what the worker would assume.
 		spec.timeoutMS = 30 * 60 * 1000
 	}
 
@@ -160,6 +168,17 @@ func (s *Service) SubmitJob(ctx context.Context, req SubmitJobRequest) (*SubmitJ
 		scheduledForArg = req.ScheduledAt
 	}
 
+	// timeout_ms is NULLable: a job declared `timeout none` gets a
+	// NULL row so the worker skips context.WithTimeout entirely.
+	// SubmitJob passes nil → Postgres stores NULL → claim's
+	// COALESCE(timeout_ms, 0) returns 0 → handleOne sees timeoutMS=0
+	// → handler runs without a per-attempt cancel. Symmetric across
+	// the three timeout shapes (none / declared / DSL default).
+	var timeoutArg any
+	if !spec.timeoutNone {
+		timeoutArg = spec.timeoutMS
+	}
+
 	const insertSQL = `
 INSERT INTO atlantis.jobs
     (job_name, queue, args, max_retries, timeout_ms, scheduled_for, submitted_by)
@@ -172,7 +191,7 @@ RETURNING id`
 		spec.queue,
 		[]byte(args),
 		spec.maxRetries,
-		spec.timeoutMS,
+		timeoutArg,
 		scheduledForArg,
 		req.SubmittedBy,
 	).Scan(&id); err != nil {
@@ -191,7 +210,8 @@ func (s *Service) GetJobStatus(ctx context.Context, req GetJobStatusRequest) (*G
 	row := s.pool.QueryRow(ctx, `
 SELECT id, job_name, queue, args, status, attempts, max_retries,
        COALESCE(last_error, ''), last_error_at, scheduled_for,
-       started_at, completed_at, enqueued_at, COALESCE(submitted_by, '')
+       started_at, completed_at, enqueued_at, COALESCE(submitted_by, ''),
+       progress_pct, COALESCE(progress_msg, ''), progress_at
 FROM atlantis.jobs WHERE id = $1`, req.JobID)
 	var js JobStatus
 	js, err := scanJobRow(row)
@@ -215,7 +235,8 @@ func (s *Service) ListDeadJobs(ctx context.Context, req ListDeadJobsRequest) (*L
 	q := `
 SELECT id, job_name, queue, args, 'failed' AS status, attempts, max_retries,
        COALESCE(last_error, ''), last_error_at, moved_at AS scheduled_for,
-       moved_at AS started_at, moved_at AS completed_at, enqueued_at, COALESCE(submitted_by, '')
+       moved_at AS started_at, moved_at AS completed_at, enqueued_at, COALESCE(submitted_by, ''),
+       NULL::smallint AS progress_pct, ''::text AS progress_msg, NULL::timestamptz AS progress_at
 FROM atlantis.jobs_dead
 WHERE ($1 = '' OR job_name = $1)
 ORDER BY moved_at DESC
@@ -279,9 +300,10 @@ FROM atlantis.jobs_dead WHERE id = $1`
 // jobSpec is the minimal slice of dsl.Job the SubmitJob path needs.
 // Private — the caller never sees it.
 type jobSpec struct {
-	maxRetries int
-	timeoutMS  int
-	queue      string
+	maxRetries  int
+	timeoutMS   int
+	timeoutNone bool
+	queue       string
 }
 
 // rowScanner is the common surface between pgx.Row and pgx.Rows so
@@ -305,9 +327,13 @@ func scanJobRow(r rowScanner) (JobStatus, error) {
 		enqueuedAt       time.Time
 		submittedByMaybe string
 		lastErrorMaybe   string
+		progressPct      *int16
+		progressMsg      string
+		progressAt       *time.Time
 	)
 	if err := r.Scan(&id, &js.JobName, &js.Queue, &args, &js.Status, &js.Attempts, &js.MaxRetries,
-		&lastErrorMaybe, &lastErrorAt, &scheduledFor, &startedAt, &completedAt, &enqueuedAt, &submittedByMaybe); err != nil {
+		&lastErrorMaybe, &lastErrorAt, &scheduledFor, &startedAt, &completedAt, &enqueuedAt, &submittedByMaybe,
+		&progressPct, &progressMsg, &progressAt); err != nil {
 		return js, err
 	}
 	js.JobID = fmt.Sprintf("%d", id)
@@ -319,6 +345,16 @@ func scanJobRow(r rowScanner) (JobStatus, error) {
 	js.CompletedAt = formatNullable(completedAt)
 	js.EnqueuedAt = enqueuedAt.UTC().Format(time.RFC3339)
 	js.SubmittedBy = submittedByMaybe
+	// ProgressPct: -1 sentinels "handler hasn't reported"; 0..100
+	// otherwise. The wire shape uses int (with omitempty stripping
+	// zero) so a never-reported job doesn't carry a spurious "0%".
+	if progressPct != nil {
+		js.ProgressPct = int(*progressPct)
+	} else {
+		js.ProgressPct = -1
+	}
+	js.ProgressMsg = progressMsg
+	js.ProgressAt = formatNullable(progressAt)
 	return js, nil
 }
 

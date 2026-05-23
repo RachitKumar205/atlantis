@@ -42,6 +42,9 @@ type jobStatus struct {
 	CompletedAt  string          `json:"CompletedAt,omitempty"`
 	EnqueuedAt   string          `json:"EnqueuedAt"`
 	SubmittedBy  string          `json:"SubmittedBy,omitempty"`
+	ProgressPct  int             `json:"ProgressPct,omitempty"`
+	ProgressMsg  string          `json:"ProgressMsg,omitempty"`
+	ProgressAt   string          `json:"ProgressAt,omitempty"`
 }
 
 type getJobStatusResponse struct {
@@ -329,6 +332,16 @@ func printJobStatusRow(j jobStatus) {
 	}
 	if j.LastError != "" {
 		fmt.Printf("%s     %s %s\n", cliout.Red("error"), cliout.Grey("(at "+j.LastErrorAt+")"), cliout.Red(j.LastError))
+	}
+	if j.ProgressPct >= 0 && (j.ProgressPct > 0 || j.ProgressMsg != "") {
+		// ProgressPct=-1 means the handler hasn't reported. We render
+		// anything else (including a deliberate 0% with a message)
+		// so a long-running job's last-known state is visible.
+		msg := j.ProgressMsg
+		if msg == "" {
+			msg = cliout.Grey("(no message)")
+		}
+		fmt.Printf("%s   %s%% %s %s\n", cliout.Grey("progress"), cliout.Yellow(fmt.Sprintf("%d", j.ProgressPct)), msg, cliout.Grey("(at "+j.ProgressAt+")"))
 	}
 	if len(j.Args) > 0 && string(j.Args) != "{}" {
 		fmt.Printf("%s       %s\n", cliout.Grey("args"), string(j.Args))

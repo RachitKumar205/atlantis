@@ -340,6 +340,13 @@ func (w *Worker) handleOne(ctx context.Context, r claimedRow) {
 		defer cancel()
 	}
 
+	// Hand the handler a Checkpointer keyed to this specific claim.
+	// Handlers call jobs.Checkpoint(ctx, pct, msg) to stamp progress
+	// on the row; the column writes are best-effort and never fail
+	// the claim. The checkpointer is per-row so the handler can't
+	// accidentally report progress against a sibling job.
+	runCtx = withCheckpointer(runCtx, newCheckpointer(w.pool, r.id))
+
 	// Lease-extension heartbeat. A goroutine ticks every
 	// HeartbeatBudget/3 to bump claimed_until so a peer doesn't
 	// poach the row mid-work. The done channel terminates the

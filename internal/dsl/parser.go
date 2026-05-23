@@ -1185,8 +1185,23 @@ func (p *Parser) parseJob() *JobDecl {
 			}
 		case TokTimeout:
 			p.advance()
-			d := p.expect(TokDuration)
-			job.Timeout = &JobTimeout{Pos: t.Pos, Duration: d.Value}
+			// `timeout 30m` or `timeout none`. The "none" form
+			// disables the per-attempt deadline so the worker
+			// doesn't cancel the handler context. Useful for
+			// long-running imports where the handler reports
+			// progress via Checkpoint and outlives any reasonable
+			// fixed budget.
+			next := p.peek()
+			switch {
+			case next.Kind == TokDuration:
+				p.advance()
+				job.Timeout = &JobTimeout{Pos: t.Pos, Duration: next.Value}
+			case next.Kind == TokIdent && next.Value == "none":
+				p.advance()
+				job.Timeout = &JobTimeout{Pos: t.Pos, Duration: "none"}
+			default:
+				p.errf(next.Pos, "expected duration or 'none' after 'timeout', got %s", next.Kind)
+			}
 		case TokQueue:
 			p.advance()
 			s := p.expect(TokString)
