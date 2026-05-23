@@ -32,10 +32,10 @@ import (
 
 // Workspace is the parsed contents of an atlantis.workspace.yaml file.
 //
-// The wire shape is narrow: one supported source kind
-// (git), a flat list of callers, no inheritance or includes. New kinds
-// (e.g. local-fixture sources for testdata) extend Source rather than
-// growing the top-level shape.
+// The wire shape is narrow: two supported source kinds
+// (git for prod, local for dev), a flat list of callers, no inheritance
+// or includes. New kinds extend Source rather than growing the
+// top-level shape.
 type Workspace struct {
 	Version int      `yaml:"version"`
 	Callers []Caller `yaml:"callers"`
@@ -52,19 +52,28 @@ type Caller struct {
 	// identifier so it survives proto / Go codegen unchanged.
 	Name string `yaml:"name"`
 
-	// Source selects the fetcher. Only "git" is supported today;
-	// validation rejects anything else so a typo doesn't silently
-	// fall through to a no-op fetcher.
+	// Source selects the fetcher. Supported values: "git" (production:
+	// pinned ref clone), "local" (development: filesystem path, working
+	// tree). Validation rejects anything else so a typo doesn't
+	// silently fall through to a no-op fetcher.
 	Source string `yaml:"source"`
 
 	// Repo is the URL git understands: https://, git@, file:// or a
-	// bare filesystem path (used by the test suite).
-	Repo string `yaml:"repo"`
+	// bare filesystem path (used by the test suite). Required when
+	// source is "git"; rejected otherwise.
+	Repo string `yaml:"repo,omitempty"`
 
 	// Ref is the branch, tag, or full SHA to check out. We do not
 	// default to HEAD: pinning an explicit ref is the whole point of
-	// the manifest.
-	Ref string `yaml:"ref"`
+	// the manifest. Required when source is "git"; rejected otherwise.
+	Ref string `yaml:"ref,omitempty"`
+
+	// Path is the filesystem location of the caller's working tree.
+	// Required when source is "local"; rejected otherwise. Relative
+	// paths resolve against the manifest's own directory so
+	// `path: ../backend` works regardless of where the operator
+	// invokes tidectl from.
+	Path string `yaml:"path,omitempty"`
 
 	// Paths are the .atl file paths inside the caller repository,
 	// relative to its root. We never glob — every contributing file
@@ -122,7 +131,7 @@ func (w *Workspace) Resolve(cacheDir string) ([]*ResolvedCaller, error) {
 
 	out := make([]*ResolvedCaller, 0, len(w.Callers))
 	for _, c := range w.Callers {
-		root, err := fetchGit(cacheDir, c)
+		root, err := w.resolveCaller(c, cacheDir)
 		if err != nil {
 			return nil, fmt.Errorf("caller %s: %w", c.Name, err)
 		}
@@ -166,14 +175,29 @@ func (w *Workspace) validate() error {
 		}
 		seen[c.Name] = struct{}{}
 
-		if c.Source != "git" {
-			return fmt.Errorf("caller %s: source %q is not supported (want \"git\")", c.Name, c.Source)
-		}
-		if c.Repo == "" {
-			return fmt.Errorf("caller %s: repo is required", c.Name)
-		}
-		if c.Ref == "" {
-			return fmt.Errorf("caller %s: ref is required", c.Name)
+		switch c.Source {
+		case "git":
+			if c.Repo == "" {
+				return fmt.Errorf("caller %s: repo is required for source: git", c.Name)
+			}
+			if c.Ref == "" {
+				return fmt.Errorf("caller %s: ref is required for source: git", c.Name)
+			}
+			if c.Path != "" {
+				return fmt.Errorf("caller %s: path is not allowed for source: git (use source: local)", c.Name)
+			}
+		case "local":
+			if c.Path == "" {
+				return fmt.Errorf("caller %s: path is required for source: local", c.Name)
+			}
+			if c.Repo != "" {
+				return fmt.Errorf("caller %s: repo is not allowed for source: local", c.Name)
+			}
+			if c.Ref != "" {
+				return fmt.Errorf("caller %s: ref is not allowed for source: local", c.Name)
+			}
+		default:
+			return fmt.Errorf("caller %s: source %q is not supported (want \"git\" or \"local\")", c.Name, c.Source)
 		}
 		if len(c.Paths) == 0 {
 			return fmt.Errorf("caller %s: at least one path is required", c.Name)
@@ -194,6 +218,46 @@ func (w *Workspace) validate() error {
 // proto/Go package fragment and as a filesystem path segment. Same
 // shape the codegen already assumes for IR namespaces.
 var callerNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+
+// resolveCaller dispatches to the right fetcher for the source kind.
+// Source-specific validation happens at Load time; resolveCaller just
+// routes.
+func (w *Workspace) resolveCaller(c Caller, cacheDir string) (string, error) {
+	switch c.Source {
+	case "git":
+		return fetchGit(cacheDir, c)
+	case "local":
+		return w.resolveLocal(c)
+	}
+	// Unreachable: validate() rejects other sources at Load time.
+	return "", fmt.Errorf("internal: unsupported source %q passed validation", c.Source)
+}
+
+// resolveLocal returns the absolute path to the caller's working tree.
+// Relative paths in the manifest resolve against the manifest's own
+// directory so `path: ../backend` is stable across invocations from
+// different working directories. The directory must exist; we don't
+// auto-create it because that would mask typos.
+func (w *Workspace) resolveLocal(c Caller) (string, error) {
+	p := c.Path
+	if !filepath.IsAbs(p) {
+		// w.path may itself be relative if Load was called with a
+		// relative argument. Absolute-ify both for predictable joins.
+		manifestAbs, err := filepath.Abs(w.path)
+		if err != nil {
+			return "", fmt.Errorf("manifest abs: %w", err)
+		}
+		p = filepath.Join(filepath.Dir(manifestAbs), p)
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		return "", fmt.Errorf("local path %s: %w", c.Path, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("local path %s is not a directory", c.Path)
+	}
+	return p, nil
+}
 
 // fetchGit ensures the caller's repository is checked out at the
 // pinned ref under cacheDir/<caller>/, then returns that path.

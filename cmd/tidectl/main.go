@@ -9,6 +9,10 @@
 //	tidectl lint      Parse + lower every .atl file in a directory, exit 0 iff clean.
 //	tidectl migrate-up   Run golang-migrate up against $PG_URL.
 //	tidectl migrate-down Run golang-migrate down 1 against $PG_URL.
+//	tidectl dev       One-shot local-dev loop: codegen + buf generate + go build +
+//	                exec atlantis-server. Reads atlantis.dev.yaml (working-tree
+//	                paths via source: local). Use for iteration; production
+//	                deployments use the workspace.yaml + git refs path.
 //	tidectl version   Print tidectl version.
 //
 // tidectl is *operator-shaped*. It runs against local files and (for migrate)
@@ -39,6 +43,7 @@ func main() {
 		{"lint", "Parse + lower every .pc; exit 0 iff clean", cmdLint},
 		{"migrate-up", "Run golang-migrate up against $PG_URL", cmdMigrateUp},
 		{"migrate-down", "Run golang-migrate down 1 against $PG_URL", cmdMigrateDown},
+		{"dev", "Codegen + build + exec server from atlantis.dev.yaml (local iteration)", cmdDev},
 		{"version", "Print tidectl version", cmdVersion},
 	}
 
