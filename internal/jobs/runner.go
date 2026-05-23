@@ -244,6 +244,7 @@ type claimedRow struct {
 	timeoutMS    int
 	enqueuedAt   time.Time
 	scheduledFor time.Time
+	traceCtx     []byte
 }
 
 // claim atomically transitions up to BatchSize rows from pending to
@@ -286,7 +287,7 @@ UPDATE atlantis.jobs j
   FROM ready
  WHERE j.id = ready.id
 RETURNING j.id, j.job_name, j.args, j.attempts, j.max_retries,
-          COALESCE(j.timeout_ms, 0), j.enqueued_at, j.scheduled_for`
+          COALESCE(j.timeout_ms, 0), j.enqueued_at, j.scheduled_for, j.trace_ctx`
 	rs, err := w.pool.Query(ctx, sqlClaim, w.queue, w.cfg.BatchSize, w.cfg.PodID, leaseDeadline)
 	if err != nil {
 		return nil, err
@@ -296,7 +297,7 @@ RETURNING j.id, j.job_name, j.args, j.attempts, j.max_retries,
 	for rs.Next() {
 		var r claimedRow
 		if err := rs.Scan(&r.id, &r.jobName, &r.args, &r.attempts, &r.maxRetries,
-			&r.timeoutMS, &r.enqueuedAt, &r.scheduledFor); err != nil {
+			&r.timeoutMS, &r.enqueuedAt, &r.scheduledFor, &r.traceCtx); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -333,18 +334,19 @@ func (w *Worker) handleOne(ctx context.Context, r claimedRow) {
 		return
 	}
 
-	runCtx := ctx
+	// Resume the distributed trace from the submitter (if present)
+	// and start a worker-side span so the handler's work appears as
+	// a child of the submit call in Jaeger / Tempo / Datadog.
+	runCtx := ResumeTraceCtx(ctx, r.traceCtx)
+	runCtx, endSpan := StartWorkerSpan(runCtx, r.jobName)
+	defer endSpan()
+
 	if r.timeoutMS > 0 {
 		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(ctx, time.Duration(r.timeoutMS)*time.Millisecond)
+		runCtx, cancel = context.WithTimeout(runCtx, time.Duration(r.timeoutMS)*time.Millisecond)
 		defer cancel()
 	}
 
-	// Hand the handler a Checkpointer keyed to this specific claim.
-	// Handlers call jobs.Checkpoint(ctx, pct, msg) to stamp progress
-	// on the row; the column writes are best-effort and never fail
-	// the claim. The checkpointer is per-row so the handler can't
-	// accidentally report progress against a sibling job.
 	runCtx = withCheckpointer(runCtx, newCheckpointer(w.pool, r.id))
 
 	// Lease-extension heartbeat. A goroutine ticks every
