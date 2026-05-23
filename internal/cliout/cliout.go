@@ -98,16 +98,20 @@ func Infof(format string, args ...any) {
 // and a bolded label. Used for the top of multi-section reports
 // (e.g., the adopt drift summary).
 func Banner(w io.Writer, color, label string) {
+	var bullet string
 	switch color {
 	case "red":
-		fmt.Fprintf(w, "%s %s\n", Red("●"), Bold(label))
+		bullet = Red("●")
 	case "green":
-		fmt.Fprintf(w, "%s %s\n", Green("●"), Bold(label))
+		bullet = Green("●")
 	case "yellow":
-		fmt.Fprintf(w, "%s %s\n", Yellow("●"), Bold(label))
+		bullet = Yellow("●")
 	case "cyan":
-		fmt.Fprintf(w, "%s %s\n", Cyan("●"), Bold(label))
+		bullet = Cyan("●")
 	default:
-		fmt.Fprintf(w, "● %s\n", Bold(label))
+		bullet = "●"
 	}
+	// Best-effort write; a torn os.Stdout / closed pipe is the caller's
+	// concern, not ours. Explicitly discarded so the linter doesn't trip.
+	_, _ = fmt.Fprintf(w, "%s %s\n", bullet, Bold(label))
 }
