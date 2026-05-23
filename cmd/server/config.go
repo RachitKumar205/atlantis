@@ -86,6 +86,19 @@ type config struct {
 	// the feature is canaried in staging.
 	BackfillWorkerEnabled bool
 
+	// JobsWorkerEnabled toggles the declarative-job worker pool. Default
+	// false during initial canary so the SubmitJob RPC is reachable for
+	// smoke testing without immediately processing claimed work; flip
+	// to true once handlers are registered and the operator's ready for
+	// jobs to actually run.
+	JobsWorkerEnabled bool
+
+	// JobsQueues is the comma-separated list of queue names this pod
+	// drains. Each queue gets its own Worker goroutine so concurrent
+	// drainers don't contend across logical workloads (e.g. "shopify"
+	// vs "default"). Empty defaults to a single "default" queue.
+	JobsQueues []string
+
 	// Observability
 	LogLevel string
 
@@ -137,6 +150,9 @@ func loadConfig() (config, error) {
 		AdminAllowApplyMutation: envBool("ATL_ALLOW_APPLY_MUTATION", false),
 
 		BackfillWorkerEnabled: envBool("ATL_BACKFILL_WORKER_ENABLED", false),
+
+		JobsWorkerEnabled: envBool("ATL_JOBS_WORKER_ENABLED", false),
+		JobsQueues:        splitCSV(envStr("ATL_JOBS_QUEUES", "default")),
 
 		LogLevel: envStr("LOG_LEVEL", "info"),
 

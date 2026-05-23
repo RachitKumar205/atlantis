@@ -61,6 +61,10 @@ type AdminServer interface {
 	BeginBackfillPlan(context.Context, BeginBackfillPlanRequest) (*BeginBackfillPlanResponse, error)
 	GetBackfillStatus(context.Context, GetBackfillStatusRequest) (*GetBackfillStatusResponse, error)
 	AdoptBaseline(context.Context, AdoptBaselineRequest) (*AdoptBaselineResponse, error)
+	SubmitJob(context.Context, SubmitJobRequest) (*SubmitJobResponse, error)
+	GetJobStatus(context.Context, GetJobStatusRequest) (*GetJobStatusResponse, error)
+	ListDeadJobs(context.Context, ListDeadJobsRequest) (*ListDeadJobsResponse, error)
+	RetryDeadJob(context.Context, RetryDeadJobRequest) (*RetryDeadJobResponse, error)
 }
 
 // Compile-time check: *Service is the implementation of
@@ -88,6 +92,10 @@ var serviceDesc = grpc.ServiceDesc{
 		{MethodName: "BeginBackfillPlan", Handler: handleBeginBackfillPlan},
 		{MethodName: "GetBackfillStatus", Handler: handleGetBackfillStatus},
 		{MethodName: "AdoptBaseline", Handler: handleAdoptBaseline},
+		{MethodName: "SubmitJob", Handler: handleSubmitJob},
+		{MethodName: "GetJobStatus", Handler: handleGetJobStatus},
+		{MethodName: "ListDeadJobs", Handler: handleListDeadJobs},
+		{MethodName: "RetryDeadJob", Handler: handleRetryDeadJob},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "atlantis/admin/v1/admin.proto",
@@ -286,6 +294,138 @@ func handleAdoptBaseline(srv any, ctx context.Context, dec func(any) error, inte
 
 func invokeAdoptBaseline(svc *Service, ctx context.Context, req *AdoptBaselineRequest) (any, error) {
 	resp, err := svc.AdoptBaseline(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+// handleSubmitJob, handleGetJobStatus, handleListDeadJobs, and
+// handleRetryDeadJob are the gRPC entry points for the declarative-
+// job admin surface. The shape mirrors every other RPC in this file
+// — JSON-envelope codec, typed request/response struct, optional
+// interceptor — so wire conformance is mechanical.
+
+func handleSubmitJob(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req SubmitJobRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeSubmitJob(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/SubmitJob"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeSubmitJob(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeSubmitJob(svc *Service, ctx context.Context, req *SubmitJobRequest) (any, error) {
+	resp, err := svc.SubmitJob(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleGetJobStatus(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req GetJobStatusRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeGetJobStatus(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/GetJobStatus"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeGetJobStatus(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeGetJobStatus(svc *Service, ctx context.Context, req *GetJobStatusRequest) (any, error) {
+	resp, err := svc.GetJobStatus(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleListDeadJobs(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req ListDeadJobsRequest
+	if len(in.Raw) > 0 {
+		if err := json.Unmarshal(in.Raw, &req); err != nil {
+			return nil, err
+		}
+	}
+	if interceptor == nil {
+		return invokeListDeadJobs(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/ListDeadJobs"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeListDeadJobs(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeListDeadJobs(svc *Service, ctx context.Context, req *ListDeadJobsRequest) (any, error) {
+	resp, err := svc.ListDeadJobs(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleRetryDeadJob(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req RetryDeadJobRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeRetryDeadJob(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/RetryDeadJob"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeRetryDeadJob(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeRetryDeadJob(svc *Service, ctx context.Context, req *RetryDeadJobRequest) (any, error) {
+	resp, err := svc.RetryDeadJob(ctx, *req)
 	if err != nil {
 		return nil, err
 	}

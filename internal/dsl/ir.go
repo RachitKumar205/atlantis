@@ -88,9 +88,8 @@ func (q *CustomQuery) ID() string {
 // caller knows which modifier to drop.
 //
 // Schedule is the raw cron spec verbatim — parsing + validation
-// happens at runtime in the scheduler (PR-B). The IR stores the
-// string so subsequent diff / codegen runs see a stable, comparable
-// value.
+// happens at runtime in the scheduler. The IR stores the string so
+// subsequent diff / codegen runs see a stable, comparable value.
 type Job struct {
 	Name       string   `json:"name"`
 	Namespace  string   `json:"namespace"`
@@ -1796,7 +1795,7 @@ func lowerCacheForCustom(cb *CacheBlock) *Cache {
 //     TTLs and query-timeout modifiers, so the DSL has a single
 //     duration grammar. queue and schedule are stored verbatim;
 //     cron-spec validation is deferred to the scheduler component
-//     (PR-B) where the cron library lives.
+//     where the cron library lives.
 //
 //  3. Uniqueness across the merged IR. Caller is responsible (via the
 //     customSeen / seen maps in Lower) — lowerJob only assembles the
@@ -1864,7 +1863,7 @@ func lowerJob(path string, d *JobDecl) (*Job, []error) {
 	}
 	if d.Schedule != nil {
 		// Cron-spec validation is deferred to the scheduler runtime
-		// (PR-B) where the parser library is wired in. PR-A only
+		// where the parser library is wired in. The IR layer only
 		// preserves the spec verbatim; an invalid spec surfaces at
 		// scheduler startup, not at DSL lowering, so a working
 		// `tide plan` doesn't depend on the cron library.
