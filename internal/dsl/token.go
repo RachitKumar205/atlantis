@@ -121,6 +121,12 @@ const (
 	TokQueue
 	TokRetries
 	TokTimeout
+
+	// TokEnqueue marks the `enqueue <Job>(args...)` step that appears
+	// inside a procedure body. Atomic with the procedure transaction:
+	// the job row INSERT shares the surrounding tx so the side effect
+	// either commits with the procedure or rolls back with it.
+	TokEnqueue
 )
 
 var tokenNames = map[TokenKind]string{
@@ -219,6 +225,7 @@ var tokenNames = map[TokenKind]string{
 	TokQueue:          "queue",
 	TokRetries:        "retries",
 	TokTimeout:        "timeout",
+	TokEnqueue:        "enqueue",
 }
 
 // String returns the textual form of the token kind.
@@ -308,6 +315,7 @@ var keywords = map[string]TokenKind{
 	"queue":      TokQueue,
 	"retries":    TokRetries,
 	"timeout":    TokTimeout,
+	"enqueue":    TokEnqueue,
 }
 
 // Position is a 1-indexed source position used for error reporting,

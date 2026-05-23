@@ -580,11 +580,37 @@ type SQLBlock struct {
 }
 
 // ProcedureStep is one entry inside a `steps { ... }` block. Exactly one
-// of Typed or Raw is populated.
+// of Typed / Raw / Enqueue is populated.
 type ProcedureStep struct {
+	Pos     Position
+	Typed   *TypedStep
+	Raw     *SQLBlock
+	Enqueue *EnqueueStep
+}
+
+// EnqueueStep: `enqueue <ns.JobName>(arg1: $foo, arg2: "lit")` inside a
+// procedure body. The job row is INSERTed into atlantis.jobs as part of
+// the procedure's transaction, so the side effect is atomic with the
+// procedure's other writes. The runtime worker picks up the new row on
+// its next claim and dispatches to the registered handler.
+//
+// Args is name/value pairs where each value is a literal or a $arg
+// reference. Type checking happens at IR-lowering time against the
+// target job's declared args block; unknown arg names and shape
+// mismatches are rejected with a precise position.
+type EnqueueStep struct {
+	Pos    Position
+	Target EntityRef // re-using EntityRef so the parser can route `[ns.]Name` consistently
+	Args   []EnqueueAssignment
+}
+
+// EnqueueAssignment: `name: value` inside an enqueue arg list. Mirrors
+// SetAssignment but uses a colon separator to match the input-block
+// grammar that callers already know from `input { foo: type }`.
+type EnqueueAssignment struct {
 	Pos   Position
-	Typed *TypedStep
-	Raw   *SQLBlock
+	Name  string
+	Value Expr
 }
 
 // TypedStep represents one of `update Entity set ... where ...`,
