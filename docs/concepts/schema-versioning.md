@@ -2,6 +2,8 @@
 
 Every `tide apply` creates a numbered schema version. The version stores the full IR snapshot, a structural diff from the previous version, the generated SQL, the caller identity, and a timestamp. The version registry is append-only and is the source of truth for what has been deployed and when (the `.atl` files remain the authoring authority for schema definitions).
 
+Each new version persists the IR checkpoint to Postgres. The server loads the IR checkpoint once at startup, so a restart (or rolling restart) is required for the new schema to take effect — no recompilation is needed. The version registry records every change regardless of whether the schema was applied via the live-apply path (`tide apply` directly against the server) or the traditional gated path (workspace manifest + redeploy).
+
 ```
 $ tide history --limit=3
 
@@ -50,7 +52,7 @@ $ tide history --limit=3
   … more versions available — use --limit
 ```
 
-Version 9 is a new version, not a deletion of versions 6-8. The full history of what was deployed and when is always recoverable.
+Version 9 is a new version, not a deletion of versions 7 and 8. The full history of what was deployed and when is always recoverable.
 
 ## Per-entity lineage
 
