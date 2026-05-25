@@ -52,6 +52,26 @@ func DefaultConfig() Config {
 	}
 }
 
+// JobCompleteHook is called by the worker after a job completes or
+// fails terminally. Server-internal code (workflow engine) supplies
+// an implementation; caller-side workers leave it nil.
+type JobCompleteHook interface {
+	OnJobComplete(ctx context.Context, jobID int64)
+	OnJobFailed(ctx context.Context, jobID int64, errMsg string)
+}
+
+// TraceHook lets the server inject OTel distributed-tracing into the
+// worker's dispatch path without pulling OTel into the client SDK.
+// When nil, tracing is a no-op — the handler runs under the bare ctx.
+type TraceHook interface {
+	// ResumeTrace reconstructs a parent span from the serialized
+	// trace_ctx column and returns a ctx carrying that parent.
+	ResumeTrace(ctx context.Context, traceCtxJSON []byte) context.Context
+	// StartSpan creates a child span for the handler dispatch and
+	// returns the wrapped ctx plus a finish function.
+	StartSpan(ctx context.Context, jobName string) (context.Context, func())
+}
+
 // Worker drains atlantis.jobs for a specific queue. Multiple workers
 // on the same queue across pods coexist safely: claim uses FOR
 // UPDATE SKIP LOCKED, and the per-row lease (claimed_until) lets a
@@ -65,7 +85,9 @@ type Worker struct {
 	registry *Registry
 	queue    string
 	cfg      Config
-	workflow *WorkflowEngine
+
+	completeHook JobCompleteHook
+	traceHook    TraceHook
 
 	lastClaimNS atomic.Int64
 }
@@ -74,11 +96,6 @@ type Worker struct {
 // before Run is called — if a job arrives whose handler isn't
 // registered, the worker reports a transient claim error and the
 // row stays pending for the next deploy that has the handler.
-// SetWorkflowEngine attaches the workflow engine so the worker can
-// advance/compensate workflows on job completion. Optional; without
-// it, workflow_id on jobs is ignored.
-func (w *Worker) SetWorkflowEngine(e *WorkflowEngine) { w.workflow = e }
-
 func NewWorker(pool *pgxpool.Pool, registry *Registry, queue string, cfg Config) *Worker {
 	if cfg.Schema == "" {
 		cfg.Schema = "atlantis"
@@ -107,6 +124,16 @@ func NewWorker(pool *pgxpool.Pool, registry *Registry, queue string, cfg Config)
 	w.lastClaimNS.Store(time.Now().UnixNano())
 	return w
 }
+
+// SetCompleteHook attaches an optional hook called on job completion
+// or terminal failure. The server uses this to wire the workflow
+// engine; caller-side workers typically leave it nil.
+func (w *Worker) SetCompleteHook(h JobCompleteHook) { w.completeHook = h }
+
+// SetTraceHook attaches an optional tracing hook so the worker
+// resumes distributed traces from the submitter and creates child
+// spans for handler dispatch. Without a hook, tracing is a no-op.
+func (w *Worker) SetTraceHook(h TraceHook) { w.traceHook = h }
 
 // Run blocks until ctx is canceled, draining the queue. Errors
 // from individual drain passes are logged; only ctx cancellation
@@ -318,11 +345,11 @@ RETURNING j.id, j.job_name, j.args, j.attempts, j.max_retries,
 //
 // Lifecycle:
 //
-//   - Look up handler in registry. Missing → bump attempts via
+//   - Look up handler in registry. Missing -> bump attempts via
 //     reportFailure(transient), leave status='running' until lease
 //     expires so a peer with the handler can pick it up.
-//   - Handler returns nil → mark complete in its own tx.
-//   - Handler returns err → bump attempts; if exceeds max_retries,
+//   - Handler returns nil -> mark complete in its own tx.
+//   - Handler returns err -> bump attempts; if exceeds max_retries,
 //     move to atlantis.jobs_dead. Otherwise mark pending again so
 //     the next drain pass retries (with last_error_at gating the
 //     backoff in claim's predicate, added in a later iteration).
@@ -342,9 +369,14 @@ func (w *Worker) handleOne(ctx context.Context, r claimedRow) {
 
 	// Resume the distributed trace from the submitter (if present)
 	// and start a worker-side span so the handler's work appears as
-	// a child of the submit call in Jaeger / Tempo / Datadog.
-	runCtx := ResumeTraceCtx(ctx, r.traceCtx)
-	runCtx, endSpan := StartWorkerSpan(runCtx, r.jobName)
+	// a child of the submit call. When no TraceHook is installed
+	// (common for caller-side workers), tracing is a no-op.
+	runCtx := ctx
+	endSpan := func() {}
+	if w.traceHook != nil {
+		runCtx = w.traceHook.ResumeTrace(runCtx, r.traceCtx)
+		runCtx, endSpan = w.traceHook.StartSpan(runCtx, r.jobName)
+	}
 	defer endSpan()
 
 	if r.timeoutMS > 0 {
@@ -386,8 +418,8 @@ func (w *Worker) handleOne(ctx context.Context, r claimedRow) {
 		if cerr := w.markComplete(ctx, r.id); cerr != nil {
 			w.cfg.Logger.Warn("jobs markComplete", "row", r.id, "err", cerr)
 		}
-		if w.workflow != nil {
-			w.workflow.OnJobComplete(ctx, r.id)
+		if w.completeHook != nil {
+			w.completeHook.OnJobComplete(ctx, r.id)
 		}
 		return
 	}
@@ -432,8 +464,8 @@ func (w *Worker) reportFailure(ctx context.Context, r claimedRow, handlerErr err
 		if err := w.moveToDLQ(ctx, r.id, msg); err != nil {
 			w.cfg.Logger.Error("jobs moveToDLQ", "row", r.id, "err", err)
 		}
-		if w.workflow != nil {
-			w.workflow.OnJobFailed(ctx, r.id, msg)
+		if w.completeHook != nil {
+			w.completeHook.OnJobFailed(ctx, r.id, msg)
 		}
 		return
 	}

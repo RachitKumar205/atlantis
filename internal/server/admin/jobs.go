@@ -9,7 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/rachitkumar205/atlantis/internal/jobs"
+	"github.com/rachitkumar205/atlantis/jobs"
 )
 
 // SubmitJobRequest enqueues a new job onto atlantis.jobs. The shape
