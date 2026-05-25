@@ -1,6 +1,6 @@
 # Deploy to production
 
-atlantis runs as a single Go binary against PostgreSQL and memcached. The order below — provision dependencies, fork the source, generate, plan migrations, build, ship, configure, run migrations, start, verify — minimizes the time the server is in a half-configured state.
+atlantis runs as a single Go binary against PostgreSQL and memcached. The server reads schema IR at startup and dispatches entity CRUD at runtime — there is no codegen step for the server and no compiled entity handlers. The order below — provision dependencies, fork the source, configure, run migrations, start, verify — minimizes the time the server is in a half-configured state.
 
 ## 1. Provision PostgreSQL and memcached
 
@@ -22,7 +22,7 @@ For memcached, one or many nodes both work. atlantis distributes keys across the
 
 ## 2. Fork atlantis source into your deployment repo
 
-In v0.1, atlantis ships as source. Your deployment repo is a fork of atlantis upstream that holds your `atlantis.workspace.yaml`, your generated tree, and your `migrations/tidectl/`.
+In v0.1, atlantis ships as source. Your deployment repo is a fork of atlantis upstream that holds the server binary source and your `migrations/tidectl/`. The fork no longer holds generated entity code — the server loads schema IR at startup and handles entity CRUD via runtime dispatch.
 
 First, create an empty private repo (e.g. `github.com/your-org/atlantis-deploy`). Then:
 
@@ -39,7 +39,9 @@ The `upstream` remote is what you'll fetch from to pull future atlantis releases
 
 See [What lives where](#what-lives-where) at the bottom for the upstream-vs-fork ownership map.
 
-## 3. Write the workspace manifest
+## 3. Write the workspace manifest (optional — client SDK only)
+
+The workspace manifest is still useful if you want to generate client SDKs (proto definitions + typed Go wrappers) for your callers. The server itself does not read or need this file — it loads schema IR from its checkpoint at startup.
 
 Replace the contents of `atlantis.workspace.yaml` with your callers, each pinned at a git ref:
 
@@ -60,47 +62,24 @@ callers:
       - internal
 ```
 
-A caller bumps their pinned ref by opening a PR against this file in your deployment repo. Production schema changes flow only through this PR path. Caller-side `tide apply` invocations are blocked against production servers (gated in step 8).
-
-## 4. Build `tidectl` and generate the typed surface
+To regenerate client SDKs after a caller changes their `.atl` files:
 
 ```
 go build -o tidectl ./cmd/tidectl
 ./tidectl codegen --workspace=atlantis.workspace.yaml
 ```
 
-`tidectl codegen` clones each caller at its pinned ref into a workspace cache at `.workspace-cache/` (gitignored), merges their `.atl` files, and overwrites `gen/`, `clients/go/`, and `atlantis/<ns>/v1/` with output keyed to your callers. The example fixtures committed in atlantis source are replaced.
+`tidectl codegen` clones each caller at its pinned ref, merges their `.atl` files, and overwrites `clients/go/` and the proto definitions under `atlantis/<ns>/v1/`. It no longer produces `gen/go/server/` — entity CRUD is handled by runtime dispatch.
 
-## 5. Stage and approve entity migrations
-
-```
-./tidectl plan --workspace=atlantis.workspace.yaml
-./tidectl approve
-```
-
-`tidectl plan` writes a staged migration under `migrations/tidectl/_staged/` and prints its classification (additive, backfill-required, or breaking). `tidectl approve` promotes it to the next numbered file under `migrations/tidectl/`.
-
-Commit and push to your deployment repo:
-
-```
-git add atlantis.workspace.yaml gen clients atlantis migrations/tidectl
-git commit -m "apply caller pins"
-git push origin main
-```
-
-From now on, every change to a caller's pinned ref flows through plan + approve and a new numbered migration lands in your deployment repo.
-
-If `tidectl plan` classifies the change as breaking, do not approve before coordinating across affected callers. (A separate breaking-change rollout guide is planned.)
-
-## 6. Build the server binary
+## 4. Build the server binary
 
 ```
 go build -o atlantis-server ./cmd/server
 ```
 
-The build links your callers' entity handlers (regenerated in step 4) into a server binary tailored to this deployment. Reproducible from `atlantis.workspace.yaml` + the atlantis-source tag.
+The binary is generic — it contains no caller-specific entity handlers. The same binary works for any set of callers; schema is loaded from the IR checkpoint at startup.
 
-## 7. Ship the artifacts
+## 5. Ship the artifacts
 
 Build a container image for image-based deploys:
 
@@ -111,11 +90,14 @@ docker push <your-registry>/atlantis:v0.1.0
 
 For VM-based deploys, ship a tarball instead: `tar czf atlantis-v0.1.0.tgz atlantis-server tidectl migrations/`. Both `atlantis-server` and `tidectl` need to land on the host — `tidectl` runs the migration step before the server starts.
 
-## 8. Configure and lock down schema mutation
+## 6. Configure schema mutation policy
 
-`ATL_ALLOW_APPLY_MUTATION=false` is the single most important production setting. With it, the server rejects mutation submissions from caller `tide apply` invocations and serves only the read-only admin RPCs (plan, pull). Production schema state is whatever the workspace manifest pins; the only path to change it is a PR against the manifest, followed by a rebuild and redeploy.
+With runtime dispatch, the server can accept live schema changes from callers via `tide apply`. The `ATL_ALLOW_APPLY_MUTATION` flag controls this:
 
-Leaving `ATL_ALLOW_APPLY_MUTATION=true` in production means any caller's CI can mutate the live schema.
+- **`false` (locked-down mode)** — the server rejects mutation submissions from caller `tide apply`. Schema changes require a deploy: update `atlantis.workspace.yaml`, regenerate migrations with `tidectl plan` + `tidectl approve`, redeploy. This is the traditional flow.
+- **`true` (live-apply mode)** — callers run `tide apply` directly against the production server. The server plans, migrates, and persists the new IR checkpoint to Postgres. A server restart (or rolling restart) is required for the new schema to take effect — the server loads the IR checkpoint once at startup. The key benefit is that no recompilation is needed; just restart.
+
+The tradeoff: `ATL_ALLOW_APPLY_MUTATION=true` means any caller with network access and valid mTLS credentials can mutate the live schema. Gate this with caller-identity restrictions and CI-only apply policies (see the schema change workflow below).
 
 A minimal production environment:
 
@@ -128,7 +110,7 @@ TLS_KEY_FILE=/etc/atlantis/tls.key
 TLS_CA_FILE=/etc/atlantis/ca.crt
 AUTO_MIGRATE=false
 ATL_MIRROR_SCHEMA=false
-ATL_ALLOW_APPLY_MUTATION=false
+ATL_ALLOW_APPLY_MUTATION=true
 LOG_LEVEL=info
 ```
 
@@ -140,9 +122,9 @@ atlantis requires mTLS whenever TLS is enabled — there is no server-only-TLS m
 
 atlantis reads TLS material on startup only; there is no SIGHUP reload. To rotate, deploy new cert material and restart the server (a rolling restart is sufficient).
 
-In an mTLS deployment, the same CA mints client certificates for every caller and for operator tooling (`grpcurl`, `grpc_health_probe`). Verification commands in step 11 and the health-check subsection assume those certs already exist.
+In an mTLS deployment, the same CA mints client certificates for every caller and for operator tooling (`grpcurl`, `grpc_health_probe`). Verification commands in step 9 and the health-check subsection assume those certs already exist.
 
-## 9. Run migrations
+## 7. Run migrations
 
 ```
 ./tidectl migrate-up --migrations-dir migrations/infra
@@ -151,13 +133,13 @@ In an mTLS deployment, the same CA mints client certificates for every caller an
 
 Run before starting the new server. Apply `migrations/infra/` first (atlantis's runtime tables: outbox, bookkeeping), then `migrations/tidectl/` (your caller entity tables). The command exits non-zero if a migration fails; halt the deploy.
 
-For zero-downtime rollouts, the migration must be backward-compatible with the still-running old version. `tidectl plan` printed the classification in step 5 — if it said `additive`, this step is safe to run before rolling the server. `backfill-required` and `breaking` need an explicit expand/contract sequence.
+For zero-downtime rollouts, the migration must be backward-compatible with the still-running old version. `tidectl plan` printed the classification — if it said `additive`, this step is safe to run before rolling the server. `backfill-required` and `breaking` need an explicit expand/contract sequence.
 
-## 10. Start the server
+## 8. Start the server
 
-Run `atlantis-server` with the environment from step 8.
+Run `atlantis-server` with the environment from step 6. At startup the server loads the latest IR checkpoint from Postgres and builds entity metadata for runtime dispatch. No caller-specific code is compiled in — the server handles any entity described by the IR.
 
-## 11. Verify the deploy
+## 9. Verify the deploy
 
 After the server starts, confirm it's serving:
 
@@ -168,9 +150,23 @@ grpcurl -cacert ca.crt -cert client.crt -key client.key \
 
 A success response returns the current merged schema as JSON. Anything else (TLS handshake failure, no response) indicates a problem; check the server logs.
 
+## Schema change workflow (runtime dispatch)
+
+With `ATL_ALLOW_APPLY_MUTATION=true`, schema changes no longer require a server rebuild. The workflow:
+
+1. Developer edits `.atl` files in the caller repo and opens a PR.
+2. Caller CI runs `tide plan --against=<prod-endpoint>` on the PR. The server returns the plan without touching its database — this is read-only.
+3. PR merges.
+4. Caller CI (on merge to main) runs `tide apply --against=<prod-endpoint>`.
+5. The server validates, applies the migration to Postgres, and persists the new IR checkpoint.
+6. Restart the server (a rolling restart is sufficient). The restarted server loads the new IR checkpoint and serves the updated schema.
+7. No recompilation, no workspace manifest update.
+
+For teams that want gated rollout, keep `ATL_ALLOW_APPLY_MUTATION=false` and use the traditional workspace-manifest flow: bump the caller ref in `atlantis.workspace.yaml`, run `tidectl plan` + `tidectl approve` in CI, then redeploy.
+
 ## Logging
 
-Logging goes to stdout as one human-readable line per event. v0.1 has no JSON log mode; a shipper like `vector` or `fluent-bit` can parse the line format if you need structured logs in your aggregator.
+JSON is the default log format. All levels except `debug` emit structured JSON to stdout. Debug level (`LOG_LEVEL=debug`) switches to human-readable text for local readability. No additional log shipper is needed for structured ingestion at info level and above.
 
 ## Health checks
 
@@ -184,11 +180,11 @@ grpc_health_probe \
   -tls-client-key=/etc/atlantis/probe.key
 ```
 
-The probe needs a client cert because mTLS is enforced on every RPC (there's no health-check exemption). A dedicated HTTP `/healthz` endpoint is not shipped; use the gRPC probe.
+The probe needs a client cert because mTLS is enforced on every RPC (there's no health-check exemption). atlantis does not expose a dedicated HTTP `/healthz` endpoint; use the gRPC probe.
 
 ## Shutdown
 
-On `SIGTERM` the server cancels its top-level context and calls gRPC `GracefulStop`, which waits for in-flight RPCs to drain before exiting. **There is no configurable grace period.** Set your orchestrator's `terminationGracePeriodSeconds` to at least the longest expected RPC latency (most workloads: 30s is conservative). Send `SIGKILL` past that.
+On `SIGINT` or `SIGTERM` the server cancels its top-level context and calls gRPC `GracefulStop`, which waits for in-flight RPCs to drain before exiting. The grace period is hardcoded at 15 seconds; after that the server forces a stop. Set your orchestrator's `terminationGracePeriodSeconds` to at least 20 seconds to allow the server's own timeout to fire before the orchestrator sends `SIGKILL`.
 
 ## Backup and restore
 
@@ -196,11 +192,13 @@ PostgreSQL is the source of truth. Use whatever PITR or `pg_dump` strategy your 
 
 Memcached holds no durable state. On total cache loss the server cold-starts against Postgres; latency is briefly elevated until the working set re-warms.
 
-Your workspace manifest, generated tree, and `migrations/tidectl/` all live in your deployment repo. Recover the build with `git checkout <known-good-ref>` and rebuild from step 4.
+Your workspace manifest and `migrations/tidectl/` live in your deployment repo. Recover the build with `git checkout <known-good-ref>` and rebuild from step 4.
 
 ## Rollback
 
-Revert the deploy by redeploying the previous binary. The previous server version expects the previous schema, so the entity migrations must be rolled back too:
+**Runtime dispatch flow** (`ATL_ALLOW_APPLY_MUTATION=true`): run `tide rollback --to=<version>` against the production server. The server creates a new schema version whose IR matches the target, applies the reverse migration, and persists the rolled-back IR checkpoint. Restart the server (or rolling-restart) for the rollback to take effect.
+
+**Traditional flow** (`ATL_ALLOW_APPLY_MUTATION=false`): revert the deploy by redeploying the previous binary. The entity migrations must be rolled back too:
 
 ```
 ./tidectl migrate-down --migrations-dir migrations/tidectl
@@ -209,8 +207,6 @@ Revert the deploy by redeploying the previous binary. The previous server versio
 Do **not** run `migrate-down` against `migrations/infra` as part of a normal rollback — atlantis's runtime tables are only rolled back when downgrading atlantis itself.
 
 A migration that drops data or changes column types is not safely reversible. Restore from PITR or `pg_dump` in that case; do not rely on the down-migration to recover data.
-
-For schema-only reverts where the new server version isn't yet shipped, reverting the manifest PR in your deployment repo is sufficient — the manifest is the source of truth and a rebuild reproduces the prior state.
 
 ## Recommended sizing
 
@@ -230,9 +226,11 @@ For larger workloads, scale atlantis horizontally; the server is stateless and a
 |---|---|
 | `cmd/`, `internal/`, `Makefile`, `Dockerfile`, atlantis source | atlantis upstream — you pull updates from `upstream` |
 | `migrations/infra/` | atlantis upstream — atlantis's own runtime schema |
-| `atlantis.workspace.yaml` | **your deployment repo** — pins your callers |
-| `gen/`, `clients/go/`, `atlantis/<ns>/v1/` | **your deployment repo** — regenerated against your callers |
-| `migrations/tidectl/` | **your deployment repo** — generated by your `tidectl plan + approve` |
+| `atlantis.workspace.yaml` | **your deployment repo** — pins your callers (client SDK generation only) |
+| `clients/go/`, `atlantis/<ns>/v1/` | **your deployment repo** — regenerated proto + client SDK against your callers |
+| `migrations/tidectl/` | **your deployment repo** — generated by `tidectl plan + approve` (traditional flow only) |
+
+`gen/go/server/` no longer exists — entity CRUD is handled by runtime dispatch from the IR checkpoint. The server binary is generic and does not contain caller-specific generated code.
 
 The fork model is provisional. A future release will separate the operator's deployment repo from atlantis source so a single precompiled `atlantis-server` binary can be configured against the workspace at runtime, without a fork.
 
