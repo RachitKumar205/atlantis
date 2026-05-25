@@ -7,6 +7,7 @@ import (
 
 	"github.com/rachitkumar205/atlantis/internal/codegen/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/schema"
 )
 
 // GoFile is one emitted Go source file.
@@ -1145,25 +1146,14 @@ func (p *pkSpec) ReturningCols() string { return p.OrderByCols() }
 // CountPlaceholders returns the number of $N tokens the PK consumes.
 func (p *pkSpec) CountPlaceholders() int { return len(p.Fields) }
 
+// fieldColumns delegates to the shared schema package.
 func fieldColumns(e *dsl.Entity) []string {
-	out := make([]string, len(e.Fields))
-	for i, f := range e.Fields {
-		out[i] = f.Name
-	}
-	return out
+	return schema.FieldColumns(e)
 }
 
-// insertColumns lists every column the INSERT statement carries values for.
-// Identity and Serial columns are excluded.
+// insertColumns delegates to the shared schema package.
 func insertColumns(e *dsl.Entity) []string {
-	var out []string
-	for _, f := range e.Fields {
-		if f.Identity || f.Serial {
-			continue
-		}
-		out = append(out, f.Name)
-	}
-	return out
+	return schema.InsertColumns(e)
 }
 
 // insertPlaceholdersFor builds the VALUES clause for sqlInsert<Entity>.
@@ -1211,12 +1201,9 @@ func updateAssignments(e *dsl.Entity, spec *pkSpec) string {
 	return strings.Join(parts, ", ")
 }
 
+// quoteAll delegates to the shared schema package.
 func quoteAll(ids []string) []string {
-	out := make([]string, len(ids))
-	for i, s := range ids {
-		out[i] = quoteIdent(s)
-	}
-	return out
+	return schema.QuoteAll(ids)
 }
 
 func goFieldName(snake string) string { return snakeToCamel(snake) }
