@@ -90,7 +90,7 @@ func (r *RemoteHandler) getConn() (*grpc.ClientConn, error) {
 // The worker treats it identically to a local handler: Lookup
 // returns the RemoteHandler, handleOne calls Handle, the remote
 // endpoint receives the args JSON and returns success or error.
-func (reg *Registry) RegisterRemote(jobID, addr string) {
+func RegisterRemote(reg *Registry, jobID, addr string) {
 	reg.Register(jobID, &RemoteHandler{addr: addr})
 }
 

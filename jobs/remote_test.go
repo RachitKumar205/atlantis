@@ -1,10 +1,15 @@
 package jobs
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
+
+func noopHandler(ctx context.Context, args []byte) error { return nil }
 
 func TestRegisterRemote(t *testing.T) {
 	reg := NewRegistry()
-	reg.RegisterRemote("vendor.BulkImport", "localhost:50051")
+	RegisterRemote(reg, "vendor.BulkImport", "localhost:50051")
 	h := reg.Lookup("vendor.BulkImport")
 	if h == nil {
 		t.Fatal("expected remote handler to be registered")
@@ -17,7 +22,7 @@ func TestRegisterRemote(t *testing.T) {
 func TestRegisterRemote_OverwritesLocal(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register("vendor.X", HandlerFunc(noopHandler))
-	reg.RegisterRemote("vendor.X", "localhost:50051")
+	RegisterRemote(reg, "vendor.X", "localhost:50051")
 	h := reg.Lookup("vendor.X")
 	if _, ok := h.(*RemoteHandler); !ok {
 		t.Fatalf("expected remote handler to replace local, got %T", h)

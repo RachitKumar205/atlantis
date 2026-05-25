@@ -1,30 +1,9 @@
-// Package jobs implements the declarative-job runtime: an in-Postgres
-// queue, worker pool, scheduler, and the handler-registration surface
-// the typed Go SDK generates code against.
-//
-// Architecture:
-//
-//   - Registry holds the runtime map of "namespace.JobName" -> Handler.
-//     atlantis-server's startup wiring (cmd/server/main.go) populates
-//     it via RegisterJobHandlers, which the generated SDK calls.
-//     Worker.invoke() looks up the handler by job_name when it claims
-//     a row and dispatches with the deserialized typed args.
-//
-//   - Runner is the drain loop. One goroutine per queue. Wakes on
-//     LISTEN/NOTIFY for atl_jobs or a 1s ticker. Claims a batch via
-//     FOR UPDATE SKIP LOCKED, dispatches each job through the
-//     registry, marks rows complete/failed in their own transactions.
-//     A heartbeat goroutine per claimed job extends claimed_until so
-//     a peer doesn't poach the row mid-work.
-//
-//   - Scheduler is a singleton goroutine (elected via
-//     pg_try_advisory_lock) that evaluates atlantis.job_schedules
-//     rows on a ticker and INSERTs into atlantis.jobs when a fire is
-//     due.
-//
-// The package is decoupled from gRPC so it can be tested in
-// isolation; internal/server/admin/jobs.go wraps these primitives in
-// the admin RPC surface.
+// Package jobs implements the caller-facing job-worker surface:
+// handler registration, worker pool, and checkpoint API. Callers
+// import this package to embed a worker and register handlers;
+// server-internal code (sweeper, workflows, tracing, remote dispatch)
+// lives in github.com/rachitkumar205/atlantis/jobs and imports these
+// types.
 package jobs
 
 import (
