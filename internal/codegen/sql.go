@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/schema"
 )
 
 // EmitSQL turns a Diff into a pair of migration scripts.
@@ -641,61 +642,33 @@ func renderPartialPred(p *dsl.PartialPred) string {
 }
 
 // qualifiedTable returns the schema-qualified, double-quoted table name.
-// Honors the `table "<schema.table>"` modifier when set; otherwise falls
-// back to the computed `atlantis.<namespace>_<snake>` form.
-//
-// Quoting is defense-in-depth — the lexer constrains identifiers today,
-// but a future grammar that lets a field be named after a Postgres
-// reserved word would silently break SQL otherwise.
+// Delegates to the shared schema package.
 func qualifiedTable(e *dsl.Entity) string {
-	return quoteIdent(entitySchema(e)) + "." + quoteIdent(entityPhysicalTable(e))
+	return schema.QualifiedTable(e)
 }
 
-// entitySchema returns the schema where this entity's physical objects
-// (the table + its indexes) live. `table "<schema.table>"` overrides the
-// default; bare `table "<name>"` (no schema prefix) lives in `public`;
-// no override at all lives in `atlantis`.
+// entitySchema returns the schema where this entity's physical objects live.
+// Delegates to the shared schema package.
 func entitySchema(e *dsl.Entity) string {
-	if e.TableName != "" {
-		if i := strings.IndexByte(e.TableName, '.'); i >= 0 {
-			return e.TableName[:i]
-		}
-		return "public"
-	}
-	return "atlantis"
+	return schema.EntitySchema(e)
 }
 
-// entityPhysicalTable returns just the bare table name — the part that
-// goes inside `"<schema>"."<table>"`. Without an override it's the
-// computed flat name; with one it's the table portion of the override.
+// entityPhysicalTable returns just the bare table name.
+// Delegates to the shared schema package.
 func entityPhysicalTable(e *dsl.Entity) string {
-	if e.TableName != "" {
-		if i := strings.IndexByte(e.TableName, '.'); i >= 0 {
-			return e.TableName[i+1:]
-		}
-		return e.TableName
-	}
-	return tableName(e)
+	return schema.EntityPhysicalTable(e)
 }
 
-// quoteIdent wraps a SQL identifier in double quotes, escaping any embedded
-// double quotes by doubling them. The lexer already restricts our DSL
-// identifiers to /[A-Za-z_][A-Za-z0-9_]*/, so the escape branch is unused
-// today — it's here so callers can't introduce an injection by widening
-// the grammar in the future.
+// quoteIdent wraps a SQL identifier in double quotes.
+// Delegates to the shared schema package.
 func quoteIdent(s string) string {
-	if !strings.ContainsAny(s, `"\n`) {
-		return `"` + s + `"`
-	}
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+	return schema.QuoteIdent(s)
 }
 
-// tableName maps an entity to its physical table name. We snake_case the
-// entity name and prefix with the namespace so the same bare name in
-// different namespaces (e.g., consumer.Account vs vendor.Account) stays
-// distinct inside the unified schema.
+// tableName maps an entity to its physical table name.
+// Delegates to the shared schema package.
 func tableName(e *dsl.Entity) string {
-	return e.Namespace + "_" + snakeCase(e.Name)
+	return schema.TableName(e)
 }
 
 // columnDecl renders one column line for CREATE TABLE / ADD COLUMN.
@@ -733,76 +706,15 @@ func columnDecl(f dsl.Field) string {
 }
 
 // sqlType maps a DSL field type to its Postgres type.
+// Delegates to the shared schema package.
 func sqlType(t dsl.FieldType) string {
-	if t.Array {
-		inner := "text"
-		if t.Elem != nil {
-			inner = sqlType(*t.Elem)
-		}
-		return inner + "[]"
-	}
-	switch t.Name {
-	case "smallint":
-		return "SMALLINT"
-	case "int":
-		return "INTEGER"
-	case "bigint":
-		return "BIGINT"
-	case "text":
-		return "TEXT"
-	case "varchar":
-		// Length is mandatory on varchar in the DSL; the parser enforces
-		// the parenthesized form, so Len > 0 always.
-		return fmt.Sprintf("VARCHAR(%d)", t.Len)
-	case "citext":
-		// citext is a Postgres extension; the initial migration enables it.
-		return "CITEXT"
-	case "boolean":
-		return "BOOLEAN"
-	case "timestamptz":
-		return "TIMESTAMPTZ"
-	case "date":
-		return "DATE"
-	case "interval":
-		return "INTERVAL"
-	case "uuid":
-		return "UUID"
-	case "bytea":
-		return "BYTEA"
-	case "jsonb":
-		return "JSONB"
-	case "vector":
-		return fmt.Sprintf("vector(%d)", t.VecDim)
-	case "numeric":
-		if t.HasNumP {
-			return fmt.Sprintf("NUMERIC(%d, %d)", t.NumP, t.NumS)
-		}
-		return "NUMERIC"
-	}
-	return strings.ToUpper(t.Name)
+	return schema.SQLType(t)
 }
 
-// defaultExpr renders a Default in SQL form (with appropriate quoting).
+// defaultExpr renders a Default in SQL form.
+// Delegates to the shared schema package.
 func defaultExpr(d dsl.Default) string {
-	switch d.Kind {
-	case dsl.DefaultIRString:
-		return "'" + strings.ReplaceAll(d.Str, "'", "''") + "'"
-	case dsl.DefaultIRInt:
-		return fmt.Sprintf("%d", d.Int)
-	case dsl.DefaultIRBool:
-		if d.Bool {
-			return "TRUE"
-		}
-		return "FALSE"
-	case dsl.DefaultIRNow:
-		return "now()"
-	case dsl.DefaultIRRaw:
-		// Verbatim — the engineer wrote the SQL expression. Postgres will
-		// reject malformed expressions at migration time. We trust the
-		// .pc author here on purpose; the escape hatch is the whole point.
-		return d.Str
-	}
-	return "NULL"
+	return schema.DefaultExpr(d)
 }
 
 // fkConstraintInline renders an FK constraint suitable for use inside a
@@ -968,33 +880,10 @@ func joinQuoted(ids []string) string {
 	return strings.Join(parts, ", ")
 }
 
-// snakeCase converts UpperCamelCase to snake_case. We avoid pulling in a
-// dependency for one function. Handles consecutive uppercase runs ("API" stays
-// readable) and digit boundaries.
+// snakeCase converts UpperCamelCase to snake_case.
+// Delegates to the shared schema package.
 func snakeCase(s string) string {
-	var out []rune
-	for i, r := range s {
-		if i > 0 && r >= 'A' && r <= 'Z' {
-			prev := rune(s[i-1])
-			next := rune(0)
-			if i+1 < len(s) {
-				next = rune(s[i+1])
-			}
-			// Insert underscore at:
-			//   - lower→upper boundary (camelCase → camel_case)
-			//   - upper→upper→lower boundary inside a run (APIKey → api_key)
-			//   - letter→digit boundary (foo1 → foo_1) — see below.
-			if (prev >= 'a' && prev <= 'z') ||
-				(next >= 'a' && next <= 'z' && prev >= 'A' && prev <= 'Z') {
-				out = append(out, '_')
-			}
-		}
-		if r >= 'A' && r <= 'Z' {
-			r = r - 'A' + 'a'
-		}
-		out = append(out, r)
-	}
-	return string(out)
+	return schema.SnakeCase(s)
 }
 
 type sqlBuilder struct{ b strings.Builder }

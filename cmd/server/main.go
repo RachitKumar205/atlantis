@@ -30,13 +30,13 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/cache/memcached"
 	"github.com/rachitkumar205/atlantis/internal/cache/queryresult"
 	"github.com/rachitkumar205/atlantis/internal/cache/read"
+	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/obs"
 	"github.com/rachitkumar205/atlantis/internal/server/admin"
+	"github.com/rachitkumar205/atlantis/internal/server/entity"
 	"github.com/rachitkumar205/atlantis/internal/server/interceptors"
 	"github.com/rachitkumar205/atlantis/internal/storage/pg"
 	"github.com/rachitkumar205/atlantis/jobs"
-
-	entityserver "github.com/rachitkumar205/atlantis/gen/go/server"
 )
 
 func main() {
@@ -292,13 +292,17 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 	}
 	_ = jobsRegistry // exported via Server.JobsRegistry once PR-C wires the public surface
 
+	log.Debug("init: load IR checkpoint")
+	ir, err := loadIRCheckpoint(pool)
+	if err != nil {
+		return fmt.Errorf("load IR checkpoint: %w", err)
+	}
+
 	log.Debug("init: register entity services")
-	entityserver.Register(srv, entityserver.ServerDeps{
-		Pool:       pool,
-		Cache:      mc,
-		Outbox:     invalidate.NewOutbox(),
-		QueryCache: queryCache,
-	})
+	dynServer := entity.NewServer(pool, mc, invalidate.NewOutbox(), queryCache)
+	if err := dynServer.Register(srv, ir); err != nil {
+		return fmt.Errorf("register entity services: %w", err)
+	}
 
 	log.Debug("init: net.Listen", "addr", cfg.GRPCAddr)
 	lis, err := net.Listen("tcp", cfg.GRPCAddr)
@@ -381,4 +385,18 @@ func buildLogger(cfg config) *slog.Logger {
 	log := slog.New(h)
 	slog.SetDefault(log)
 	return log
+}
+
+// loadIRCheckpoint reads the current IR from atlantis.ir_checkpoint. If
+// no checkpoint exists yet (fresh database), an empty IR is returned so
+// the server can start without entity services and accept PlanSchema RPCs.
+func loadIRCheckpoint(pool *pg.Pool) (*dsl.IR, error) {
+	var raw []byte
+	err := pool.QueryRow(context.Background(), `SELECT ir FROM atlantis.ir_checkpoint WHERE id = 1`).Scan(&raw)
+	if err != nil {
+		// No checkpoint yet — return an empty IR so the server boots and
+		// the admin service can accept the first PlanSchema call.
+		return &dsl.IR{Version: dsl.CurrentIRVersion}, nil
+	}
+	return dsl.DecodeJSONIR(raw)
 }

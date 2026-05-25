@@ -14,26 +14,32 @@ import (
 
 	commonpb "github.com/rachitkumar205/atlantis-go/pb/atlantis/common/v1"
 	consumerpb "github.com/rachitkumar205/atlantis-go/pb/atlantis/consumer/v1"
-	entityserver "github.com/rachitkumar205/atlantis/gen/go/server"
+	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/server/entity"
 )
 
-// startGRPCServer boots an in-process gRPC server with every codegen'd
-// service registered against the harness and returns the dialed
-// client connection. Both the server and the connection are torn down
-// via t.Cleanup.
+// startGRPCServer boots an in-process gRPC server with the dynamic entity
+// server registered against the harness. The IR is loaded from the
+// ir_checkpoint table (populated by `tide apply` during the migration step).
+// Both the server and the connection are torn down via t.Cleanup.
 func startGRPCServer(t *testing.T, h *Harness) *grpc.ClientConn {
 	t.Helper()
+
+	// Load the IR from the database. If no checkpoint exists, the
+	// entity services won't be registered (admin-only server).
+	ir := loadTestIR(t, h)
+
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("net.Listen: %v", err)
 	}
 	srv := grpc.NewServer()
-	entityserver.Register(srv, entityserver.ServerDeps{
-		Pool:       h.Pool,
-		Cache:      h.Cache,
-		Outbox:     h.Outbox,
-		QueryCache: h.QueryCache,
-	})
+
+	dynServer := entity.NewServer(h.Pool, h.Cache, h.Outbox, h.QueryCache)
+	if err := dynServer.Register(srv, ir); err != nil {
+		t.Fatalf("dynServer.Register: %v", err)
+	}
+
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.GracefulStop)
 
@@ -44,6 +50,24 @@ func startGRPCServer(t *testing.T, h *Harness) *grpc.ClientConn {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn
+}
+
+// loadTestIR reads the IR checkpoint from the database, falling back
+// to an empty IR if no checkpoint exists.
+func loadTestIR(t *testing.T, h *Harness) *dsl.IR {
+	t.Helper()
+	var raw []byte
+	err := h.PgxPool().QueryRow(context.Background(),
+		`SELECT ir FROM atlantis.ir_checkpoint WHERE id = 1`).Scan(&raw)
+	if err != nil {
+		// No checkpoint — return empty IR.
+		return &dsl.IR{Version: dsl.CurrentIRVersion}
+	}
+	ir, err := dsl.DecodeJSONIR(raw)
+	if err != nil {
+		t.Fatalf("decode IR checkpoint: %v", err)
+	}
+	return ir
 }
 
 // TestGRPC_Account_RoundTrip is the wire-path canary: Create → Get →
