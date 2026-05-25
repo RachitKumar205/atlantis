@@ -99,6 +99,10 @@ type config struct {
 	// vs "default"). Empty defaults to a single "default" queue.
 	JobsQueues []string
 
+	// JobsRemoteHandlers maps job names to remote gRPC endpoints.
+	// Format: "vendor.ShopifyImport=localhost:50051,consumer.SweepExpired=localhost:50052"
+	JobsRemoteHandlers map[string]string
+
 	// Observability
 	LogLevel string
 
@@ -151,8 +155,9 @@ func loadConfig() (config, error) {
 
 		BackfillWorkerEnabled: envBool("ATL_BACKFILL_WORKER_ENABLED", false),
 
-		JobsWorkerEnabled: envBool("ATL_JOBS_WORKER_ENABLED", false),
-		JobsQueues:        splitCSV(envStr("ATL_JOBS_QUEUES", "default")),
+		JobsWorkerEnabled:  envBool("ATL_JOBS_WORKER_ENABLED", false),
+		JobsQueues:         splitCSV(envStr("ATL_JOBS_QUEUES", "default")),
+		JobsRemoteHandlers: parseRemoteHandlers(envStr("ATL_JOBS_REMOTE_HANDLERS", "")),
 
 		LogLevel: envStr("LOG_LEVEL", "info"),
 
@@ -274,6 +279,21 @@ func splitCSV(s string) []string {
 		p = strings.TrimSpace(p)
 		if p != "" {
 			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func parseRemoteHandlers(s string) map[string]string {
+	if s == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) == 2 {
+			out[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 		}
 	}
 	return out

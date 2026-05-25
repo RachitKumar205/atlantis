@@ -30,11 +30,11 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/cache/memcached"
 	"github.com/rachitkumar205/atlantis/internal/cache/queryresult"
 	"github.com/rachitkumar205/atlantis/internal/cache/read"
-	"github.com/rachitkumar205/atlantis/internal/jobs"
 	"github.com/rachitkumar205/atlantis/internal/obs"
 	"github.com/rachitkumar205/atlantis/internal/server/admin"
 	"github.com/rachitkumar205/atlantis/internal/server/interceptors"
 	"github.com/rachitkumar205/atlantis/internal/storage/pg"
+	"github.com/rachitkumar205/atlantis/jobs"
 
 	entityserver "github.com/rachitkumar205/atlantis/gen/go/server"
 )
@@ -263,6 +263,10 @@ func run(ctx context.Context, cfg config, log *slog.Logger) error {
 	var jobsRegistry *jobs.Registry
 	if cfg.JobsWorkerEnabled {
 		jobsRegistry = jobs.NewRegistry()
+		for jobName, addr := range cfg.JobsRemoteHandlers {
+			jobs.RegisterRemote(jobsRegistry, jobName, addr)
+			log.Info("jobs remote handler registered", "job", jobName, "addr", addr)
+		}
 		for _, queue := range cfg.JobsQueues {
 			queue := queue
 			w := jobs.NewWorker(pool.Raw(), jobsRegistry, queue, jobs.Config{

@@ -79,3 +79,16 @@ func StartWorkerSpan(ctx context.Context, jobName string) (context.Context, func
 	)
 	return ctx, func() { span.End() }
 }
+
+// OTelTraceHook implements TraceHook using the OTel functions in this
+// file. The server wires it into each Worker via SetTraceHook so the
+// SDK's runner gets distributed-tracing without importing OTel itself.
+type OTelTraceHook struct{}
+
+func (OTelTraceHook) ResumeTrace(ctx context.Context, traceCtxJSON []byte) context.Context {
+	return ResumeTraceCtx(ctx, traceCtxJSON)
+}
+
+func (OTelTraceHook) StartSpan(ctx context.Context, jobName string) (context.Context, func()) {
+	return StartWorkerSpan(ctx, jobName)
+}

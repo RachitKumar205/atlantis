@@ -102,7 +102,7 @@ func emitJobsForNamespace(ns string, jobs []*dsl.Job) (GoFile, error) {
 		b.WriteString("\t\"time\"\n")
 	}
 	b.WriteString("\n")
-	b.WriteString("\t\"github.com/rachitkumar205/atlantis/internal/jobs\"\n")
+	b.WriteString("\t\"github.com/rachitkumar205/atlantis/jobs\"\n")
 	b.WriteString(")\n\n")
 
 	// Reference all imports unconditionally so a job with zero args
