@@ -1,16 +1,17 @@
 # Codegen pipeline
 
-How a `.atl` file becomes Postgres migrations, proto definitions, server handlers, and a typed Go client. Source lives under `internal/dsl/` (lex, parse, IR) and `internal/codegen/` (emitters and diff).
+How a `.atl` file becomes Postgres migrations, proto definitions, and a typed Go client. Source lives under `internal/dsl/` (lex, parse, IR) and `internal/codegen/` (emitters and diff). Server-side entity handlers are no longer generated — entity CRUD is handled by runtime dispatch from the IR.
 
 ## Stages
 
 ```
 .atl files → Lexer → AST → Validator → IR → Emitters → Outputs
-                                              ├─ proto/
-                                              ├─ server/
-                                              ├─ client/
-                                              └─ SQL (migrations/tidectl/_staged/)
+                                              ├─ proto/     (.proto files)
+                                              ├─ client/    (clients/go/pb/, clients/go/client/)
+                                              └─ SQL        (migrations/tidectl/_staged/)
 ```
+
+The runtime server does not use the generated `gen/go/server/` output; entity CRUD — create, read, update, delete, list, and predicate filtering — is handled by runtime dispatch from the IR. The `EmitGoServer` emitter still exists in `internal/codegen/server.go` for backward compatibility but is not called in the default server startup path. The server reads the IR checkpoint at startup and builds entity metadata (table names, column mappings, scan helpers) dynamically. A new entity added via `tide apply` takes effect after a server restart — no recompilation is needed.
 
 ## Lexer and parser
 
@@ -40,10 +41,11 @@ The parser produces an AST per file. Files are parsed independently — there is
 Each emitter is a Go package under `internal/codegen/`:
 
 - `proto.go` — emits `<entity>.proto` per entity, including the per-field predicate messages (`StringPredicate`, etc.).
-- `server.go` — emits per-entity Go server code: scan helpers, bind helpers, the typed handler methods.
-- `client.go` — emits the typed Go client SDK module under `clients/go/pb/<namespace>/`.
+- `client.go` — emits the typed Go client SDK module under `clients/go/pb/<namespace>/` and typed wrappers under `clients/go/client/`.
 - `sql.go` — emits `CREATE TABLE`, indexes, FKs, triggers; combined into one staged migration file under `migrations/tidectl/_staged/`.
 - `coltype/` — shared column-type mapping consumed by every other emitter so a new type lands in one place.
+
+`server.go` (`EmitGoServer`) still exists for backward compatibility but is not called in the default server startup path. The `gen/go/server/` output directory is no longer used. Per-entity scan helpers, bind helpers, and handler methods are now built at runtime from the IR — see `internal/server/entity/`.
 
 ## Diff and migration generation
 
@@ -57,7 +59,7 @@ The migration SQL is staged under `migrations/tidectl/_staged/`. `tidectl approv
 
 ## Transaction boundary
 
-The DDL migration plus the bookkeeping write (recording the new schema version and the responsible caller) commit inside one Postgres transaction. Emitted artifacts — proto, Go, SDK — are written to their output paths **after** the transaction commits. A crash between commit and emission leaves the schema migrated but the on-disk artifacts stale; the next `tidectl codegen` regenerates them from the now-canonical IR. The exact entry point is the `AdminService.ApplyMigration` handler in `internal/server/admin/`.
+The DDL migration plus the bookkeeping write (recording the new schema version, the responsible caller, and the new IR checkpoint) commit inside one Postgres transaction. Client-side artifacts — proto, SDK — are written to their output paths **after** the transaction commits. A crash between commit and emission leaves the schema migrated but the on-disk client artifacts stale; the next `tidectl codegen` regenerates them from the now-canonical IR. On the server side, the new IR is already persisted in Postgres; the server must be restarted to pick up the new IR. The exact entry point for the apply transaction is the `Service.ApplyMigration` handler in `internal/server/admin/`.
 
 ## Adding a new declaration form
 
