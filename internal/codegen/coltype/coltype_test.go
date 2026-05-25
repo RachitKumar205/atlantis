@@ -178,7 +178,7 @@ func TestScanFragments(t *testing.T) {
 		{"vector nn", ft("vector"), true,
 			"var x pgvector.Vector", "&x", "out.Y = runtime.VectorToFloat32(x.Slice())"},
 		{"vector null", ft("vector"), false,
-			"var x pgvector.Vector", "&x", "out.Y = runtime.VectorToFloat32(x.Slice())"},
+			"var x *pgvector.Vector", "&x", "if x != nil {\n\t\tout.Y = runtime.VectorToFloat32(x.Slice())\n\t}"},
 
 		// Arrays scan into []elem and assign directly. Elem nullability
 		// inside an array is forced not-null per coltype contract.
