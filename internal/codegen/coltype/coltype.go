@@ -198,8 +198,15 @@ func ScanFragments(t dsl.FieldType, notNull bool, local, protoField string) (dec
 		decl = fmt.Sprintf("var %s []byte", local)
 		assign = fmt.Sprintf("%s = %s", protoField, local)
 	case "vector":
-		decl = fmt.Sprintf("var %s pgvector.Vector", local)
-		assign = fmt.Sprintf("%s = runtime.VectorToFloat32(%s.Slice())", protoField, local)
+		if notNull {
+			decl = fmt.Sprintf("var %s pgvector.Vector", local)
+			assign = fmt.Sprintf("%s = runtime.VectorToFloat32(%s.Slice())", protoField, local)
+		} else {
+			decl = fmt.Sprintf("var %s *pgvector.Vector", local)
+			assign = fmt.Sprintf(`if %s != nil {
+		%s = runtime.VectorToFloat32(%s.Slice())
+	}`, local, protoField, local)
+		}
 	default:
 		// Defensive fallback so an IR lowering miss surfaces as "scan
 		// target is any" rather than a panic at codegen time.

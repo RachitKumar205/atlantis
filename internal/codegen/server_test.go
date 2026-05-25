@@ -319,7 +319,7 @@ func TestEmitGoServer_VectorHandling(t *testing.T) {
 	files, _ := EmitGoServer(ir)
 	c := entityServerFile(t, files)
 	assertContains(t, c, "pgvector \"github.com/pgvector/pgvector-go\"")
-	assertContains(t, c, "var vecLocal pgvector.Vector")
+	assertContains(t, c, "var vecLocal *pgvector.Vector")
 	assertContains(t, c, "out.Vec = runtime.VectorToFloat32(vecLocal.Slice())")
 	assertContains(t, c, "pgvector.NewVector(in.GetVec())")
 }
