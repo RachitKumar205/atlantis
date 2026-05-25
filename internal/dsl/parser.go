@@ -102,6 +102,21 @@ func (p *Parser) recover(syncs ...TokenKind) {
 	}
 }
 
+// canBeFieldName returns true for tokens that are valid column names
+// inside an entity/hypertable body. Job, workflow, and ephemeral
+// keywords are only special at the top level or inside their own
+// blocks — inside an entity they are ordinary identifiers.
+func canBeFieldName(k TokenKind) bool {
+	switch k {
+	case TokIdent,
+		TokState, TokQueue, TokArgs, TokRetries, TokTimeout,
+		TokSchedule, TokStep, TokCompensate, TokVisibleTo,
+		TokJob, TokWorkflow, TokEphemeral, TokEnqueue:
+		return true
+	}
+	return false
+}
+
 // ---- file / top-level ----
 
 func (p *Parser) parseFile() *File {
@@ -256,14 +271,15 @@ func (p *Parser) parseEntityMembers() []EntityMember {
 			if m := p.parseTableNameDecl(); m != nil {
 				members = append(members, m)
 			}
-		case TokIdent:
-			if m := p.parseField(); m != nil {
-				members = append(members, m)
-			}
 		default:
-			p.errf(t.Pos, "unexpected token %s in entity body", t.Kind)
-			// Sync to a likely member start so we can keep going.
-			p.recover(TokRBrace, TokIdent, TokIndex, TokCache, TokHasMany, TokHasOne, TokQueryTimeout, TokUnique)
+			if canBeFieldName(t.Kind) {
+				if m := p.parseField(); m != nil {
+					members = append(members, m)
+				}
+			} else {
+				p.errf(t.Pos, "unexpected token %s in entity body", t.Kind)
+				p.recover(TokRBrace, TokIdent, TokIndex, TokCache, TokHasMany, TokHasOne, TokQueryTimeout, TokUnique)
+			}
 		}
 	}
 }
@@ -339,7 +355,12 @@ func (p *Parser) parsePrimaryDecl() *PrimaryDecl {
 // ---- field ----
 
 func (p *Parser) parseField() *FieldDecl {
-	name := p.expect(TokIdent)
+	t := p.peek()
+	if !canBeFieldName(t.Kind) {
+		p.errf(t.Pos, "expected field name, got %s", t.Kind)
+		return nil
+	}
+	name := p.advance()
 	typ := p.parseType()
 	mods := p.parseFieldModifiers()
 	return &FieldDecl{
