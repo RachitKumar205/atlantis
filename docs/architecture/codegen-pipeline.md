@@ -11,7 +11,14 @@ How a `.atl` file becomes Postgres migrations, proto definitions, and a typed Go
                                               └─ SQL        (migrations/tidectl/_staged/)
 ```
 
-The runtime server does not use the generated `gen/go/server/` output; entity CRUD — create, read, update, delete, list, and predicate filtering — is handled by runtime dispatch from the IR. The `EmitGoServer` emitter still exists in `internal/codegen/server.go` for backward compatibility but is not called in the default server startup path. The server reads the IR checkpoint at startup and builds entity metadata (table names, column mappings, scan helpers) dynamically. A new entity added via `tide apply` takes effect after a server restart — no recompilation is needed.
+The runtime server does not use the generated `gen/go/server/` output; entity CRUD — create, read, update, delete, list, and predicate filtering — is handled by runtime dispatch from the IR. The `EmitGoServer` emitter still exists in `internal/codegen/server.go` for backward compatibility but is not called in the default server startup path. The server reads the IR checkpoint at startup and hot-reloads via PostgreSQL `LISTEN/NOTIFY` when `tide apply` persists a new checkpoint. Field changes to existing entities take effect within seconds; adding a brand-new entity requires a rolling restart because gRPC services are registered once at startup.
+
+There are two ways to produce the typed Go client:
+
+- **Caller-local (default for callers):** `tide generate`, run from the caller's repo, fetches the canonical IR over the `GetCanonicalIR` RPC, filters it to the namespaces in the caller's `tide.yaml`, and emits proto + typed wrappers into the caller's own module (`output_dir`). It writes its own `buf.gen.yaml` with a single `go_package_prefix = <module>/<output_dir>` and shells out to `buf generate`. The output compiles in the caller's module with no `replace` directive and no dependency on a central SDK for the generated types. See [schema flow](schema-flow.md#caller-local-sdk-generation).
+- **Central (atlantis's own tests):** `tidectl codegen` + `buf generate` from the atlantis repo emit the full merged SDK into `clients/go/`. Still used by atlantis's integration tests; callers no longer consume it.
+
+Both paths run the same emitters (`internal/codegen/`); caller-local generation just passes a `GenConfig{ModulePrefix}` and a namespace-filtered IR.
 
 ## Lexer and parser
 
@@ -59,7 +66,7 @@ The migration SQL is staged under `migrations/tidectl/_staged/`. `tidectl approv
 
 ## Transaction boundary
 
-The DDL migration plus the bookkeeping write (recording the new schema version, the responsible caller, and the new IR checkpoint) commit inside one Postgres transaction. Client-side artifacts — proto, SDK — are written to their output paths **after** the transaction commits. A crash between commit and emission leaves the schema migrated but the on-disk client artifacts stale; the next `tidectl codegen` regenerates them from the now-canonical IR. On the server side, the new IR is already persisted in Postgres; the server must be restarted to pick up the new IR. The exact entry point for the apply transaction is the `Service.ApplyMigration` handler in `internal/server/admin/`.
+The DDL migration plus the bookkeeping write (recording the new schema version, the responsible caller, and the new IR checkpoint with its content hash) commit inside one Postgres transaction. A trigger fires `NOTIFY atl_schema_changed` on commit, and the server's schema listener hot-reloads entity metadata automatically. Client-side artifacts — proto, SDK — are written to their output paths **after** the transaction commits. A crash between commit and emission leaves the schema migrated but the on-disk client artifacts stale; regenerating from the now-canonical IR fixes them — a caller re-runs `tide generate`, and the central test SDK re-runs `tidectl codegen` + `buf generate`. The exact entry point for the apply transaction is the `Service.ApplyMigration` handler in `internal/server/admin/`.
 
 ## Adding a new declaration form
 

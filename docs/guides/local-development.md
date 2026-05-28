@@ -52,6 +52,8 @@ ATL_ALLOW_APPLY_MUTATION=true \
 
 To iterate: edit a `.atl`, `Ctrl+C` the server, re-run `tidectl dev`.
 
+This flow rebuilds the **server** (and the central `clients/go/` SDK used by atlantis's own tests). It is separate from how a caller gets its typed client: a caller runs [`tide generate`](../reference/cli-tide.md#tide-generate) from its own repo to emit a scoped client into its module. Server-side runtime dispatch means the server never needs the generated client — only callers do.
+
 ## Flags worth knowing
 
 - `--workspace <path>` — non-default manifest location. Useful if you keep two manifests (`atlantis.dev.yaml`, `atlantis.dev-local-only.yaml`) for different setups.
