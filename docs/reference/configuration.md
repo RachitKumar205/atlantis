@@ -88,6 +88,20 @@ Production should leave `AUTO_MIGRATE=false` and run migrations explicitly as a 
 |---|---|---|
 | `ATL_ALLOW_APPLY_MUTATION` | `false` | Gates the `ApplyMigration` RPC. Must be `false` in production. |
 
+## Schema hot-reload
+
+The server automatically listens for schema changes via PostgreSQL `LISTEN/NOTIFY`. When `tide apply` persists a new IR checkpoint, a trigger fires `pg_notify('atl_schema_changed', content_hash)`. The server's schema listener rebuilds entity metadata and swaps it atomically. No configuration is needed — hot-reload is always active.
+
+Prometheus metrics exposed:
+
+| Metric | Type | Description |
+|---|---|---|
+| `atlantis_schema_reloads_total` | counter | Successful hot-reloads. |
+| `atlantis_schema_reload_errors_total` | counter | Failed reload attempts (logged, old schema stays active). |
+| `atlantis_schema_reload_duration_seconds` | histogram | Time to rebuild entity metadata. |
+
+Hot-reload covers field additions/removals, type changes, custom query changes, and constraint changes to existing entities. Adding a brand-new entity requires a rolling restart because gRPC services are registered once at startup.
+
 ## Schema mirror (dev only)
 
 These variables enable the local-development workflow where the server mirrors caller-submitted `.atl` files to disk so a file watcher can react to schema changes. Both must be `false` in production.

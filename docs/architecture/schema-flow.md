@@ -2,7 +2,7 @@
 
 How a schema change moves from a caller's repository into a running atlantis server.
 
-atlantis never reads from caller repositories at runtime, and callers never write into the atlantis repository. Dev and prod differ in how the schema bytes reach the server; the invariant holds in both paths. On every `tide apply`, the server persists a new IR checkpoint to Postgres. The server loads the IR checkpoint once at startup, so a restart (or rolling restart) is required for the new schema to take effect. The key benefit is that no recompilation is needed — just a restart.
+atlantis never reads from caller repositories at runtime, and callers never write into the atlantis repository. Dev and prod differ in how the schema bytes reach the server; the invariant holds in both paths. On every `tide apply`, the server persists a new IR checkpoint to Postgres with a content hash (sha256 of the IR). A PostgreSQL trigger fires `NOTIFY atl_schema_changed` after commit, and the server's schema listener hot-reloads entity metadata via atomic pointer swap. No restart is needed for field changes to existing entities; adding a brand-new entity requires a rolling restart because gRPC services are registered once at startup.
 
 A schema change is an edit to one or more `.atl` files in a caller's repo (typically `internal/<pkg>/schema.atl`). See the [DSL reference](../reference/dsl-grammar.md) for the syntax.
 
@@ -14,9 +14,9 @@ The dev server has `ATL_MIRROR_SCHEMA=true` and `ATL_ALLOW_APPLY_MUTATION=true`.
 2. Dev runs `tide apply` from the caller repo.
 3. `tide` bundles the `.atl` files and sends `PlanSchema` over gRPC.
 4. Server validates, plans, returns the plan to `tide`.
-5. `tide` writes the regenerated SDK to `output_dir/`.
-6. Server applies the migration to local Postgres and persists the new IR checkpoint. The dev server must be restarted for the new schema to take effect.
-7. Server mirrors the received `.atl` files to `ATL_MIRROR_DIR`.
+5. Server applies the migration to local Postgres and persists the new IR checkpoint. The server hot-reloads the new schema automatically via LISTEN/NOTIFY.
+6. Server mirrors the received `.atl` files to `ATL_MIRROR_DIR`.
+7. Dev runs `tide generate` from the caller repo to regenerate the typed Go client into `output_dir`, scoped to the namespaces the caller consumes. The generated code lives in the caller's own module — no shared SDK, no `replace` directive for the generated types. See [caller-local generation](#caller-local-sdk-generation) below.
 
 ### Why the mirror
 
@@ -30,10 +30,26 @@ Prod has `ATL_ALLOW_APPLY_MUTATION=true` and `ATL_MIRROR_SCHEMA=false`. Callers 
 2. Caller CI runs `tide plan --against=<prod-endpoint>` on the PR. `PlanSchema` is read-only and side-effect-free; CI submits the local files in-memory and the server returns the plan without touching its database.
 3. PR merges.
 4. Caller CI (on merge) runs `tide apply --against=<prod-endpoint>`.
-5. Server validates, applies the DDL migration to Postgres, and persists the new IR checkpoint.
-6. Restart the server (a rolling restart is sufficient). The restarted server loads the new IR checkpoint and serves the updated schema.
+5. Server acquires an advisory lock, validates, applies the DDL migration, and persists the new IR checkpoint with a content hash. CAS (compare-and-swap) on the content hash rejects stale applies if the checkpoint moved since planning.
+6. A PostgreSQL trigger fires `NOTIFY atl_schema_changed`. The server's schema listener rebuilds entity metadata and swaps it atomically. In-flight requests complete on the old metadata; new requests see the updated schema immediately.
 
-No recompilation, no workspace manifest update. The server binary is generic and serves any entity described by the current IR.
+No restart, no recompilation, no workspace manifest update. A rolling restart is only needed when a `tide apply` introduces a brand-new entity (not just new fields). The server binary is generic and serves any entity described by the current IR.
+
+To update the typed Go client after a schema change, the caller runs `tide generate` from its own repo (see [caller-local generation](#caller-local-sdk-generation)).
+
+## Caller-local SDK generation
+
+The typed Go client is generated **in the caller's own repo**, scoped to only the namespaces that caller consumes. There is no shared central SDK and no dependency on a checkout of the atlantis repo for the generated types.
+
+`tide generate`:
+
+1. Fetches the canonical IR from the server via the `GetCanonicalIR` admin RPC. Proto field numbers come from the server's checkpoint, so the generated wire format matches the server exactly — the caller never re-lowers `.atl` files locally (which could assign different numbers).
+2. Filters the IR to the `generate:` namespaces in `tide.yaml`. A cross-namespace FK is a scalar column, so a caller that references another namespace's entity does not need that namespace's types unless it lists it in `generate:`.
+3. Reads the caller's `go.mod`, computes the package prefix `<module>/<output_dir>`, and emits proto sources (scoped namespaces + the embedded `atlantis/common/v1` protos) plus typed wrappers into `output_dir`. It then runs `buf generate` for the `.pb.go` wire types and `gofmt`.
+
+The result compiles inside the caller's module with the caller's own import paths. The only remaining `atlantis-go` dependency is the hand-written `jobs` worker runtime, for callers that run job workers — a normal library dependency, not generated code.
+
+The central `clients/go/` SDK (generated by `tidectl codegen` + `buf generate` from the atlantis repo) still exists for atlantis's own integration tests, but callers no longer consume it.
 
 ## Production path — gated (traditional)
 
@@ -55,7 +71,7 @@ Prod has `ATL_ALLOW_APPLY_MUTATION=false` and `ATL_MIRROR_SCHEMA=false`. The `Ap
 
 Step 7's order — apply migration then roll the server — only works if the new schema is backward-compatible with the old server binary. atlantis classifies each migration as additive, backfill-required, or breaking at apply time; only additive changes are safe for the migrate-then-roll order. Backfill-required and breaking changes need an explicit expand/contract sequence (apply additive parts → roll server → backfill → apply contract migration). See [migration ownership](migration-ownership.md).
 
-In the live-apply path, the compatibility contract is similar: `tide apply` persists the new IR but the running server continues to serve the old schema until restarted. The DDL migration must be backward-compatible with the still-running server (same constraint as the traditional path). After the rolling restart, the new IR takes effect.
+In the live-apply path, `tide apply` persists the new IR and the server hot-reloads within seconds. The DDL migration must still be backward-compatible: in-flight requests may reference the old schema during the brief reload window, and callers with stale typed clients continue to send the old proto shape until they regenerate. Additive changes (new fields, new entities) are always safe; type changes and removals need the same expand/contract discipline.
 
 ## The workspace manifest
 

@@ -86,6 +86,28 @@ Optional. Captures the plan output and posts it as a sticky comment on the PR:
 
 The sticky comment overwrites itself on each push, so the PR shows the latest plan only.
 
+## Keep the generated client in sync
+
+The typed Go client lives in the caller repo (under `output_dir`) and is regenerated with `tide generate`. Commit it alongside the `.atl` change that motivates it. A CI check guards against forgetting: regenerate against the server and fail if the working tree drifts.
+
+```yaml
+- name: Install buf
+  uses: bufbuild/buf-setup-action@v1
+
+- name: Check generated client is current
+  env:
+    TIDE_TLS_CERT: .tls/cert.pem
+    TIDE_TLS_KEY:  .tls/key.pem
+    TIDE_TLS_CA:   .tls/ca.pem
+    ATL_ENDPOINT:  atlantis-staging.internal:9090
+  run: |
+    tide generate
+    git diff --exit-code -- "$(yq '.output_dir' tide.yaml)" \
+      || { echo "::error::generated client is stale — run 'tide generate' and commit"; exit 1; }
+```
+
+`tide generate` needs `buf` on the runner and reads the caller's `go.mod` for the module path, so run it from the repo root. The `generate:` namespaces and `output_dir` come from `tide.yaml`. Plan against the same environment you generate against so the proto field numbers match the server you'll deploy to.
+
 ## TLS credentials
 
 Store the client cert, client key, and CA as GitHub Secrets and write them to files on the runner; the workflow above shows the pattern. The `TIDE_TLS_*` environment variables override `tls.*` in `tide.yaml`, so the on-disk paths stay out of committed config.
@@ -102,5 +124,6 @@ Open a PR that adds a column to an `.atl` file. The `tide plan` check should app
 
 ## Related
 
+- [`tide generate`](../reference/cli-tide.md#tide-generate) — regenerate the typed client; commit it alongside the schema change.
 - [`tide` CLI reference](../reference/cli-tide.md) — full `tide plan` flag list and exit codes.
 - [Schema flow](../architecture/schema-flow.md) — how dev and prod schema state diverge.

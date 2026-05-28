@@ -18,11 +18,17 @@ endpoint: <host:port>         # required
 schema_paths:                 # required — at least one directory
   - internal/foo
   - internal/bar
+output_dir: internal/gen/pcclient   # required for `tide generate`
+generate:                     # required for `tide generate` — namespaces to emit
+  - consumer
+  - vendor
 tls:                          # optional
   cert: <file>
   key:  <file>
   ca:   <file>
 ```
+
+`output_dir` is the directory inside the caller's own Go module where `tide generate` writes the typed client. `generate` lists the namespaces the caller consumes (its own plus any it reads cross-namespace). Both are only required for `tide generate`; the other commands ignore them.
 
 YAML does not expand `${VAR}` placeholders. The config loader rejects literal `${VAR}` strings in the three TLS fields specifically (other fields are passed through verbatim).
 
@@ -39,6 +45,7 @@ Each path is walked recursively; every file with extension `.atl` is included. O
 | `TIDE_TLS_CERT` | `tls.cert` | Path to mTLS client certificate. |
 | `TIDE_TLS_KEY` | `tls.key` | Path to mTLS client key. |
 | `TIDE_TLS_CA` | `tls.ca` | Path to CA certificate for verifying the server. |
+| `ATL_GENERATE` | `generate` | Comma-separated namespace list; replaces the `generate:` field for `tide generate`. |
 
 `TIDE_CALLER` and `TIDE_ENDPOINT` are not consulted; use `ATL_CALLER` / `ATL_ENDPOINT`.
 
@@ -91,6 +98,31 @@ tide pull [--force]
 | `--force` | Pull even if the local cache version equals the server's. |
 
 `.tide-cache/` mirrors every caller's currently-registered `.atl` files. It is not the generated Go client. Add it to `.gitignore`.
+
+### `tide generate`
+
+Generates the typed Go client SDK into the caller's own repo, scoped to the namespaces in `generate:`. Run from the caller repo root.
+
+```
+tide generate
+```
+
+The flow:
+
+1. Fetch the canonical IR from the server (the `GetCanonicalIR` admin RPC). The canonical IR is the server's persisted schema checkpoint, with proto field numbers already assigned. Pulling those numbers from the server means the generated wire format matches it exactly — the caller never re-derives numbers locally.
+2. Filter the IR to the `generate:` namespaces. The caller gets typed clients only for what it consumes, not every caller's entities.
+3. Read the caller's `go.mod` to compute the package prefix `<module>/<output_dir>`.
+4. Emit proto sources (the scoped namespaces plus the embedded `atlantis/common/v1` protos) and the typed Go wrappers into `output_dir`, then shell out to `buf generate` for the `.pb.go` wire types and `gofmt` the result.
+
+Requirements:
+
+- `output_dir` and a non-empty `generate:` list in `tide.yaml`.
+- [`buf`](https://buf.build/docs/installation) on `PATH`.
+- Run from the caller repo root (so `go.mod` is readable).
+
+The generated tree lives in the caller's module (e.g. `internal/gen/pcclient/{pb,client}/...`) and is imported with the caller's own import path. Commit it like any other generated code — it is the caller's source, not a shared artifact. There is no dependency on a central `atlantis-go` SDK for the generated types; only the hand-written `atlantis-go/jobs` runtime remains a normal library dependency for callers that run job workers.
+
+Re-run `tide generate` after any `tide apply` that changes a namespace the caller consumes.
 
 ### `tide list`
 
