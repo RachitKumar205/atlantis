@@ -19,9 +19,14 @@ GOFLAGS ?=
 
 BIN_DIR := ./bin
 
+# Production image + version stamp (overridable). VERSION is baked into the
+# binary via the Dockerfile's -ldflags and surfaced in the startup log.
+IMAGE   ?= atlantis:local
+VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo dev)
+
 .PHONY: help
 help:
-	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-22s %s\n", $$1, $$2}'
+	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-22s %s\n", $$1, $$2}'
 
 # ---------- build ----------
 
@@ -194,6 +199,32 @@ dev-reset-db: ## Drop local schema + reapply all committed migrations (DESTRUCTI
 	@psql "$(PG_URL)" -c "DROP TABLE IF EXISTS atlantis_schema_migrations_infra, atlantis_schema_migrations_tidectl CASCADE;" >/dev/null
 	@echo "==> re-applying migrations..."
 	@$(MAKE) migrate-up
+
+# ---------- deploy ----------
+#
+# Single-VM production deploy: the atlantis server runs as a systemd-managed
+# Docker container (deploy/atlantis.service) against host-native Postgres +
+# memcached. The docker run lives in the unit, not here, so the service boots
+# independently of this checkout. See docs/guides/deploy-to-production.md.
+
+.PHONY: image
+image: ## Build the production image, version-stamped from git
+	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE) .
+
+.PHONY: deploy
+deploy: image ## Rebuild the image and restart the atlantis service (run git pull first)
+	sudo systemctl restart atlantis
+	@echo "==> deployed $(IMAGE) ($(VERSION))"
+
+.PHONY: systemd-install
+systemd-install: ## Install/refresh the systemd unit, then enable + start
+	sudo install -m 0644 deploy/atlantis.service /etc/systemd/system/atlantis.service
+	sudo systemctl daemon-reload
+	sudo systemctl enable --now atlantis
+
+.PHONY: logs
+logs: ## Tail the atlantis service logs (journald)
+	journalctl -u atlantis -f
 
 # ---------- lint / quality ----------
 

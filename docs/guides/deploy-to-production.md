@@ -66,9 +66,11 @@ The binary is generic — it contains no caller-specific entity handlers. The sa
 Build a container image for image-based deploys:
 
 ```
-docker build -t <your-registry>/atlantis:v0.1.0 .
+docker build --build-arg VERSION=v0.1.0 -t <your-registry>/atlantis:v0.1.0 .
 docker push <your-registry>/atlantis:v0.1.0
 ```
+
+The `VERSION` build-arg is stamped into the binary and printed at startup. `make image` derives it from `git describe` (see [Single-VM deploy](#single-vm-deploy-systemd--docker)).
 
 For VM-based deploys, ship a tarball instead: `tar czf atlantis-v0.1.0.tgz atlantis-server tidectl migrations/`. Both `atlantis-server` and `tidectl` need to land on the host — `tidectl` runs the migration step before the server starts.
 
@@ -132,6 +134,61 @@ grpcurl -cacert ca.crt -cert client.crt -key client.key \
 
 A success response returns the current merged schema as JSON. Anything else (TLS handshake failure, no response) indicates a problem; check the server logs.
 
+## Single-VM deploy (systemd + Docker)
+
+The steps above are the general flow. For a single VM with **host-native Postgres and memcached**, atlantis runs as a systemd-managed Docker container. The repo ships the unit (`deploy/atlantis.service`) and Makefile targets that reduce the flow to a few commands.
+
+**Build the image** (`make image` — version-stamped from `git describe`; see [step 5](#5-ship-the-artifacts)):
+
+```
+make image
+```
+
+**Lay down config and certs** under `/etc/atlantis`. The container runs as uid 10001, so the server key must be readable by that uid:
+
+```
+sudo mkdir -p /etc/atlantis/tls
+# copy ca.crt, server.crt, server.key into /etc/atlantis/tls
+sudo chown 10001:10001 /etc/atlantis/tls/server.key
+sudo chmod 600 /etc/atlantis/tls/server.key
+
+cp deploy/atlantis.env.example /etc/atlantis/atlantis.env   # then fill the PG password
+sudo chmod 600 /etc/atlantis/atlantis.env
+```
+
+`deploy/atlantis.env.example` is the prod env template (see the [TLS](#tls) requirements above). It keeps `AUTO_MIGRATE=false` and `ATL_ALLOW_APPLY_MUTATION=false`, both deliberate for production.
+
+**Apply migrations** ([step 7](#7-run-migrations)) with `./tidectl migrate-up` — not `make migrate-up`, whose tidectl path is dev-only. Then install the service:
+
+```
+make systemd-install    # installs the unit, daemon-reload, enable --now
+```
+
+**Verify:**
+
+```
+systemctl status atlantis
+curl -fsS http://127.0.0.1:8081/readyz && echo OK
+make logs               # journalctl -u atlantis -f
+```
+
+**Redeploy** after pulling new code:
+
+```
+git pull
+make deploy             # rebuild image, then sudo systemctl restart atlantis
+```
+
+The unit is self-contained — it runs `docker run` directly rather than shelling out to `make`, so the service boots independently of this checkout:
+
+- `--network host` so the container reaches host-native Postgres/memcached on `127.0.0.1`.
+- `After=postgresql.service memcached.service` to order boot behind its dependencies.
+- `TimeoutStopSec=45` to cover the server's ~30s drain window (15s gRPC stop + 10s outbox drain + 5s health shutdown; see [Shutdown](#shutdown)) before systemd sends `SIGKILL`.
+
+This is single-node only: there's no rolling deploy, so `make deploy` causes a brief gap on restart.
+
+For a public endpoint, keep mTLS terminating **at atlantis** (the caller identity is the client-cert CN) and run any reverse proxy in TCP/L4 passthrough mode. A TLS-terminating proxy would strip the client cert and collapse every caller into one identity.
+
 ## Schema change workflow (runtime dispatch)
 
 With `ATL_ALLOW_APPLY_MUTATION=true`, schema changes no longer require a server rebuild. The workflow:
@@ -154,7 +211,15 @@ JSON is the default log format. All levels except `debug` emit structured JSON t
 
 ## Health checks
 
-The server implements the standard [gRPC Health Checking protocol](https://grpc.io/docs/guides/health-checking/). Use [grpc_health_probe](https://github.com/grpc-ecosystem/grpc-health-probe) from a Kubernetes probe or any other orchestrator:
+The server exposes both an HTTP and a gRPC health surface.
+
+**HTTP** — on `HEALTH_LISTEN` (default `:8081`), with no mTLS, so it's the simplest probe for orchestrators and the Docker `HEALTHCHECK`:
+
+- `/healthz` — liveness; returns 200 whenever the process is up.
+- `/readyz` — readiness; 200 only when Postgres, memcached, and the outbox worker are all healthy, 503 otherwise. It returns 503 immediately once shutdown begins, so a load balancer drains the instance before the server stops.
+- `/metrics` — Prometheus.
+
+**gRPC** — the standard [gRPC Health Checking protocol](https://grpc.io/docs/guides/health-checking/) on the gRPC port. Because mTLS is enforced on every RPC (no health-check exemption), [grpc_health_probe](https://github.com/grpc-ecosystem/grpc-health-probe) needs a client cert:
 
 ```
 grpc_health_probe \
@@ -164,11 +229,11 @@ grpc_health_probe \
   -tls-client-key=/etc/atlantis/probe.key
 ```
 
-The probe needs a client cert because mTLS is enforced on every RPC (there's no health-check exemption). atlantis does not expose a dedicated HTTP `/healthz` endpoint; use the gRPC probe.
+Use the HTTP endpoints for liveness/readiness probes (no cert needed); use the gRPC probe to exercise the mTLS path.
 
 ## Shutdown
 
-On `SIGINT` or `SIGTERM` the server cancels its top-level context and calls gRPC `GracefulStop`, which waits for in-flight RPCs to drain before exiting. The grace period is hardcoded at 15 seconds; after that the server forces a stop. Set your orchestrator's `terminationGracePeriodSeconds` to at least 20 seconds to allow the server's own timeout to fire before the orchestrator sends `SIGKILL`.
+On `SIGINT` or `SIGTERM` the server stops accepting new RPCs and runs a bounded shutdown: gRPC `GracefulStop` (up to 15s for in-flight RPCs), a final outbox drain (up to 10s), then the health HTTP server (up to 5s) — about 30s worst case. Set your orchestrator's `terminationGracePeriodSeconds` to at least 35 seconds so the server's own timeouts fire before `SIGKILL`.
 
 ## Backup and restore
 
