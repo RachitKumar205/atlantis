@@ -39,6 +39,10 @@ import (
 	"github.com/rachitkumar205/atlantis/jobs"
 )
 
+// version is stamped at build time via -ldflags "-X main.version=...".
+// Unstamped local builds report "dev".
+var version = "dev"
+
 func main() {
 	cfg, err := loadConfig()
 	if err != nil {
@@ -48,6 +52,7 @@ func main() {
 	}
 
 	log := buildLogger(cfg)
+	log.Info("atlantis starting", "version", version)
 
 	// Top-level context cancels on SIGINT / SIGTERM.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
