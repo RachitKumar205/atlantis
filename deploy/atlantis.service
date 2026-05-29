@@ -1,0 +1,23 @@
+[Unit]
+Description=atlantis gRPC server
+Wants=network-online.target
+After=network-online.target docker.service postgresql.service memcached.service
+Requires=docker.service
+
+[Service]
+Restart=on-failure
+RestartSec=5
+# Reap any container left behind by an unclean stop before starting.
+ExecStartPre=-/usr/bin/docker rm -f atlantis
+ExecStart=/usr/bin/docker run --rm --name atlantis \
+  --network host \
+  --env-file /etc/atlantis/atlantis.env \
+  -v /etc/atlantis/tls:/etc/atlantis/tls:ro \
+  atlantis:local
+# atlantis drains on SIGTERM (~30s worst case: 15s gRPC GracefulStop + 10s
+# outbox drain + 5s health shutdown). docker run forwards SIGTERM to PID 1;
+# give the drain room before systemd sends SIGKILL.
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target
