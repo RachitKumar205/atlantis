@@ -1,0 +1,357 @@
+/* Setup wizard — full-screen, depth-gauge stepper.
+   Matches the design's .setup + .gauge spec: 620px column anchored 9vh
+   from the top, three flex-1 .gstep tracks that fill brass on done/active,
+   meter-style depth labels ("0m", "120m", "340m") instead of generic
+   numbered circles. */
+
+.root {
+  height: 100vh;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  background: var(--canvas-0);
+  position: relative;
+  overflow: hidden;
+  padding-top: 9vh;
+}
+
+.bathyBg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.bathyBg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(circle, var(--ink-4) 1px, transparent 1px);
+  background-size: 32px 32px;
+  opacity: .06;
+}
+
+.card {
+  position: relative;
+  z-index: 1;
+  width: 620px;
+  max-width: calc(100vw - 32px);
+  margin: 0 16px;
+  /* No card border here — the design's setup screen has the .card chrome
+     applied only to the inner panel, not the outer column. */
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+/* Wordmark — same as login but smaller, with a "setup" muted subtitle. */
+.header {
+  margin-bottom: 6px;
+}
+
+.wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--ink-0);
+  letter-spacing: -.02em;
+  font-family: var(--sans);
+}
+
+.wordmarkAccent {
+  position: relative;
+  display: inline-block;
+}
+
+.wordmarkAccent::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: -1px;
+  transform: translateX(-50%);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.subtitle {
+  display: inline;
+  margin-left: 6px;
+  font-weight: 400;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+/* Depth-gauge stepper ---------------------------------------------------- */
+.steps {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  margin: 8px 0 34px;
+}
+
+.stepItem {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  position: relative;
+}
+
+.stepNumber {
+  /* Repurposed: this slot is now the depth-track meter rather than a
+     numbered chip. The original class name is preserved so JSX resolves. */
+  height: 3px;
+  background: var(--line);
+  border-radius: 2px;
+  overflow: hidden;
+  position: relative;
+}
+
+.stepNumber::after {
+  content: '';
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width var(--med) var(--ease);
+}
+
+.stepNumber--active::after {
+  width: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-tint));
+}
+
+.stepNumber--done::after {
+  width: 100%;
+}
+
+/* Connector between steps — no longer used; depth-gauge tracks butt up
+   against each other with a 6px gap. Kept for compat. */
+.stepConnector,
+.stepConnector--done {
+  display: none;
+}
+
+.stepLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.stepLabel--active {
+  color: var(--ink-0);
+}
+
+/* Card containing the active step's body --------------------------------- */
+.card__panel {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  background: var(--canvas-2);
+}
+
+.cardHead {
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line-soft);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cardTitle {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--ink-0);
+  white-space: nowrap;
+}
+
+.cardBody {
+  padding: 18px;
+}
+
+/* Form fields (re-used by step 1 + step 3) ------------------------------- */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.label {
+  font-size: 11.5px;
+  color: var(--ink-2);
+  font-weight: 500;
+}
+
+.input {
+  height: 34px;
+  background: transparent;
+  color: var(--ink-0);
+  border: none;
+  border-bottom: 1px solid var(--line-strong);
+  font-size: 13.5px;
+  padding: 0 1px 1px;
+  font-family: var(--sans);
+  transition: border-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+  outline: none;
+  width: 100%;
+}
+
+.input::placeholder { color: var(--ink-3); }
+
+.input:focus {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.input.mono {
+  font-family: var(--mono);
+}
+
+.input--error {
+  border-color: var(--coral);
+}
+
+.input[readonly] {
+  color: var(--ink-2);
+  cursor: default;
+  border-bottom-style: dashed;
+}
+
+.primaryBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-family: var(--sans);
+  cursor: pointer;
+  transition: background var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+
+.primaryBtn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.primaryBtn:active:not(:disabled) {
+  transform: translateY(0.5px);
+}
+
+.primaryBtn:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+.error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--coral-tint);
+  border: 1px solid rgba(214, 120, 120, .22);
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  color: var(--coral);
+  margin-top: 4px;
+  line-height: 1.5;
+}
+
+/* Step 2 — connectivity check ------------------------------------------- */
+.connectivityPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.endpointDisplay {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  height: 34px;
+  background: var(--canvas-1);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-1);
+}
+
+.endpointLabel {
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-3);
+  flex-shrink: 0;
+}
+
+/* Probe-test rows — borderless, single rule between rows. */
+.checkRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 12.5px;
+}
+
+.checkRow:last-child {
+  border-bottom: none;
+}
+
+.checkRow--success { color: var(--ink-1); }
+.checkRow--error   { color: var(--ink-1); }
+
+.checkLabel {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-1);
+  flex: 1;
+  white-space: nowrap;
+}
+
+.checkStatus {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.checkStatus--ok      { color: var(--sage); }
+.checkStatus--error   { color: var(--coral); }
+.checkStatus--pending { color: var(--ink-3); }
+
+.spinner {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 1.5px solid var(--line-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 2s; }
+}

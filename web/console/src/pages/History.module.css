@@ -1,0 +1,357 @@
+/* History — schema version timeline grouped by day.
+   Matches the design's .timeline + .tl-daygroup + .tlnode spec. The
+   vertical track is a hairline left of the column; nodes are 11px rings
+   that fill brass + grow a 4px halo when expanded. */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--canvas-0);
+}
+
+.header {
+  padding: 18px var(--pad-page);
+  border-bottom: 1px solid var(--line-soft);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.headerTitle {
+  font-family: var(--sans);
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ink-0);
+  letter-spacing: -0.015em;
+}
+
+.headerMeta {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+
+.body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px var(--pad-page) 40px;
+}
+
+.timeline {
+  position: relative;
+  padding-left: 4px;
+  max-width: var(--maxw);
+  margin: 0 auto;
+}
+
+/* Day group head — uppercase label with a hairline trailing rule. */
+.timelineTrack {
+  /* legacy class — vestigial; the design uses .tl-daygroup grouping
+     directly so we no longer rely on a single global track. */
+  display: none;
+}
+
+/* Each version entry sits inside a day-group; the vertical line is drawn
+   on .versionEntry::before so it connects nodes within a day. */
+.versionEntry {
+  position: relative;
+  padding: 0 0 0 40px;
+}
+
+.versionEntry::before {
+  content: '';
+  position: absolute;
+  left: 13px;
+  top: 0;
+  bottom: -1px;
+  width: 1px;
+  background: var(--line);
+}
+
+.versionEntry:last-child::before {
+  bottom: auto;
+  height: 22px;
+}
+
+/* Timeline node — 11px ring; fills brass when the version is expanded. */
+.timelineNode {
+  position: absolute;
+  left: 8px;
+  top: 16px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--canvas-0);
+  border: 1.5px solid var(--line-strong);
+  z-index: 1;
+  transition: all var(--fast) var(--ease);
+}
+
+.versionEntry--expanded .timelineNode {
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-tint);
+}
+
+/* Version card — hairline border, slight bg lift, no shadow. */
+.versionCard {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  margin: 6px 0;
+  background: var(--canvas-2);
+  overflow: hidden;
+  transition: border-color var(--fast) var(--ease);
+  cursor: pointer;
+}
+
+.versionCard:hover {
+  border-color: var(--line);
+}
+
+.versionEntry--expanded .versionCard {
+  border-color: var(--line-strong);
+}
+
+/* Summary bar inside the card. */
+.versionSummary {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 13px 16px;
+}
+
+.versionNumber {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent);
+}
+
+.versionMeta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.callerName {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-1);
+  white-space: nowrap;
+}
+
+.timestamp {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.changeBadges {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.eventType {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+  background: transparent;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  flex-shrink: 0;
+}
+
+.eventType--rollback {
+  color: var(--accent);
+  border-color: var(--accent-tint-2);
+  background: var(--accent-tint);
+}
+
+/* Diff section — expanded version detail. */
+.diffSection {
+  padding: 0 16px 16px;
+}
+
+.diffHeader {
+  display: none;  /* design's diff section has no separate header */
+}
+
+.diffTitle {
+  font-size: 10.5px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-3);
+}
+
+.diffContent {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.diffBlock {
+  /* Group of changes of the same kind. */
+  margin-bottom: 12px;
+}
+
+.diffBlock:last-child { margin-bottom: 0; }
+
+.diffBlockLabel {
+  font-size: 10.5px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.diffBlockLabel--add      { color: var(--sage); }
+.diffBlockLabel--backfill { color: var(--accent); }
+.diffBlockLabel--break    { color: var(--coral); }
+
+.changeList {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.changeLine {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.changeLine:last-child { border-bottom: none; }
+
+.changeLine--add      { background: var(--sage-tint); }
+.changeLine--backfill { background: var(--accent-tint); }
+.changeLine--break    { background: var(--coral-tint); }
+
+.changeGutter {
+  width: 14px;
+  text-align: center;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.changeGutter--add      { color: var(--sage); }
+.changeGutter--backfill { color: var(--accent); }
+.changeGutter--break    { color: var(--coral); }
+
+.changeText {
+  flex: 1;
+  color: var(--ink-1);
+}
+
+.changeText strong {
+  color: var(--ink-0);
+  font-weight: 500;
+}
+
+/* SQL block ------------------------------------------------------------- */
+.sqlBlock {
+  margin-top: 12px;
+}
+
+.sqlPre {
+  margin-top: 6px;
+  padding: 13px 15px;
+  background: var(--canvas-0);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-1);
+  overflow-x: auto;
+  line-height: 1.7;
+  white-space: pre;
+}
+
+/* Load more / empty / error -------------------------------------------- */
+.loadMore {
+  text-align: center;
+  padding: 20px;
+}
+
+.loadMoreBtn {
+  height: 30px;
+  background: transparent;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  color: var(--ink-1);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 0 16px;
+  cursor: pointer;
+  transition: all var(--fast) var(--ease);
+  font-family: var(--sans);
+}
+
+.loadMoreBtn:hover {
+  color: var(--ink-0);
+  background: var(--canvas-2);
+  border-color: var(--line);
+}
+
+.emptyState {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 56px 24px;
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+
+.errorMsg {
+  padding: 28px;
+  color: var(--coral);
+  font-size: 12.5px;
+  font-family: var(--mono);
+}
+
+/* Day-group head — for grouping versions when we later add it. */
+.dayHead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 0 14px 40px;
+}
+
+.dayHead h4 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-3);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.dayHead .line {
+  flex: 1;
+  height: 1px;
+  background: var(--line-soft);
+}

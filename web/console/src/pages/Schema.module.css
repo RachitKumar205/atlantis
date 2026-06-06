@@ -1,0 +1,840 @@
+/* Schema browser — the product's signature surface.
+   Three panes with hairline dividers; active rows marked by a 2px brass
+   tick on the left edge (the same vocabulary as the sidebar). The detail
+   pane treats the entity name as a typographic anchor — big mono, with
+   a single ochre dot punctuating the namespace. */
+
+.root {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg-canvas);
+}
+
+/* ── Panes ──────────────────────────────────────────────────────────── */
+.nsPane,
+.entityPane {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.nsPane     { width: 208px; }
+.entityPane { width: 272px; }
+
+.detailPane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-canvas);
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* ── Pane headers ─────────────────────────────────────────────────────
+   Bottom-rule only; no fill. Section label uses the same uppercase
+   tracking idiom as everything else in the system. */
+.paneHeader {
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  min-height: 44px;
+  box-sizing: border-box;
+}
+
+.paneTitle {
+  font-size: 10.5px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-muted);
+}
+
+.paneCount {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  color: var(--ink-muted);
+  letter-spacing: 0.02em;
+}
+
+.paneScroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 8px;
+}
+
+/* ── Namespace items ──────────────────────────────────────────────────
+   Active = neutral elevated bg + brass tick on left, NO color fill on
+   the row. Hover = subtle elevation only. The tick is the entire signal. */
+.nsItem {
+  display: flex;
+  align-items: center;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+  border: 1px solid transparent;
+  color: var(--ink-muted);
+  font-size: 13px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  position: relative;
+}
+
+.nsItem:hover {
+  background: var(--bg-elevated);
+  color: var(--ink-secondary);
+}
+
+.nsItem--active {
+  background: var(--bg-elevated);
+  color: var(--ink);
+}
+
+.nsItem--active::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 7px;
+  bottom: 7px;
+  width: 2px;
+  background: var(--accent);
+  border-radius: 0 1px 1px 0;
+}
+
+.nsName {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: -0.005em;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nsBadge {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  color: var(--ink-muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+  letter-spacing: 0.02em;
+}
+
+.nsItem--active .nsBadge {
+  border-color: var(--line-strong);
+  color: var(--ink-secondary);
+}
+
+/* ── Entity items ─────────────────────────────────────────────────────
+   Same active-tick pattern as namespaces. Two-line row (name + field
+   count) so the eye has somewhere to land. */
+.entityItem {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+  border: 1px solid transparent;
+  width: 100%;
+  text-align: left;
+  background: none;
+  position: relative;
+}
+
+.entityItem:hover {
+  background: var(--bg-elevated);
+}
+
+.entityItem--active {
+  background: var(--bg-elevated);
+}
+
+.entityItem--active::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: var(--accent);
+  border-radius: 0 1px 1px 0;
+}
+
+.entityRow1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.entityName {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--ink-secondary);
+  letter-spacing: -0.005em;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color var(--transition-fast);
+}
+
+.entityItem:hover .entityName,
+.entityItem--active .entityName {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.entityMeta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.fieldCount {
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+/* ── Detail pane header ───────────────────────────────────────────────
+   Mono "namespace.Entity" path with the namespace dimmed and the name in
+   full ink, then a metadata row of stacked label/value items underneath.
+   Spec mirrors the design's .detail__path + .detail__meta + .metaitem. */
+.detailHeader {
+  padding: 22px 28px 0;
+  border-bottom: 1px solid var(--line-soft);
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.detailHeading {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  padding-bottom: 18px;
+}
+
+.detailPath {
+  font-family: var(--mono);
+  font-size: 19px;
+  font-weight: 450;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.detailPathNamespace {
+  color: var(--ink-3);
+}
+
+.detailPathSep {
+  color: var(--ink-3);
+}
+
+.detailPathName {
+  color: var(--ink-0);
+}
+
+/* Stacked label/value metadata row beneath the path — labels above values.
+   Mirrors the .metaitem treatment in the design exactly. */
+.detailMeta {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin: 12px 0 0;
+}
+
+.detailMetaItem {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.detailMetaLabel {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-3);
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.detailMetaValue {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-1);
+  white-space: nowrap;
+}
+
+.detailMetaSep {
+  /* Visual separator is now spacing alone — metaitems flex-gap; the dot
+     dividers from the previous design are dropped. Kept the class so the
+     JSX still resolves but renders as empty. */
+  display: none;
+}
+
+.detailActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+
+.detailScroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 32px 32px;
+}
+
+/* ── Section labels ───────────────────────────────────────────────────*/
+.sectionLabel {
+  font-size: 10.5px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-muted);
+  margin-bottom: 10px;
+}
+
+/* ── Field table ──────────────────────────────────────────────────────
+   Dense, instrument-panel feel. Hairline rules only, no fills. Mono on
+   every data cell so columns align by character. */
+.fieldTable {
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: 28px;
+  font-size: 12.5px;
+}
+
+.fieldTable th {
+  background: var(--bg-surface);
+  padding: 8px 12px;
+  text-align: left;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-muted);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  font-family: var(--font-ui);
+}
+
+.fieldTable td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--ink-secondary);
+  vertical-align: middle;
+  letter-spacing: -0.003em;
+}
+
+.fieldTable tr:last-child td {
+  border-bottom: none;
+}
+
+.fieldTable tbody tr {
+  transition: background var(--transition-fast);
+}
+
+.fieldTable tbody tr:hover {
+  background: var(--bg-elevated);
+}
+
+.fieldName {
+  color: var(--ink);
+}
+
+/* Types stay in the body-ink range — color is reserved for FK refs, where
+   the cross-namespace signal is genuinely useful. */
+.fieldType {
+  color: var(--ink-muted);
+}
+
+.fieldType--fk {
+  color: var(--change-fk);
+}
+
+.nullableYes {
+  color: var(--ink-faint);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+.nullableNo {
+  color: var(--ink-secondary);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+/* The indexed marker is a tiny dot, not a chip. Reads as a precision
+   indicator on the side of a data cell. */
+.indexedBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-muted);
+  border: 1px solid var(--line);
+}
+
+/* ── Owners section ───────────────────────────────────────────────────*/
+.ownersSection {
+  margin-bottom: 28px;
+}
+
+.ownersList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ownerItem {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  transition: border-color var(--transition-fast);
+}
+
+.ownerItem:hover {
+  border-color: var(--line-strong);
+}
+
+.ownerCaller {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--ink);
+  flex: 1;
+}
+
+.ownerFieldCount {
+  font-size: 11px;
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Empty + loading states ──────────────────────────────────────────*/
+.emptyDetail {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+}
+
+.depthGlyph {
+  opacity: 0.20;
+}
+
+.emptyText {
+  font-size: 12.5px;
+  color: var(--ink-muted);
+  letter-spacing: -0.005em;
+}
+
+.skeletonRow {
+  height: 28px;
+  margin: 4px 8px;
+  border-radius: var(--radius-sm);
+}
+
+.skeletonRow:nth-child(2) { width: 85%; }
+.skeletonRow:nth-child(3) { width: 70%; }
+.skeletonRow:nth-child(4) { width: 90%; }
+.skeletonRow:nth-child(5) { width: 60%; }
+
+.errorMsg {
+  padding: 20px;
+  font-size: 12.5px;
+  color: var(--change-break);
+  font-family: var(--font-mono);
+}
+
+/* ── Edit button ──────────────────────────────────────────────────────*/
+.editBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast),
+              color var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.editBtn:hover {
+  border-color: var(--line-strong);
+  background: var(--bg-elevated);
+  color: var(--ink);
+}
+
+/* ── Edit panel ───────────────────────────────────────────────────────
+   When the operator opens the edit affordance, an inline panel slides
+   open above the field table. Reuses the form vocabulary. */
+.editPanel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  padding: 18px;
+  margin-bottom: 24px;
+}
+
+.editPanelHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.editPanelTitle {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  letter-spacing: -0.005em;
+}
+
+.editCloseBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.editCloseBtn:hover {
+  border-color: var(--change-break);
+  color: var(--change-break);
+}
+
+.editRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.editLabel {
+  font-size: 10.5px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-muted);
+  width: 84px;
+  flex-shrink: 0;
+}
+
+.editInput {
+  background: var(--bg-canvas);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  padding: 6px 10px;
+  outline: none;
+  width: 200px;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.editInput:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.editInputWide {
+  composes: editInput;
+  width: 360px;
+  max-width: 100%;
+}
+
+.editHint {
+  font-size: 11.5px;
+  color: var(--ink-muted);
+  margin-bottom: 8px;
+  padding-left: 96px;
+  line-height: 1.5;
+}
+
+.editError {
+  font-size: 12px;
+  color: var(--change-break);
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  background: var(--tint-break);
+  border: 1px solid color-mix(in srgb, var(--change-break) 22%, transparent);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  line-height: 1.5;
+}
+
+/* ── Op selector — three pill buttons for add/replace/remove ─────────*/
+.opSelector {
+  display: inline-flex;
+  background: var(--bg-canvas);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 2px;
+  gap: 2px;
+}
+
+.opBtn {
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  font-family: var(--font-mono);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  letter-spacing: 0.02em;
+}
+
+.opBtn:hover {
+  color: var(--ink-secondary);
+}
+
+.opBtn--active {
+  background: var(--bg-elevated);
+  color: var(--accent);
+}
+
+/* ── Preview section ──────────────────────────────────────────────────*/
+.previewSection {
+  margin-top: 14px;
+}
+
+.previewHeaderRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.ownerHint {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-muted);
+  letter-spacing: 0.02em;
+}
+
+/* ── Diff viewer ─────────────────────────────────────────────────────
+   Hairline-bordered code block. Add/remove rows get a 2px brass/coral
+   gutter on the left (drafting-table tick); never a tint fill across
+   the whole row. */
+.diffViewer {
+  background: var(--bg-canvas);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 8px 0;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+  line-height: 1.7;
+  overflow-x: auto;
+  margin-bottom: 12px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.diffLine {
+  padding: 0 16px;
+  color: var(--ink-muted);
+  white-space: pre;
+  border-left: 2px solid transparent;
+}
+
+.diffLine--add {
+  composes: diffLine;
+  color: var(--change-add);
+  border-left-color: var(--change-add);
+  background: var(--tint-add);
+}
+
+.diffLine--remove {
+  composes: diffLine;
+  color: var(--change-break);
+  border-left-color: var(--change-break);
+  background: var(--tint-break);
+}
+
+.diffGutter {
+  display: inline-block;
+  width: 16px;
+  opacity: 0.6;
+  user-select: none;
+}
+
+/* ── SQL section ─────────────────────────────────────────────────────*/
+.sqlSection {
+  margin-bottom: 12px;
+}
+
+.sqlToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--ink-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  margin-bottom: 6px;
+  letter-spacing: -0.003em;
+  transition: color var(--transition-fast);
+}
+
+.sqlToggle:hover {
+  color: var(--ink);
+}
+
+.sqlBlock {
+  background: var(--bg-canvas);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--ink-secondary);
+  overflow-x: auto;
+  white-space: pre;
+  line-height: 1.6;
+}
+
+/* ── Breaking warnings ───────────────────────────────────────────────*/
+.breakingList {
+  margin-bottom: 12px;
+}
+
+.breakingItem {
+  font-size: 12px;
+  color: var(--change-break);
+  padding: 6px 10px;
+  background: var(--tint-break);
+  border-left: 2px solid var(--change-break);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  margin-bottom: 4px;
+  font-family: var(--font-mono);
+  letter-spacing: -0.003em;
+  line-height: 1.5;
+}
+
+/* ── PR row ──────────────────────────────────────────────────────────*/
+.prRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.prBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--bg-abyss);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.prBtn:hover:not(.prBtn--disabled) {
+  background: var(--accent-bright);
+  border-color: var(--accent-bright);
+}
+
+.prBtn--disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.prSuccess {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--ink-secondary);
+  padding: 9px 12px;
+  background: var(--tint-add);
+  border: 1px solid color-mix(in srgb, var(--change-add) 22%, transparent);
+  border-radius: var(--radius);
+}
+
+.prLink {
+  color: var(--accent);
+  text-decoration: none;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: -0.003em;
+}
+
+.prLink:hover {
+  color: var(--accent-bright);
+}

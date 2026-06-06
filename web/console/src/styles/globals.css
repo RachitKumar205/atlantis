@@ -1,0 +1,96 @@
+/* globals.css — compatibility shim.
+   The Bathysphere design lives in tokens.css + console.css + pages.css
+   (all imported by main.tsx). This file exists only to preserve a few
+   legacy aliases that surviving CSS modules still resolve against. */
+
+:root {
+  /* Legacy ink aliases used by some module CSS still in the tree. */
+  --ink:           var(--ink-0);
+  --ink-secondary: var(--ink-1);
+  --ink-muted:     var(--ink-2);
+  --ink-faint:     var(--ink-3);
+  --ink-disabled:  var(--ink-4);
+  --muted:         var(--ink-2);
+
+  /* Legacy surface aliases. */
+  --bg-abyss:    var(--canvas-0);
+  --bg-canvas:   var(--canvas-0);
+  --bg-surface:  var(--canvas-2);
+  --bg-elevated: var(--canvas-3);
+  --bg-raised:   var(--canvas-4);
+  --bg-overlay:  var(--canvas-5);
+  --bg-layer:    var(--canvas-2);
+
+  /* Legacy hairline names. */
+  --hairline:    var(--line-soft);
+  --line-bright: var(--line-strong);
+
+  /* Legacy semantic aliases. */
+  --change-add:       var(--sage);
+  --change-additive:  var(--sage);
+  --change-backfill:  var(--accent);
+  --change-break:     var(--coral);
+  --change-breaking:  var(--coral);
+  --change-fk:        var(--slate);
+  --tint-add:      var(--sage-tint);
+  --tint-backfill: var(--accent-tint);
+  --tint-break:    var(--coral-tint);
+  --tint-fk:       var(--slate-tint);
+  --accent-soft:   var(--accent-tint);
+  --accent-line:   var(--accent-tint-2);
+  --accent-bright: var(--accent-hover);
+
+  /* Legacy type aliases. */
+  --font-ui:   var(--sans);
+  --font-sans: var(--sans);
+  --font-mono: var(--mono);
+
+  /* Legacy motion aliases. */
+  --ease-out:           cubic-bezier(0.16, 1, 0.3, 1);
+  --transition-fast:    var(--fast) var(--ease);
+  --transition-medium:  var(--med) var(--ease);
+
+  /* Legacy geometry aliases. */
+  --sidebar-width: var(--rail-w);
+
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.25);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.38);
+  --shadow-lg: 0 24px 56px rgba(0,0,0,0.55);
+  --focus-ring: 0 0 0 2px var(--canvas-0), 0 0 0 3px var(--accent);
+}
+
+/* Legacy app-shell — replaced by .app from console.css but kept so a
+   page that hasn't migrated yet still renders. */
+.app-shell {
+  display: flex;
+  width: 100%;
+  min-height: 100vh;
+}
+
+.app-main {
+  flex: 1;
+  margin-left: var(--rail-w);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Legacy status-dot, used by Sidebar role indicator if a module still references it. */
+.status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-dot--healthy   { background: var(--sage);  box-shadow: 0 0 0 3px var(--sage-tint); }
+.status-dot--unhealthy { background: var(--coral); box-shadow: 0 0 0 3px var(--coral-tint); }
+.status-dot--unknown   { background: var(--ink-4); }
+
+/* Legacy .skeleton alias for .sk. */
+.skeleton {
+  background: linear-gradient(90deg, var(--canvas-2) 0%, var(--canvas-3) 50%, var(--canvas-2) 100%);
+  background-size: 200% 100%;
+  border-radius: var(--radius-sm);
+  animation: sk 1.4s var(--ease) infinite;
+}
