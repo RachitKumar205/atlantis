@@ -3,8 +3,19 @@
 /server
 /tide
 /tidectl
+/console
+/signer
+/-.o
 /bin/
 /dist/
+
+# Console SPA build output (placeholder cmd/console/dist/index.html is tracked)
+/cmd/console/dist/
+!/cmd/console/dist/index.html
+
+# web/console node_modules and local build artifacts
+/web/console/node_modules/
+/web/console/.vite/
 
 # Go test / coverage artifacts
 *.exe
