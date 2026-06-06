@@ -1,0 +1,109 @@
+# Release workflow for the atlantis CLIs (tide + tidectl).
+#
+# Triggers on any `v*` tag push (e.g. `git tag v0.4.0 && git push --tags`).
+# Builds tide + tidectl for linux/{amd64,arm64}, then aggregates the
+# tarballs + a single SHA256SUMS file into the auto-created GitHub
+# Release for the tag.
+#
+# Linux only for now: tide and tidectl both transitively depend on
+# pg_query_go (libpg_query via cgo), so a CGO-aware build is required.
+# linux/amd64 runs native on ubuntu-latest; linux/arm64 cross-compiles
+# from the same amd64 runner via gcc-aarch64-linux-gnu — both stay on
+# free amd64 runners on public AND private repos. macOS was tried via
+# zig cc cross-compile and rejected: zig's bundled macOS SDK stub
+# doesn't ship libresolv.tbd, which Go's net package links unconditionally
+# on darwin. Mac users build from source for now:
+#   go install github.com/<org>/atlantis/cmd/tide@v0.4.0
+#   go install github.com/<org>/atlantis/cmd/tidectl@v0.4.0
+#
+# Linux operators install the tarballs with:
+#   curl -sSL https://github.com/<org>/atlantis/releases/download/$VERSION/tidectl-$VERSION-linux-amd64.tar.gz \
+#     | tar -xz --strip-components=1 -C /usr/local/bin tidectl-*-linux-amd64/tidectl
+# Caller-repo CI workflows install tide the same way, swapping the binary name.
+
+name: release-clis
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write  # needed to create / attach to the GH release
+
+jobs:
+  build:
+    name: build ${{ matrix.os }}/${{ matrix.arch }}
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux, arch: amd64, runs-on: ubuntu-latest, cc: "" }
+          - { os: linux, arch: arm64, runs-on: ubuntu-latest, cc: aarch64-linux-gnu-gcc, apt-cross: gcc-aarch64-linux-gnu }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Install cross-toolchain (${{ matrix.apt-cross }})
+        if: matrix.apt-cross != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt-cross }}
+
+      - name: Build tide + tidectl tarballs (${{ matrix.os }}/${{ matrix.arch }})
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CC: ${{ matrix.cc }}
+        run: make release-clis-native VERSION=${{ github.ref_name }}
+
+      - name: Upload tarballs
+        uses: actions/upload-artifact@v4
+        with:
+          name: clis-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: attach to GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all platform tarballs
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        # Sorted by filename (second column) so the file is byte-identical
+        # across re-runs of the same VERSION + tree state — downstream
+        # installers that pin the sum don't churn.
+        run: |
+          cd dist
+          shasum -a 256 *.tar.gz | sort -k 2 > SHA256SUMS
+          ls -la
+
+      - name: Attach artifacts to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # softprops auto-creates the release if it doesn't already exist
+          # for this tag, so the same workflow handles both first-tag and
+          # republish-with-amended-binaries flows.
+          files: |
+            dist/tide-*.tar.gz
+            dist/tidectl-*.tar.gz
+            dist/SHA256SUMS
+          # Keep the release body whatever was set manually (or blank);
+          # release notes are written deliberately on the GitHub Release
+          # page when cutting a tag — not auto-generated here.
+          generate_release_notes: false
+          fail_on_unmatched_files: true
