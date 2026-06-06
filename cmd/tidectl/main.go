@@ -27,7 +27,11 @@ import (
 	"os"
 )
 
-const version = "0.1.0"
+// version is set at build time via -ldflags "-X main.version=v0.X.Y".
+// The default "dev" surfaces when run from a non-release build (go run,
+// go install from source, IDE) so operators don't mistake an
+// uninstalled binary for a release.
+var version = "dev"
 
 type command struct {
 	name string
@@ -40,7 +44,7 @@ func main() {
 		{"codegen", "Regenerate proto / Go / SQL / keys from .atl files", cmdCodegen},
 		{"plan", "Stage a migration from the current .atl file set", cmdPlan},
 		{"approve", "Promote a staged migration into migrations/", cmdApprove},
-		{"lint", "Parse + lower every .pc; exit 0 iff clean", cmdLint},
+		{"lint", "Parse + lower every .atl; exit 0 iff clean", cmdLint},
 		{"migrate-up", "Run golang-migrate up against $PG_URL", cmdMigrateUp},
 		{"migrate-down", "Run golang-migrate down 1 against $PG_URL", cmdMigrateDown},
 		{"dev", "Codegen + build + exec server from atlantis.dev.yaml (local iteration)", cmdDev},
