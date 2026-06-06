@@ -306,7 +306,7 @@ func (s *Server) handleSandboxBoot(w http.ResponseWriter, r *http.Request) {
 		// Empty body is OK — treat as default (sim, no determinism).
 		req = sandboxBootRequest{}
 	}
-	backend := sandbox.BackendSim
+	var backend sandbox.Backend
 	switch strings.ToLower(req.Backend) {
 	case "", "sim":
 		backend = sandbox.BackendSim
@@ -493,11 +493,6 @@ func (s *Server) handleSandboxSnapshotPut(w http.ResponseWriter, r *http.Request
 // so a single fork can't burn through a user's remaining sandbox slots.
 type sandboxForkRequest struct {
 	N int `json:"n"`
-}
-
-type sandboxForkResponse struct {
-	IDs      []string `json:"ids"`
-	BackendK string   `json:"backend"`
 }
 
 // handleSandboxFork implements the ownership-propagating Fork. Rather

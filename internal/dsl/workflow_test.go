@@ -33,6 +33,7 @@ workflow OnboardVendor in vendor {
 	}
 	if wf == nil {
 		t.Fatalf("expected WorkflowDecl")
+		return
 	}
 	if wf.Name != "OnboardVendor" || wf.Namespace != "vendor" {
 		t.Errorf("name/ns = %q/%q", wf.Name, wf.Namespace)

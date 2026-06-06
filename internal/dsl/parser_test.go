@@ -257,6 +257,7 @@ entity Outfit in consumer {
 	}
 	if cb == nil {
 		t.Fatal("expected cache block")
+		return
 	}
 	if !cb.HasReadThrough || cb.TTL != "10m" || cb.Tag != "consumer:{consumer_id}" {
 		t.Errorf("read_through shape: %+v", cb)

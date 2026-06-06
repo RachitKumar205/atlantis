@@ -90,7 +90,7 @@ func cmdSandboxBoot(args []string) int {
 		fmt.Fprintf(os.Stderr, "tide sandbox boot: listen: %v\n", err)
 		return 1
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	backend, reason, err := resolveBackend(*backendFlag, ir)
 	if err != nil {
@@ -181,7 +181,7 @@ func cmdSandboxShell(args []string) int {
 		fmt.Fprintf(os.Stderr, "tide sandbox shell: %v\n", err)
 		return 1
 	}
-	defer sb.Close()
+	defer func() { _ = sb.Close() }()
 
 	fmt.Println("atlantis sandbox shell — in-memory schema-true REPL")
 	fmt.Println("  .tables                          list entities")
