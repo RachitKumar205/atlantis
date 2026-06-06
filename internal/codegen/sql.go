@@ -15,9 +15,10 @@ import (
 //   - One file per call (caller decides the filename / sequence number).
 //   - Up and down are returned as separate strings; the caller writes them
 //     to disk side-by-side (NNNN_<name>.up.sql, NNNN_<name>.down.sql).
-//   - Every entity lives in the `atlantis` schema. Namespaces are
-//     preserved in the IR for future re-splitting but the SQL emitter
-//     unifies them.
+//   - Entities default to the `atlantis` schema; the `table "schema.table"`
+//     override routes them elsewhere, and the emitter issues
+//     CREATE SCHEMA IF NOT EXISTS for each non-default target before any
+//     CREATE TABLE.
 //   - Reversibility: every up has a matching down. CI runs up/down/up
 //     against a fresh DB.
 //
@@ -27,9 +28,10 @@ import (
 //   - Cache and query_timeout changes do not produce SQL (they affect server
 //     behavior only). They are reflected in the script as a no-op comment so
 //     the file isn't empty when those are the only changes.
-//   - Schema-qualified atlantis.* names are used throughout, with no
-//     search_path manipulation, so the emitted SQL is safe to run from any
-//     role with sufficient privileges.
+//   - Schema-qualified names throughout (atlantis.* by default; the
+//     schema from `table "schema.table"` when overridden), with no
+//     search_path manipulation, so the emitted SQL is unambiguous
+//     regardless of the caller's session search_path.
 //
 // SQLScripts is the migration output of one emit pass. Up + Down are the
 // legacy single-script forms — what plain `tide apply` consumes. The four
@@ -85,13 +87,29 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 	up := &sqlBuilder{}
 	down := &sqlBuilder{}
 
-	// Header. Identifies which changes the script encodes, for human review.
+	// Static banner. Per-change banners come from emitClass below.
 	up.line("-- atlantis migration (generated)")
-	up.line("-- DO NOT EDIT BY HAND. Re-run `tidectl plan` after editing .atl files.")
+	up.line("-- DO NOT EDIT BY HAND. Re-run `tide plan` after editing .atl files.")
 	up.blank()
 	down.line("-- atlantis migration (generated, down)")
 	down.line("-- DO NOT EDIT BY HAND.")
 	down.blank()
+
+	// Ensure every Postgres schema referenced by a newly-added entity exists
+	// before any CREATE TABLE in that schema runs. CREATE SCHEMA IF NOT
+	// EXISTS is idempotent, so re-emitting it on a follow-up migration that
+	// happens to add another entity to the same schema is harmless. The
+	// `atlantis` and `public` schemas are skipped — `atlantis` is created
+	// by the infra migrations at server boot, and `public` always exists.
+	// Down does NOT drop schemas: a schema may hold non-atlantis objects,
+	// and a rollback that leaves an empty schema is a tiny, harmless
+	// artifact compared to risking data loss in unrelated tables.
+	for _, name := range collectNewSchemas(d.Additive, newByID) {
+		up.linef("CREATE SCHEMA IF NOT EXISTS %s;", quoteIdent(name))
+	}
+	if len(collectNewSchemas(d.Additive, newByID)) > 0 {
+		up.blank()
+	}
 
 	// Process all changes in a deterministic order. We split by class so the
 	// reader sees additive first, then any backfill-required changes (with
@@ -124,6 +142,104 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 		scripts.BackfillFields = fields
 	}
 	return scripts, nil
+}
+
+// collectRequiredExtensions walks newIR and returns the sorted set of
+// Postgres extension names the schema depends on. Triggers:
+//
+//	vector(N) column      → vector
+//	hypertable entity     → timescaledb
+//	citext column         → citext
+//
+// Used by EmitInitial to emit only the CREATE EXTENSION calls the schema
+// actually needs. The server's apply-time auto-enable path
+// (internal/server/admin/extensions.go) uses the same trigger list to
+// drive pg_available_extensions / pg_extension checks at apply time.
+func collectRequiredExtensions(newIR *dsl.IR) []string {
+	seen := map[string]struct{}{}
+	add := func(name string) { seen[name] = struct{}{} }
+	for i := range newIR.Entities {
+		e := &newIR.Entities[i]
+		if e.Kind == dsl.EntityKindHypertable {
+			add("timescaledb")
+		}
+		for j := range e.Fields {
+			collectFieldExtensions(&e.Fields[j].Type, add)
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for s := range seen {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// collectFieldExtensions descends through Array/Elem so a hypothetical
+// `[]vector(N)` still triggers pgvector.
+func collectFieldExtensions(t *dsl.FieldType, add func(string)) {
+	if t == nil {
+		return
+	}
+	switch t.Name {
+	case "vector":
+		add("vector")
+	case "citext":
+		add("citext")
+	}
+	if t.Array && t.Elem != nil {
+		collectFieldExtensions(t.Elem, add)
+	}
+}
+
+// collectInitialSchemas returns every distinct Postgres schema (other than
+// "atlantis" and "public") referenced by entities in newIR — sorted for
+// deterministic output. Used by EmitInitial to provision schemas for
+// `table "schema.table"` overrides ahead of CREATE TABLE.
+func collectInitialSchemas(newIR *dsl.IR) []string {
+	seen := map[string]struct{}{}
+	for i := range newIR.Entities {
+		s := entitySchema(&newIR.Entities[i])
+		if s == "atlantis" || s == "public" {
+			continue
+		}
+		seen[s] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for s := range seen {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// collectNewSchemas walks the EntityAdded changes in additive and returns
+// every distinct Postgres schema (other than "atlantis" and "public") that
+// the new entities will land in — sorted for deterministic output. Used to
+// emit `CREATE SCHEMA IF NOT EXISTS` headers ahead of the first CREATE
+// TABLE in each non-default schema.
+func collectNewSchemas(additive []Change, newByID map[string]*dsl.Entity) []string {
+	seen := map[string]struct{}{}
+	for _, ch := range additive {
+		if ch.Kind != KindEntityAdded {
+			continue
+		}
+		e := newByID[ch.EntityID]
+		if e == nil {
+			continue
+		}
+		s := entitySchema(e)
+		if s == "atlantis" || s == "public" {
+			continue
+		}
+		seen[s] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for s := range seen {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // needsPhaseSplit returns true iff the diff requires the apply to split
@@ -180,6 +296,16 @@ func buildPhaseSplit(d *Diff, newByID, oldByID map[string]*dsl.Entity) (pre, pre
 	pre.line("-- atlantis migration (pre-backfill phase)")
 	pre.line("-- Runs in the apply tx before `tide apply --backfill` kicks off the chunked UPDATE.")
 	pre.blank()
+
+	// Mirror EmitSQL's CREATE SCHEMA prelude in the phase-split path so a
+	// backfill plan whose additive part introduces a new namespace can also
+	// boot from a clean DB.
+	for _, name := range collectNewSchemas(d.Additive, newByID) {
+		pre.linef("CREATE SCHEMA IF NOT EXISTS %s;", quoteIdent(name))
+	}
+	if len(collectNewSchemas(d.Additive, newByID)) > 0 {
+		pre.blank()
+	}
 	post.line("-- atlantis migration (post-backfill phase)")
 	post.line("-- Runs after the chunked backfill completes — applies SET NOT NULL on backfilled fields.")
 	post.blank()
@@ -207,7 +333,7 @@ func buildPhaseSplit(d *Diff, newByID, oldByID map[string]*dsl.Entity) (pre, pre
 		f := e.FindField(fieldName)
 		pk := primaryKeyColumn(e)
 		if pk == "" || f == nil {
-			preIdx.linef("-- SKIPPED: %s has no single-column PK; backfill on composite PKs is unsupported in v1", qualifiedTable(e))
+			preIdx.linef("-- SKIPPED: %s has no single-column PK; chunked backfill requires a single-column PK for the cursor", qualifiedTable(e))
 			continue
 		}
 		idxName := backfillIndexName(e, fieldName)
@@ -284,7 +410,8 @@ func backfillIndexName(e *dsl.Entity, fieldName string) string {
 }
 
 // primaryKeyColumn returns the single PK column name, or "" for a
-// composite-PK entity (which v1 doesn't support for backfill).
+// composite-PK entity. The chunked-backfill driver only supports
+// single-column cursors today.
 func primaryKeyColumn(e *dsl.Entity) string {
 	if pf := e.PrimaryField(); pf != nil {
 		return pf.Name
@@ -298,11 +425,57 @@ func emitClass(up, down *sqlBuilder, label string, changes []Change, newByID, ol
 	}
 	up.line("-- ==== " + label + " ====")
 	down.line("-- ==== " + label + " ====")
-	for _, ch := range changes {
+	for _, ch := range reorderEntityAddsByFKDependency(changes, newByID) {
 		emitChange(up, down, ch, newByID, oldByID)
 	}
 	up.blank()
 	down.blank()
+}
+
+// reorderEntityAddsByFKDependency returns changes with EntityAdded entries
+// topologically sorted ahead of all other changes, so an FK from a new
+// entity to another new entity in the same migration resolves correctly
+// regardless of the entities' alphabetical order. Non-EntityAdded changes
+// (field add, NOT NULL tighten, …) target entities that already exist in
+// the prior schema, so their ordering relative to each other is preserved.
+// On a topo failure (true cycle between two different new entities), the
+// original order is returned so the apply fails with a clearer Postgres
+// error rather than swallowing the change set.
+func reorderEntityAddsByFKDependency(changes []Change, newByID map[string]*dsl.Entity) []Change {
+	var adds []Change
+	var rest []Change
+	for _, ch := range changes {
+		if ch.Kind == KindEntityAdded {
+			adds = append(adds, ch)
+		} else {
+			rest = append(rest, ch)
+		}
+	}
+	if len(adds) <= 1 {
+		return changes
+	}
+
+	entities := make([]dsl.Entity, 0, len(adds))
+	for _, ch := range adds {
+		if e := newByID[ch.EntityID]; e != nil {
+			entities = append(entities, *e)
+		}
+	}
+	sorted, err := topoSortEntities(entities)
+	if err != nil {
+		return changes
+	}
+
+	addByID := map[string]Change{}
+	for _, ch := range adds {
+		addByID[ch.EntityID] = ch
+	}
+	out := make([]Change, 0, len(changes))
+	for _, e := range sorted {
+		out = append(out, addByID[e.ID()])
+	}
+	out = append(out, rest...)
+	return out
 }
 
 // emitChange dispatches one change to its specific emitter.
@@ -311,7 +484,7 @@ func emitClass(up, down *sqlBuilder, label string, changes []Change, newByID, ol
 // each emitter — i.e. a CREATE TABLE on up is mirrored by DROP TABLE on down,
 // and a column ADD is mirrored by a column DROP. The orchestration outer
 // loop preserves the additive→backfill→breaking sequence on the up side; the
-// down side mirrors that. (For v0.1 we don't re-sort the down statements —
+// down side mirrors that. (We don't re-sort the down statements —
 // migrate runs them top-to-bottom as written, and the per-change reversal is
 // sufficient because we never combine destructive + additive changes in the
 // same migration without explicit ceremony.)
@@ -427,7 +600,7 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 
 // emitTouchTrigger writes the per-entity BEFORE UPDATE trigger + its
 // trigger function. We emit a dedicated function per entity rather than
-// one shared function across the schema because the legacy idiom hardcodes
+// one shared function across the schema because the trigger function hardcodes
 // the column name (`NEW.updated_at = now()`), and reaching for hstore /
 // dynamic SQL to parameterize that adds an extension dependency. Per-entity
 // functions are a few extra bytes of DDL each but cost nothing at runtime
@@ -913,8 +1086,19 @@ func EmitInitial(newIR *dsl.IR) (SQLScripts, error) {
 	down := &sqlBuilder{}
 	up.line("-- atlantis initial migration")
 	up.line("CREATE SCHEMA IF NOT EXISTS atlantis;")
-	up.line("CREATE EXTENSION IF NOT EXISTS vector;")
-	up.line("CREATE EXTENSION IF NOT EXISTS timescaledb;")
+	// Emit CREATE EXTENSION only for what the schema actually needs.
+	// A vanilla-text schema shouldn't force operators to install
+	// pgvector + timescaledb at the OS level.
+	for _, ext := range collectRequiredExtensions(newIR) {
+		up.linef("CREATE EXTENSION IF NOT EXISTS %s;", ext)
+	}
+	// Also create any Postgres schemas that entities with explicit
+	// `table "schema.table"` overrides require — `public` always exists
+	// and `atlantis` was created above. The down does NOT drop these;
+	// a non-atlantis schema may hold unrelated objects.
+	for _, name := range collectInitialSchemas(newIR) {
+		up.linef("CREATE SCHEMA IF NOT EXISTS %s;", quoteIdent(name))
+	}
 	up.blank()
 	down.line("-- atlantis initial migration (down)")
 	for _, e := range order {

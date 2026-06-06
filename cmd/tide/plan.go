@@ -139,6 +139,38 @@ func printPlanReport(resp planResponse) {
 			fmt.Printf("  %s %s\n", cliout.Red("✖"), d)
 		}
 	}
+	if len(resp.Extensions) > 0 {
+		printExtensions(resp.Extensions)
+	}
+}
+
+// printExtensions renders the per-extension state the server reported
+// in PlanResponse.Extensions. Three actions: ok (already enabled),
+// enable (atlantis will CREATE EXTENSION inside the apply tx), missing
+// (operator must install at OS level — apply will refuse).
+func printExtensions(exts []extensionStatus) {
+	fmt.Println(cliout.Bold("extensions:"))
+	for _, e := range exts {
+		var mark, action string
+		switch e.Action {
+		case "ok":
+			mark = cliout.Grey("·")
+			action = cliout.Grey("already enabled")
+		case "enable":
+			mark = cliout.Yellow("●")
+			action = cliout.Yellow("will be auto-enabled")
+		case "missing":
+			mark = cliout.Red("✖")
+			action = cliout.Red("missing — " + e.InstallHint)
+		default:
+			mark = cliout.Grey("?")
+			action = e.Action
+		}
+		fmt.Printf("  %s %-14s %s\n", mark, e.Name, action)
+		if e.Trigger != "" && e.Action != "ok" {
+			fmt.Printf("    %s\n", cliout.Grey(e.Trigger))
+		}
+	}
 }
 
 // colorClass paints the plan-class string by severity. Used in both

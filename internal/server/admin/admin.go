@@ -1,4 +1,9 @@
-// Package admin implements the PlanSchema, ApplyMigration, and GetMergedSchema RPCs.
+// Package admin implements the atlantis control-plane RPCs: schema
+// lifecycle (plan, apply, adopt, rollback, history, lineage), caller
+// identity management (register, revoke, cert-expiry tracking),
+// declarative jobs and workflows (submit, status, dead/retry), and
+// operational telemetry (entity owners, in-process log ring). All
+// RPCs use a JSON envelope codec — see grpc.go.
 package admin
 
 import (
@@ -21,18 +26,34 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/dsl/sqlvalidate"
+	"github.com/rachitkumar205/atlantis/internal/obs"
 )
 
 // Service is safe for concurrent use; one instance per process.
 //
-// mirrorDir/mirrorEnabled: write applied .atl files to disk (dev only).
-// allowApplyMutation: when false, ApplyMigration returns PermissionDenied.
+// Mutation gating layers (defense in depth):
+//
+//  1. `allowApplyMutation` — a global wildcard. true means any
+//     authenticated caller may mutate (dev only).
+//  2. `mutationAllowed` — a per-CN allowlist. The intended prod posture:
+//     `allowApplyMutation=false` and only CI's caller CNs in this set,
+//     so a leaked app-server cert can't push schema.
+//  3. `req.Caller == cert CN` on apply/backfill — a caller may only
+//     mutate its OWN schema. Even if a CN is on the mutation allowlist,
+//     it can't impersonate a different caller in the request body.
+//
+// (1) is unioned with (2). (3) is independent and always enforced when
+// the server runs in TLS mode (a cert CN is available).
 type Service struct {
 	pool               *pgxpool.Pool
 	mirrorDir          string
 	mirrorEnabled      bool
 	allowApplyMutation bool
+	mutationAllowed    map[string]bool
+	operatorAllowed    map[string]bool
+	callerFromContext  func(context.Context) string
 	backfillEnabled    bool
+	logRing            *obs.LogRing
 }
 
 // Config holds optional toggles; the zero value is read-only with no mirror.
@@ -43,32 +64,148 @@ type Config struct {
 	// MirrorEnabled, when true, mirrors applied files to MirrorDir.
 	MirrorEnabled bool
 
-	// AllowApplyMutation enables the ApplyMigration RPC. False rejects
-	// every apply with codes.PermissionDenied.
+	// AllowApplyMutation is the legacy wildcard gate. When true any
+	// authenticated caller may invoke mutating RPCs (kept for dev; in
+	// production prefer MutationAllowedCallers so a leaked cert is
+	// contained).
 	AllowApplyMutation bool
+
+	// MutationAllowedCallers is the per-CN allowlist of identities
+	// permitted to invoke schema-mutating RPCs (ApplyMigration,
+	// BeginBackfillPlan). Empty means no per-CN exceptions — only
+	// AllowApplyMutation grants permission. Independent of (and in
+	// addition to) the req.Caller-matches-CN check.
+	MutationAllowedCallers []string
+
+	// OperatorAllowedCallers is the per-CN allowlist of identities
+	// permitted to invoke operator-only mutating RPCs (RevokeCaller,
+	// RollbackSchema, AdoptBaseline). Typically a single entry: the
+	// console's cert CN. Empty means fall back to AllowApplyMutation
+	// for backward compatibility.
+	OperatorAllowedCallers []string
+
+	// CallerFromContext extracts the authenticated cert CN from the
+	// request context. The admin service uses it to enforce that
+	// req.Caller matches the connecting CN on apply/backfill so a
+	// caller can't impersonate another caller's identity in the
+	// request body. When nil the check is skipped (insecure dev mode).
+	CallerFromContext func(context.Context) string
 
 	// BackfillEnabled gates the BeginBackfillPlan RPC. Default false so
 	// a server running without the backfill worker can't accept plans
 	// that would pile up unprocessed. Operator sets this to true after
 	// canarying the feature.
 	BackfillEnabled bool
+
+	// LogRing is the in-process slog ring buffer the GetLogs RPC reads
+	// from. nil disables the RPC (it returns an empty page). The ring
+	// itself is populated by the slog handler installed in
+	// cmd/server/main.go's buildLogger — see internal/obs/logring.go.
+	LogRing *obs.LogRing
 }
 
 // New returns a Service backed by pool.
 func New(pool *pgxpool.Pool, cfg Config) *Service {
+	toSet := func(in []string) map[string]bool {
+		out := make(map[string]bool, len(in))
+		for _, cn := range in {
+			if cn = strings.TrimSpace(cn); cn != "" {
+				out[cn] = true
+			}
+		}
+		return out
+	}
 	return &Service{
 		pool:               pool,
 		mirrorDir:          cfg.MirrorDir,
 		mirrorEnabled:      cfg.MirrorEnabled,
 		allowApplyMutation: cfg.AllowApplyMutation,
+		mutationAllowed:    toSet(cfg.MutationAllowedCallers),
+		operatorAllowed:    toSet(cfg.OperatorAllowedCallers),
+		callerFromContext:  cfg.CallerFromContext,
 		backfillEnabled:    cfg.BackfillEnabled,
+		logRing:            cfg.LogRing,
 	}
+}
+
+// canMutate reports whether the given cert CN is permitted to invoke
+// schema-mutating RPCs. The wildcard (AllowApplyMutation) and the per-CN
+// allowlist (MutationAllowedCallers) are unioned: either grants permission.
+func (s *Service) canMutate(cn string) bool {
+	if s.allowApplyMutation {
+		return true
+	}
+	return s.mutationAllowed[cn]
+}
+
+// authorizeOperator enforces the operator-mutation gate for RPCs that
+// administrate other callers' state (revoke, rollback, adopt). Unlike
+// self-apply there is no req.Caller-matches-CN check — the operator
+// (typically the console) acts ON BEHALF OF a human admin and req.Caller
+// names the TARGET caller, not the actor. When the OperatorAllowedCallers
+// set is empty we fall back to the legacy global wildcard so existing
+// deployments keep working.
+func (s *Service) authorizeOperator(ctx context.Context) error {
+	var cn string
+	if s.callerFromContext != nil {
+		cn = s.callerFromContext(ctx)
+	}
+	if len(s.operatorAllowed) == 0 {
+		if s.allowApplyMutation {
+			return nil
+		}
+		return fmt.Errorf("admin: operator mutation is disabled on this server (set ATL_OPERATOR_ALLOWED_CALLERS=<console-cn> or ATL_ALLOW_APPLY_MUTATION=true)")
+	}
+	if !s.operatorAllowed[cn] {
+		return fmt.Errorf("admin: caller %q is not an operator (set ATL_OPERATOR_ALLOWED_CALLERS to permit)", cn)
+	}
+	return nil
+}
+
+// authorizeSelfApply enforces both mutation gates for RPCs that mutate
+// the calling caller's OWN schema (apply, backfill). Returns nil iff:
+//
+//   - the connecting cert CN is allowed to mutate (via wildcard, env-var
+//     allowlist, OR caller_identities.can_mutate=true), AND
+//   - req.Caller matches the connecting cert CN (so a CN allowed to
+//     mutate can only mutate its own namespace, not someone else's).
+//
+// In insecure dev mode (no TLS, no CallerFromContext) the same-CN check
+// is skipped but the mutation gate still applies.
+func (s *Service) authorizeSelfApply(ctx context.Context, reqCaller string) error {
+	var cn string
+	if s.callerFromContext != nil {
+		cn = s.callerFromContext(ctx)
+	}
+	// Skip the same-CN check when no cert identity is available (dev),
+	// but always evaluate the mutation gate.
+	if cn != "" && cn != "anonymous" && reqCaller != cn {
+		return fmt.Errorf("admin: req.caller %q does not match authenticated identity %q", reqCaller, cn)
+	}
+	// Cheap static gates first; only fall through to a DB round-trip
+	// when neither the global wildcard nor the env-var allowlist
+	// grants. The DB gate lets operators grant mutation permission at
+	// runtime without an env-var edit + atlantis restart; only a real
+	// CN is worth a lookup.
+	if s.canMutate(cn) {
+		return nil
+	}
+	if cn != "" && cn != "anonymous" {
+		_, canMutate, err := s.isRegisteredCaller(ctx, cn)
+		if err != nil {
+			return fmt.Errorf("admin: identity lookup failed: %w", err)
+		}
+		if canMutate {
+			return nil
+		}
+	}
+	return fmt.Errorf("admin: caller %q is not permitted to mutate schema (register via console with 'allow apply' on, add to ATL_MUTATION_ALLOWED_CALLERS, or set ATL_ALLOW_APPLY_MUTATION=true for dev)", cn)
 }
 
 // SubmittedFile is one .atl file submitted by a caller; Path is repo-relative.
 type SubmittedFile struct {
-	Path    string
-	Content []byte
+	Path    string `json:"path"`
+	Content []byte `json:"content"`
 }
 
 // PlanRequest is the input to PlanSchema.
@@ -81,40 +218,47 @@ type PlanRequest struct {
 // with the same (caller, file-set, base-checkpoint) tuple; ApplyMigration
 // re-derives it to detect drift.
 type PlanResponse struct {
-	PlanID         string // sha256(caller_files + base_ir) hex
-	Class          ClassName
-	UpSQL          string
-	DownSQL        string
-	ImpactReport   []ImpactEntry
-	ParseErrors    []string
-	BreakingDetail []string
+	PlanID         string        `json:"plan_id"`
+	Class          ClassName     `json:"class"`
+	UpSQL          string        `json:"up_sql"`
+	DownSQL        string        `json:"down_sql"`
+	ImpactReport   []ImpactEntry `json:"impact_report"`
+	ParseErrors    []string      `json:"parse_errors"`
+	BreakingDetail []string      `json:"breaking_detail"`
 
 	// CheckpointHash is the content hash of the IR checkpoint at plan time.
 	// Sent back in ApplyRequest for CAS conflict detection.
-	CheckpointHash string
+	CheckpointHash string `json:"checkpoint_hash"`
 
 	// CustomSQLErrors lists pg_query_go validation failures for query/procedure blocks.
 	// Empty if all custom SQL validates.
-	CustomSQLErrors []string
+	CustomSQLErrors []string `json:"custom_sql_errors,omitempty"`
 
 	// CustomCount tallies custom queries and procedures in the new IR.
-	CustomCount CustomDeclCount
+	CustomCount CustomDeclCount `json:"custom_count"`
 
 	// Phase-split outputs for `tide apply --backfill`. Empty for non-
 	// backfill plans. BackfillFields drives the chunked-UPDATE worker:
 	// one entry per field, with the user expression + PK column already
 	// resolved against the new IR.
-	PreBackfillUpSQL       string
-	PreBackfillIndexesSQL  string
-	PostBackfillUpSQL      string
-	PostBackfillIndexesSQL string
-	BackfillFields         []BackfillFieldRef
+	PreBackfillUpSQL       string             `json:"pre_backfill_up_sql,omitempty"`
+	PreBackfillIndexesSQL  string             `json:"pre_backfill_indexes_sql,omitempty"`
+	PostBackfillUpSQL      string             `json:"post_backfill_up_sql,omitempty"`
+	PostBackfillIndexesSQL string             `json:"post_backfill_indexes_sql,omitempty"`
+	BackfillFields         []BackfillFieldRef `json:"backfill_fields,omitempty"`
+
+	// Extensions lists the Postgres extensions the new IR requires, with
+	// one of three actions per extension: "ok" (already enabled),
+	// "enable" (atlantis will CREATE EXTENSION inside the apply tx),
+	// "missing" (operator must install at the OS level — apply refuses).
+	// Empty when the schema needs no extensions.
+	Extensions []extensionStatus `json:"extensions,omitempty"`
 }
 
 // CustomDeclCount tallies custom queries and procedures.
 type CustomDeclCount struct {
-	Queries    int
-	Procedures int
+	Queries    int `json:"queries"`
+	Procedures int `json:"procedures"`
 }
 
 // ClassName is the wire-side enum mirroring codegen.ChangeClass.
@@ -129,9 +273,9 @@ const (
 
 // ImpactEntry describes how one caller is affected by a plan; includes the plan's own caller.
 type ImpactEntry struct {
-	Caller   string
-	Affected bool
-	Detail   string
+	Caller   string `json:"caller"`
+	Affected bool   `json:"affected"`
+	Detail   string `json:"detail,omitempty"`
 }
 
 // ApplyRequest is the input to ApplyMigration.
@@ -145,9 +289,9 @@ type ApplyRequest struct {
 
 // ApplyResponse is returned on a successful apply.
 type ApplyResponse struct {
-	AppliedAt   string
-	Version     int64
-	ContentHash string // sha256 of the new IR checkpoint
+	AppliedAt   string `json:"applied_at"`
+	Version     int64  `json:"version"`
+	ContentHash string `json:"content_hash"`
 }
 
 // GetMergedSchemaRequest asks for the union of every caller's registered files.
@@ -160,8 +304,50 @@ type GetMergedSchemaRequest struct {
 // GetMergedSchemaResponse carries the merged file set. Files is empty when
 // SinceVersion equals Version.
 type GetMergedSchemaResponse struct {
-	Version string
-	Files   []SubmittedFile
+	Version string          `json:"version"`
+	Files   []SubmittedFile `json:"files"`
+}
+
+// GetCallerFilesRequest identifies a single caller whose registered files
+// should be returned.
+type GetCallerFilesRequest struct {
+	Caller string
+}
+
+// GetCallerFilesResponse carries the named caller's registered .atl files in
+// file_path order. Empty if the caller has never applied.
+type GetCallerFilesResponse struct {
+	Files []SubmittedFile `json:"files"`
+}
+
+// GetCallerFiles returns all registered .atl files for a single caller,
+// ordered by file_path. Read-only.
+func (s *Service) GetCallerFiles(ctx context.Context, req GetCallerFilesRequest) (*GetCallerFilesResponse, error) {
+	if req.Caller == "" {
+		return nil, fmt.Errorf("caller is required")
+	}
+	rows, err := s.pool.Query(ctx, `
+SELECT file_path, content
+FROM atlantis.caller_registrations
+WHERE caller = $1
+ORDER BY file_path`, req.Caller)
+	if err != nil {
+		return nil, fmt.Errorf("load caller files: %w", err)
+	}
+	defer rows.Close()
+
+	var files []SubmittedFile
+	for rows.Next() {
+		var path, content string
+		if err := rows.Scan(&path, &content); err != nil {
+			return nil, err
+		}
+		files = append(files, SubmittedFile{Path: path, Content: []byte(content)})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return &GetCallerFilesResponse{Files: files}, nil
 }
 
 // GetCanonicalIRRequest is the input to GetCanonicalIR. No fields today;
@@ -173,8 +359,8 @@ type GetCanonicalIRRequest struct{}
 // typed client produces wire-identical messages. ContentHash lets the
 // caller pin the schema version it generated against.
 type GetCanonicalIRResponse struct {
-	IR          json.RawMessage
-	ContentHash string
+	IR          json.RawMessage `json:"ir"`
+	ContentHash string          `json:"content_hash"`
 }
 
 // PlanSchema is the workhorse. The flow:
@@ -253,6 +439,12 @@ func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanRespons
 		return nil, fmt.Errorf("emit sql: %w", err)
 	}
 
+	// Surface the extension state so `tide plan` can warn before any
+	// apply runs. Read-only: pg_available_extensions + pg_extension.
+	// Errors here don't fail the plan — the extension check is best-
+	// effort, and the apply path will hard-refuse if anything's missing.
+	extStatuses, _ := inspectExtensions(ctx, s.pool, newIR)
+
 	resp := &PlanResponse{
 		PlanID:          computePlanID(req.Caller, callerFiles, prior),
 		Class:           translateClass(d.HighestClass()),
@@ -270,6 +462,7 @@ func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanRespons
 		PostBackfillUpSQL:      scripts.PostBackfillUp,
 		PostBackfillIndexesSQL: scripts.PostBackfillIndexes,
 		BackfillFields:         translateBackfillFields(scripts.BackfillFields),
+		Extensions:             extStatuses,
 	}
 	for _, ch := range d.Breaking {
 		resp.BreakingDetail = append(resp.BreakingDetail,
@@ -323,12 +516,14 @@ func validateCustomSQL(ir *dsl.IR) []string {
 // and writes a new IR checkpoint. Serialized by a cluster-wide advisory lock.
 // A stale PlanID is rejected; any failure rolls back.
 func (s *Service) ApplyMigration(ctx context.Context, req ApplyRequest) (*ApplyResponse, error) {
-	// Read-only servers reject every apply; surface the env var in the error so operators can flip it.
-	if !s.allowApplyMutation {
-		return nil, errors.New("admin: apply is disabled on this server (set ATL_ALLOW_APPLY_MUTATION=true to enable)")
-	}
 	if req.Caller == "" {
 		return nil, errors.New("admin: caller identity is required")
+	}
+	// Enforce per-CN mutation allowlist + that req.Caller matches the
+	// connecting cert CN. A leaked cert can therefore only push schema
+	// for ITS OWN caller namespace, not anyone else's.
+	if err := s.authorizeSelfApply(ctx, req.Caller); err != nil {
+		return nil, err
 	}
 	if req.PlanID == "" {
 		return nil, errors.New("admin: plan_id is required")
@@ -405,6 +600,15 @@ func (s *Service) ApplyMigration(ctx context.Context, req ApplyRequest) (*ApplyR
 	if err != nil {
 		return nil, fmt.Errorf("emit sql: %w", err)
 	}
+
+	// Auto-enable extensions required by the new IR but not yet enabled
+	// in this database. Refuses with a structured error if any required
+	// extension is missing at OS level. Runs INSIDE the apply tx so the
+	// enable + DDL commit atomically — no half-applied state.
+	if _, err := prepareExtensions(ctx, tx, newIR); err != nil {
+		return nil, err
+	}
+
 	if _, err := tx.Exec(ctx, scripts.Up); err != nil {
 		return nil, fmt.Errorf("apply: %w", err)
 	}
