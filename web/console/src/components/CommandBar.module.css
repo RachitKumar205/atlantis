@@ -1,0 +1,185 @@
+/* CommandBar — ⌘K modal. Matches the design's .cmdk spec: 560px box
+   anchored 14vh from the top of the viewport, scrim behind, soft scale-up
+   enter, item rows with an icon chip + label + meta keyboard hint. */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: start center;
+  padding-top: 14vh;
+  background: rgba(6, 6, 8, .55);
+  backdrop-filter: blur(3px);
+}
+
+.modal {
+  position: relative;
+  width: 560px;
+  max-width: calc(100vw - 32px);
+  background: var(--canvas-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, .6);
+  overflow: hidden;
+}
+
+/* ── Input row ──────────────────────────────────────────────────────── */
+.inputRow {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.searchIcon {
+  color: var(--ink-3);
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  stroke-width: 1.75;
+}
+
+.input {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--ink-0);
+  font-family: var(--sans);
+  font-size: 15px;
+  letter-spacing: -.003em;
+}
+
+.input::placeholder {
+  color: var(--ink-3);
+}
+
+.kbdHint {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  color: var(--ink-2);
+  background: var(--canvas-1);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+/* ── Results ────────────────────────────────────────────────────────── */
+.results {
+  max-height: 360px;
+  overflow: auto;
+  padding: 6px;
+}
+
+.sectionLabel {
+  padding: 10px 10px 6px;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+}
+
+/* Result item — 40px row with a 26px icon chip on the left and a mono
+   meta hint pinned right. Focused row uses the brass tick treatment. */
+.resultItem {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  height: 40px;
+  padding: 0 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background var(--fast) var(--ease), color var(--fast) var(--ease);
+  text-decoration: none;
+  color: var(--ink-0);
+  position: relative;
+}
+
+.resultItem:hover {
+  background: var(--canvas-3);
+}
+
+.resultItem--focused {
+  background: var(--canvas-4);
+  outline: none;
+}
+
+.resultIcon {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  background: var(--canvas-2);
+  display: grid;
+  place-items: center;
+  color: var(--ink-2);
+  flex-shrink: 0;
+  transition: color var(--fast) var(--ease);
+}
+
+.resultIcon svg { width: 14px; height: 14px; stroke-width: 1.75; }
+
+.resultItem--focused .resultIcon {
+  color: var(--accent);
+}
+
+.resultName {
+  font-size: 13px;
+  color: var(--ink-0);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -.003em;
+}
+
+.resultNamespace {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.emptyState {
+  padding: 36px 16px;
+  text-align: center;
+  color: var(--ink-3);
+  font-size: 12.5px;
+}
+
+/* ── Foot (keyboard hints) ──────────────────────────────────────────── */
+.footer {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--line-soft);
+  background: var(--canvas-2);
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.footerHint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.kbd {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  background: var(--canvas-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+  color: var(--ink-2);
+}

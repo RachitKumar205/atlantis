@@ -1,0 +1,195 @@
+/* Sidebar (left rail) — 56px wide. Matches the design's rail spec:
+   30px logo with brass dot at bottom-right, 38px square rail buttons with
+   the brass-tick active marker that slides in from the left edge,
+   tooltips that appear on the right with mechanical easing, and a
+   role badge below the spacer. */
+
+.sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: var(--rail-w);
+  height: 100vh;
+  background: var(--canvas-1);
+  border-right: 1px solid var(--line-soft);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 14px 0 12px;
+  gap: 2px;
+  z-index: 30;
+}
+
+/* ── Logo: outer ring + inner ring + brass dot at center ───────────── */
+.logoMark {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius);
+  display: grid;
+  place-items: center;
+  margin-bottom: 14px;
+  position: relative;
+  cursor: pointer;
+  transition: background var(--fast) var(--ease);
+}
+
+.logoMark:hover {
+  background: var(--canvas-3);
+}
+
+.logoMark::after {
+  content: '';
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--ink-3);
+  transition: background var(--fast) var(--ease);
+}
+
+.logoMark:hover::after {
+  background: var(--accent);
+}
+
+.logoMark svg {
+  display: block;
+}
+
+/* ── Nav group ─────────────────────────────────────────────────────── */
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+}
+
+.navItem {
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius);
+  display: grid;
+  place-items: center;
+  color: var(--ink-2);
+  position: relative;
+  transition: color var(--fast) var(--ease), background var(--fast) var(--ease);
+  cursor: pointer;
+  border: none;
+  background: none;
+  text-decoration: none;
+}
+
+.navItem svg {
+  width: 18px;
+  height: 18px;
+  stroke-width: 1.75;
+}
+
+/* Brass tick that slides in from the left edge of the row. */
+.navItem::before {
+  content: '';
+  position: absolute;
+  left: -10px;
+  top: 50%;
+  width: 2px;
+  height: 18px;
+  background: var(--accent);
+  transform: translate(-2px, -50%);
+  opacity: 0;
+  transition: transform var(--fast) var(--ease), opacity var(--fast) var(--ease);
+  border-radius: 0 1px 1px 0;
+}
+
+.navItem:hover {
+  color: var(--ink-0);
+  background: var(--canvas-3);
+}
+
+.navItem:hover::before {
+  transform: translate(0, -50%);
+  opacity: .5;
+}
+
+.navItem--active {
+  color: var(--ink-0);
+  background: var(--canvas-3);
+}
+
+.navItem--active::before {
+  transform: translate(0, -50%);
+  opacity: 1;
+}
+
+.navItem--active:hover::before {
+  opacity: 1;
+}
+
+/* ── Tooltip — slides in to the right of the button ────────────────── */
+.tooltip {
+  position: absolute;
+  left: calc(100% + 12px);
+  top: 50%;
+  transform: translateY(-50%) translateX(-4px);
+  background: var(--canvas-5);
+  color: var(--ink-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 5px 9px;
+  font-size: 11.5px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--fast) var(--ease), transform var(--fast) var(--ease);
+  z-index: 50;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .4);
+}
+
+.navItem:hover .tooltip {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+  transition-delay: 350ms;
+}
+
+/* ── Bottom group ──────────────────────────────────────────────────── */
+.bottom {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.divider {
+  width: 24px;
+  height: 1px;
+  background: var(--line);
+  margin: 10px 0 6px;
+}
+
+/* ── Role badge — 30px circle with single brass initial ────────────── */
+.roleBadge {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--accent);
+  border: 1px solid var(--accent-tint-2);
+  background: var(--accent-tint);
+  margin-bottom: 6px;
+  cursor: default;
+  text-transform: uppercase;
+}
+
+.roleIndicator,
+.roleText {
+  display: none;
+}
+
+/* Spacer that pushes the bottom group to the bottom of the column. */
+.spacer {
+  flex: 1;
+}

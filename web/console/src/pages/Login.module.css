@@ -1,0 +1,198 @@
+/* Login — full-screen, no rail. Centered 380px card on a soft dot-grid
+   canvas with a vignette. Matches the design's .auth + .authcard. */
+
+.root {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--canvas-0);
+  position: relative;
+  overflow: hidden;
+}
+
+/* Dot grid behind the card — very subtle so it reads as atmosphere. */
+.bathyBg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.bathyBg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(circle, var(--ink-4) 1px, transparent 1px);
+  background-size: 32px 32px;
+  opacity: .06;
+}
+
+/* Soft radial vignette so corners go to canvas-0. */
+.bathyBg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse 60% 50% at 50% 42%, transparent, var(--canvas-0) 78%);
+}
+
+.card {
+  position: relative;
+  z-index: 1;
+  width: 380px;
+  background: var(--canvas-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 38px 36px 32px;
+  margin: 24px;
+}
+
+/* atlantis wordmark with the brass dot on the "i" */
+.wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  font-size: 21px;
+  font-weight: 500;
+  color: var(--ink-0);
+  letter-spacing: -.02em;
+  font-family: var(--sans);
+  margin-bottom: 4px;
+}
+
+.wordmarkAccent {
+  position: relative;
+  display: inline-block;
+}
+
+.wordmarkAccent::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: -2px;
+  transform: translateX(-50%);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.subtitle {
+  font-size: 14px;
+  color: var(--ink-1);
+  margin: 22px 0 26px;
+}
+
+/* Form ------------------------------------------------------------------ */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  margin-bottom: 28px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.label {
+  font-size: 11.5px;
+  color: var(--ink-2);
+  font-weight: 500;
+  font-family: var(--sans);
+}
+
+.input {
+  height: 34px;
+  background: transparent;
+  color: var(--ink-0);
+  border: none;
+  border-bottom: 1px solid var(--line-strong);
+  font-size: 13.5px;
+  padding: 0 1px 1px;
+  font-family: var(--sans);
+  transition: border-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+  outline: none;
+}
+
+.input::placeholder { color: var(--ink-3); }
+
+.input:focus {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.input--error {
+  border-color: var(--coral);
+}
+
+/* Brass-fill primary action: 36px tall, full width on auth surfaces. */
+.submitBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  width: 100%;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--sans);
+  cursor: pointer;
+  letter-spacing: -.003em;
+  transition: background var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+
+.submitBtn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.submitBtn:active:not(:disabled) {
+  transform: translateY(0.5px);
+}
+
+.submitBtn:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+.error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--coral-tint);
+  border: 1px solid rgba(214, 120, 120, .22);
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  color: var(--coral);
+  margin-top: 6px;
+}
+
+.foot {
+  margin-top: 18px;
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+
+.spinner {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 1.5px solid rgba(0, 0, 0, 0.25);
+  border-top-color: var(--accent-ink);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

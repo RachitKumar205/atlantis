@@ -1,0 +1,472 @@
+/* ============================================================================
+   console.css — reset, shell, shared components
+   ============================================================================ */
+
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; padding: 0; }
+
+html, body { height: 100%; overflow: hidden; }
+body {
+  background: var(--canvas-0);
+  color: var(--ink-1);
+  font-family: var(--sans);
+  font-size: var(--font-body);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+::selection { background: var(--accent-tint-2); color: var(--ink-0); }
+
+.mono { font-family: var(--mono); font-feature-settings: var(--feat-mono); font-variant-numeric: tabular-nums; }
+.num  { font-variant-numeric: tabular-nums; font-feature-settings: var(--feat-mono); }
+
+button { font-family: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+input, select, textarea { font-family: inherit; color: inherit; }
+a { color: inherit; text-decoration: none; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--canvas-4); border-radius: 6px; border: 3px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: #34343c; background-clip: content-box; }
+
+/* ---- App layout ----------------------------------------------------------- */
+/* Grid columns animate with rail width, so the content reflows smoothly
+   as the rail hover-expands. cubic-bezier matches the mechanical easing
+   token used across motion transitions. */
+.app {
+  display: grid;
+  grid-template-columns: var(--rail-w) 1fr;
+  height: 100vh;
+  transition: grid-template-columns 220ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* :has() is well-supported across modern browsers. When the rail is
+   hovered anywhere, the CSS variable swaps and every dependent rule
+   (rail width, grid column, label opacity, justify-content) follows. */
+.app:has(.rail:hover) { --rail-w: var(--rail-w-expanded); }
+
+/* ====== LEFT RAIL ========================================================== */
+/* Supabase-style hover-to-expand sidebar. Collapsed (56px) by default,
+   expands to 220px while the cursor is over the rail. No click target,
+   no localStorage — purely an ambient affordance.
+
+   Layout invariant: every row's leading glyph (logo, nav icon, role
+   badge) is anchored to the SAME horizontal x = 28px (the rail's
+   center in collapsed mode). Achieved via per-element padding-left
+   tuned to the glyph's half-width. Labels expand from max-width: 0 with
+   margin-left: 0 to max-width: 160 with margin-left: 11, so they take
+   literally zero space when collapsed and don't displace the icons. */
+.rail {
+  background: var(--canvas-1);
+  border-right: 1px solid var(--line-soft);
+  display: flex; flex-direction: column;
+  padding: 14px 6px 12px;
+  gap: 2px;
+  z-index: 30;
+  overflow: hidden;
+}
+.rail__head {
+  display: flex; align-items: center;
+  margin-bottom: 16px;
+  height: 32px;
+  padding: 0 9px;   /* 9 + 26/2 = 22; +6 rail pad = 28 (rail center) ✓ */
+}
+.rail__logo {
+  width: 26px; height: 26px; border-radius: var(--radius);
+  display: grid; place-items: center;
+  flex-shrink: 0;
+}
+
+/* Wordmark — lowercase atlantis, weight 500, tight tracking. Sized
+   larger than rail-btn labels so it reads as a brand mark, not a nav
+   item. Plain lockup; the natural "i" tittle is the only dot. */
+.rail__brand {
+  font-size: 18px; font-weight: 500; color: var(--ink-0);
+  letter-spacing: -.02em;
+  line-height: 1;
+  white-space: nowrap;
+  margin-left: 0;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition:
+    margin-left 220ms cubic-bezier(0.32, 0.72, 0, 1),
+    max-width 220ms cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 200ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.rail:hover .rail__brand {
+  margin-left: 11px;
+  max-width: 160px;
+  opacity: 1;
+}
+
+/* screens directory popover */
+.screens-pop {
+  position: fixed; left: 58px; top: 12px; width: 234px; z-index: 60;
+  background: var(--canvas-5); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg); padding: 6px;
+  box-shadow: 0 18px 50px rgba(0,0,0,.5), 0 2px 6px rgba(0,0,0,.4);
+  opacity: 0; pointer-events: none; transform: translateX(-8px) scale(.98);
+  transition: opacity var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+.screens-pop.is-open { opacity: 1; pointer-events: auto; transform: none; }
+.screens-pop__group { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); padding: 9px 10px 5px; }
+.screens-item { display: flex; align-items: center; gap: 11px; width: 100%; height: 36px; padding: 0 10px; border-radius: var(--radius); font-size: 12.5px; color: var(--ink-1); transition: background var(--fast) var(--ease), color var(--fast) var(--ease); text-align: left; }
+.screens-item svg { width: 16px; height: 16px; color: var(--ink-3); flex-shrink: 0; transition: color var(--fast) var(--ease); }
+.screens-item span { white-space: nowrap; }
+.screens-item .meta { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--ink-4); }
+.screens-item:hover { background: var(--canvas-3); color: var(--ink-0); }
+.screens-item:hover svg { color: var(--ink-1); }
+.screens-item.is-active { color: var(--accent); }
+.screens-item.is-active svg { color: var(--accent); }
+
+/* auth-page escape cluster */
+.auth-switch { position: fixed; top: 20px; right: 22px; z-index: 40; display: flex; align-items: center; gap: 4px; padding: 4px; background: var(--canvas-2); border: 1px solid var(--line); border-radius: var(--radius-lg); }
+.auth-switch__btn { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 12px; border-radius: var(--radius); font-size: 12px; font-weight: 500; color: var(--ink-2); transition: all var(--fast) var(--ease); white-space: nowrap; }
+.auth-switch__btn svg { width: 13px; height: 13px; }
+.auth-switch__btn:hover { color: var(--ink-0); background: var(--canvas-3); }
+.auth-switch__btn.is-active { color: var(--ink-0); background: var(--canvas-4); }
+.auth-switch__enter { color: var(--accent); }
+.auth-switch__enter:hover { color: var(--accent-hover); background: var(--accent-tint); }
+.auth-switch__sep { width: 1px; height: 18px; background: var(--line); margin: 0 2px; }
+.rail__logo svg { display: block; }
+.rail__group { display: flex; flex-direction: column; gap: 1px; }
+.rail__spacer { flex: 1; }
+
+.rail-btn {
+  display: flex; align-items: center;
+  width: 100%; height: 36px;
+  padding: 0 13px;   /* 13 + 18/2 = 22; +6 rail pad = 28 (rail center) ✓ */
+  border-radius: var(--radius);
+  color: var(--ink-2);
+  position: relative;
+  font-size: 12.5px; font-weight: 500;
+  transition: color var(--fast) var(--ease), background var(--fast) var(--ease);
+}
+.rail-btn svg {
+  width: 18px; height: 18px;
+  flex-shrink: 0;
+  transition: color var(--fast) var(--ease);
+}
+.rail-btn__label {
+  white-space: nowrap;
+  margin-left: 0;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition:
+    margin-left 220ms cubic-bezier(0.32, 0.72, 0, 1),
+    max-width 220ms cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 200ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.rail:hover .rail-btn__label {
+  margin-left: 11px;
+  max-width: 160px;
+  opacity: 1;
+}
+
+/* Brass active tick — slides in from the left edge of the rail. */
+.rail-btn::before {
+  content: ""; position: absolute; left: -3px; top: 50%;
+  width: 2px; height: 18px; background: var(--accent);
+  transform: translate(-2px, -50%); opacity: 0;
+  transition: transform var(--fast) var(--ease), opacity var(--fast) var(--ease);
+  border-radius: 0 1px 1px 0;
+}
+.rail-btn:hover { color: var(--ink-0); background: var(--canvas-3); }
+.rail-btn:hover svg { color: var(--ink-1); }
+.rail-btn.is-active { color: var(--ink-0); background: var(--canvas-3); }
+.rail-btn.is-active svg { color: var(--accent); }
+.rail-btn.is-active::before { transform: translate(0, -50%); opacity: 1; }
+.rail-btn:hover::before { transform: translate(0, -50%); opacity: .5; }
+.rail-btn.is-active:hover::before { opacity: 1; }
+
+.rail-role {
+  display: flex; align-items: center;
+  padding: 0 8px;   /* 8 + 28/2 = 22; +6 rail pad = 28 (rail center) ✓ */
+  height: 36px;
+  margin-bottom: 6px;
+}
+.rail-role__badge {
+  width: 28px; height: 28px; border-radius: 50%;
+  display: grid; place-items: center;
+  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  color: var(--accent); border: 1px solid var(--accent-tint-2);
+  background: var(--accent-tint);
+  flex-shrink: 0;
+}
+.rail-role__email {
+  font-family: var(--mono); font-size: 11.5px; color: var(--ink-2);
+  white-space: nowrap; min-width: 0;
+  margin-left: 0;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition:
+    margin-left 220ms cubic-bezier(0.32, 0.72, 0, 1),
+    max-width 220ms cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 200ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.rail:hover .rail-role__email {
+  margin-left: 11px;
+  max-width: 160px;
+  opacity: 1;
+}
+
+/* ====== MAIN / PAGE ======================================================== */
+.main { overflow: hidden; display: flex; flex-direction: column; min-width: 0; background: var(--canvas-0); }
+.page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.page__head {
+  flex-shrink: 0;
+  padding: 24px var(--pad-page) 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.page__headinner {
+  max-width: var(--maxw); margin: 0 auto;
+  display: flex; align-items: flex-start; gap: 16px;
+  padding-bottom: 18px;
+}
+.page__title { font-size: 22px; font-weight: 500; color: var(--ink-0); letter-spacing: -0.01em; line-height: 1.15; }
+.page__title.is-path { font-family: var(--mono); font-size: 19px; font-weight: 450; }
+.page__sub { font-size: 12.5px; color: var(--ink-2); margin-top: 5px; white-space: nowrap; }
+.page__head-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.page__body { flex: 1; overflow: auto; padding: var(--pad-page); }
+.page__bodyinner { max-width: var(--maxw); margin: 0 auto; }
+.page--flush .page__body { padding: 0; }
+
+/* ====== BUTTONS ============================================================ */
+.btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 32px; padding: 0 13px;
+  border-radius: var(--radius); font-size: 12.5px; font-weight: 500;
+  color: var(--ink-1); border: 1px solid var(--line);
+  background: var(--canvas-2);
+  transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease), color var(--fast) var(--ease);
+  white-space: nowrap;
+}
+.btn svg { width: 14px; height: 14px; }
+.btn:hover { background: var(--canvas-3); border-color: var(--line-strong); color: var(--ink-0); }
+.btn--ghost { background: transparent; border-color: transparent; color: var(--ink-2); }
+.btn--ghost:hover { background: var(--canvas-3); color: var(--ink-0); border-color: transparent; }
+.btn--brass {
+  background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 600;
+}
+.btn--brass:hover { background: var(--accent-hover); color: var(--accent-ink); }
+.btn--danger { color: var(--coral); border-color: transparent; background: transparent; }
+.btn--danger:hover { background: var(--coral-tint); color: var(--coral); }
+.btn--sm { height: 26px; padding: 0 9px; font-size: 11.5px; }
+.btn:disabled { opacity: .4; pointer-events: none; }
+.btn--icon { width: 32px; padding: 0; justify-content: center; }
+
+.kbd {
+  font-family: var(--mono); font-size: 10.5px; color: var(--ink-2);
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 1px 5px; background: var(--canvas-1); line-height: 1.5;
+}
+
+/* ====== CHIPS / BADGES ===================================================== */
+.chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums;
+  color: var(--ink-2); background: var(--canvas-3);
+  border: 1px solid var(--line-soft); border-radius: var(--radius-sm);
+  padding: 1px 6px; height: 18px; white-space: nowrap;
+}
+.chip--count { min-width: 22px; justify-content: center; color: var(--ink-2); }
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--mono); font-size: 10.5px; font-weight: 500; letter-spacing: .02em;
+  text-transform: uppercase; padding: 2px 7px; border-radius: var(--radius-sm);
+  height: 18px; white-space: nowrap;
+}
+.card__head > svg, .editpanel__head > svg, .modal__head svg { width: 17px; height: 17px; color: var(--ink-2); flex-shrink: 0; }
+.banner__icon { width: 16px; height: 16px; flex-shrink: 0; }
+.badge::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.badge--add   { color: var(--sage);  background: var(--sage-tint); }
+.badge--break { color: var(--coral); background: var(--coral-tint); }
+.badge--back  { color: var(--accent); background: var(--accent-tint); }
+.badge--fk    { color: var(--slate); background: var(--slate-tint); }
+.badge--plain { color: var(--ink-2); background: var(--canvas-3); }
+.badge--plain::before { display: none; }
+
+.dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.dot--brass { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint); }
+.dot--sage  { background: var(--sage); }
+.dot--coral { background: var(--coral); }
+
+/* level letter markers (health) */
+.lvl { font-family: var(--mono); font-size: 10px; font-weight: 600; width: 16px; height: 16px;
+  display: inline-grid; place-items: center; border-radius: 3px; letter-spacing: 0; }
+.lvl--debug { color: var(--ink-3); background: var(--canvas-4); }
+.lvl--info  { color: var(--slate); background: var(--slate-tint); }
+.lvl--warn  { color: var(--accent); background: var(--accent-tint); }
+.lvl--error { color: var(--coral); background: var(--coral-tint); }
+
+/* ====== INPUTS — bottom-rule, drafting table ============================== */
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field__label { font-size: 11.5px; color: var(--ink-2); font-weight: 500; }
+/* Unified boxed input — four-sided border, subtle canvas-1 fill, brass
+   focus ring. .input and .input--boxed are kept as aliases so existing
+   markup works either way. */
+.input,
+.input--boxed {
+  height: 34px;
+  background: var(--canvas-1);
+  color: var(--ink-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0 11px;
+  font-size: 13px;
+  transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
+}
+.input::placeholder,
+.input--boxed::placeholder { color: var(--ink-3); }
+.input:hover:not(:focus),
+.input--boxed:hover:not(:focus) { border-color: var(--line-strong); }
+.input:focus,
+.input--boxed:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
+.input:disabled,
+.input--boxed:disabled { opacity: .5; cursor: not-allowed; }
+.input.mono,
+.input--boxed.mono { font-family: var(--mono); font-size: 12.5px; }
+
+/* iOS Safari zooms the page when a focused input's computed font-size is
+   below 16px. The 13px we use on desktop trips that — viewport jumps,
+   layout reflows, user can't unzoom. Bump to 16px on small viewports
+   so the focus is a no-op. Applies app-wide (Settings dialogs, modal
+   forms, etc.) — login isn't the only victim. */
+@media (max-width: 720px) {
+  .input,
+  .input--boxed {
+    font-size: 16px;
+  }
+  .input.mono,
+  .input--boxed.mono { font-size: 16px; }
+}
+
+.checkbox { display: inline-flex; align-items: center; gap: 9px; cursor: pointer; font-size: 12.5px; color: var(--ink-1); }
+/* The hidden input is positioned at the viewport origin (position:
+   fixed, 1×1 px). With position: absolute the input would sit at its
+   in-flow position (deep inside whatever card contains it), and on
+   focus the browser would scrollIntoView() it — for tall cards this
+   yanks the entire page up because Chrome ignores overflow:hidden for
+   programmatic scrolls AND scroll-margin only applies to scroll snap.
+   Pinning the input to viewport origin means there's no "into view"
+   for the browser to scroll to. Sibling-selector (.checkbox input +
+   .checkbox__box) and label-input forwarding both work regardless of
+   the input's positioning. */
+.checkbox input {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.checkbox__box {
+  width: 16px; height: 16px; border-radius: var(--radius-sm); border: 1px solid var(--line-strong);
+  display: grid; place-items: center; transition: all var(--fast) var(--ease); background: var(--canvas-1);
+}
+.checkbox__box svg { width: 11px; height: 11px; opacity: 0; color: var(--accent-ink); transform: scale(.7); transition: all var(--fast) var(--ease); }
+.checkbox input:checked + .checkbox__box { background: var(--accent); border-color: var(--accent); }
+.checkbox input:checked + .checkbox__box svg { opacity: 1; transform: scale(1); }
+.checkbox input:focus-visible + .checkbox__box { box-shadow: 0 0 0 3px var(--accent-tint); }
+
+/* segmented control */
+.seg { display: inline-flex; background: var(--canvas-1); border: 1px solid var(--line-soft); border-radius: var(--radius); padding: 2px; gap: 2px; }
+.seg button {
+  height: 24px; padding: 0 10px; border-radius: var(--radius-sm); font-size: 11.5px; font-weight: 500; color: var(--ink-2);
+  transition: all var(--fast) var(--ease);
+}
+.seg button.is-active { background: var(--canvas-4); color: var(--ink-0); }
+.seg button:hover:not(.is-active) { color: var(--ink-1); }
+
+/* ====== TOGGLE SWITCH ====================================================== */
+.switch { position: relative; display: inline-flex; align-items: center; cursor: pointer; flex-shrink: 0; }
+/* Same viewport-pinning trick as .checkbox input — see comment above. */
+.switch input { position: fixed; top: 0; left: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.switch__track { width: 38px; height: 22px; border-radius: 11px; background: var(--canvas-4); border: 1px solid var(--line-strong); position: relative; transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease); }
+.switch__track::after { content: ""; position: absolute; left: 2px; top: 50%; transform: translateY(-50%); width: 16px; height: 16px; border-radius: 50%; background: var(--ink-2); transition: left var(--fast) var(--ease), background var(--fast) var(--ease); }
+.switch input:checked + .switch__track { background: var(--accent-tint-2); border-color: var(--accent); }
+.switch input:checked + .switch__track::after { left: 18px; background: var(--accent); }
+.switch input:focus-visible + .switch__track { box-shadow: 0 0 0 3px var(--accent-tint); }
+
+/* ====== TABLES ============================================================= */
+.tbl { width: 100%; border-collapse: collapse; }
+.tbl th {
+  text-align: left; font-size: 10.5px; font-weight: 500; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--ink-3); padding: 0 var(--pad-cell) 9px; border-bottom: 1px solid var(--line);
+}
+.tbl td { padding: 0 var(--pad-cell); height: var(--row-h-lg); border-bottom: 1px solid var(--line-soft); font-size: var(--font-data); color: var(--ink-1); }
+.tbl tr { position: relative; }
+.tbl tbody tr { transition: background var(--fast) var(--ease); }
+.tbl tbody tr:hover { background: var(--canvas-2); }
+.tbl tbody tr td:first-child { position: relative; }
+.tbl tbody tr td:first-child::before {
+  content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px; background: var(--accent);
+  transform: translateX(-2px); opacity: 0; transition: all var(--fast) var(--ease); border-radius: 0 1px 1px 0;
+}
+.tbl tbody tr:hover td:first-child::before { transform: translateX(0); opacity: 1; }
+.tbl tbody tr.is-danger:hover td:first-child::before { background: var(--coral); }
+.row-actions { display: flex; gap: 4px; justify-content: flex-end; opacity: 0; transition: opacity var(--fast) var(--ease); }
+.tbl tbody tr:hover .row-actions { opacity: 1; }
+
+/* ====== CARD / PANEL ======================================================= */
+.card { background: var(--canvas-2); border: 1px solid var(--line-soft); border-radius: var(--radius-lg); }
+.card__head { padding: 16px 18px; border-bottom: 1px solid var(--line-soft); display: flex; align-items: center; gap: 10px; }
+.card__title { font-size: 13.5px; font-weight: 500; color: var(--ink-0); white-space: nowrap; }
+.card__body { padding: 18px; }
+.section-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); font-weight: 500; }
+
+/* ====== EMPTY STATE ======================================================== */
+.empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 56px 24px; text-align: center; }
+.empty__icon { width: 40px; height: 40px; color: var(--ink-3); display: grid; place-items: center; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--canvas-1); }
+.empty__title { font-size: 13.5px; color: var(--ink-1); font-weight: 500; }
+.empty__sub { font-size: 12.5px; color: var(--ink-3); max-width: 320px; line-height: 1.5; }
+
+/* ====== SKELETON =========================================================== */
+.sk { background: linear-gradient(90deg, var(--canvas-2) 0%, var(--canvas-3) 50%, var(--canvas-2) 100%); background-size: 200% 100%; border-radius: var(--radius-sm); animation: sk 1.4s var(--ease) infinite; }
+@keyframes sk { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .sk { animation: none; } }
+
+/* ====== MODAL / OVERLAY ==================================================== */
+.overlay { position: fixed; inset: 0; background: rgba(6,6,8,.62); backdrop-filter: blur(2px); z-index: 100; display: grid; place-items: center; opacity: 0; transition: opacity var(--med) var(--ease); }
+.overlay.is-open { opacity: 1; }
+.modal {
+  width: 440px; max-width: calc(100vw - 40px); background: var(--canvas-3); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg); box-shadow: 0 24px 70px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.4);
+  transform: translateY(8px) scale(.99); transition: transform var(--med) var(--ease); overflow: hidden;
+}
+.overlay.is-open .modal { transform: translateY(0) scale(1); }
+.modal__head { padding: 18px 20px 14px; border-bottom: 1px solid var(--line-soft); }
+.modal__title { font-size: 15px; font-weight: 500; color: var(--ink-0); }
+.modal__sub { font-size: 12px; color: var(--ink-2); margin-top: 4px; }
+.modal__body { padding: 20px; display: flex; flex-direction: column; gap: 18px; }
+.modal__foot { padding: 14px 20px; border-top: 1px solid var(--line-soft); display: flex; justify-content: flex-end; gap: 8px; background: var(--canvas-2); }
+
+/* ====== STATUS BANNER ====================================================== */
+.banner { display: flex; align-items: center; gap: 11px; padding: 11px 14px; border-radius: var(--radius); font-size: 12.5px; border: 1px solid; }
+.banner--ok    { background: var(--sage-tint);  border-color: rgba(125,181,147,.25); color: var(--ink-1); }
+.banner--warn  { background: var(--accent-tint); border-color: var(--accent-tint-2); color: var(--ink-1); }
+.banner--error { background: var(--coral-tint); border-color: rgba(214,120,120,.28); color: var(--ink-1); }
+.banner__icon { flex-shrink: 0; }
+.banner b { color: var(--ink-0); font-weight: 600; }
+
+/* utilities */
+.muted { color: var(--ink-2); }
+.faint { color: var(--ink-3); }
+.brass { color: var(--accent); }
+.sage  { color: var(--sage); }
+.coral { color: var(--coral); }
+.slate { color: var(--slate); }
+.row { display: flex; align-items: center; gap: var(--gap); }
+.col { display: flex; flex-direction: column; }
+.spacer { flex: 1; }
+.stack-16 > * + * { margin-top: 16px; }
+.stack-24 > * + * { margin-top: 24px; }
+.hide { display: none !important; }
+.tick-in { animation: tickIn var(--med) var(--ease); }
+@keyframes tickIn { from { background: var(--accent-tint); } to { background: transparent; } }
