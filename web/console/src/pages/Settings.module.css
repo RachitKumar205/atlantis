@@ -1,0 +1,465 @@
+/* Settings — single-column page: caller→repo map + operator users.
+   Matches the design's section pattern: hairline header rules between
+   sections, tables share the edge-tick vocabulary from Callers. */
+
+.root {
+  padding: 24px var(--pad-page) 40px;
+  max-width: var(--maxw);
+  margin: 0 auto;
+}
+
+.header {
+  margin-bottom: 32px;
+}
+
+.title {
+  font-family: var(--sans);
+  font-size: 22px;
+  font-weight: 500;
+  color: var(--ink-0);
+  margin: 0 0 4px;
+  letter-spacing: -0.022em;
+  line-height: 1.18;
+}
+
+.subtitle {
+  font-size: 12.5px;
+  color: var(--ink-2);
+  margin: 0;
+  max-width: 540px;
+  line-height: 1.5;
+}
+
+/* ── Section ─────────────────────────────────────────────────────────── */
+.section {
+  border-top: 1px solid var(--line-soft);
+  padding: 28px 0;
+}
+
+.section:last-child {
+  padding-bottom: 0;
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.sectionTitle {
+  font-family: var(--sans);
+  font-size: 14.5px;
+  font-weight: 500;
+  color: var(--ink-0);
+  margin: 0 0 4px;
+  letter-spacing: -0.015em;
+}
+
+.sectionHint {
+  font-size: 12.5px;
+  color: var(--ink-2);
+  margin: 0;
+  max-width: 460px;
+  line-height: 1.55;
+}
+
+/* Right-aligned secondary action button. */
+.addBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--canvas-2);
+  color: var(--ink-1);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--fast) var(--ease);
+  font-family: var(--sans);
+}
+
+.addBtn:hover {
+  background: var(--canvas-3);
+  border-color: var(--line-strong);
+  color: var(--ink-0);
+}
+
+/* ── Caller → repo table ────────────────────────────────────────────── */
+.repoTable {
+  display: flex;
+  flex-direction: column;
+}
+
+.repoTableHead {
+  display: grid;
+  grid-template-columns: 160px 1fr auto;
+  gap: 16px;
+  padding: 0 var(--pad-cell) 9px;
+  font-size: 10.5px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.repoRow {
+  display: grid;
+  grid-template-columns: 160px 1fr auto;
+  gap: 16px;
+  align-items: center;
+  padding: 0 var(--pad-cell);
+  height: var(--row-h-lg);
+  border-bottom: 1px solid var(--line-soft);
+  position: relative;
+  transition: background var(--fast) var(--ease);
+}
+
+.repoRow::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: var(--accent);
+  transform: translateX(-2px);
+  opacity: 0;
+  transition: all var(--fast) var(--ease);
+  border-radius: 0 1px 1px 0;
+}
+
+.repoRow:hover { background: var(--canvas-2); }
+
+.repoRow:hover::before {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+.repoRowCaller {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.callerBadge {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--ink-0);
+  padding: 1px 7px;
+  background: var(--canvas-3);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+}
+
+.repoRowView {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-0);
+  min-width: 0;
+}
+
+.repoLink {
+  color: var(--ink-0);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: color var(--fast) var(--ease);
+}
+
+.repoLink:hover { color: var(--accent); }
+
+.slash { color: var(--ink-3); }
+
+.branchBadge {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10.5px;
+  color: var(--ink-2);
+  padding: 1px 6px;
+  background: transparent;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.prefixBadge {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  padding: 1px 6px;
+  background: var(--canvas-0);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+}
+
+.userActions,
+.repoRowEdit {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.iconBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  opacity: 0;
+  transition: all var(--fast) var(--ease);
+}
+
+.repoRow:hover .iconBtn,
+.userRow:hover .iconBtn {
+  opacity: 1;
+}
+
+.iconBtn:hover {
+  border-color: var(--line);
+  background: var(--canvas-3);
+  color: var(--ink-0);
+}
+
+.iconBtnEdit:hover {
+  color: var(--accent);
+  border-color: var(--accent-tint-2);
+}
+
+.iconBtnDanger:hover {
+  background: var(--coral-tint);
+  border-color: rgba(214, 120, 120, .22);
+  color: var(--coral);
+}
+
+.iconBtn:disabled { opacity: .35; cursor: not-allowed; }
+
+/* ── Inputs ─────────────────────────────────────────────────────────── */
+.input,
+.inputNarrow,
+.inputWide {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--line-strong);
+  color: var(--ink-0);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12.5px;
+  padding: 0 1px 5px;
+  outline: none;
+  transition: border-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+
+.input { width: 100%; }
+.inputNarrow { width: 100px; }
+.inputWide { width: 220px; }
+
+.input:focus,
+.inputNarrow:focus,
+.inputWide:focus {
+  border-bottom-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.input::placeholder,
+.inputNarrow::placeholder,
+.inputWide::placeholder {
+  color: var(--ink-3);
+}
+
+.newRepoForm {
+  display: grid;
+  grid-template-columns: 160px 1fr auto;
+  gap: 16px;
+  align-items: center;
+  padding: 14px;
+  background: var(--canvas-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  margin-top: 8px;
+}
+
+.repoRowEdit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ── Users table ────────────────────────────────────────────────────── */
+.userTableHead {
+  display: grid;
+  grid-template-columns: 1fr 120px auto;
+  gap: 16px;
+  padding: 0 var(--pad-cell) 9px;
+  font-size: 10.5px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.userRow {
+  display: grid;
+  grid-template-columns: 1fr 120px auto;
+  gap: 16px;
+  align-items: center;
+  padding: 0 var(--pad-cell);
+  height: var(--row-h-lg);
+  border-bottom: 1px solid var(--line-soft);
+  position: relative;
+  transition: background var(--fast) var(--ease);
+}
+
+.userRow::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: var(--accent);
+  transform: translateX(-2px);
+  opacity: 0;
+  transition: all var(--fast) var(--ease);
+  border-radius: 0 1px 1px 0;
+}
+
+.userRow:hover { background: var(--canvas-2); }
+
+.userRow:hover::before {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+.userEmail {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--ink-0);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.roleAdmin {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--accent);
+  padding: 2px 7px;
+  background: var(--accent-tint);
+  border: 1px solid var(--accent-tint-2);
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.roleViewer {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-2);
+  padding: 2px 7px;
+  background: var(--canvas-3);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.roleToggleBtn {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-soft);
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--fast) var(--ease);
+}
+
+.roleToggleBtn:hover:not(:disabled) {
+  color: var(--ink-0);
+  border-color: var(--line);
+}
+
+.roleToggleBtn:disabled { opacity: .4; cursor: not-allowed; }
+
+.selfLabel {
+  font-size: 11px;
+  color: var(--ink-3);
+  font-style: italic;
+}
+
+/* ── Invite form ────────────────────────────────────────────────────── */
+.inviteForm {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  padding: 16px;
+  background: var(--canvas-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.roleSelect {
+  background: var(--canvas-1);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--ink-0);
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 5px 8px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color var(--fast) var(--ease);
+}
+
+.roleSelect:focus { border-color: var(--accent); }
+
+/* ── Empty + error ──────────────────────────────────────────────────── */
+.emptyMsg {
+  padding: 28px 16px;
+  color: var(--ink-3);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.errorMsg {
+  padding: 9px 12px;
+  background: var(--coral-tint);
+  border: 1px solid rgba(214, 120, 120, .22);
+  border-radius: var(--radius);
+  color: var(--ink-1);
+  font-size: 12px;
+  margin: 12px 0;
+  font-family: var(--mono);
+  line-height: 1.5;
+}

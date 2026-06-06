@@ -1,0 +1,102 @@
+/* ============================================================================
+   BATHYSPHERE — design tokens
+   atlantis console. 1950s scientific instrument restraint + Linear discipline.
+   Every value here is referenced by console.css. Change a token, move the system.
+   ============================================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;450;500;600&family=Geist+Mono:wght@400;450;500&display=swap');
+
+:root {
+  /* ---- Canvas: warm graphite, six elevation steps -------------------------- */
+  --canvas-0: #0C0C0E;   /* base / app background */
+  --canvas-1: #121215;   /* rails, sunk wells */
+  --canvas-2: #17171B;   /* cards, panes */
+  --canvas-3: #1C1C21;   /* raised rows, hover */
+  --canvas-4: #212127;   /* active rows, inputs */
+  --canvas-5: #25252B;   /* top elevation / popovers */
+
+  /* ---- Ink: five steps ----------------------------------------------------- */
+  --ink-0: #F5F5F7;      /* primary text, headings */
+  --ink-1: #C5C5CC;      /* body */
+  --ink-2: #8E8E97;      /* muted labels, metadata */
+  --ink-3: #5C5C64;      /* faint, placeholders */
+  --ink-4: #3A3A40;      /* faintest, disabled */
+
+  /* ---- Hairlines ----------------------------------------------------------- */
+  --line-soft: #232328;
+  --line: #2E2E35;
+  --line-strong: #3D3D45;
+  --line-mix: 100%;       /* hairline intensity multiplier (tweak) */
+
+  /* ---- Accent: brass-ochre. Fittings, not fills. --------------------------- */
+  --accent-h: 70;         /* hue — tweakable */
+  --accent-c: 0.058;      /* chroma */
+  --accent-l: 0.755;      /* lightness */
+  --accent: oklch(var(--accent-l) var(--accent-c) var(--accent-h));      /* #D4A574 */
+  --accent-hover: oklch(0.815 var(--accent-c) var(--accent-h));          /* tracks --accent-c so sage/slate/coral variants swap cleanly */
+  --accent-tint: oklch(var(--accent-l) var(--accent-c) var(--accent-h) / 0.10);
+  --accent-tint-2: oklch(var(--accent-l) var(--accent-c) var(--accent-h) / 0.18);
+  --accent-ink: #1A1407;  /* text on brass fill */
+
+  /* ---- Semantic ------------------------------------------------------------ */
+  --sage: #7DB593;        /* additive / healthy */
+  --sage-tint: rgba(125, 181, 147, 0.12);
+  --warn: var(--accent);  /* backfill / warning = brass */
+  --warn-tint: var(--accent-tint);
+  --coral: #D67878;       /* breaking / error */
+  --coral-tint: rgba(214, 120, 120, 0.12);
+  --slate: #8AA4C8;       /* FK refs */
+  --slate-tint: rgba(138, 164, 200, 0.12);
+
+  /* ---- Type ---------------------------------------------------------------- */
+  --sans: 'Geist', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: 'Geist Mono', ui-monospace, 'SF Mono', 'Menlo', monospace;
+  --feat-mono: "ss03" 1, "tnum" 1, "cv01" 1;   /* slashed zero + tabular */
+
+  /* ---- Motion -------------------------------------------------------------- */
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);   /* mechanical */
+  --fast: 140ms;
+  --med: 220ms;
+
+  /* ---- Geometry ------------------------------------------------------------ */
+  /* Sidebar follows the Supabase pattern: collapsed (icon-only) by default,
+     expands on hover via `.app:has(.rail:hover)`. No persistence, no toggle. */
+  --rail-w: 56px;
+  --rail-w-expanded: 220px;
+  --radius-sm: 4px;
+  --radius: 6px;
+  --radius-lg: 8px;       /* hard ceiling — never above 8 */
+
+  /* ---- Density (tweak: comfortable | compact) ------------------------------ */
+  --row-h: 40px;          /* data row height */
+  --row-h-lg: 48px;       /* table row */
+  --pad-page: 32px;       /* body outer padding */
+  --pad-cell: 12px;       /* cell horizontal padding */
+  --gap: 12px;
+  --font-data: 12.5px;    /* mono data size */
+  --font-body: 13px;
+  --maxw: 1040px;
+}
+
+:root[data-density="compact"] {
+  --row-h: 32px;
+  --row-h-lg: 38px;
+  --pad-page: 24px;
+  --pad-cell: 10px;
+  --gap: 8px;
+  --font-data: 12px;
+  --font-body: 12.5px;
+}
+
+/* hairline intensity tweak */
+:root[data-hairline="faint"]  { --line-soft: #1E1E22; --line: #262629; --line-strong: #333339; }
+:root[data-hairline="strong"] { --line-soft: #2B2B31; --line: #393940; --line-strong: #4A4A53; }
+
+/* accent presets (tweak) — all share chroma/lightness, vary hue */
+:root[data-accent="sage"]  { --accent-h: 152; --accent-c: 0.045; }
+:root[data-accent="slate"] { --accent-h: 248; --accent-c: 0.040; }
+:root[data-accent="coral"] { --accent-h: 22;  --accent-c: 0.060; }
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --fast: 0ms; --med: 0ms; }
+}

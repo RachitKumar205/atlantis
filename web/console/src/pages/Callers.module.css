@@ -1,0 +1,670 @@
+/* Callers — registered identities table.
+   Matches the design's .tbl pattern: hairline row dividers, edge-tick on
+   first cell that slides in on hover, action icons on the right that fade
+   in only on row-hover (Linear's table idiom). */
+
+.page {
+  padding: 24px var(--pad-page) 40px;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 22px;
+  max-width: var(--maxw);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.title {
+  font-family: var(--sans);
+  font-size: 22px;
+  font-weight: 500;
+  color: var(--ink-0);
+  margin: 0 0 4px;
+  letter-spacing: -0.022em;
+  line-height: 1.18;
+}
+
+.subtitle {
+  font-size: 12.5px;
+  color: var(--ink-2);
+  margin: 0;
+  max-width: 540px;
+  line-height: 1.5;
+}
+
+.subtitle code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-1);
+  background: var(--canvas-2);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-soft);
+}
+
+/* Brass primary "+ Add caller" button. */
+.primaryBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 13px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-family: var(--sans);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+
+.primaryBtn:hover { background: var(--accent-hover); }
+.primaryBtn:active { transform: translateY(0.5px); }
+
+/* Table ----------------------------------------------------------------- */
+.tableHeader {
+  display: grid;
+  grid-template-columns: 1fr auto 72px;
+  gap: 16px;
+  padding: 0 var(--pad-cell) 9px;
+  font-size: 10.5px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-3);
+  border-bottom: 1px solid var(--line);
+  max-width: var(--maxw);
+  margin: 0 auto;
+}
+
+.callerRow {
+  display: grid;
+  grid-template-columns: 1fr auto 72px;
+  gap: 16px;
+  align-items: center;
+  height: var(--row-h-lg);
+  padding: 0 var(--pad-cell);
+  border-bottom: 1px solid var(--line-soft);
+  position: relative;
+  transition: background var(--fast) var(--ease);
+  max-width: var(--maxw);
+  margin: 0 auto;
+}
+
+/* Brass edge-tick on the first cell, slides in on hover. */
+.callerRow::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: var(--accent);
+  transform: translateX(-2px);
+  opacity: 0;
+  transition: all var(--fast) var(--ease);
+  border-radius: 0 1px 1px 0;
+}
+
+.callerRow:hover {
+  background: var(--canvas-2);
+}
+
+.callerRow:hover::before {
+  transform: translateX(0);
+  opacity: 1;
+}
+
+.callerName {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--ink-0);
+}
+
+.callerDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+  flex-shrink: 0;
+}
+
+.callerMeta {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.metaItem {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.metaItem svg { color: var(--ink-3); }
+
+/* Action icons — fade in on row-hover only. */
+.callerActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity var(--fast) var(--ease);
+}
+
+.callerRow:hover .callerActions { opacity: 1; }
+
+.actionIconBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: all var(--fast) var(--ease);
+}
+
+.actionIconBtn:hover {
+  border-color: var(--line);
+  background: var(--canvas-3);
+  color: var(--ink-0);
+}
+
+.actionIconBtn__danger:hover {
+  background: var(--coral-tint);
+  border-color: rgba(214, 120, 120, .22);
+  color: var(--coral);
+}
+
+.actionIconBtn:disabled {
+  opacity: .4;
+  cursor: not-allowed;
+}
+
+/* Spinner shown while issuing a cert. */
+.issuing {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Empty / loading / banners -------------------------------------------- */
+.loading,
+.empty {
+  padding: 56px 16px;
+  color: var(--ink-3);
+  font-size: 12.5px;
+  text-align: center;
+  max-width: var(--maxw);
+  margin: 0 auto;
+}
+
+.empty code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-1);
+  background: var(--canvas-2);
+  padding: 1px 5px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-soft);
+}
+
+.successBanner {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 14px;
+  border-radius: var(--radius);
+  background: var(--sage-tint);
+  border: 1px solid rgba(125, 181, 147, .25);
+  color: var(--ink-1);
+  font-size: 12.5px;
+  margin-bottom: 18px;
+  max-width: var(--maxw);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.errorBanner {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 14px;
+  border-radius: var(--radius);
+  background: var(--coral-tint);
+  border: 1px solid rgba(214, 120, 120, .28);
+  color: var(--ink-1);
+  font-size: 12.5px;
+  margin-bottom: 18px;
+  max-width: var(--maxw);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* ── Modal shell shared by Revoke + AddCaller + CertIssued ───────────── */
+.dialogOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 6, 8, .62);
+  backdrop-filter: blur(2px);
+  display: grid;
+  place-items: center;
+  z-index: 100;
+  padding: 24px;
+}
+
+.dialog {
+  background: var(--canvas-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .55), 0 2px 8px rgba(0, 0, 0, .4);
+  width: 440px;
+  max-width: calc(100vw - 40px);
+  overflow: hidden;
+}
+
+.dialogIcon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius);
+  display: grid;
+  place-items: center;
+  margin: 18px 20px 0;
+  color: var(--accent);
+  background: var(--accent-tint);
+  border: 1px solid var(--accent-tint-2);
+}
+
+.dialogIcon__accent {
+  color: var(--accent);
+  background: var(--accent-tint);
+  border-color: var(--accent-tint-2);
+}
+
+.dialogTitle {
+  padding: 12px 20px 4px;
+  font-family: var(--sans);
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ink-0);
+  margin: 0;
+}
+
+.dialogBody {
+  padding: 0 20px 16px;
+  font-size: 13px;
+  color: var(--ink-1);
+  line-height: 1.55;
+}
+
+.callerCode {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-0);
+  background: var(--canvas-1);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-soft);
+}
+
+.dialogActions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 14px 20px;
+  border-top: 1px solid var(--line-soft);
+  background: var(--canvas-2);
+}
+
+.cancelBtn {
+  height: 30px;
+  padding: 0 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-1);
+  font-size: 12.5px;
+  font-weight: 500;
+  font-family: var(--sans);
+  cursor: pointer;
+  transition: all var(--fast) var(--ease);
+}
+
+.cancelBtn:hover {
+  background: var(--canvas-3);
+  color: var(--ink-0);
+  border-color: var(--line-strong);
+}
+
+.confirmBtn {
+  height: 30px;
+  padding: 0 14px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--fast) var(--ease);
+}
+
+.confirmBtn:hover:not(:disabled) { background: var(--accent-hover); }
+.confirmBtn:disabled { opacity: .45; cursor: not-allowed; }
+
+.revokeBtn {
+  height: 30px;
+  padding: 0 14px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(214, 120, 120, .32);
+  background: var(--coral-tint);
+  color: var(--coral);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--fast) var(--ease);
+}
+
+.revokeBtn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--coral) 16%, transparent);
+}
+
+.revokeBtn:disabled,
+.cancelBtn:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+/* ── Cert-issued modal ─────────────────────────────────────────────────*/
+.certModal {
+  background: var(--canvas-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  width: 540px;
+  max-width: calc(100vw - 40px);
+  overflow: hidden;
+}
+
+.certModalHeader {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.certModalIcon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius);
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  background: var(--accent-tint);
+  border: 1px solid var(--accent-tint-2);
+  flex-shrink: 0;
+}
+
+.certModalTitle {
+  font-family: var(--sans);
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ink-0);
+  margin: 0 0 3px;
+}
+
+.certModalSub {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-2);
+  margin: 0;
+}
+
+.certModalClose {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: all var(--fast) var(--ease);
+}
+
+.certModalClose:hover {
+  background: var(--canvas-2);
+  border-color: var(--line);
+  color: var(--ink-0);
+}
+
+.certModalDesc {
+  padding: 16px 20px 12px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  line-height: 1.55;
+  margin: 0;
+}
+
+.certDownloads {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 20px 16px;
+}
+
+.downloadBtn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-soft);
+  background: var(--canvas-2);
+  color: var(--ink-0);
+  font-family: var(--mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all var(--fast) var(--ease);
+  text-align: left;
+}
+
+.downloadBtn:hover {
+  background: var(--canvas-3);
+  border-color: var(--line);
+}
+
+.downloadLabel {
+  margin-left: auto;
+  font-family: var(--sans);
+  font-size: 10.5px;
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.snippetBlock {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin: 0 20px 16px;
+}
+
+.snippetHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: var(--canvas-2);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.snippetLabel {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-2);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.copyBtn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-soft);
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 10.5px;
+  cursor: pointer;
+  transition: all var(--fast) var(--ease);
+}
+
+.copyBtn:hover {
+  background: var(--canvas-3);
+  color: var(--ink-0);
+  border-color: var(--line);
+}
+
+.snippet {
+  margin: 0;
+  padding: 12px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-1);
+  background: var(--canvas-0);
+  white-space: pre;
+  overflow-x: auto;
+  line-height: 1.65;
+}
+
+/* ── Add-caller dialog form ────────────────────────────────────────────*/
+.formField {
+  padding: 0 20px 14px;
+}
+
+.formField:first-of-type {
+  padding-top: 4px;
+}
+
+.formLabel {
+  display: block;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ink-2);
+  margin-bottom: 6px;
+}
+
+.formInput {
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--line-strong);
+  color: var(--ink-0);
+  font-size: 13px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  padding: 0 1px 6px;
+  outline: none;
+  transition: border-color var(--fast) var(--ease), transform var(--fast) var(--ease);
+}
+
+.formInput:focus {
+  border-bottom-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.formInput::placeholder { color: var(--ink-3); }
+
+.formInput__error,
+.formInput__error:focus {
+  border-bottom-color: var(--coral);
+}
+
+.formHint,
+.formHint__error {
+  display: block;
+  font-size: 11.5px;
+  margin-top: 6px;
+}
+
+.formHint { color: var(--ink-3); }
+.formHint__error { color: var(--coral); }
+
+.checkboxRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 0 20px 16px;
+  padding: 11px 13px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-soft);
+  background: var(--canvas-2);
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--ink-1);
+  transition: border-color var(--fast) var(--ease);
+}
+
+.checkboxRow:hover { border-color: var(--line); }
+
+.checkboxRow input[type='checkbox'] {
+  margin-top: 2px;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+}
+
+.checkboxRow > span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.checkboxRow strong { font-weight: 500; color: var(--ink-0); }
+
+.checkboxSub {
+  font-size: 12px;
+  color: var(--ink-2);
+  line-height: 1.5;
+}
+
+.checkboxSub code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-1);
+  background: var(--canvas-1);
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-soft);
+}

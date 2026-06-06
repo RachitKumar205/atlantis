@@ -1,0 +1,320 @@
+/* Health — live activity stream with a probe-chip header.
+   Logs are the page's primary visual element; the probe row is a thin
+   summary strip that compresses the legacy status banner into a chip-row.
+   Spec mirrors the design's pages-health.js + console.css log selectors. */
+
+.health {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ── Probe chip row — compressed health summary at top ──────────────── */
+.probe {
+  flex-shrink: 0;
+  padding: 16px var(--pad-page);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.probeInner {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.probeChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-soft);
+  background: var(--canvas-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.probeK {
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.probeV {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-0);
+}
+
+.probeStatus {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.probeChipOk .probeStatus {
+  background: var(--sage);
+  box-shadow: 0 0 0 3px var(--sage-tint);
+}
+
+.probeChipWarn .probeStatus {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
+
+/* ── Log toolbar — level chips + search + pause/live ────────────────── */
+.logbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px var(--pad-page);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.logbarInner {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.chipRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filterchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 13px;
+  border: 1px solid var(--line-soft);
+  background: var(--canvas-2);
+  font-size: 11.5px;
+  color: var(--ink-2);
+  transition: all var(--fast) var(--ease);
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: var(--sans);
+}
+
+.filterchip:hover {
+  color: var(--ink-0);
+  border-color: var(--line);
+}
+
+.filterchipActive {
+  color: var(--accent);
+  border-color: var(--accent-tint-2);
+  background: var(--accent-tint);
+}
+
+.ct {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  opacity: .7;
+  font-variant-numeric: tabular-nums;
+}
+
+.logsearch {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-soft);
+  background: var(--canvas-1);
+  min-width: 180px;
+}
+
+.logsearch input {
+  background: none;
+  border: none;
+  outline: none;
+  font-size: 12px;
+  width: 100%;
+  color: var(--ink-0);
+  font-family: var(--sans);
+}
+
+.logsearch svg {
+  color: var(--ink-3);
+  width: 13px;
+  height: 13px;
+}
+
+.tailbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-soft);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ink-1);
+  background: var(--canvas-2);
+  transition: all var(--fast) var(--ease);
+  cursor: pointer;
+  font-family: var(--sans);
+}
+
+.liveDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--sage);
+}
+
+.tailbtnLive .liveDot {
+  animation: pulse 1.5s var(--ease) infinite;
+}
+
+.tailbtnPaused {
+  color: var(--accent);
+  border-color: var(--accent-tint-2);
+  background: var(--accent-tint);
+}
+
+.tailbtnPaused .liveDot {
+  background: var(--accent);
+  animation: none;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .3; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tailbtnLive .liveDot { animation: none !important; }
+}
+
+/* ── Log stream ──────────────────────────────────────────────────────── */
+.streamWrap {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.logstream {
+  flex: 1;
+  overflow: auto;
+  padding: 4px 0;
+  font-family: var(--mono);
+  font-feature-settings: var(--feat-mono);
+}
+
+.logstreamInner {
+  max-width: var(--maxw);
+  margin: 0 auto;
+}
+
+.logrow {
+  display: grid;
+  grid-template-columns: 92px 22px 1fr auto;
+  align-items: baseline;
+  gap: 12px;
+  padding: 3px var(--pad-page);
+  font-size: 12px;
+  line-height: 1.55;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  transition: background var(--fast) var(--ease);
+}
+
+.logrow:hover {
+  background: var(--canvas-2);
+  border-left-color: var(--line-strong);
+}
+
+.logrowNew {
+  animation: tickIn 1.2s var(--ease);
+}
+
+.logrowTime {
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.logrowMsg {
+  color: var(--ink-1);
+}
+
+.lvError .logrowMsg {
+  color: #E89898;
+}
+
+.lvWarn .logrowMsg {
+  color: var(--ink-0);
+}
+
+.logrowAttrs {
+  display: flex;
+  gap: 10px;
+  color: var(--ink-3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.ak {
+  color: var(--ink-3);
+}
+
+.av {
+  color: var(--slate);
+}
+
+.logrowExpand {
+  grid-column: 3 / -1;
+  margin-top: 6px;
+  padding: 10px 12px;
+  background: var(--canvas-1);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+}
+
+.logrowOpen {
+  background: var(--canvas-1);
+  border-left-color: var(--accent);
+}
+
+/* Key/value table inside the expanded record. */
+.kv {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 4px 16px;
+  font-size: 11.5px;
+}
+
+.kv dt { color: var(--ink-3); }
+.kv dd { color: var(--ink-0); }
+
+.kvRow {
+  display: contents;
+}
+
+.lograw {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--ink-3);
+  font-size: 11px;
+  word-break: break-all;
+  line-height: 1.6;
+}

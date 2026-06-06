@@ -1,0 +1,62 @@
+# Dockerfile.console — multi-stage build for the atlantis management console.
+#
+# Stage 1: build the React/TypeScript SPA (web/console → dist/)
+# Stage 2: build the Go BFF binary (cmd/console), embedding dist/
+# Stage 3: minimal runtime image
+#
+# Usage:
+#   docker build -f Dockerfile.console -t atlantis-console:local .
+
+# ── Stage 1: SPA build ────────────────────────────────────────────────────────
+FROM --platform=$BUILDPLATFORM node:22-alpine AS spa-build
+
+WORKDIR /app/web/console
+COPY web/console/package.json web/console/package-lock.json* ./
+RUN npm ci --prefer-offline
+
+COPY web/console/ ./
+RUN npm run build
+
+# ── Stage 2: Go build ─────────────────────────────────────────────────────────
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS go-build
+
+# CGO toolchain. The console binary embeds the sandbox runtime, which
+# depends on pg_query_go (vendored libpg_query, statically linked).
+# build-base provides gcc + musl headers for the cgo compile.
+RUN apk add --no-cache build-base
+
+WORKDIR /src
+
+# go.mod has a replace directive for ./clients/go; the sub-module's go.mod is
+# needed to resolve dependencies before the full source is copied.
+COPY go.mod go.sum ./
+COPY clients/go/go.mod clients/go/go.sum* ./clients/go/
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+COPY . .
+# Vite outDir is ../../cmd/console/dist (relative to web/console/),
+# which resolves to /app/cmd/console/dist inside the spa-build stage.
+COPY --from=spa-build /app/cmd/console/dist ./cmd/console/dist/
+
+# Static-linked binary so the runtime image can stay on a minimal base.
+# The pg_query_go vendored libpg_query archive is statically pulled in;
+# the result is a single self-contained executable.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=1 \
+    GOFLAGS="-ldflags=-extldflags=-static" \
+    go build -o /out/atlantis-console ./cmd/console
+
+# ── Stage 3: runtime ──────────────────────────────────────────────────────────
+FROM alpine:3.20
+
+RUN addgroup -S app && adduser -S -G app app
+USER app
+
+COPY --from=go-build /out/atlantis-console /usr/local/bin/atlantis-console
+
+EXPOSE 3000
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
+    CMD wget -q -O - http://127.0.0.1:3000/api/setup/status >/dev/null 2>&1 || exit 1
+
+ENTRYPOINT ["/usr/local/bin/atlantis-console"]
