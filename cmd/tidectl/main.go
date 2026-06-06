@@ -25,6 +25,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+
+	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
 // version is set at build time via -ldflags "-X main.version=v0.X.Y".
@@ -82,7 +84,7 @@ func printUsage(cmds []command) {
 }
 
 func cmdVersion(_ []string) int {
-	fmt.Println("tidectl", version)
+	cliout.Logo(os.Stdout, "tidectl", version)
 	return 0
 }
 
