@@ -58,7 +58,7 @@ func BenchmarkMark_1k_rows(b *testing.B) {
 	if err != nil {
 		b.Fatalf("new: %v", err)
 	}
-	defer sb.Close()
+	defer func() { _ = sb.Close() }()
 	seedBench(b, sb, 1000)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -74,7 +74,7 @@ func BenchmarkMark_100k_rows(b *testing.B) {
 	if err != nil {
 		b.Fatalf("new: %v", err)
 	}
-	defer sb.Close()
+	defer func() { _ = sb.Close() }()
 	seedBench(b, sb, 100_000)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -90,7 +90,7 @@ func BenchmarkFork_100k_rows(b *testing.B) {
 	if err != nil {
 		b.Fatalf("new: %v", err)
 	}
-	defer sb.Close()
+	defer func() { _ = sb.Close() }()
 	seedBench(b, sb, 100_000)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -113,7 +113,7 @@ func BenchmarkRestoreTo_100k_rows(b *testing.B) {
 	if err != nil {
 		b.Fatalf("new: %v", err)
 	}
-	defer sb.Close()
+	defer func() { _ = sb.Close() }()
 	seedBench(b, sb, 100_000)
 	mark := sb.Mark()
 	b.ResetTimer()

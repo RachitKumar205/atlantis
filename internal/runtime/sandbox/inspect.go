@@ -379,44 +379,6 @@ func compareForInspect(a, b any) int {
 	return 0
 }
 
-// diffTables computes a TableDiff between two row slices by PK.
-// PK is reconstructed from desc.PKCols + row positions; rows whose
-// PK key matches but values differ count as Modified.
-func diffTables(desc *sim.TableDesc, before, after []sim.Row) TableDiff {
-	beforeByKey := indexByPK(desc, before)
-	afterByKey := indexByPK(desc, after)
-	var td TableDiff
-	for k, brow := range beforeByKey {
-		arow, ok := afterByKey[k]
-		if !ok {
-			td.Removed++
-			continue
-		}
-		if !rowsEqual(brow, arow) {
-			td.Modified++
-		}
-	}
-	for k := range afterByKey {
-		if _, ok := beforeByKey[k]; !ok {
-			td.Added++
-		}
-	}
-	return td
-}
-
-func indexByPK(desc *sim.TableDesc, rows []sim.Row) map[string]sim.Row {
-	out := make(map[string]sim.Row, len(rows))
-	for _, r := range rows {
-		parts := make([]string, len(desc.PKCols))
-		for i, pk := range desc.PKCols {
-			parts[i] = fmt.Sprintf("%v", r[desc.ColIndex(pk)])
-		}
-		key := strings.Join(parts, "\x00")
-		out[key] = r
-	}
-	return out
-}
-
 func rowsEqual(a, b sim.Row) bool {
 	if len(a) != len(b) {
 		return false

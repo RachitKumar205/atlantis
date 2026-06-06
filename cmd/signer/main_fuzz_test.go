@@ -100,7 +100,7 @@ func FuzzHandleIssue(f *testing.F) {
 			// test failure.
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		// Read the response (cap at 64 KiB; ours is much smaller).
 		respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
@@ -127,6 +127,7 @@ func FuzzHandleIssue(f *testing.F) {
 		block, _ := pem.Decode([]byte(out.CertPEM))
 		if block == nil {
 			t.Fatalf("200 response with un-PEM-able cert_pem; body=%q", respBody)
+			return
 		}
 		cert, err := x509.ParseCertificate(block.Bytes)
 		if err != nil {
