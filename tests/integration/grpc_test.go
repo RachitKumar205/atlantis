@@ -12,8 +12,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	commonpb "github.com/rachitkumar205/atlantis-go/pb/atlantis/common/v1"
-	consumerpb "github.com/rachitkumar205/atlantis-go/pb/atlantis/consumer/v1"
+	commonpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/common/v1"
+	consumerpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/consumer/v1"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/server/entity"
 )
