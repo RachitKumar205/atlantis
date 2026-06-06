@@ -7,7 +7,7 @@ import (
 	// Import the compiled predicates proto so that the global proto
 	// registry has the atlantis.common.v1.* types available for the
 	// dynamic descriptor builder tests.
-	_ "github.com/rachitkumar205/atlantis-go/pb/atlantis/common/v1"
+	_ "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/common/v1"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )

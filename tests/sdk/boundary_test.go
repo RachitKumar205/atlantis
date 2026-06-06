@@ -1,7 +1,7 @@
 //go:build sdk
 
 // SDK module-boundary test. Verifies the typed-client sub-module
-// (github.com/rachitkumar205/atlantis-go) never imports anything from atlantis's main
+// (github.com/rachitkumar205/atlantis/clients/go) never imports anything from atlantis's main
 // module. The whole point of the sub-module split is that caller repos
 // — backend, data-pipeline, future iOS / ML / web consumers — see only
 // the proto types + gRPC stubs + thin client wrappers, never atlantis's
@@ -47,7 +47,7 @@ func TestSDKHasNoAtlantisInternalImports(t *testing.T) {
 	}
 	var leaks []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		// The SDK's own module path is `github.com/rachitkumar205/atlantis-go`; the leaked
+		// The SDK's own module path is `github.com/rachitkumar205/atlantis/clients/go`; the leaked
 		// path would be the main module `github.com/rachitkumar205/atlantis` (note the
 		// missing `-go` suffix). Match the prefix exactly + a `/` to avoid
 		// false-positives if someone names a future module `atlantis-foo`.

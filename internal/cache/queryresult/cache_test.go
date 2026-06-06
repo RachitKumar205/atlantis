@@ -9,7 +9,7 @@ import (
 
 	"github.com/rachitkumar205/atlantis/internal/runtime"
 
-	commonv1 "github.com/rachitkumar205/atlantis-go/pb/atlantis/common/v1"
+	commonv1 "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/common/v1"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 )
