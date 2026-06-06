@@ -283,7 +283,7 @@ func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan pla
 	}
 	cliout.Successf("applied at %s", applyResp.AppliedAt)
 	if applyResp.ContentHash != "" {
-		fmt.Printf("  %s %s\n", cliout.Grey("content hash:"), applyResp.ContentHash[:12])
+		cliout.Field(os.Stdout, "content", applyResp.ContentHash[:12])
 	}
 	if cfg.OutputDir != "" {
 		cliout.Infof("regenerate the typed client under %s with `tide generate`", cfg.OutputDir)
@@ -293,15 +293,13 @@ func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan pla
 
 func printImpactReport(p planResponse) {
 	if len(p.ImpactReport) > 0 {
-		fmt.Println(cliout.Bold("impact report:"))
+		cliout.Header(os.Stdout, "impact")
 		for _, e := range p.ImpactReport {
-			mark := cliout.Grey("·")
-			caller := e.Caller
 			if e.Affected {
-				mark = cliout.Yellow("●")
-				caller = cliout.Bold(e.Caller)
+				cliout.Row(os.Stdout, "warn", cliout.Bold(e.Caller), e.Detail)
+			} else {
+				cliout.Row(os.Stdout, "muted", cliout.Faint(e.Caller), e.Detail)
 			}
-			fmt.Printf("  %s %-32s %s\n", mark, caller, cliout.Grey(e.Detail))
 		}
 		fmt.Println()
 	}

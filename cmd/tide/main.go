@@ -32,6 +32,8 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
 // version is set at build time via -ldflags "-X main.version=v0.X.Y".
@@ -77,7 +79,7 @@ func main() {
 	case "sandbox":
 		os.Exit(cmdSandbox(os.Args[2:]))
 	case "version":
-		fmt.Println("tide", version)
+		cliout.Logo(os.Stdout, "tide", version)
 	default:
 		fmt.Fprintf(os.Stderr, "tide: unknown subcommand %q\n\n", os.Args[1])
 		printUsage()
@@ -86,6 +88,8 @@ func main() {
 }
 
 func printUsage() {
+	cliout.LogoInline(os.Stderr, "tide", version)
+	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "usage: tide apply    [--backfill] [--dry-run] [--no-pull]")
 	fmt.Fprintln(os.Stderr, "       tide plan     [--against URL] [--format table|json] [--no-pull]")
 	fmt.Fprintln(os.Stderr, "       tide pull     [--force]")

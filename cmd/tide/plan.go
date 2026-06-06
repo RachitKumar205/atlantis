@@ -115,31 +115,33 @@ func printPlanReport(resp planResponse) {
 	if len(resp.ParseErrors) > 0 {
 		cliout.Errorf("schema validation failed:")
 		for _, e := range resp.ParseErrors {
-			fmt.Printf("  %s %s\n", cliout.Red("✖"), e)
+			fmt.Printf("  %s %s\n", cliout.Coral(cliout.GlyphCross), e)
 		}
 		return
 	}
-	fmt.Printf("%s   %s\n", cliout.Grey("plan_id"), resp.PlanID)
-	fmt.Printf("%s     %s\n", cliout.Grey("class"), colorClass(resp.Class))
+	cliout.Header(os.Stdout, "plan")
+	cliout.Field(os.Stdout, "plan_id", resp.PlanID)
+	cliout.Field(os.Stdout, "class", colorClass(resp.Class))
 	if len(resp.ImpactReport) > 0 {
-		fmt.Println(cliout.Bold("impact:"))
+		fmt.Println()
+		cliout.Header(os.Stdout, "impact")
 		for _, e := range resp.ImpactReport {
-			mark := cliout.Grey("·")
-			caller := e.Caller
 			if e.Affected {
-				mark = cliout.Yellow("●")
-				caller = cliout.Bold(e.Caller)
+				cliout.Row(os.Stdout, "warn", cliout.Bold(e.Caller), e.Detail)
+			} else {
+				cliout.Row(os.Stdout, "muted", cliout.Faint(e.Caller), e.Detail)
 			}
-			fmt.Printf("  %s %-32s %s\n", mark, caller, cliout.Grey(e.Detail))
 		}
 	}
 	if len(resp.BreakingDetail) > 0 {
-		fmt.Println(cliout.Red("breaking:"))
+		fmt.Println()
+		cliout.Header(os.Stdout, "breaking")
 		for _, d := range resp.BreakingDetail {
-			fmt.Printf("  %s %s\n", cliout.Red("✖"), d)
+			fmt.Printf("  %s  %s\n", cliout.Coral(cliout.GlyphCross), d)
 		}
 	}
 	if len(resp.Extensions) > 0 {
+		fmt.Println()
 		printExtensions(resp.Extensions)
 	}
 }
@@ -149,26 +151,24 @@ func printPlanReport(resp planResponse) {
 // enable (atlantis will CREATE EXTENSION inside the apply tx), missing
 // (operator must install at OS level — apply will refuse).
 func printExtensions(exts []extensionStatus) {
-	fmt.Println(cliout.Bold("extensions:"))
+	cliout.Header(os.Stdout, "extensions")
 	for _, e := range exts {
-		var mark, action string
 		switch e.Action {
 		case "ok":
-			mark = cliout.Grey("·")
-			action = cliout.Grey("already enabled")
+			cliout.Row(os.Stdout, "muted", e.Name, "already enabled")
 		case "enable":
-			mark = cliout.Yellow("●")
-			action = cliout.Yellow("will be auto-enabled")
+			cliout.Row(os.Stdout, "brass", e.Name, "will be auto-enabled")
+			if e.Trigger != "" {
+				cliout.SubRow(os.Stdout, e.Trigger)
+			}
 		case "missing":
-			mark = cliout.Red("✖")
-			action = cliout.Red("missing — " + e.InstallHint)
-		default:
-			mark = cliout.Grey("?")
-			action = e.Action
-		}
-		fmt.Printf("  %s %-14s %s\n", mark, e.Name, action)
-		if e.Trigger != "" && e.Action != "ok" {
-			fmt.Printf("    %s\n", cliout.Grey(e.Trigger))
+			cliout.Row(os.Stdout, "coral", e.Name, "missing")
+			if e.Trigger != "" {
+				cliout.SubRow(os.Stdout, e.Trigger)
+			}
+			if e.InstallHint != "" {
+				cliout.SubRow(os.Stdout, e.InstallHint)
+			}
 		}
 	}
 }
@@ -179,13 +179,13 @@ func printExtensions(exts []extensionStatus) {
 func colorClass(class string) string {
 	switch class {
 	case "additive":
-		return cliout.Green(class)
+		return cliout.Sage(class)
 	case "backfill_required":
-		return cliout.Yellow(class)
+		return cliout.Brass(class)
 	case "cross_caller_breaking":
-		return cliout.Red(cliout.Bold(class))
+		return cliout.Coral(cliout.Bold(class))
 	case "unparseable":
-		return cliout.Red(class)
+		return cliout.Coral(class)
 	}
 	return class
 }
