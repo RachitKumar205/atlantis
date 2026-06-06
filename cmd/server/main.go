@@ -209,12 +209,50 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		},
 	})
 
+	// admin.Service is constructed early because the cert-binding
+	// interceptor needs its LookupCallerCertBinding method. Register on
+	// the gRPC server happens after server construction below.
+	adminSvc := admin.New(pool.Raw(), admin.Config{
+		MirrorDir:              cfg.AdminMirrorDir,
+		MirrorEnabled:          cfg.AdminMirrorSchema,
+		AllowApplyMutation:     cfg.AdminAllowApplyMutation,
+		MutationAllowedCallers: cfg.AdminMutationAllowedCallers,
+		OperatorAllowedCallers: cfg.AdminOperatorAllowedCallers,
+		// Share the cert-CN extractor with the auth + rate-limit
+		// interceptors so every layer agrees on caller identity for the
+		// same request — a divergence here would let a CN authorized
+		// by one layer be evaluated as a different identity by another.
+		CallerFromContext: callerFromContext,
+		BackfillEnabled:   cfg.BackfillWorkerEnabled,
+		LogRing:           logRing,
+	})
+
+	// Cert binding: bind each caller_identities row to a specific leaf
+	// fingerprint. Every authenticated RPC must present a cert whose
+	// SHA-256 matches the row's stored fingerprint; mismatch or missing
+	// row → Unauthenticated. This is what makes re-issue + revoke
+	// actually invalidate prior certs at the auth layer without a CRL.
+	//
+	// Exempt: the management-plane CN (the console BFF) doesn't have a
+	// fingerprint of its own — its auth is the session cookie + sudo
+	// layer in front of the BFF — so we skip binding for it. Operators
+	// can add more CNs via ATL_CERT_BINDING_EXEMPT_CALLERS if they have
+	// a similar bootstrap CN that authenticates by other means.
+	certBinding := interceptors.NewCertBinding(interceptors.CertBindingConfig{
+		Lookup:            adminSvc.LookupCallerCertBinding,
+		Enforce:           cfg.TLSCertFile != "",
+		CallerFromContext: callerFromContext,
+		ExemptCallers:     cfg.CertBindingExemptCallers,
+		Log:               log,
+	})
+
 	srv := grpc.NewServer(
 		grpc.Creds(creds),
 		grpc.ChainUnaryInterceptor(
 			recoveryInterceptor(log),
 			interceptors.NewMetrics(),
 			resolveCallerInterceptor(),
+			certBinding,
 			authInt,
 			rateLimit,
 			loggingInterceptor(log),
@@ -228,20 +266,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	reflection.Register(srv)
 
 	log.Debug("init: register admin service")
-	admin.Register(srv, admin.New(pool.Raw(), admin.Config{
-		MirrorDir:              cfg.AdminMirrorDir,
-		MirrorEnabled:          cfg.AdminMirrorSchema,
-		AllowApplyMutation:     cfg.AdminAllowApplyMutation,
-		MutationAllowedCallers: cfg.AdminMutationAllowedCallers,
-		OperatorAllowedCallers: cfg.AdminOperatorAllowedCallers,
-		// Share the cert-CN extractor with the auth + rate-limit
-		// interceptors so every layer agrees on caller identity for the
-		// same request — a divergence here would let a CN authorized
-		// by one layer be evaluated as a different identity by another.
-		CallerFromContext: callerFromContext,
-		BackfillEnabled:   cfg.BackfillWorkerEnabled,
-		LogRing:           logRing,
-	}))
+	admin.Register(srv, adminSvc)
 
 	// Backfill worker — gated by ATL_BACKFILL_WORKER_ENABLED. Shares
 	// workerCtx with the invalidate worker so SIGTERM stops both, and
