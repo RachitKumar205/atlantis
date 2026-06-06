@@ -31,7 +31,7 @@ jobs:
           go-version: "1.24"
 
       - name: Install tide
-        run: go install github.com/rachitkumar205/atlantis/cmd/tide@v0.1.0
+        run: go install github.com/rachitkumar205/atlantis/cmd/tide@v0.4.0
         # Pin to a tagged version; bump when you upgrade the server.
 
       - name: Materialize TLS credentials

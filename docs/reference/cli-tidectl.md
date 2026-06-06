@@ -113,7 +113,7 @@ tidectl migrate-down [--migrations-dir <dir>] [--pg-url <url>]
 
 ### `tidectl version`
 
-Prints `tidectl 0.1.0`. Does not contact any service.
+Prints the build-time version (`tidectl dev` for a local source build; `tidectl v0.4.0` for a release tarball built with `-X main.version=v0.4.0`). Does not contact any service.
 
 ```
 tidectl version
