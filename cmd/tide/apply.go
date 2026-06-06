@@ -46,6 +46,15 @@ type planResponse struct {
 	PostBackfillUpSQL      string             `json:"PostBackfillUpSQL,omitempty"`
 	PostBackfillIndexesSQL string             `json:"PostBackfillIndexesSQL,omitempty"`
 	BackfillFields         []backfillFieldRef `json:"BackfillFields,omitempty"`
+
+	Extensions []extensionStatus `json:"Extensions,omitempty"`
+}
+
+type extensionStatus struct {
+	Name        string `json:"name"`
+	Trigger     string `json:"trigger"`
+	Action      string `json:"action"` // ok | enable | missing
+	InstallHint string `json:"install_hint,omitempty"`
 }
 
 type backfillFieldRef struct {
@@ -277,26 +286,29 @@ func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan pla
 		fmt.Printf("  %s %s\n", cliout.Grey("content hash:"), applyResp.ContentHash[:12])
 	}
 	if cfg.OutputDir != "" {
-		cliout.Infof("regenerate the typed client under %s with `buf generate` (v0.2 will run this automatically)", cfg.OutputDir)
+		cliout.Infof("regenerate the typed client under %s with `tide generate`", cfg.OutputDir)
 	}
 	return 0
 }
 
 func printImpactReport(p planResponse) {
-	if len(p.ImpactReport) == 0 {
-		return
-	}
-	fmt.Println(cliout.Bold("impact report:"))
-	for _, e := range p.ImpactReport {
-		mark := cliout.Grey("·")
-		caller := e.Caller
-		if e.Affected {
-			mark = cliout.Yellow("●")
-			caller = cliout.Bold(e.Caller)
+	if len(p.ImpactReport) > 0 {
+		fmt.Println(cliout.Bold("impact report:"))
+		for _, e := range p.ImpactReport {
+			mark := cliout.Grey("·")
+			caller := e.Caller
+			if e.Affected {
+				mark = cliout.Yellow("●")
+				caller = cliout.Bold(e.Caller)
+			}
+			fmt.Printf("  %s %-32s %s\n", mark, caller, cliout.Grey(e.Detail))
 		}
-		fmt.Printf("  %s %-32s %s\n", mark, caller, cliout.Grey(e.Detail))
+		fmt.Println()
 	}
-	fmt.Println()
+	if len(p.Extensions) > 0 {
+		printExtensions(p.Extensions)
+		fmt.Println()
+	}
 }
 
 // collectPCFiles walks every schema path and reads every .atl file. Paths
