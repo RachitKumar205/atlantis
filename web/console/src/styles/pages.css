@@ -859,10 +859,14 @@ input:-webkit-autofill:active {
 .hover-info {
   position: relative;
   display: inline-block;
+}
+/* Default variant fills its container — used by the Sandbox boot grid where
+   each tooltip wraps a button that should fill its grid cell. */
+.hover-info:not(.hover-info--inline) {
   width: 100%;
 }
-.hover-info > .btn,
-.hover-info > button {
+.hover-info:not(.hover-info--inline) > .btn,
+.hover-info:not(.hover-info--inline) > button {
   width: 100%;
   justify-content: center;
 }
@@ -917,6 +921,12 @@ input:-webkit-autofill:active {
   color: var(--ink-1);
 }
 .hover-info-pop p:last-child { margin-bottom: 0; }
+/* Inline variant: wrapper sizes to its child, the button keeps the width
+   from its own class (.btn--icon → 32px, etc.). Used by the Callers card
+   header where icon buttons sit in a flex row. */
+.hover-info--inline {
+  display: inline-block;
+}
 .hi-foot {
   margin-top: 6px;
   padding-top: 6px;

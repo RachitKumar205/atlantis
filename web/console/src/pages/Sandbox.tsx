@@ -35,6 +35,7 @@ import {
 import { PageShell } from '@/components/PageShell'
 import { Sql } from '@/components/Sql'
 import { RowsTable } from '@/components/RowsTable'
+import { HoverInfo } from '@/components/HoverInfo'
 
 // ─────────────────────────── tabs + checkpoint store ───────────────────────────
 
@@ -711,28 +712,6 @@ function EmptyWorkbench() {
         <dd>Clone the sandbox into parallel copies, each with independent state.</dd>
       </dl>
     </div>
-  )
-}
-
-// ─────────────────────────── hover info popover ───────────────────────────
-
-// HoverInfo wraps an element with a hover popover. The open state is
-// the parent's :hover/:focus-within (pure CSS), so there's no portal,
-// no positioner library, no extra render on hover. Don't pass tall
-// content — there's no viewport collision avoidance and a tall popover
-// will clip behind the next rail section.
-function HoverInfo({ children, content, side = 'bottom' }: {
-  children: React.ReactNode
-  content: React.ReactNode
-  side?: 'top' | 'bottom' | 'right'
-}) {
-  return (
-    <span className="hover-info">
-      {children}
-      <span className={`hover-info-pop hover-info-pop--${side}`} role="tooltip">
-        {content}
-      </span>
-    </span>
   )
 }
 
