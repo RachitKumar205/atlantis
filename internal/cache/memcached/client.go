@@ -171,20 +171,34 @@ func (c *Client) CurrentVersion(ctx context.Context, entity, id string) (int64, 
 // Monotonic guard: refuses to write a version that's less than or equal to
 // the current pointer value. Without this guard, two concurrent workers
 // processing rows for the same entity can race and leave the pointer at a
-// *lower* version after both finish. The guard is implemented
-// as read-then-write rather than memcached CAS for one reason — the
-// pointer key may not exist yet on first write, and CAS requires an
-// existing value. ErrStaleVersion is returned (not nil) so the worker can
-// `markFailure` and move on instead of retrying.
+// *lower* version after both finish. The guard is implemented as
+// read-then-write rather than memcached CAS for one reason — the pointer
+// key may not exist yet on first write, and CAS requires an existing
+// value.
+//
+// Three return shapes:
+//
+//   - nil — version accepted and written.
+//   - ErrStaleVersion — the cached pointer is already at-or-ahead of
+//     `version`. The worker treats this as success-equivalent (the desired
+//     state is in cache already) and DELETEs the outbox row.
+//   - any other error — the guard couldn't be validated (CurrentVersion
+//     failed) or the write itself failed. The worker treats this as
+//     retryable and leaves the outbox row for the next tick. Returning the
+//     read error here is the load-bearing decision: with an unvalidated
+//     guard, proceeding to SET would let a delayed worker overwrite a
+//     fresher pointer published by another worker since this worker's
+//     last successful read.
 func (c *Client) SetVersion(ctx context.Context, entity, id string, version int64, ttl time.Duration) error {
 	if version <= 0 {
 		return fmt.Errorf("memcached: refusing to write non-positive version %d for %s/%s", version, entity, id)
 	}
 	cur, err := c.CurrentVersion(ctx, entity, id)
 	if err != nil {
-		// Read failure: best-effort proceed to write. We'd rather have a
-		// fresh pointer than leave the cache stuck.
-		_ = err
+		// Read failure: the monotonic guard can't be validated. Refuse
+		// the write — see the doc-comment above for why a "fresh pointer
+		// better than stuck cache" fallback is the wrong call here.
+		return fmt.Errorf("memcached: monotonic guard read failed for %s/%s: %w", entity, id, err)
 	}
 	if cur >= version {
 		return ErrStaleVersion
