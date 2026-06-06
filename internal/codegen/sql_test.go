@@ -30,8 +30,11 @@ func TestEmit_Initial_BareEntity(t *testing.T) {
 	}
 	up := scripts.Up
 	assertContains(t, up, "CREATE SCHEMA IF NOT EXISTS atlantis")
-	assertContains(t, up, "CREATE EXTENSION IF NOT EXISTS vector")
-	assertContains(t, up, "CREATE EXTENSION IF NOT EXISTS timescaledb")
+	// Vanilla text/bigint schema → no extension dependencies. Previously
+	// this emitted CREATE EXTENSION vector + timescaledb unconditionally,
+	// which forced operators to install pgvector and timescaledb at the
+	// OS level even when the schema didn't use them.
+	assertNotContains(t, up, "CREATE EXTENSION")
 	assertContains(t, up, `CREATE TABLE IF NOT EXISTS "atlantis"."consumer_account"`)
 	assertContains(t, up, `"id" BIGINT`)
 	assertContains(t, up, `"email" TEXT NOT NULL UNIQUE`)
@@ -69,6 +72,66 @@ entity K in lab {
 		`"j" JSONB`, `"k" vector(32)`, `"l" TEXT[]`,
 	} {
 		assertContains(t, up, sub)
+	}
+	// vector(32) column triggers pgvector — but not timescaledb (no hypertable).
+	assertContains(t, up, "CREATE EXTENSION IF NOT EXISTS vector;")
+	assertNotContains(t, up, "CREATE EXTENSION IF NOT EXISTS timescaledb")
+}
+
+func TestEmit_Initial_ExtensionsByTrigger(t *testing.T) {
+	tests := []struct {
+		name   string
+		dsl    string
+		expect []string // which CREATE EXTENSION lines must appear
+		reject []string // which CREATE EXTENSION lines must NOT appear
+	}{
+		{
+			name:   "vanilla schema requires nothing",
+			dsl:    `entity Note in lab { id bigint primary  title text not null }`,
+			reject: []string{"vector", "timescaledb", "citext"},
+		},
+		{
+			name:   "vector field triggers pgvector only",
+			dsl:    `entity Doc in search { id bigint primary  emb vector(8) }`,
+			expect: []string{"vector"},
+			reject: []string{"timescaledb", "citext"},
+		},
+		{
+			name:   "hypertable triggers timescaledb only",
+			dsl:    `hypertable Event in audit on ts { id bigint primary  ts timestamptz }`,
+			expect: []string{"timescaledb"},
+			reject: []string{"vector", "citext"},
+		},
+		{
+			name:   "citext field triggers citext only",
+			dsl:    `entity User in consumer { id bigint primary  email citext unique }`,
+			expect: []string{"citext"},
+			reject: []string{"vector", "timescaledb"},
+		},
+		{
+			name: "all three triggers at once",
+			dsl: `
+entity User in consumer { id bigint primary  email citext }
+hypertable Event in audit on ts { id bigint primary  ts timestamptz }
+entity Doc in search { id bigint primary  emb vector(16) }
+`,
+			expect: []string{"vector", "timescaledb", "citext"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ir := lower(t, tc.dsl)
+			scripts, err := EmitInitial(ir)
+			if err != nil {
+				t.Fatalf("EmitInitial: %v", err)
+			}
+			for _, ext := range tc.expect {
+				assertContains(t, scripts.Up, "CREATE EXTENSION IF NOT EXISTS "+ext+";")
+			}
+			for _, ext := range tc.reject {
+				assertNotContains(t, scripts.Up, "CREATE EXTENSION IF NOT EXISTS "+ext)
+			}
+		})
 	}
 }
 
@@ -325,7 +388,7 @@ func TestEmit_Diff_CacheChangeIsNoSQL(t *testing.T) {
 }
 
 func TestEmit_TopoSort_CycleDetected(t *testing.T) {
-	// Two entities referencing each other — true cycle, not supported in v0.1.
+	// Two entities referencing each other — true cycle; topoSortEntities reports it as an error instead of emitting unverifiable DDL.
 	ir := lower(t, `
 entity A in x { id bigint primary  b_id bigint references x.B.id }
 entity B in x { id bigint primary  a_id bigint references x.A.id }
