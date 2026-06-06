@@ -30,6 +30,7 @@ func fieldNames(t *testing.T, src []byte, namespace, entity string) []string {
 	e := findEntity(f, namespace, entity)
 	if e == nil {
 		t.Fatalf("entity %s.%s not found in result", namespace, entity)
+		return nil
 	}
 	var names []string
 	for _, m := range e.Members {

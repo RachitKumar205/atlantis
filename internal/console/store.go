@@ -550,14 +550,6 @@ type sessionInfo struct {
 	SudoUntil *time.Time // nil when not in sudo mode
 }
 
-func (s *store) getSessionUser(ctx context.Context, token string) (*User, error) {
-	info, err := s.getSessionInfo(ctx, token)
-	if err != nil {
-		return nil, err
-	}
-	return info.User, nil
-}
-
 // getSessionInfo returns the session row + the user. Centralises the
 // JOIN so the auth middleware and the sudo middleware look at the
 // session through one query.

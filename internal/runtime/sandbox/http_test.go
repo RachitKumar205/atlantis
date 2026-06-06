@@ -47,7 +47,7 @@ func postJSON(t *testing.T, url string, body any) (status int, decoded map[strin
 	if err != nil {
 		t.Fatalf("POST %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(resp.Body)
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &decoded); err != nil {
@@ -64,7 +64,7 @@ func getJSON(t *testing.T, url string) (status int, decoded map[string]any) {
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(resp.Body)
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &decoded)
@@ -98,7 +98,7 @@ func TestHTTPCreateAndDestroy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DELETE: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("DELETE status: got %d want 204", resp.StatusCode)
 	}
@@ -326,7 +326,7 @@ func TestHTTPSnapshotRoundTrip(t *testing.T) {
 		t.Fatalf("snapshot GET: %v", err)
 	}
 	blob, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if len(blob) == 0 {
 		t.Fatalf("empty snapshot blob")
 	}
@@ -343,7 +343,7 @@ func TestHTTPSnapshotRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("snapshot PUT: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("PUT snapshot status: %d", resp.StatusCode)
 	}

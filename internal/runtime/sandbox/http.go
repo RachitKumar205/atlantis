@@ -719,12 +719,6 @@ func (ss *serverSandbox) handleFixturesBulk(w http.ResponseWriter, r *http.Reque
 
 // ─────────────────────────── helpers ───────────────────────────
 
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
-}
-
 // writeJSONTimed wraps any JSON-serialisable body with a top-level
 // `t_server_us` field capturing the elapsed time since `start`. Used
 // by every sandbox endpoint so the console's right-rail "live perf

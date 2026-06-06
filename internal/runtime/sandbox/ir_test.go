@@ -44,6 +44,7 @@ func TestLoadIRBuildsCatalog(t *testing.T) {
 	desc := sb.Catalog().Lookup("atlantis.consumer_account")
 	if desc == nil {
 		t.Fatalf("entity Account not registered as atlantis.consumer_account")
+		return
 	}
 	if len(desc.PKCols) != 1 || desc.PKCols[0] != "id" {
 		t.Fatalf("PK: %v", desc.PKCols)
@@ -108,6 +109,7 @@ func TestLoadIRCompositePKAndHypertable(t *testing.T) {
 	desc := sb.Catalog().Lookup("atlantis.vendor_purchase")
 	if desc == nil {
 		t.Fatalf("Purchase not registered")
+		return
 	}
 	if len(desc.PKCols) != 2 || desc.PKCols[0] != "purchase_id" || desc.PKCols[1] != "occurred_at" {
 		t.Fatalf("composite PK: %v", desc.PKCols)
@@ -162,7 +164,7 @@ func TestLoadIRAcceptsArrayColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error registering array entity: %v", err)
 	}
-	defer sb.Close()
+	defer func() { _ = sb.Close() }()
 	desc := sb.Catalog().Lookup("atlantis.consumer_tagged")
 	if desc == nil {
 		t.Fatalf("Tagged entity not registered")

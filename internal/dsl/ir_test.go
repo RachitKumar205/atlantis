@@ -73,6 +73,7 @@ entity User in consumer {
 	dn := ir.Entities[0].FindField("display_name")
 	if dn == nil {
 		t.Fatalf("display_name not found")
+		return
 	}
 	want := `first_name || ' ' || last_name`
 	if dn.Backfill != want {
