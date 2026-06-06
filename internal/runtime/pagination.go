@@ -24,7 +24,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	commonpb "github.com/rachitkumar205/atlantis-go/pb/atlantis/common/v1"
+	commonpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/common/v1"
 )
 
 // ErrInvalidPageToken is returned when a cursor cannot be base64-

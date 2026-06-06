@@ -27,14 +27,14 @@
 // the admin RPC surface.
 //
 // Caller-facing types (Handler, Registry, Worker, Config, Checkpoint)
-// live in the client SDK (github.com/rachitkumar205/atlantis-go/jobs)
+// live in the client SDK (github.com/rachitkumar205/atlantis/clients/go/jobs)
 // so callers import only the SDK. This package re-exports them for
 // server-internal use and adds server-only code (sweeper, workflows,
 // tracing, remote dispatch).
 package jobs
 
 import (
-	sdkjobs "github.com/rachitkumar205/atlantis-go/jobs"
+	sdkjobs "github.com/rachitkumar205/atlantis/clients/go/jobs"
 )
 
 // Re-export caller-facing types from the client SDK so server code

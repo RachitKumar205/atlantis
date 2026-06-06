@@ -1,4 +1,4 @@
-module github.com/rachitkumar205/atlantis-go
+module github.com/rachitkumar205/atlantis/clients/go
 
 go 1.25.0
 

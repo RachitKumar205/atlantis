@@ -6,10 +6,10 @@ go 1.25.0
 // caller repos can depend on the SDK without taking on atlantis-internal
 // code as a build dependency. The sub-module's go.mod has only grpc-go +
 // protobuf — atlantis's `internal/` packages are structurally unreachable
-// from any consumer of `github.com/rachitkumar205/atlantis-go`.
-replace github.com/rachitkumar205/atlantis-go => ./clients/go
+// from any consumer of `github.com/rachitkumar205/atlantis/clients/go`.
+replace github.com/rachitkumar205/atlantis/clients/go => ./clients/go
 
-require github.com/rachitkumar205/atlantis-go v0.0.0-00010101000000-000000000000
+require github.com/rachitkumar205/atlantis/clients/go v0.0.0-00010101000000-000000000000
 
 require (
 	github.com/golang-migrate/migrate/v4 v4.19.1
