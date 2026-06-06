@@ -1015,7 +1015,7 @@ function InviteDialog({
             <input
               className="input"
               type="email"
-              placeholder="name@atlantis.acme.dev"
+              placeholder="name@your.org"
               autoFocus
               value={email}
               onChange={e => setEmail(e.target.value)}
