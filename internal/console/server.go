@@ -6,8 +6,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -1791,15 +1793,37 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 		"expires_at": signerRespBody.ExpiresAt,
 	})
 
-	// Persist the NotAfter so the Callers card view can render a real
-	// validity meter without re-asking the signer on every page load.
-	// Best-effort: if this fails the cert is still usable — the meter
-	// just stays empty for this caller until the next issuance.
+	// Compute the leaf's SHA-256 fingerprint. The server's cert-binding
+	// interceptor reads this column on every authenticated RPC and
+	// rejects any peer cert whose hash doesn't match — so persisting the
+	// new fingerprint atomically supersedes the previous cert at the
+	// auth layer (rotation/revoke without a CRL).
+	//
+	// PEM decode is parser-strict — anything but a CERTIFICATE block is
+	// rejected so a malformed signer response can't land a bogus
+	// fingerprint that locks the caller out.
+	var fingerprintHex string
+	if block, _ := pem.Decode([]byte(signerRespBody.CertPEM)); block != nil && block.Type == "CERTIFICATE" {
+		sum := sha256.Sum256(block.Bytes)
+		fingerprintHex = hex.EncodeToString(sum[:])
+	} else {
+		s.log.Error("decode signed cert for fingerprint", "caller", caller)
+		jsonError(w, "signer returned malformed cert", http.StatusBadGateway)
+		return
+	}
+
+	// Persist NotAfter + fingerprint. The fingerprint write is
+	// load-bearing — if it fails, the old cert keeps authenticating
+	// until natural expiry, so surface the error to the operator rather
+	// than swallowing it like the pre-binding implementation did.
 	if _, err := s.atl.invokeRaw(r.Context(), adminBase+"RecordCallerCertExpiry", map[string]string{
-		"caller":     caller,
-		"expires_at": signerRespBody.ExpiresAt,
+		"caller":      caller,
+		"expires_at":  signerRespBody.ExpiresAt,
+		"fingerprint": fingerprintHex,
 	}); err != nil {
-		s.log.Warn("RecordCallerCertExpiry", "caller", caller, "err", err)
+		s.log.Error("RecordCallerCertExpiry", "caller", caller, "err", err)
+		jsonError(w, "cert minted but binding write failed; the previous cert still authenticates — retry to rotate", http.StatusBadGateway)
+		return
 	}
 
 	s.log.Info("cert issued",

@@ -101,6 +101,13 @@ type config struct {
 	// for backward compatibility.
 	AdminOperatorAllowedCallers []string
 
+	// CertBindingExemptCallers are CNs that bypass the per-RPC cert
+	// fingerprint check. Reserved for management-plane services whose
+	// trust comes from a higher layer (session cookies + sudo for the
+	// console) and that therefore don't have a fingerprint to bind
+	// against. Default: the console CN.
+	CertBindingExemptCallers []string
+
 	// BackfillWorkerEnabled toggles the chunked-UPDATE backfill worker
 	// + the BeginBackfillPlan admin RPC. Default false until the feature
 	// is canaried in staging.
@@ -179,6 +186,10 @@ func loadConfig() (config, error) {
 		AdminAllowApplyMutation:     envBool("ATL_ALLOW_APPLY_MUTATION", true),
 		AdminMutationAllowedCallers: splitCSV(os.Getenv("ATL_MUTATION_ALLOWED_CALLERS")),
 		AdminOperatorAllowedCallers: splitCSV(os.Getenv("ATL_OPERATOR_ALLOWED_CALLERS")),
+		// Default exempts the console CN so it can keep calling admin
+		// RPCs after the cert-binding rollout without an operator
+		// step. Add more via comma-separated env.
+		CertBindingExemptCallers: splitCSVDefault(os.Getenv("ATL_CERT_BINDING_EXEMPT_CALLERS"), "atlantis-console"),
 
 		BackfillWorkerEnabled: envBool("ATL_BACKFILL_WORKER_ENABLED", false),
 
@@ -310,6 +321,16 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// splitCSVDefault returns splitCSV(s) when s is non-empty, otherwise
+// the provided default list. Useful for env vars where "unset" should
+// mean "ship this baseline" rather than "no entries."
+func splitCSVDefault(s string, def ...string) []string {
+	if s == "" {
+		return def
+	}
+	return splitCSV(s)
 }
 
 func parseRemoteHandlers(s string) map[string]string {

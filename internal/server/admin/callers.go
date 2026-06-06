@@ -2,6 +2,8 @@ package admin
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -186,13 +188,47 @@ SELECT can_mutate FROM atlantis.caller_identities WHERE caller = $1`, caller).Sc
 	return true, canMutate, nil
 }
 
+// LookupCallerCertBinding returns the cert-binding state for a caller:
+// exists reports whether a caller_identities row is present, and
+// fingerprint is the 32-byte SHA-256 of its currently-active cert (nil
+// when the row exists but no cert has been recorded yet — the
+// back-compat case for callers minted before the binding column).
+//
+// This is the hot path for the cert-binding interceptor; callers
+// should layer a TTL cache on top to avoid one DB read per RPC under
+// burst. A nil pool returns (false, nil, nil) so tests that don't
+// stand up Postgres can exercise the "no binding configured"
+// branch.
+func (s *Service) LookupCallerCertBinding(ctx context.Context, caller string) (exists bool, fingerprint []byte, err error) {
+	if s.pool == nil {
+		return false, nil, nil
+	}
+	err = s.pool.QueryRow(ctx, `
+SELECT cert_fingerprint FROM atlantis.caller_identities WHERE caller = $1`, caller).Scan(&fingerprint)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil, nil
+	}
+	if err != nil {
+		return false, nil, fmt.Errorf("lookup caller_identities.cert_fingerprint: %w", err)
+	}
+	return true, fingerprint, nil
+}
+
 // ---------------------------------------------------------------------------
-// RecordCallerCertExpiry — persist the NotAfter of a freshly issued cert
+// RecordCallerCertExpiry — persist NotAfter + fingerprint of a freshly issued cert
 // ---------------------------------------------------------------------------
 
 type RecordCallerCertExpiryRequest struct {
-	Caller    string `json:"caller"`
-	ExpiresAt string `json:"expires_at"` // RFC3339
+	Caller string `json:"caller"`
+	// ExpiresAt is RFC3339. Required.
+	ExpiresAt string `json:"expires_at"`
+	// Fingerprint is the hex-encoded SHA-256 of the signed leaf cert's
+	// DER bytes. Required for new code paths; optional during the
+	// migration window so older console binaries (which only reported
+	// expiry) keep working. Once set, every authenticated RPC from this
+	// caller must present a cert whose fingerprint matches — that's how
+	// rotation + revoke actually invalidate prior certs without a CRL.
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 type RecordCallerCertExpiryResponse struct {
@@ -200,15 +236,18 @@ type RecordCallerCertExpiryResponse struct {
 	ExpiresAt string `json:"expires_at"`
 }
 
-// RecordCallerCertExpiry stores the NotAfter of the caller's most
-// recently console-issued cert. Operator-only — invoked by the BFF
-// after a successful signer issuance to feed the cert-validity meter
-// in the Callers card view.
+// RecordCallerCertExpiry stores the NotAfter and fingerprint of the
+// caller's most recently console-issued cert. Operator-only — invoked
+// by the BFF after a successful signer issuance.
 //
-// This is *not* an authoritative trust input: the actual mTLS handshake
-// still reads NotAfter off the live leaf, and the caller_identities
-// allowlist still gates which CNs may connect at all. A wrong value
-// here can only mis-render the UI meter.
+// The fingerprint write is the load-bearing one: the cert-binding
+// interceptor in cmd/server reads this column on every authenticated
+// RPC and rejects any peer cert whose SHA-256 doesn't match. So a
+// successful UPDATE here is what flips an old cert from "still
+// crypto-valid" to "superseded — won't authenticate." A failed write
+// leaves the old fingerprint in place; the caller will keep working
+// with the old cert until a successful re-record (operationally we
+// surface the BFF error and the operator retries).
 func (s *Service) RecordCallerCertExpiry(ctx context.Context, req RecordCallerCertExpiryRequest) (*RecordCallerCertExpiryResponse, error) {
 	if err := s.authorizeOperator(ctx); err != nil {
 		return nil, err
@@ -224,12 +263,31 @@ func (s *Service) RecordCallerCertExpiry(ctx context.Context, req RecordCallerCe
 		return nil, fmt.Errorf("admin: parse expires_at: %w", err)
 	}
 
+	// Fingerprint optional during migration window. When present must be
+	// exactly 64 hex chars (SHA-256 = 32 bytes = 64 hex). A malformed
+	// value would silently land as a non-matching fingerprint and lock
+	// the caller out, so reject early at the boundary.
+	var fp []byte
+	if req.Fingerprint != "" {
+		fp, err = hex.DecodeString(req.Fingerprint)
+		if err != nil {
+			return nil, fmt.Errorf("admin: parse fingerprint: %w", err)
+		}
+		if len(fp) != sha256.Size {
+			return nil, fmt.Errorf("admin: fingerprint must be %d bytes (got %d)", sha256.Size, len(fp))
+		}
+	}
+
+	// One UPDATE so expiry + fingerprint flip atomically. If fp is nil
+	// (back-compat caller), COALESCE preserves whatever's already there
+	// — we never *unset* a fingerprint from this path.
 	tag, err := s.pool.Exec(ctx, `
 UPDATE atlantis.caller_identities
-   SET cert_expires_at = $2
- WHERE caller = $1`, req.Caller, exp.UTC())
+   SET cert_expires_at  = $2,
+       cert_fingerprint = COALESCE($3, cert_fingerprint)
+ WHERE caller = $1`, req.Caller, exp.UTC(), fp)
 	if err != nil {
-		return nil, fmt.Errorf("update cert_expires_at: %w", err)
+		return nil, fmt.Errorf("update caller cert: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return nil, fmt.Errorf("admin: caller %q is not registered", req.Caller)
@@ -251,11 +309,15 @@ type RevokeCallerResponse struct {
 
 // RevokeCaller removes a caller from BOTH the identities table and the
 // registrations table. The caller will no longer appear in GetCallers,
-// can't apply schema (no longer registered), and can't be issued a new
-// cert by the signer. Crypto-valid certs already issued continue to pass
-// TLS handshakes until they expire — that's by design; we don't run a
-// CRL. Combined with the apply-time registration check, an issued-but-
-// revoked cert can't actually do anything useful.
+// can't apply schema, and can't be issued a new cert by the signer.
+//
+// Effect on existing certs: the cert-binding interceptor (cmd/server)
+// reads caller_identities.cert_fingerprint on every authenticated RPC
+// and rejects any caller whose row is missing. Deletion here makes the
+// caller's row missing, which means every still-crypto-valid cert
+// minted for this CN starts failing Unauthenticated within one cache
+// TTL (~5s). This is the revocation mechanism — no CRL, no OCSP, just
+// the row going away.
 func (s *Service) RevokeCaller(ctx context.Context, req RevokeCallerRequest) (*RevokeCallerResponse, error) {
 	if err := s.authorizeOperator(ctx); err != nil {
 		return nil, err

@@ -4,6 +4,7 @@ import { Check, Copy, Download, Key, Plus, Trash2 } from 'lucide-react'
 import { api, queries, type CallerInfo, type IssueCertResponse } from '@/api/client'
 import { useIsAdmin } from '@/hooks/useAuth'
 import { PageShell } from '@/components/PageShell'
+import { HoverInfo } from '@/components/HoverInfo'
 
 function fmtDateShort(iso?: string) {
   if (!iso) return '—'
@@ -31,6 +32,7 @@ export function Callers() {
   const qc = useQueryClient()
   const isAdmin = useIsAdmin()
   const { data, isLoading, error } = useQuery(queries.callers())
+  const { data: instance } = useQuery(queries.instance())
   const [addOpen, setAddOpen] = useState(false)
   const [revoking, setRevoking] = useState<string | null>(null)
   const [certBundle, setCertBundle] = useState<{ name: string; bundle: IssueCertResponse } | null>(null)
@@ -152,6 +154,7 @@ export function Callers() {
         <CertDialog
           name={certBundle.name}
           bundle={certBundle.bundle}
+          endpoint={instance?.endpoint}
           onClose={() => setCertBundle(null)}
           showToast={showToast}
         />
@@ -216,21 +219,43 @@ function CallerCard({
         <span className="spacer" style={{ flex: 1 }} />
         {canAdmin && (
           <>
-            <button
-              className="btn btn--sm btn--ghost btn--icon"
-              title="Issue cert"
-              onClick={onIssue}
-              disabled={isIssuing}
+            <HoverInfo
+              side="bottom"
+              inline
+              content={
+                <>
+                  <p>Mint a fresh client cert and private key. The bundle downloads once.</p>
+                  <p className="hi-foot">Supersedes the previous cert — atlantis stops authenticating it.</p>
+                </>
+              }
             >
-              {isIssuing ? <span className="spin" /> : <Key size={13} />}
-            </button>
-            <button
-              className="btn btn--sm btn--danger btn--icon"
-              title="Revoke caller"
-              onClick={onRevoke}
+              <button
+                className="btn btn--sm btn--ghost btn--icon"
+                onClick={onIssue}
+                disabled={isIssuing}
+                aria-label="Re-issue cert"
+              >
+                {isIssuing ? <span className="spin" /> : <Key size={13} />}
+              </button>
+            </HoverInfo>
+            <HoverInfo
+              side="bottom"
+              inline
+              content={
+                <>
+                  <p>Drops this caller's identity and any files they registered.</p>
+                  <p className="hi-foot">Every cert for this caller stops authenticating — reads and writes both fail.</p>
+                </>
+              }
             >
-              <Trash2 size={13} />
-            </button>
+              <button
+                className="btn btn--sm btn--danger btn--icon"
+                onClick={onRevoke}
+                aria-label="Revoke caller"
+              >
+                <Trash2 size={13} />
+              </button>
+            </HoverInfo>
           </>
         )}
       </div>
@@ -367,8 +392,8 @@ function RevokeDialog({
           <div className="modal__title">Revoke caller?</div>
           <div className="modal__sub">
             Removes <span className="mono brass">{name}</span> from the identity table and clears
-            all of its registered files. The certificate stays cryptographically valid
-            until expiry — but the server refuses to mutate.
+            all of its registered files. Every cert minted for this caller stops
+            authenticating immediately — both reads and writes fail.
           </div>
         </div>
         <div className="modal__foot">
@@ -386,11 +411,13 @@ function RevokeDialog({
 function CertDialog({
   name,
   bundle,
+  endpoint,
   onClose,
   showToast,
 }: {
   name: string
   bundle: IssueCertResponse
+  endpoint?: string
   onClose: () => void
   showToast: (msg: string) => void
 }) {
@@ -406,11 +433,19 @@ function CertDialog({
   }
 
   const yaml = `caller: ${name}
-endpoint: atlantis.acme.dev:8443
+endpoint: ${endpoint || '<ATL_ENDPOINT>'}
 tls:
   cert: ./${name}.crt
   key:  ./${name}.key
   ca:   ./ca.crt`
+
+  // expires_at comes from the signer; surface the real date rather than a
+  // hardcoded TTL — the leaf lifetime is set in cmd/signer/main.go (currently
+  // 90d) and may shift over time. The private key only exists in this tab's
+  // memory until close; re-issuing rotates the cert and invalidates the prior
+  // one on the next dial.
+  const exp = new Date(bundle.expires_at)
+  const expStr = isNaN(exp.getTime()) ? bundle.expires_at : exp.toISOString().slice(0, 10)
 
   return (
     <div className="overlay is-open" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
@@ -418,7 +453,8 @@ tls:
         <div className="modal__head">
           <div className="modal__title">Certificate issued — {name}</div>
           <div className="modal__sub">
-            Valid 365 days. These files are shown once. Store them in your secret manager.
+            Expires {expStr}. Download the three files and store them in your secret
+            manager — re-issuing rotates the cert and invalidates this one.
           </div>
         </div>
         <div className="modal__body">
