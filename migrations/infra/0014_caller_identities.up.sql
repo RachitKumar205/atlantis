@@ -19,11 +19,21 @@
 --
 -- The legacy ATL_MUTATION_ALLOWED_CALLERS env var continues to work
 -- alongside this table — the two are UNIONed at the gate.
+--
+-- cert_fingerprint binds the row to a single active leaf cert (SHA-256
+-- of the DER). Every authenticated RPC verifies that the presented
+-- cert's fingerprint matches; mismatch is rejected as Unauthenticated.
+-- NULL means "no fingerprint recorded yet" — back-compat for callers
+-- whose certs were issued before this column existed; the first
+-- console-driven re-issue closes that gap. Combined with the existing
+-- DELETE-on-revoke, this gives same-process certificate revocation
+-- without standing up a CRL or OCSP responder.
 CREATE TABLE IF NOT EXISTS atlantis.caller_identities (
-    caller      TEXT        PRIMARY KEY,
-    can_mutate  BOOLEAN     NOT NULL DEFAULT false,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    created_by  TEXT        NOT NULL DEFAULT ''  -- operator email; empty for legacy implicit registrations
+    caller            TEXT        PRIMARY KEY,
+    can_mutate        BOOLEAN     NOT NULL DEFAULT false,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by        TEXT        NOT NULL DEFAULT '',  -- operator email; empty for legacy implicit registrations
+    cert_fingerprint  BYTEA  -- SHA-256(cert.Raw); NULL until first console-issued or re-issued cert
 );
 
 -- Backfill from caller_registrations with can_mutate=true so every
