@@ -43,7 +43,17 @@ const defaultSandboxTTL = 30 * time.Minute
 
 // defaultSandboxPerUserLimit caps how many active sandboxes one user
 // can hold. Tunable via SANDBOX_PER_USER_LIMIT.
-const defaultSandboxPerUserLimit = 3
+//
+// 100 because atlantis's whole pitch is that one human (or one agent
+// loop) routinely fans out across many sandboxes — checkpoint /
+// rewind / fork / compare are designed for the workflow where you
+// spin up dozens of forks per task. A default of 3 actively
+// contradicts that pitch and forces the operator to bump the env on
+// day one. Self-host operators on resource-constrained hosts can
+// still cap lower via SANDBOX_PER_USER_LIMIT; multi-tenant deployments
+// should ALWAYS set their own ceiling rather than trusting this
+// default.
+const defaultSandboxPerUserLimit = 100
 
 // maxSnapshotBytes caps the PUT body for /snapshot uploads, preventing
 // OOM-via-upload.

@@ -29,8 +29,9 @@ type Config struct {
 	AuditRetentionDays int
 
 	// SandboxPerUserLimit caps how many active sandboxes one user can
-	// hold at once. 4th boot returns 429. Default 3; tune via
-	// SANDBOX_PER_USER_LIMIT.
+	// hold at once. (N+1)th boot returns 429. Default 100; tune via
+	// SANDBOX_PER_USER_LIMIT. The default is intentionally generous —
+	// fanned-out agent workflows boot dozens of forks per task.
 	SandboxPerUserLimit int
 
 	// SandboxTTL is the idle window after which the TTL janitor evicts
@@ -55,7 +56,7 @@ func ConfigFromEnv() (Config, error) {
 
 		AuditRetentionDays: envInt("CONSOLE_AUDIT_RETENTION_DAYS", 365),
 
-		SandboxPerUserLimit: envInt("SANDBOX_PER_USER_LIMIT", 3),
+		SandboxPerUserLimit: envInt("SANDBOX_PER_USER_LIMIT", 100),
 		SandboxTTL:          envDuration("SANDBOX_TTL", 30*time.Minute),
 	}
 	if c.PGURL == "" {
