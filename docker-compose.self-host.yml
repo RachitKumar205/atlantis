@@ -220,8 +220,12 @@ services:
       # dropped past this age. See deploy/.env.example for the
       # SOC 2 / HIPAA / SOX baseline values.
       CONSOLE_AUDIT_RETENTION_DAYS: "${CONSOLE_AUDIT_RETENTION_DAYS:-365}"
-      # Sandbox limits.
-      SANDBOX_PER_USER_LIMIT: "${SANDBOX_PER_USER_LIMIT:-3}"
+      # Sandbox limits. Default 100 matches the Go binary's own default —
+      # fanned-out agent workflows expect dozens of concurrent forks per
+      # task, so a conservative cap actively contradicts the product
+      # surface. Operators on resource-constrained hosts can lower via
+      # the env override.
+      SANDBOX_PER_USER_LIMIT: "${SANDBOX_PER_USER_LIMIT:-100}"
       SANDBOX_TTL: "${SANDBOX_TTL:-30m}"
       # Optional: enable schema PR generation. Fine-grained PAT needs
       # contents:write + pull_requests:write on each caller's repo.
