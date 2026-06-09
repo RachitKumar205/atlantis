@@ -333,6 +333,54 @@ export interface HealthResponse {
   }
 }
 
+// ── Worker dispatcher (PR 3) ────────────────────────────────────────
+
+export interface WorkerSessionSummary {
+  session_id: string
+  caller: string
+  queue: string
+  pod_id?: string
+  sdk_version?: string
+  connected_at: string       // RFC3339
+  last_heartbeat_at: string  // RFC3339
+  max_in_flight: number
+  inflight_count: number
+  dispatched: number
+  completed: number
+  failed: number
+  revoked: number
+  drained?: boolean
+}
+
+export interface WorkerInflightRow {
+  job_id: number
+  job_name: string
+  dispatched_at: string
+  ack_received: boolean
+}
+
+export interface WorkerSessionEvent {
+  at: string
+  kind: string
+  job_id?: number
+  job_name?: string
+  note?: string
+}
+
+export interface WorkerSessionDetail extends WorkerSessionSummary {
+  job_names: string[]
+  inflight: WorkerInflightRow[]
+  events: WorkerSessionEvent[]
+}
+
+export interface ListWorkersResponse {
+  sessions: WorkerSessionSummary[]
+}
+
+export interface GetWorkerResponse {
+  session: WorkerSessionDetail
+}
+
 // ---------------------------------------------------------------------------
 // Core fetch helper
 // ---------------------------------------------------------------------------
@@ -496,6 +544,20 @@ export const api = {
   logs: {
     since: (since: number): Promise<LogsResponse> =>
       apiFetch<LogsResponse>(`/api/logs?since=${since}`),
+  },
+
+  workers: {
+    list: (): Promise<ListWorkersResponse> =>
+      apiFetch<ListWorkersResponse>('/api/admin/workers'),
+
+    get: (sessionID: string): Promise<GetWorkerResponse> =>
+      apiFetch<GetWorkerResponse>(`/api/admin/workers/${encodeURIComponent(sessionID)}`),
+
+    drain: (sessionID: string): Promise<Record<string, never>> =>
+      apiFetch(`/api/admin/workers/${encodeURIComponent(sessionID)}/drain`, { method: 'POST' }),
+
+    evict: (sessionID: string): Promise<Record<string, never>> =>
+      apiFetch(`/api/admin/workers/${encodeURIComponent(sessionID)}/evict`, { method: 'POST' }),
   },
 
   schemaEdit: {

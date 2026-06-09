@@ -366,6 +366,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 			Logger:            log.With("component", "jobs-dispatcher"),
 		})
 		jobsdispatcher.Register(srv, dispatcher)
+		adminSvc.SetDispatcher(newDispatcherAdapter(dispatcher))
 		for _, queue := range cfg.JobsDispatcherQueues {
 			queue := queue
 			workerWG.Add(1)
