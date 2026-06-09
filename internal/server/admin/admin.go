@@ -54,6 +54,11 @@ type Service struct {
 	callerFromContext  func(context.Context) string
 	backfillEnabled    bool
 	logRing            *obs.LogRing
+
+	// dispatcher is the worker-poll dispatcher (set by SetDispatcher).
+	// Nil when ATL_JOBS_DISPATCHER_ENABLED=false; the four worker-
+	// admin RPCs return "not found" in that case.
+	dispatcher WorkerDispatcher
 }
 
 // Config holds optional toggles; the zero value is read-only with no mirror.

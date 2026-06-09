@@ -15,6 +15,8 @@ import { Route as SettingsRoute } from './routes/settings'
 import { Route as CallersRoute } from './routes/callers'
 import { Route as OperationsRoute } from './routes/operations'
 import { Route as SandboxRoute } from './routes/sandbox'
+import { Route as WorkersRoute } from './routes/workers'
+import { Route as WorkerSessionRoute } from './routes/workers.$id'
 
 export const routeTree = RootRoute.addChildren([
   IndexRoute,
@@ -27,6 +29,8 @@ export const routeTree = RootRoute.addChildren([
   CallersRoute,
   OperationsRoute,
   SandboxRoute,
+  WorkersRoute,
+  WorkerSessionRoute,
 ])
 
 // Module augmentation so typed Link / navigate work
@@ -100,6 +104,20 @@ declare module '@tanstack/react-router' {
       path: '/sandbox'
       fullPath: '/sandbox'
       preLoaderRoute: typeof SandboxRoute
+      parentRoute: typeof RootRoute
+    }
+    '/workers': {
+      id: '/workers'
+      path: '/workers'
+      fullPath: '/workers'
+      preLoaderRoute: typeof WorkersRoute
+      parentRoute: typeof RootRoute
+    }
+    '/workers/$id': {
+      id: '/workers/$id'
+      path: '/workers/$id'
+      fullPath: '/workers/$id'
+      preLoaderRoute: typeof WorkerSessionRoute
       parentRoute: typeof RootRoute
     }
   }

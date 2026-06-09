@@ -54,6 +54,20 @@ type session struct {
 	// pushing new rows once this flips.
 	drained atomic.Bool
 
+	// Per-session counters. Bumped at every state transition. Read by
+	// SnapshotSessions / GetSession for the console's "Workers" tab.
+	// Atomic so the read path doesn't take inflightMu.
+	cntDispatched atomic.Int64
+	cntCompleted  atomic.Int64
+	cntFailed     atomic.Int64
+	cntRevoked    atomic.Int64
+
+	// lastHeartbeatNS is the wall-clock nanos of the most recent
+	// Heartbeat envelope received from the worker. The console
+	// renders a "stale heartbeat" pill when now - this exceeds
+	// 2× HeartbeatMS. Atomic int64 to avoid locking on every bump.
+	lastHeartbeatNS atomic.Int64
+
 	connectedAt time.Time
 	closeOnce   sync.Once
 	closeCh     chan struct{}
@@ -96,7 +110,7 @@ func newSession(open *OpenSession, caller string) *session {
 	if maxIF > MaxMaxInFlight {
 		maxIF = MaxMaxInFlight
 	}
-	return &session{
+	s := &session{
 		id:          uuid.NewString(),
 		caller:      caller,
 		queue:       open.Queue,
@@ -109,6 +123,20 @@ func newSession(open *OpenSession, caller string) *session {
 		connectedAt: time.Now(),
 		closeCh:     make(chan struct{}),
 	}
+	s.lastHeartbeatNS.Store(time.Now().UnixNano())
+	return s
+}
+
+// lastHeartbeatAt returns the time of the most recent Heartbeat (or
+// session connect time if no Heartbeat has been received yet).
+func (s *session) lastHeartbeatAt() time.Time {
+	return time.Unix(0, s.lastHeartbeatNS.Load())
+}
+
+// noteHeartbeat updates lastHeartbeatNS. Called from
+// dispatcher.handleHeartbeat. Atomic so the read path stays lock-free.
+func (s *session) noteHeartbeat() {
+	s.lastHeartbeatNS.Store(time.Now().UnixNano())
 }
 
 // claimedBy formats the lease holder string written into
@@ -291,5 +319,16 @@ func (s *session) snapshotEvents() []sessionEvent {
 	defer s.eventsMu.Unlock()
 	out := make([]sessionEvent, len(s.events))
 	copy(out, s.events)
+	return out
+}
+
+// jobNamesSlice returns the worker-declared job names. Order is
+// insertion-order-stable across reads. The admin "Workers" RPCs use
+// this to render the per-session detail panel; not in the hot path.
+func (s *session) jobNamesSlice() []string {
+	out := make([]string, 0, len(s.jobNames))
+	for n := range s.jobNames {
+		out = append(out, n)
+	}
 	return out
 }

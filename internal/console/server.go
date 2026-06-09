@@ -232,6 +232,16 @@ func (s *Server) buildMux() {
 	mux.HandleFunc("GET /api/jobs/{id}", s.auth(s.handleGetJobStatus))
 	mux.HandleFunc("POST /api/jobs/{id}/retry", s.auth(s.requireRole("admin", s.csrf(s.handleRetryDeadJob))))
 
+	// Worker-poll dispatcher admin (PR 3). List + Get are read-only for
+	// any authenticated user; Drain + Evict require admin role + sudo
+	// (mirror of the Settings panel's destructive-action discipline).
+	mux.HandleFunc("GET /api/admin/workers", s.auth(s.handleListConnectedWorkers))
+	mux.HandleFunc("GET /api/admin/workers/{id}", s.auth(s.handleGetWorkerSession))
+	mux.HandleFunc("POST /api/admin/workers/{id}/drain",
+		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleDrainWorker)))))
+	mux.HandleFunc("POST /api/admin/workers/{id}/evict",
+		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleEvictWorker)))))
+
 	// Audit log.
 	mux.HandleFunc("GET /api/audit", s.auth(s.handleGetAuditLog))
 
@@ -1699,6 +1709,59 @@ func (s *Server) handleRetryDeadJob(w http.ResponseWriter, r *http.Request) {
 	u := r.Context().Value(ctxUser).(*User)
 	s.db.logAction(r.Context(), u.ID, "retry_dead_job", map[string]any{"job_id": id})
 
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
+// ── Worker dispatcher ────────────────────────────────────────────────
+
+func (s *Server) handleListConnectedWorkers(w http.ResponseWriter, r *http.Request) {
+	s.proxyRPC(w, r, adminBase+"ListConnectedWorkers", map[string]any{})
+}
+
+func (s *Server) handleGetWorkerSession(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	s.proxyRPC(w, r, adminBase+"GetWorkerSession", map[string]string{"session_id": id})
+}
+
+func (s *Server) handleDrainWorker(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	raw, err := s.atl.invokeRaw(r.Context(), adminBase+"DrainWorker", map[string]string{"session_id": id})
+	if err != nil {
+		s.log.Error("DrainWorker", "session_id", id, "err", err)
+		jsonError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	u := r.Context().Value(ctxUser).(*User)
+	s.db.logAction(r.Context(), u.ID, "worker_drained", map[string]any{"session_id": id})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
+func (s *Server) handleEvictWorker(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	raw, err := s.atl.invokeRaw(r.Context(), adminBase+"EvictWorker", map[string]string{"session_id": id})
+	if err != nil {
+		s.log.Error("EvictWorker", "session_id", id, "err", err)
+		jsonError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	u := r.Context().Value(ctxUser).(*User)
+	s.db.logAction(r.Context(), u.ID, "worker_evicted", map[string]any{"session_id": id})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(raw)

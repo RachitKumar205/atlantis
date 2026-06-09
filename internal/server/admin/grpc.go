@@ -81,6 +81,10 @@ type AdminServer interface {
 	RevokeCaller(context.Context, RevokeCallerRequest) (*RevokeCallerResponse, error)
 	RecordCallerCertExpiry(context.Context, RecordCallerCertExpiryRequest) (*RecordCallerCertExpiryResponse, error)
 	GetLogs(context.Context, GetLogsRequest) (*GetLogsResponse, error)
+	ListConnectedWorkers(context.Context, ListConnectedWorkersRequest) (*ListConnectedWorkersResponse, error)
+	GetWorkerSession(context.Context, GetWorkerSessionRequest) (*GetWorkerSessionResponse, error)
+	DrainWorker(context.Context, DrainWorkerRequest) (*DrainWorkerResponse, error)
+	EvictWorker(context.Context, EvictWorkerRequest) (*EvictWorkerResponse, error)
 }
 
 // Compile-time check: *Service is the implementation of
@@ -128,6 +132,10 @@ var serviceDesc = grpc.ServiceDesc{
 		{MethodName: "RevokeCaller", Handler: handleRevokeCaller},
 		{MethodName: "RecordCallerCertExpiry", Handler: handleRecordCallerCertExpiry},
 		{MethodName: "GetLogs", Handler: handleGetLogs},
+		{MethodName: "ListConnectedWorkers", Handler: handleListConnectedWorkers},
+		{MethodName: "GetWorkerSession", Handler: handleGetWorkerSession},
+		{MethodName: "DrainWorker", Handler: handleDrainWorker},
+		{MethodName: "EvictWorker", Handler: handleEvictWorker},
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "atlantis/admin/v1/admin.proto",
@@ -962,6 +970,132 @@ func handleGetLogs(srv any, ctx context.Context, dec func(any) error, intercepto
 
 func invokeGetLogs(svc *Service, ctx context.Context, req *GetLogsRequest) (any, error) {
 	resp, err := svc.GetLogs(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+// --- Worker dispatcher admin RPCs ---
+
+func handleListConnectedWorkers(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req ListConnectedWorkersRequest
+	if len(in.Raw) > 0 {
+		_ = json.Unmarshal(in.Raw, &req)
+	}
+	if interceptor == nil {
+		return invokeListConnectedWorkers(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/ListConnectedWorkers"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeListConnectedWorkers(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeListConnectedWorkers(svc *Service, ctx context.Context, req *ListConnectedWorkersRequest) (any, error) {
+	resp, err := svc.ListConnectedWorkers(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleGetWorkerSession(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req GetWorkerSessionRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeGetWorkerSession(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/GetWorkerSession"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeGetWorkerSession(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeGetWorkerSession(svc *Service, ctx context.Context, req *GetWorkerSessionRequest) (any, error) {
+	resp, err := svc.GetWorkerSession(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleDrainWorker(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req DrainWorkerRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeDrainWorker(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/DrainWorker"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeDrainWorker(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeDrainWorker(svc *Service, ctx context.Context, req *DrainWorkerRequest) (any, error) {
+	resp, err := svc.DrainWorker(ctx, *req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+	return &jsonMsg{Raw: raw}, nil
+}
+
+func handleEvictWorker(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	in := new(jsonMsg)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	var req EvictWorkerRequest
+	if err := json.Unmarshal(in.Raw, &req); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return invokeEvictWorker(srv.(*Service), ctx, &req)
+	}
+	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/atlantis.admin.v1.Admin/EvictWorker"}
+	handler := func(ctx context.Context, _ any) (any, error) {
+		return invokeEvictWorker(srv.(*Service), ctx, &req)
+	}
+	return interceptor(ctx, &req, info, handler)
+}
+
+func invokeEvictWorker(svc *Service, ctx context.Context, req *EvictWorkerRequest) (any, error) {
+	resp, err := svc.EvictWorker(ctx, *req)
 	if err != nil {
 		return nil, err
 	}
