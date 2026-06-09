@@ -1,21 +1,16 @@
 // WorkerSession — per-session drill-in.
 //
-// Header pill: connected | stale heartbeat | disconnected.
-// Counter cards: dispatched / completed / failed / revoked.
-// In-flight panel: live list of jobs the worker is running.
-// Job names panel: what this session declared it can handle.
-// Recent events: last 50 state transitions from the server-side ring.
-//
-// Actions (admin role only, gated by sudo confirm via the shared
-// SudoConfirmDialog reused from Settings):
-//   - Drain: graceful stop; let in-flight finish; close session.
-//   - Evict: force-close; release in-flight rows; immediate.
+// Path-title with mono treatment, meta strip (Caller / Queue / Pod /
+// Connected / Last heartbeat / SDK), four counter cards, in-flight
+// table, handles list, recent events log. Drain / Evict live in the
+// page-head action slot, both gated by the shared SudoConfirmDialog.
 
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from '@tanstack/react-router'
-import { AlertTriangle, ShieldOff } from 'lucide-react'
+import { AlertTriangle, ShieldOff, ChevronLeft, Activity } from 'lucide-react'
 import { api, ApiError } from '@/api/client'
 import type { WorkerSessionDetail } from '@/api/client'
+import { PageShell } from '@/components/PageShell'
 import { SudoConfirmDialog } from './Settings'
 
 const POLL_MS = 2000
@@ -26,8 +21,8 @@ export function WorkerSession() {
 
   const [detail, setDetail] = useState<WorkerSessionDetail | null>(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
   const [notFound, setNotFound] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const [tick, setTick] = useState(0)
 
   const [showDrain, setShowDrain] = useState(false)
@@ -72,6 +67,13 @@ export function WorkerSession() {
     }
   }, [id, tick])
 
+  // Per-second tick for relative timestamps.
+  const [, setRel] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => setRel(n => n + 1), 1000)
+    return () => clearInterval(id)
+  }, [])
+
   const drain = async (password: string) => {
     setActionPending(true)
     setActionError(null)
@@ -102,183 +104,274 @@ export function WorkerSession() {
 
   if (notFound) {
     return (
-      <div className="page">
-        <header className="page__head">
-          <div>
-            <h1 className="page__title">Worker session not found</h1>
-            <div className="page__subtitle">
-              The session disconnected or was never registered.
-              <Link to="/workers" className="link" style={{ marginLeft: 8 }}>← back to Workers</Link>
+      <PageShell title="Worker session" sub="not found">
+        <div className="page__bodyinner">
+          <div className="card">
+            <div className="empty">
+              <div className="empty__icon">
+                <Activity size={18} />
+              </div>
+              <div className="empty__title">Session not found</div>
+              <div className="empty__sub">
+                The session disconnected or never registered.
+              </div>
+              <Link to="/workers" className="btn btn--ghost btn--sm" style={{ gap: 6 }}>
+                <ChevronLeft size={12} /> Back to workers
+              </Link>
             </div>
           </div>
-        </header>
-      </div>
+        </div>
+      </PageShell>
     )
   }
 
   if (loading && !detail) {
-    return <div className="page"><div className="muted">Loading…</div></div>
+    return (
+      <PageShell title="Worker session" sub="loading">
+        <div className="page__bodyinner">
+          <div className="card" style={{ padding: 12 }}>
+            <div className="sk" style={{ height: 64, marginBottom: 12 }} />
+            <div className="sk" style={{ height: 120 }} />
+          </div>
+        </div>
+      </PageShell>
+    )
   }
 
   if (!detail) {
     return (
-      <div className="page">
-        <div className="banner banner--error">{error || 'failed to load'}</div>
-        <Link to="/workers" className="link">← back</Link>
-      </div>
+      <PageShell title="Worker session" sub="error">
+        <div className="page__bodyinner">
+          <div className="banner banner--error">{error || 'failed to load'}</div>
+        </div>
+      </PageShell>
     )
   }
 
   const stale = isStale(detail.last_heartbeat_at)
-  const heartbeatPill =
-    detail.drained ? 'pill pill--muted' :
-    stale ? 'pill pill--warn' :
-    'pill pill--ok'
-  const heartbeatLabel =
-    detail.drained ? 'draining' :
-    stale ? 'stale heartbeat' :
-    'connected'
+  const statusKind: 'connected' | 'stale' | 'drained' = detail.drained
+    ? 'drained'
+    : stale
+      ? 'stale'
+      : 'connected'
+
+  const title = (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 12 }}>
+      <Link to="/workers" className="btn btn--ghost btn--sm btn--icon" title="Back" style={{ width: 28, height: 28 }}>
+        <ChevronLeft size={14} />
+      </Link>
+      <span className="mono" style={{ fontSize: 19, fontWeight: 450, letterSpacing: '-0.01em' }}>
+        <span className="faint">{detail.caller}</span>
+        <span className="faint" style={{ margin: '0 6px' }}>/</span>
+        <span style={{ color: 'var(--ink-0)' }}>{detail.queue}</span>
+      </span>
+      <StatusPill kind={statusKind} />
+    </span>
+  )
+
+  const action = (
+    <>
+      {!detail.drained && (
+        <button
+          className="btn btn--ghost btn--sm"
+          onClick={() => { setActionError(null); setShowDrain(true) }}
+          style={{ gap: 6 }}
+        >
+          <AlertTriangle size={12} />
+          Drain
+        </button>
+      )}
+      <button
+        className="btn btn--sm"
+        onClick={() => { setActionError(null); setShowEvict(true) }}
+        style={{ gap: 6, color: 'var(--coral)', borderColor: 'transparent' }}
+      >
+        <ShieldOff size={12} />
+        Evict
+      </button>
+    </>
+  )
 
   return (
-    <div className="page">
-      <header className="page__head">
-        <div>
-          <div className="row" style={{ gap: 12, alignItems: 'center' }}>
-            <Link to="/workers" className="link">← workers</Link>
-          </div>
-          <h1 className="page__title">
-            <span className="mono">{detail.caller}</span>
-            <span style={{ color: 'var(--ink-3)', margin: '0 8px' }}>·</span>
-            <span>{detail.queue}</span>
-          </h1>
-          <div className="page__subtitle">
-            <span className={heartbeatPill}>{heartbeatLabel}</span>
-            <span style={{ margin: '0 8px', color: 'var(--ink-3)' }}>·</span>
-            <span className="mono" style={{ fontSize: 11 }}>{detail.session_id}</span>
-            <span style={{ margin: '0 8px', color: 'var(--ink-3)' }}>·</span>
-            <span>pod {detail.pod_id || '—'}</span>
-            <span style={{ margin: '0 8px', color: 'var(--ink-3)' }}>·</span>
-            <span>connected {relativeAgo(detail.connected_at)}</span>
-            {detail.sdk_version && (
-              <>
-                <span style={{ margin: '0 8px', color: 'var(--ink-3)' }}>·</span>
-                <span>SDK {detail.sdk_version}</span>
-              </>
+    <PageShell title={title} sub={`session ${detail.session_id}`} action={action}>
+      <div className="page__bodyinner">
+        {error && <div className="banner banner--error" style={{ marginBottom: 18 }}>{error}</div>}
+
+        {/* Meta strip — mirrors Schema entity-detail's .detail__meta layout. */}
+        <div style={{ display: 'flex', gap: 28, flexWrap: 'wrap', marginBottom: 28 }}>
+          <Meta label="Caller" value={detail.caller} mono />
+          <Meta label="Queue" value={detail.queue} />
+          <Meta label="Pod" value={detail.pod_id || '—'} mono faint={!detail.pod_id} />
+          <Meta label="SDK" value={detail.sdk_version || '—'} mono faint={!detail.sdk_version} />
+          <Meta label="Connected" value={relativeAgo(detail.connected_at)} />
+          <Meta
+            label="Heartbeat"
+            value={relativeAgo(detail.last_heartbeat_at)}
+            tone={stale ? 'coral' : detail.drained ? 'muted' : 'sage'}
+          />
+        </div>
+
+        {/* Counter cards. */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
+          gap: 12,
+          marginBottom: 32,
+        }}>
+          <CounterTile label="Dispatched" value={detail.dispatched} />
+          <CounterTile label="Completed" value={detail.completed} tone="sage" />
+          <CounterTile label="Failed" value={detail.failed} tone={detail.failed > 0 ? 'coral' : undefined} />
+          <CounterTile label="Revoked" value={detail.revoked} tone={detail.revoked > 0 ? 'coral' : undefined} />
+          <CounterTile
+            label="In-flight"
+            value={detail.inflight_count}
+            sub={`of ${detail.max_in_flight} max`}
+          />
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(0, 1fr)', gap: 18, marginBottom: 32 }}>
+          {/* In-flight jobs */}
+          <div>
+            <div className="section-label" style={{ marginBottom: 12 }}>IN-FLIGHT</div>
+            {detail.inflight.length === 0 ? (
+              <div className="card">
+                <div className="empty" style={{ padding: '32px 24px' }}>
+                  <div className="empty__title">Idle</div>
+                  <div className="empty__sub">No jobs currently in-flight on this session.</div>
+                </div>
+              </div>
+            ) : (
+              <div className="card" style={{ padding: 6 }}>
+                <table className="tbl">
+                  <thead>
+                    <tr>
+                      <th>Job ID</th>
+                      <th>Name</th>
+                      <th>Dispatched</th>
+                      <th style={{ textAlign: 'right' }}>Ack</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detail.inflight.map(r => (
+                      <tr key={r.job_id}>
+                        <td className="mono num">{r.job_id}</td>
+                        <td className="mono">{r.job_name}</td>
+                        <td className="num">{relativeAgo(r.dispatched_at)}</td>
+                        <td style={{ textAlign: 'right' }}>
+                          {r.ack_received ? (
+                            <span className="sage" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                              <span className="dot" style={{ background: 'var(--sage)' }} />
+                              acked
+                            </span>
+                          ) : (
+                            <span className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                              <span className="dot" style={{ background: 'var(--ink-3)' }} />
+                              pending
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </div>
+
+          {/* Handles */}
+          <div>
+            <div className="section-label" style={{ marginBottom: 12 }}>HANDLES</div>
+            <div className="card">
+              <div className="card__body" style={{ padding: 0 }}>
+                {detail.job_names.length === 0 ? (
+                  <div className="empty" style={{ padding: '24px 12px' }}>
+                    <div className="empty__sub">No declared job names.</div>
+                  </div>
+                ) : (
+                  <ul style={{ listStyle: 'none' }}>
+                    {detail.job_names.map((n, i) => (
+                      <li
+                        key={n}
+                        className="mono"
+                        style={{
+                          padding: '10px 16px',
+                          fontSize: 'var(--font-data)',
+                          color: 'var(--ink-1)',
+                          borderBottom: i === detail.job_names.length - 1 ? 'none' : '1px solid var(--line-soft)',
+                        }}
+                      >
+                        {n}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
-        <div className="row" style={{ gap: 8 }}>
-          {!detail.drained && (
-            <button className="btn btn--ghost" onClick={() => { setActionError(null); setShowDrain(true) }}>
-              <AlertTriangle size={14} style={{ marginRight: 6 }} />
-              Drain
-            </button>
-          )}
-          <button className="btn btn--danger" onClick={() => { setActionError(null); setShowEvict(true) }}>
-            <ShieldOff size={14} style={{ marginRight: 6 }} />
-            Evict
-          </button>
-        </div>
-      </header>
 
-      {error && <div className="banner banner--error">{error}</div>}
-
-      <section className="cards" style={{ marginBottom: 24 }}>
-        <CounterCard label="Dispatched" value={detail.dispatched} />
-        <CounterCard label="Completed" value={detail.completed} />
-        <CounterCard label="Failed" value={detail.failed} tone={detail.failed > 0 ? 'warn' : undefined} />
-        <CounterCard label="Revoked" value={detail.revoked} tone={detail.revoked > 0 ? 'warn' : undefined} />
-        <CounterCard label="In-flight" value={detail.inflight_count} sub={`of ${detail.max_in_flight} max`} />
-      </section>
-
-      <div className="grid" style={{ gridTemplateColumns: '2fr 1fr', gap: 24 }}>
-        <section>
-          <h2 className="section__title">In-flight jobs</h2>
-          {detail.inflight.length === 0 ? (
-            <div className="empty">No jobs currently in-flight on this session.</div>
-          ) : (
-            <table className="table">
+        {/* Events */}
+        <div className="section-label" style={{ marginBottom: 12 }}>RECENT EVENTS</div>
+        {detail.events.length === 0 ? (
+          <div className="card">
+            <div className="empty" style={{ padding: '24px' }}>
+              <div className="empty__sub">No recorded events yet.</div>
+            </div>
+          </div>
+        ) : (
+          <div className="card" style={{ padding: 6 }}>
+            <table className="tbl">
               <thead>
                 <tr>
-                  <th>Job ID</th>
-                  <th>Name</th>
-                  <th>Dispatched</th>
-                  <th>Ack</th>
+                  <th style={{ width: 100 }}>When</th>
+                  <th>Event</th>
+                  <th>Job</th>
+                  <th>Note</th>
                 </tr>
               </thead>
               <tbody>
-                {detail.inflight.map(r => (
-                  <tr key={r.job_id}>
-                    <td className="mono">{r.job_id}</td>
-                    <td className="mono">{r.job_name}</td>
-                    <td>{relativeAgo(r.dispatched_at)}</td>
-                    <td>{r.ack_received ? <span className="pill pill--ok">acked</span> : <span className="pill pill--warn">pending</span>}</td>
+                {[...detail.events].reverse().map((e, i) => (
+                  <tr key={i}>
+                    <td className="mono num faint" style={{ fontSize: 11.5 }}>{relativeAgo(e.at)}</td>
+                    <td>
+                      <EventKind kind={e.kind} />
+                    </td>
+                    <td className="mono" style={{ fontSize: 12 }}>
+                      {e.job_id ? (
+                        <>
+                          <span className="faint">#</span>
+                          <span>{e.job_id}</span>
+                          {e.job_name && <span className="faint" style={{ marginLeft: 6 }}>{e.job_name}</span>}
+                        </>
+                      ) : (
+                        <span className="faint">—</span>
+                      )}
+                    </td>
+                    <td className="muted" style={{ fontSize: 12 }}>{e.note || ''}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          )}
-        </section>
-
-        <section>
-          <h2 className="section__title">Handles</h2>
-          {detail.job_names.length === 0 ? (
-            <div className="empty">No declared job names.</div>
-          ) : (
-            <ul className="list">
-              {detail.job_names.map(n => (
-                <li key={n} className="mono" style={{ fontSize: 13 }}>{n}</li>
-              ))}
-            </ul>
-          )}
-        </section>
-      </div>
-
-      <section style={{ marginTop: 32 }}>
-        <h2 className="section__title">Recent events</h2>
-        {detail.events.length === 0 ? (
-          <div className="empty">No recorded events yet.</div>
-        ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>When</th>
-                <th>Event</th>
-                <th>Job</th>
-                <th>Note</th>
-              </tr>
-            </thead>
-            <tbody>
-              {[...detail.events].reverse().map((e, i) => (
-                <tr key={i}>
-                  <td className="mono" style={{ fontSize: 12 }}>{relativeAgo(e.at)}</td>
-                  <td>{e.kind}</td>
-                  <td className="mono" style={{ fontSize: 12 }}>
-                    {e.job_id ? `${e.job_id}${e.job_name ? ' ' + e.job_name : ''}` : '—'}
-                  </td>
-                  <td style={{ color: 'var(--ink-2)' }}>{e.note || ''}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          </div>
         )}
-      </section>
+      </div>
 
       {showDrain && (
         <SudoConfirmDialog
           title="Drain worker"
-          icon={<AlertTriangle size={18} />}
+          icon={<AlertTriangle size={18} className="brass" />}
           body={
-            <>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <p>
-                Dispatcher will stop pushing new jobs to this session. The {detail.inflight_count}
-                {' '}in-flight job{detail.inflight_count === 1 ? '' : 's'} will finish normally; the
-                session disconnects once in-flight reaches zero.
+                The dispatcher will stop sending new jobs to this session.{' '}
+                {detail.inflight_count === 0
+                  ? 'The session will disconnect cleanly within a few seconds.'
+                  : `The ${detail.inflight_count} in-flight job${detail.inflight_count === 1 ? '' : 's'} will finish first.`}
               </p>
-              <p style={{ marginTop: 8, color: 'var(--ink-2)' }}>
-                Safe choice for rolling out a worker change or shutting one down cleanly.
+              <p className="muted" style={{ fontSize: 12 }}>
+                Safe for rolling out a worker change.
               </p>
-            </>
+            </div>
           }
           confirmLabel="Drain"
           pending={actionPending}
@@ -291,18 +384,18 @@ export function WorkerSession() {
       {showEvict && (
         <SudoConfirmDialog
           title="Evict worker"
-          icon={<ShieldOff size={18} />}
+          icon={<ShieldOff size={18} className="coral" />}
           body={
-            <>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <p>
-                Force-close the stream immediately. The {detail.inflight_count}
-                {' '}in-flight job{detail.inflight_count === 1 ? '' : 's'} will be returned to
-                the queue and re-attempted by another worker.
+                Force-close the stream immediately. {detail.inflight_count > 0 && (
+                  <>The <b>{detail.inflight_count} in-flight job{detail.inflight_count === 1 ? '' : 's'}</b> will be returned to the queue and re-attempted by another worker.</>
+                )}
               </p>
-              <p style={{ marginTop: 8, color: 'var(--coral)' }}>
+              <p className="coral" style={{ fontSize: 12 }}>
                 Destructive. Use only for stuck or misbehaving workers.
               </p>
-            </>
+            </div>
           }
           requiredText="evict"
           confirmLabel="Evict"
@@ -312,21 +405,92 @@ export function WorkerSession() {
           onConfirm={evict}
         />
       )}
+    </PageShell>
+  )
+}
+
+function StatusPill({ kind }: { kind: 'connected' | 'stale' | 'drained' }) {
+  const map = {
+    connected: { dot: 'dot dot--brass', label: 'connected', cls: '' },
+    stale: { dot: 'dot dot--coral', label: 'stale heartbeat', cls: 'coral' },
+    drained: { dot: 'dot', label: 'draining', cls: 'muted' },
+  } as const
+  const s = map[kind]
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 7,
+      padding: '4px 10px',
+      background: 'var(--canvas-1)',
+      border: '1px solid var(--line-soft)',
+      borderRadius: 12,
+      fontSize: 11.5,
+    }} className={s.cls}>
+      <span
+        className={s.dot}
+        style={kind === 'drained' ? { background: 'var(--ink-3)' } : undefined}
+      />
+      {s.label}
+    </span>
+  )
+}
+
+function Meta({
+  label, value, mono, faint, tone,
+}: { label: string; value: string; mono?: boolean; faint?: boolean; tone?: 'sage' | 'coral' | 'muted' }) {
+  const toneCls = tone === 'sage' ? 'sage' : tone === 'coral' ? 'coral' : tone === 'muted' ? 'muted' : ''
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div className="section-label" style={{ fontSize: 10.5, letterSpacing: '0.05em' }}>{label}</div>
+      <div
+        className={[mono ? 'mono' : '', faint ? 'faint' : '', toneCls].filter(Boolean).join(' ')}
+        style={{ fontSize: 13, color: toneCls ? undefined : (faint ? 'var(--ink-3)' : 'var(--ink-1)') }}
+      >
+        {value}
+      </div>
     </div>
   )
 }
 
-function CounterCard({ label, value, sub, tone }: { label: string; value: number; sub?: string; tone?: 'warn' }) {
+function CounterTile({
+  label, value, sub, tone,
+}: { label: string; value: number; sub?: string; tone?: 'sage' | 'coral' }) {
+  const color = tone === 'sage' ? 'var(--sage)' : tone === 'coral' ? 'var(--coral)' : 'var(--ink-0)'
   return (
     <div className="card">
-      <div className="card__head">
-        <div className="card__title">{label}</div>
+      <div className="card__body" style={{ padding: 16 }}>
+        <div className="section-label" style={{ marginBottom: 8 }}>{label}</div>
+        <div className="num" style={{ fontSize: 24, fontWeight: 500, color, letterSpacing: '-0.01em', lineHeight: 1.05 }}>
+          {value.toLocaleString()}
+        </div>
+        {sub && <div className="faint" style={{ fontSize: 11, marginTop: 4 }}>{sub}</div>}
       </div>
-      <div style={{ fontSize: 28, fontWeight: 600, color: tone === 'warn' ? 'var(--coral)' : undefined }}>
-        {value.toLocaleString()}
-      </div>
-      {sub && <div style={{ color: 'var(--ink-3)', fontSize: 11 }}>{sub}</div>}
     </div>
+  )
+}
+
+function EventKind({ kind }: { kind: string }) {
+  // Soft colour-coding mirrors the .lvl- pattern but for event kinds.
+  const tone: 'sage' | 'coral' | 'brass' | '' =
+    kind === 'completed' || kind === 'acked' ? 'sage' :
+    kind === 'failed' || kind === 'protocol_violation' || kind === 'authz_rejected' || kind === 'authz_rejected_post_open' || kind === 'evicted' ? 'coral' :
+    kind === 'revoked' || kind === 'drain_requested' || kind === 'drained_started' ? 'brass' :
+    ''
+  const cls = tone ? tone : 'ink-1'
+  const bg = tone === 'sage' ? 'var(--sage-tint)' : tone === 'coral' ? 'var(--coral-tint)' : tone === 'brass' ? 'var(--accent-tint)' : 'var(--canvas-3)'
+  return (
+    <span
+      className={'mono ' + cls}
+      style={{
+        display: 'inline-block',
+        padding: '2px 8px',
+        background: bg,
+        borderRadius: 4,
+        fontSize: 11,
+        letterSpacing: '0.02em',
+      }}
+    >
+      {kind}
+    </span>
   )
 }
 
