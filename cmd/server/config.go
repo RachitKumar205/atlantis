@@ -130,6 +130,23 @@ type config struct {
 	// Format: "vendor.ShopifyImport=localhost:50051,consumer.SweepExpired=localhost:50052"
 	JobsRemoteHandlers map[string]string
 
+	// JobsDispatcherEnabled turns on the server-side worker-poll
+	// dispatcher (internal/server/jobsdispatcher). Off by default so a
+	// rollout doesn't change behavior on an existing prod box until
+	// the operator opts in. When enabled, the WorkerDispatch gRPC
+	// service is mounted and a drain loop runs per JobsDispatcherQueues
+	// entry, claiming rows from atlantis.jobs and dispatching them to
+	// remote workers connected over a bidi stream.
+	JobsDispatcherEnabled bool
+
+	// JobsDispatcherQueues lists the queues this pod's dispatcher
+	// drains. Defaults to JobsQueues — most deployments want the
+	// dispatcher and the SDK direct-PG workers (if any) to drain the
+	// same partition set. Operators can scope the dispatcher to a
+	// subset when they want some queues handled only by direct-PG
+	// workers.
+	JobsDispatcherQueues []string
+
 	// Observability
 	LogLevel string
 
@@ -196,6 +213,9 @@ func loadConfig() (config, error) {
 		JobsWorkerEnabled:  envBool("ATL_JOBS_WORKER_ENABLED", false),
 		JobsQueues:         splitCSV(envStr("ATL_JOBS_QUEUES", "default")),
 		JobsRemoteHandlers: parseRemoteHandlers(envStr("ATL_JOBS_REMOTE_HANDLERS", "")),
+
+		JobsDispatcherEnabled: envBool("ATL_JOBS_DISPATCHER_ENABLED", false),
+		JobsDispatcherQueues:  splitCSV(envStr("ATL_JOBS_DISPATCHER_QUEUES", envStr("ATL_JOBS_QUEUES", "default"))),
 
 		LogLevel:    envStr("LOG_LEVEL", "info"),
 		LogRingSize: envInt("LOG_RING_SIZE", 8192),
