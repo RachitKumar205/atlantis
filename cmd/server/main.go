@@ -35,9 +35,21 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/server/admin"
 	"github.com/rachitkumar205/atlantis/internal/server/entity"
 	"github.com/rachitkumar205/atlantis/internal/server/interceptors"
+	"github.com/rachitkumar205/atlantis/internal/server/jobsdispatcher"
 	"github.com/rachitkumar205/atlantis/internal/storage/pg"
 	"github.com/rachitkumar205/atlantis/jobs"
 )
+
+// podID returns the local pod identifier used in the dispatcher's
+// claimed_by formatting. Hostname-pid mirrors DefaultConfig in
+// clients/go/jobs.
+func podID() string {
+	host, _ := os.Hostname()
+	if host == "" {
+		host = "atlantis"
+	}
+	return fmt.Sprintf("%s-%d", host, os.Getpid())
+}
 
 // version is stamped at build time via -ldflags "-X main.version=...".
 // Unstamped local builds report "dev".
@@ -332,6 +344,46 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	}
 	_ = jobsRegistry // stashed for future public access; today only the in-process worker goroutines need it.
 
+	// Worker-poll dispatcher — gated by ATL_JOBS_DISPATCHER_ENABLED.
+	// Drains atlantis.jobs against this pod's PG and pushes work over
+	// a bidi gRPC stream to remote workers (laptop-dev or any caller
+	// without direct PG access). Coexists safely with direct-PG SDK
+	// workers via the shared SKIP LOCKED claim helpers.
+	var dispatcher *jobsdispatcher.Dispatcher
+	if cfg.JobsDispatcherEnabled {
+		dispatcher = jobsdispatcher.New(pool.Raw(), jobsdispatcher.Config{
+			HeartbeatBudget: 30 * time.Second,
+			DrainInterval:   time.Second,
+			BatchSize:       50,
+			AckTimeoutMS:    15000,
+			ShutdownBudget:  30 * time.Second,
+			PodID:           podID(),
+			IRLoader: func(_ context.Context) (*dsl.IR, error) {
+				ir, _, err := loadIRCheckpoint(pool)
+				return ir, err
+			},
+			CallerFromContext: callerFromContext,
+			Logger:            log.With("component", "jobs-dispatcher"),
+		})
+		jobsdispatcher.Register(srv, dispatcher)
+		for _, queue := range cfg.JobsDispatcherQueues {
+			queue := queue
+			workerWG.Add(1)
+			go func() {
+				defer workerWG.Done()
+				defer func() {
+					if rec := recover(); rec != nil {
+						log.Error("jobs dispatcher panic", "queue", queue, "panic", rec)
+					}
+				}()
+				dispatcher.RunQueue(workerCtx, queue)
+			}()
+			log.Info("jobs dispatcher enabled", "queue", queue)
+		}
+	} else {
+		log.Info("jobs dispatcher disabled (set ATL_JOBS_DISPATCHER_ENABLED=true to enable)")
+	}
+
 	log.Debug("init: load IR checkpoint")
 	ir, irHash, err := loadIRCheckpoint(pool)
 	if err != nil {
@@ -402,6 +454,20 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	case <-time.After(15 * time.Second):
 		log.Warn("graceful shutdown timed out; forcing")
 		srv.Stop()
+	}
+
+	// Dispatcher drain runs AFTER gRPC GracefulStop (so no new
+	// WorkerSession streams arrive) and BEFORE pool.Close() (because
+	// the drain writes release rows to PG). Sessions get Goodbye'd,
+	// in-flight rows wait for the configured budget, anything
+	// remaining is force-released back to pending.
+	if dispatcher != nil {
+		dispatchShutdownCtx, cancelDispatch := context.WithTimeout(context.Background(), 45*time.Second)
+		released := dispatcher.Shutdown(dispatchShutdownCtx)
+		cancelDispatch()
+		if released > 0 {
+			log.Warn("dispatcher shutdown force-released rows", "count", released)
+		}
 	}
 
 	// Final drain pass: stop the worker loop, wait for the goroutine,
