@@ -2,7 +2,6 @@ package jobs
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -175,67 +173,13 @@ func (w *Worker) LastClaimAt() time.Time {
 	return time.Unix(0, w.lastClaimNS.Load())
 }
 
-// runListenLoop opens LISTEN sessions on freshly-acquired pool
-// connections and reconnects on any session-ending error. Returns
-// only when ctx is canceled. The 1s gap between sessions absorbs
-// flapping connections without spinning.
+// runListenLoop delegates to PgListen, filtering atl_jobs notifications
+// to this worker's queue. PgListen owns the reconnect cadence + panic
+// recovery; the closure adapts the queue-match predicate.
 func (w *Worker) runListenLoop(ctx context.Context, notifyCh chan struct{}) {
-	defer func() {
-		if rec := recover(); rec != nil {
-			w.cfg.Logger.Error("jobs listen loop panic", "queue", w.queue, "panic", rec)
-		}
-	}()
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		if err := w.runListenSession(ctx, notifyCh); err != nil {
-			if errors.Is(err, context.Canceled) {
-				return
-			}
-			w.cfg.Logger.Warn("jobs listen session ended", "queue", w.queue, "err", err)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(time.Second):
-		}
-	}
-}
-
-// runListenSession acquires a connection, subscribes to atl_jobs,
-// and pushes wake signals onto notifyCh for any notification whose
-// payload matches this worker's queue. The session ends on any
-// error or ctx cancellation; the caller reconnects.
-func (w *Worker) runListenSession(ctx context.Context, notifyCh chan struct{}) error {
-	conn, err := w.pool.Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire: %w", err)
-	}
-	defer conn.Release()
-
-	if _, err := conn.Exec(ctx, "LISTEN atl_jobs"); err != nil {
-		return fmt.Errorf("listen: %w", err)
-	}
-
-	for {
-		notif, err := conn.Conn().WaitForNotification(ctx)
-		if err != nil {
-			return err
-		}
-		// Only wake on notifications targeted at our queue. Cross-
-		// queue traffic on a shared channel is much cheaper than
-		// per-queue channel proliferation in pg's notify subsystem.
-		if notif.Payload != w.queue {
-			continue
-		}
-		select {
-		case notifyCh <- struct{}{}:
-		default:
-			// Channel buffered to 1; an existing pending signal is
-			// already going to wake the drainer, so we're done.
-		}
-	}
+	PgListen(ctx, w.pool, "atl_jobs", func(payload string) bool {
+		return payload == w.queue
+	}, notifyCh, w.cfg.Logger)
 }
 
 // drainOnce claims a batch and processes each row. Errors from
@@ -252,7 +196,9 @@ func (w *Worker) drainOnce(ctx context.Context) {
 			w.cfg.Logger.Error("jobs drainOnce panic", "queue", w.queue, "panic", rec)
 		}
 	}()
-	rows, err := w.claim(ctx)
+	leaseDeadline := time.Now().Add(w.cfg.HeartbeatBudget)
+	rows, err := ClaimRows(ctx, w.pool, w.queue, nil, w.cfg.BatchSize,
+		w.cfg.PodID, leaseDeadline, WorkerKindDirectPG, "")
 	if err != nil {
 		w.cfg.Logger.Warn("jobs claim", "queue", w.queue, "err", err)
 		return
@@ -263,79 +209,6 @@ func (w *Worker) drainOnce(ctx context.Context) {
 	for _, r := range rows {
 		w.handleOne(ctx, r)
 	}
-}
-
-// claimedRow carries everything the handler-dispatch path needs
-// without re-querying the row. Kept private — the wire shape (admin
-// RPCs) is JobStatus, not this struct.
-type claimedRow struct {
-	id           int64
-	jobName      string
-	args         []byte
-	attempts     int
-	maxRetries   int
-	timeoutMS    int
-	enqueuedAt   time.Time
-	scheduledFor time.Time
-	traceCtx     []byte
-}
-
-// claim atomically transitions up to BatchSize rows from pending to
-// running. The CTE pattern avoids racing pods grabbing the same row
-// by combining the SELECT...FOR UPDATE SKIP LOCKED scan with the
-// UPDATE in a single statement; CTEs are atomic in Postgres.
-//
-// The claim filter:
-//
-//   - queue matches this worker
-//   - status is pending OR (status is running AND lease expired) —
-//     a crashed pod's row is recoverable
-//   - scheduled_for has passed
-//
-// The lease is set to claimed_until = now() + HeartbeatBudget. We
-// rely on the budget being conservative; long-running jobs
-// can use the checkpoint API to extend the lease themselves.
-func (w *Worker) claim(ctx context.Context) ([]claimedRow, error) {
-	leaseDeadline := time.Now().Add(w.cfg.HeartbeatBudget)
-	const sqlClaim = `
-WITH ready AS (
-    SELECT id
-    FROM atlantis.jobs
-    WHERE queue = $1
-      AND scheduled_for <= now()
-      AND (
-        status = 'pending'
-        OR (status = 'running' AND (claimed_until IS NULL OR claimed_until < now()))
-      )
-    ORDER BY scheduled_for
-    FOR UPDATE SKIP LOCKED
-    LIMIT $2
-)
-UPDATE atlantis.jobs j
-   SET status        = 'running',
-       attempts      = j.attempts + 1,
-       claimed_by    = $3,
-       claimed_until = $4,
-       started_at    = COALESCE(j.started_at, now())
-  FROM ready
- WHERE j.id = ready.id
-RETURNING j.id, j.job_name, j.args, j.attempts, j.max_retries,
-          COALESCE(j.timeout_ms, 0), j.enqueued_at, j.scheduled_for, j.trace_ctx`
-	rs, err := w.pool.Query(ctx, sqlClaim, w.queue, w.cfg.BatchSize, w.cfg.PodID, leaseDeadline)
-	if err != nil {
-		return nil, err
-	}
-	defer rs.Close()
-	var out []claimedRow
-	for rs.Next() {
-		var r claimedRow
-		if err := rs.Scan(&r.id, &r.jobName, &r.args, &r.attempts, &r.maxRetries,
-			&r.timeoutMS, &r.enqueuedAt, &r.scheduledFor, &r.traceCtx); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rs.Err()
 }
 
 // handleOne dispatches a single claimed row through the registry.
@@ -358,11 +231,11 @@ RETURNING j.id, j.job_name, j.args, j.attempts, j.max_retries,
 // extend the lease via the checkpoint API. Callers without the
 // checkpoint wiring should keep their timeouts within
 // HeartbeatBudget.
-func (w *Worker) handleOne(ctx context.Context, r claimedRow) {
-	handler := w.registry.Lookup(r.jobName)
+func (w *Worker) handleOne(ctx context.Context, r ClaimedRow) {
+	handler := w.registry.Lookup(r.JobName)
 	if handler == nil {
-		err := &HandlerNotRegisteredError{JobID: r.jobName}
-		w.cfg.Logger.Warn("jobs handler missing", "queue", w.queue, "job_id", r.jobName, "row", r.id)
+		err := &HandlerNotRegisteredError{JobID: r.JobName}
+		w.cfg.Logger.Warn("jobs handler missing", "queue", w.queue, "job_id", r.JobName, "row", r.ID)
 		w.reportTransientFailure(ctx, r, err)
 		return
 	}
@@ -374,18 +247,18 @@ func (w *Worker) handleOne(ctx context.Context, r claimedRow) {
 	runCtx := ctx
 	endSpan := func() {}
 	if w.traceHook != nil {
-		runCtx = w.traceHook.ResumeTrace(runCtx, r.traceCtx)
-		runCtx, endSpan = w.traceHook.StartSpan(runCtx, r.jobName)
+		runCtx = w.traceHook.ResumeTrace(runCtx, r.TraceCtx)
+		runCtx, endSpan = w.traceHook.StartSpan(runCtx, r.JobName)
 	}
 	defer endSpan()
 
-	if r.timeoutMS > 0 {
+	if r.TimeoutMS > 0 {
 		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(runCtx, time.Duration(r.timeoutMS)*time.Millisecond)
+		runCtx, cancel = context.WithTimeout(runCtx, time.Duration(r.TimeoutMS)*time.Millisecond)
 		defer cancel()
 	}
 
-	runCtx = withCheckpointer(runCtx, newCheckpointer(w.pool, r.id))
+	runCtx = withCheckpointer(runCtx, newCheckpointer(w.pool, r.ID))
 
 	// Lease-extension heartbeat. A goroutine ticks every
 	// HeartbeatBudget/3 to bump claimed_until so a peer doesn't
@@ -403,82 +276,40 @@ func (w *Worker) handleOne(ctx context.Context, r claimedRow) {
 			case <-hbCtx.Done():
 				return
 			case <-ticker.C:
-				if err := w.heartbeat(ctx, r.id); err != nil {
-					w.cfg.Logger.Warn("jobs heartbeat", "row", r.id, "err", err)
+				if err := ExtendLease(ctx, w.pool, []int64{r.ID}, w.cfg.PodID, w.cfg.HeartbeatBudget); err != nil {
+					w.cfg.Logger.Warn("jobs heartbeat", "row", r.ID, "err", err)
 				}
 			}
 		}
 	}()
 
-	err := handler.Handle(runCtx, r.args)
+	err := handler.Handle(runCtx, r.Args)
 	stopHB()
 	hbWG.Wait()
 
 	if err == nil {
-		if cerr := w.markComplete(ctx, r.id); cerr != nil {
-			w.cfg.Logger.Warn("jobs markComplete", "row", r.id, "err", cerr)
+		if cerr := MarkComplete(ctx, w.pool, r.ID); cerr != nil {
+			w.cfg.Logger.Warn("jobs markComplete", "row", r.ID, "err", cerr)
 		}
 		if w.completeHook != nil {
-			w.completeHook.OnJobComplete(ctx, r.id)
+			w.completeHook.OnJobComplete(ctx, r.ID)
 		}
 		return
 	}
 	w.reportFailure(ctx, r, err)
 }
 
-// markComplete writes the terminal state for a successful job.
-// Wrapped in its own tx — the handler's tx (if any) already
-// committed, so this is a discrete "I'm done" write.
-func (w *Worker) markComplete(ctx context.Context, id int64) error {
-	_, err := w.pool.Exec(ctx, `
-UPDATE atlantis.jobs
-   SET status        = 'complete',
-       completed_at  = now(),
-       claimed_by    = NULL,
-       claimed_until = NULL
- WHERE id = $1`, id)
-	return err
-}
-
-// heartbeat extends the lease so a peer doesn't poach this row.
-// Idempotent: a duplicate heartbeat is a no-op write.
-func (w *Worker) heartbeat(ctx context.Context, id int64) error {
-	_, err := w.pool.Exec(ctx, `
-UPDATE atlantis.jobs
-   SET claimed_until = now() + ($1 || ' milliseconds')::interval
- WHERE id = $2 AND claimed_by = $3`,
-		w.cfg.HeartbeatBudget.Milliseconds(), id, w.cfg.PodID)
-	return err
-}
-
-// reportFailure records a handler error. If attempts exceeded
-// max_retries, moves the row to atlantis.jobs_dead; otherwise resets
-// status to pending so the next drain pass retries.
-//
-// All-in-one tx: a torn move (deleted from jobs but not inserted
-// into jobs_dead, or vice versa) would leak rows. The tx wraps the
-// INSERT + DELETE atomically.
-func (w *Worker) reportFailure(ctx context.Context, r claimedRow, handlerErr error) {
+// reportFailure delegates to the package-level ReportFailure helper.
+// On terminal failure the completion hook fires; the helper itself
+// doesn't know about hooks (kept SQL-only).
+func (w *Worker) reportFailure(ctx context.Context, r ClaimedRow, handlerErr error) {
 	msg := handlerErr.Error()
-	if r.attempts >= r.maxRetries {
-		if err := w.moveToDLQ(ctx, r.id, msg); err != nil {
-			w.cfg.Logger.Error("jobs moveToDLQ", "row", r.id, "err", err)
-		}
-		if w.completeHook != nil {
-			w.completeHook.OnJobFailed(ctx, r.id, msg)
-		}
-		return
+	terminal := r.Attempts >= r.MaxRetries
+	if err := ReportFailure(ctx, w.pool, r.ID, r.Attempts, r.MaxRetries, msg); err != nil {
+		w.cfg.Logger.Warn("jobs reportFailure", "row", r.ID, "err", err)
 	}
-	_, err := w.pool.Exec(ctx, `
-UPDATE atlantis.jobs
-   SET status        = 'pending',
-       last_error    = $1,
-       last_error_at = now(),
-       claimed_by    = NULL,
-       claimed_until = NULL
- WHERE id = $2`, msg, r.id)
-	if err != nil {
-		w.cfg.Logger.Warn("jobs reportFailure", "row", r.id, "err", err)
+	if terminal && w.completeHook != nil {
+		w.completeHook.OnJobFailed(ctx, r.ID, msg)
 	}
 }
 
@@ -487,39 +318,17 @@ UPDATE atlantis.jobs
 // case. We bump attempts so a persistently-missing handler eventually
 // DLQ's, but we keep the row in `running` until the lease expires so
 // a peer pod with the handler can claim it.
-func (w *Worker) reportTransientFailure(ctx context.Context, r claimedRow, err error) {
-	if r.attempts >= r.maxRetries {
-		_ = w.moveToDLQ(ctx, r.id, err.Error())
+func (w *Worker) reportTransientFailure(ctx context.Context, r ClaimedRow, err error) {
+	if r.Attempts >= r.MaxRetries {
+		_ = MoveToDLQ(ctx, w.pool, r.ID, err.Error())
 		return
 	}
 	_, qerr := w.pool.Exec(ctx, `
 UPDATE atlantis.jobs
    SET last_error    = $1,
        last_error_at = now()
- WHERE id = $2`, err.Error(), r.id)
+ WHERE id = $2`, err.Error(), r.ID)
 	if qerr != nil {
-		w.cfg.Logger.Warn("jobs reportTransientFailure", "row", r.id, "err", qerr)
+		w.cfg.Logger.Warn("jobs reportTransientFailure", "row", r.ID, "err", qerr)
 	}
-}
-
-// moveToDLQ atomically removes a row from atlantis.jobs and inserts
-// the matching row into atlantis.jobs_dead. The INSERT preserves the
-// row id so a subsequent RetryDeadJob can route by id.
-func (w *Worker) moveToDLQ(ctx context.Context, id int64, errMsg string) error {
-	tx, err := w.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if _, err := tx.Exec(ctx, `
-INSERT INTO atlantis.jobs_dead
-    (id, job_name, queue, args, attempts, max_retries, last_error, last_error_at, enqueued_at, submitted_by)
-SELECT id, job_name, queue, args, attempts, max_retries, $2, now(), enqueued_at, submitted_by
-FROM atlantis.jobs WHERE id = $1`, id, errMsg); err != nil {
-		return fmt.Errorf("insert dead: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM atlantis.jobs WHERE id = $1`, id); err != nil {
-		return fmt.Errorf("delete jobs: %w", err)
-	}
-	return tx.Commit(ctx)
 }
