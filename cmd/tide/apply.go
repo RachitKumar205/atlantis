@@ -41,6 +41,12 @@ type planResponse struct {
 	BreakingDetail []string      `json:"breaking_detail"`
 	CheckpointHash string        `json:"checkpoint_hash,omitempty"`
 
+	// CustomSQLErrors surface failures from the server-side pg_query_go
+	// validator. Server returns class="unparseable" when this list is
+	// non-empty; without surfacing the messages, "unparseable" gives the
+	// operator nothing to act on.
+	CustomSQLErrors []string `json:"custom_sql_errors,omitempty"`
+
 	PreBackfillUpSQL       string             `json:"pre_backfill_up_sql,omitempty"`
 	PreBackfillIndexesSQL  string             `json:"pre_backfill_indexes_sql,omitempty"`
 	PostBackfillUpSQL      string             `json:"post_backfill_up_sql,omitempty"`
@@ -213,6 +219,25 @@ func cmdApply(args []string) int {
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "tide: open a PR in the atlantis repo to coordinate the change.")
 		return 2
+
+	case "unparseable":
+		// Server marks the plan unparseable when pg_query_go validation on
+		// any custom-query SQL body fails. Surface the actual failures so
+		// the operator can fix the .atl file without spelunking the server logs.
+		fmt.Fprintln(os.Stderr, "tide: plan is unparseable — custom-query SQL validation failed.")
+		if len(planResp.CustomSQLErrors) > 0 {
+			fmt.Fprintln(os.Stderr, "")
+			for _, e := range planResp.CustomSQLErrors {
+				fmt.Fprintln(os.Stderr, "  ", e)
+			}
+		}
+		if len(planResp.ParseErrors) > 0 {
+			fmt.Fprintln(os.Stderr, "")
+			for _, e := range planResp.ParseErrors {
+				fmt.Fprintln(os.Stderr, "  ", e)
+			}
+		}
+		return 3
 
 	default:
 		fmt.Fprintf(os.Stderr, "tide: unknown plan class %q\n", planResp.Class)
