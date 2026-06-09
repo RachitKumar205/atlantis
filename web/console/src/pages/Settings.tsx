@@ -825,7 +825,10 @@ function ConfirmDialog({
 // The submit calls /api/auth/sudo first (via the mutation wired up
 // in DangerPanel) so a stolen session cookie alone isn't enough to
 // trigger sign-out-all or revoke-all.
-function SudoConfirmDialog({
+//
+// Exported so other pages with destructive admin actions can reuse
+// the same gate (PR 3 Workers tab uses it for Drain / Evict).
+export function SudoConfirmDialog({
   title, icon, body, requiredText, confirmLabel, pending, error, onCancel, onConfirm,
 }: {
   title: string

@@ -353,12 +353,14 @@ func (d *Dispatcher) drainOnce(ctx context.Context, queue string) {
 				"session", s.id, "queue", queue)
 			d.releaseClaimed(ctx, row.ID, s.claimedBy(), "outbox_full")
 			revokedTotal.WithLabelValues(queue, "outbox_full").Inc()
+			s.cntRevoked.Add(1)
 			// Force session close — worker isn't Recv-ing fast enough.
 			s.close()
 			continue
 		}
 		d.trackInflight(row.ID, s)
 		dispatchedTotal.WithLabelValues(queue, row.JobName).Inc()
+		s.cntDispatched.Add(1)
 
 		// Decrement budget so the next iteration uses up-to-date slots.
 		perSessSlot[s]--
@@ -503,6 +505,7 @@ func (d *Dispatcher) handleHeartbeat(ctx context.Context, s *session, hb *Heartb
 		d.cfg.Logger.Warn("dispatcher: heartbeat extend", "session", s.id, "err", err)
 		return
 	}
+	s.noteHeartbeat()
 	// Also bump the in-memory ackBy clock so the sweeper doesn't
 	// revoke a row whose worker IS alive (Heartbeat without Ack is a
 	// valid state for jobs the worker has fully accepted but hasn't
@@ -555,6 +558,7 @@ func (d *Dispatcher) handleComplete(ctx context.Context, s *session, c *Complete
 			"session", s.id, "row", c.JobID, "err", err)
 	}
 	completedTotal.WithLabelValues(s.queue, row.jobName).Inc()
+	s.cntCompleted.Add(1)
 	s.appendEvent(sessionEvent{
 		At: time.Now(), Kind: "completed", JobID: c.JobID, JobName: row.jobName,
 	})
@@ -592,6 +596,7 @@ func (d *Dispatcher) handleFail(ctx context.Context, s *session, f *Fail) {
 				"session", s.id, "row", f.JobID, "err", err)
 		}
 		failedTotal.WithLabelValues(s.queue, row.jobName, "true").Inc()
+		s.cntFailed.Add(1)
 		s.appendEvent(sessionEvent{
 			At: time.Now(), Kind: "failed", JobID: f.JobID, JobName: row.jobName, Note: "dlq",
 		})
@@ -607,6 +612,7 @@ func (d *Dispatcher) handleFail(ctx context.Context, s *session, f *Fail) {
 		label = "true"
 	}
 	failedTotal.WithLabelValues(s.queue, row.jobName, label).Inc()
+	s.cntFailed.Add(1)
 	s.appendEvent(sessionEvent{
 		At: time.Now(), Kind: "failed", JobID: f.JobID, JobName: row.jobName,
 		Note: f.Error,
@@ -637,6 +643,7 @@ func (d *Dispatcher) sweepAckTimeouts(ctx context.Context, queue string) {
 					"session", s.id, "row", jobID, "err", err)
 			}
 			revokedTotal.WithLabelValues(queue, "ack_timeout").Inc()
+			s.cntRevoked.Add(1)
 			s.appendEvent(sessionEvent{
 				At: now, Kind: "revoked", JobID: jobID, Note: "ack_timeout",
 			})
