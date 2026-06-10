@@ -614,10 +614,10 @@ export const api = {
       apiFetch('/api/callers/revoke-all', { method: 'POST' }),
 
     aliases: (caller: string): Promise<CallerAliasesResponse> =>
-      apiFetch<CallerAliasesResponse>(`/api/callers/${encodeURIComponent(caller)}/aliases`),
+      apiFetch<CallerAliasesResponse>(`/api/admin/callers/${encodeURIComponent(caller)}/aliases`),
 
     setAliases: (caller: string, aliases: string[]): Promise<CallerAliasesResponse> =>
-      apiFetch<CallerAliasesResponse>(`/api/callers/${encodeURIComponent(caller)}/aliases`, {
+      apiFetch<CallerAliasesResponse>(`/api/admin/callers/${encodeURIComponent(caller)}/aliases`, {
         method: 'PUT',
         body: JSON.stringify({ aliases }),
       }),

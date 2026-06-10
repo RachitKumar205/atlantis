@@ -222,11 +222,14 @@ func (s *Server) buildMux() {
 	mux.HandleFunc("POST /api/callers", s.auth(s.requireRole("admin", s.csrf(s.handleRegisterCaller))))
 	mux.HandleFunc("DELETE /api/callers/{caller}", s.auth(s.requireRole("admin", s.csrf(s.handleRevokeCaller))))
 	mux.HandleFunc("POST /api/callers/{caller}/cert/issue", s.auth(s.requireRole("admin", s.csrf(s.handleIssueCert))))
-	// Caller aliases (PR follow-up to the dispatcher security work).
-	// GET is admin role-only; PUT is sudo-gated because changing aliases
-	// widens the visible_to match set for a registered cert.
-	mux.HandleFunc("GET /api/callers/{caller}/aliases", s.auth(s.requireRole("admin", s.handleGetCallerAliases)))
-	mux.HandleFunc("PUT /api/callers/{caller}/aliases",
+	// Caller aliases. Mounted under /api/admin/callers/... to avoid the
+	// ServeMux ambiguity with PUT /api/callers/repos/{caller} (both
+	// would match /api/callers/repos/aliases and Go 1.22+ refuses to
+	// register that). Same admin+sudo gating as the rest of the
+	// /api/admin/... surface (workers, etc).
+	mux.HandleFunc("GET /api/admin/callers/{caller}/aliases",
+		s.auth(s.requireRole("admin", s.handleGetCallerAliases)))
+	mux.HandleFunc("PUT /api/admin/callers/{caller}/aliases",
 		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleSetCallerAliases)))))
 
 	// Schema rollback — mutation, CSRF-protected, admin-only.
