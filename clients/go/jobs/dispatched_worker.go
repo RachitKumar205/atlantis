@@ -94,9 +94,14 @@ type DispatchedWorker struct {
 	cfg      ServerConfig
 
 	// inflight tracks handler goroutines so Run can wait for them on
-	// graceful shutdown.
+	// graceful shutdown. The generation counter disambiguates a
+	// re-dispatch of the same job id from the original: a handler
+	// goroutine only untracks its own entry if the generation still
+	// matches, so a stale goroutine finishing late can't delete the
+	// entry belonging to a newer dispatch of the same id.
 	inflightMu  sync.Mutex
-	inflight    map[int64]context.CancelFunc
+	inflight    map[int64]inflightHandle
+	inflightGen uint64
 	inflightWG  sync.WaitGroup
 	inflightCnt atomic.Int32
 
@@ -145,7 +150,7 @@ func NewDispatchedWorker(conn *grpc.ClientConn, registry *Registry, queue string
 		registry: registry,
 		queue:    queue,
 		cfg:      cfg,
-		inflight: make(map[int64]context.CancelFunc),
+		inflight: make(map[int64]inflightHandle),
 		// ctrlCh is small but bursty (one heartbeat per HeartbeatMS,
 		// plus one Checkpoint per Checkpoint call). Sized for ~30s of
 		// queueing at typical cadence.
@@ -381,6 +386,21 @@ func (w *DispatchedWorker) handleDispatch(ctx context.Context, d *Dispatch) {
 	// Ack first — atlantis's missing-Ack sweeper revokes if we don't.
 	w.enqueueData(&WorkerEnvelope{Ack: &Ack{JobID: d.JobID}})
 
+	// Duplicate-dispatch guard. The server can re-dispatch a job id
+	// that's already running here (e.g. its lease was reclaimed under a
+	// transient network blip, then re-routed back to this same session).
+	// Without this guard we'd spawn a second handler goroutine for the
+	// same id, overwrite the first's cancel func, and inflate the
+	// in-flight count — exactly the concurrent-handler stacking seen in
+	// the 2026-06-10 incident. Re-Ack (the server reset its ackBy clock
+	// on re-dispatch) and return; the original goroutine keeps running.
+	w.inflightMu.Lock()
+	if _, exists := w.inflight[d.JobID]; exists {
+		w.inflightMu.Unlock()
+		w.cfg.Logger.Warn("dispatched worker: duplicate dispatch ignored",
+			"job_name", d.JobName, "job_id", d.JobID)
+		return
+	}
 	handlerCtx, cancel := context.WithCancel(ctx)
 	if d.TimeoutMS > 0 {
 		handlerCtx, cancel = context.WithTimeout(ctx, time.Duration(d.TimeoutMS)*time.Millisecond)
@@ -390,8 +410,9 @@ func (w *DispatchedWorker) handleDispatch(ctx context.Context, d *Dispatch) {
 	// the direct-PG worker installs — handlers don't know which
 	// backend is running them.
 	handlerCtx = withCheckpointer(handlerCtx, newStreamCheckpointer(w, d.JobID))
-	w.inflightMu.Lock()
-	w.inflight[d.JobID] = cancel
+	w.inflightGen++
+	gen := w.inflightGen
+	w.inflight[d.JobID] = inflightHandle{cancel: cancel, gen: gen}
 	w.inflightMu.Unlock()
 	w.inflightCnt.Add(1)
 	w.inflightWG.Add(1)
@@ -399,7 +420,7 @@ func (w *DispatchedWorker) handleDispatch(ctx context.Context, d *Dispatch) {
 	go func() {
 		defer w.inflightWG.Done()
 		defer w.inflightCnt.Add(-1)
-		defer w.untrackInflight(d.JobID)
+		defer w.untrackInflight(d.JobID, gen)
 		defer cancel()
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -425,21 +446,38 @@ func (w *DispatchedWorker) handleDispatch(ctx context.Context, d *Dispatch) {
 	}()
 }
 
+// inflightHandle is the in-flight map value: the handler's cancel func
+// plus the generation under which it was tracked. untrackInflight uses
+// the generation to avoid a late-finishing stale goroutine deleting a
+// newer dispatch's entry for the same job id.
+type inflightHandle struct {
+	cancel context.CancelFunc
+	gen    uint64
+}
+
 // handleRevoke cancels the in-flight handler for a job atlantis has
 // pulled back (lease expired, operator action, timeout).
 func (w *DispatchedWorker) handleRevoke(r *Revoke) {
 	w.inflightMu.Lock()
-	cancel := w.inflight[r.JobID]
-	delete(w.inflight, r.JobID)
+	h, ok := w.inflight[r.JobID]
+	if ok {
+		delete(w.inflight, r.JobID)
+	}
 	w.inflightMu.Unlock()
-	if cancel != nil {
-		cancel()
+	if ok && h.cancel != nil {
+		h.cancel()
 	}
 }
 
-func (w *DispatchedWorker) untrackInflight(jobID int64) {
+// untrackInflight removes a job's entry, but only if the entry still
+// carries the generation the calling goroutine was tracked under. A
+// mismatch means the id was revoked-then-redispatched while this
+// goroutine was unwinding; deleting would clobber the new dispatch.
+func (w *DispatchedWorker) untrackInflight(jobID int64, gen uint64) {
 	w.inflightMu.Lock()
-	delete(w.inflight, jobID)
+	if h, ok := w.inflight[jobID]; ok && h.gen == gen {
+		delete(w.inflight, jobID)
+	}
 	w.inflightMu.Unlock()
 }
 
@@ -581,8 +619,10 @@ func (w *DispatchedWorker) gracefulDrain(parent context.Context) {
 		w.cfg.Logger.Warn("dispatched worker: shutdown budget exceeded, canceling handlers",
 			"remaining", w.inflightCnt.Load())
 		w.inflightMu.Lock()
-		for _, cancel := range w.inflight {
-			cancel()
+		for _, h := range w.inflight {
+			if h.cancel != nil {
+				h.cancel()
+			}
 		}
 		w.inflightMu.Unlock()
 	}

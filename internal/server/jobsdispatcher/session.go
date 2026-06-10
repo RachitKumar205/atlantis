@@ -116,6 +116,7 @@ type inflightRow struct {
 	leaseUntil   time.Time
 	ackReceived  bool
 	ackBy        time.Time // expected-by deadline for missing-Ack detection
+	timeoutMS    int       // per-attempt deadline from the IR; 0 = no timeout (timeout none)
 }
 
 type sessionEvent struct {
@@ -239,15 +240,23 @@ func (s *session) handlesJob(jobName string) bool {
 // releases. Caller computes it as now() + LeaseTTLMS/2.
 func (s *session) recordDispatch(d *Dispatch, leaseUntil time.Time, ackDeadline time.Time) bool {
 	s.inflightMu.Lock()
+	// Defense in depth against a double-dispatch of the same id: only
+	// the first occurrence increments the counter. The SDK-side guard in
+	// handleDispatch is the primary protection; this keeps inflightCount
+	// honest if a duplicate ever reaches the server's record path.
+	_, dup := s.inflight[d.JobID]
 	s.inflight[d.JobID] = inflightRow{
 		jobID:        d.JobID,
 		jobName:      d.JobName,
 		dispatchedAt: time.Now(),
 		leaseUntil:   leaseUntil,
 		ackBy:        ackDeadline,
+		timeoutMS:    d.TimeoutMS,
 	}
 	s.inflightMu.Unlock()
-	s.inflightCounter.Add(1)
+	if !dup {
+		s.inflightCounter.Add(1)
+	}
 	inflightGauge.WithLabelValues(s.queue, s.id).Set(float64(s.inflightCount()))
 
 	// Non-blocking enqueue. If the outbox is full (worker not Recv-ing
@@ -262,11 +271,15 @@ func (s *session) recordDispatch(d *Dispatch, leaseUntil time.Time, ackDeadline 
 		return true
 	default:
 		// Failed to enqueue. Undo bookkeeping; caller will release.
-		s.inflightMu.Lock()
-		delete(s.inflight, d.JobID)
-		s.inflightMu.Unlock()
-		s.inflightCounter.Add(-1)
-		inflightGauge.WithLabelValues(s.queue, s.id).Set(float64(s.inflightCount()))
+		// Only undo what this call added: a duplicate didn't increment
+		// the counter and shouldn't delete the original's entry.
+		if !dup {
+			s.inflightMu.Lock()
+			delete(s.inflight, d.JobID)
+			s.inflightMu.Unlock()
+			s.inflightCounter.Add(-1)
+			inflightGauge.WithLabelValues(s.queue, s.id).Set(float64(s.inflightCount()))
+		}
 		return false
 	}
 }
@@ -349,6 +362,65 @@ func (s *session) findExpiredAcks(now time.Time) []int64 {
 	}
 	return out
 }
+
+// expiredLease names an in-flight row the lease sweeper wants to revoke
+// plus why, for metric labeling and the events log.
+type expiredLease struct {
+	jobID  int64
+	reason string // "lease_expired" | "timeout_exceeded"
+}
+
+// findExpiredLeases is the companion to findExpiredAcks for rows that
+// HAVE been acked but stopped making progress. Two independent triggers:
+//
+//   - lease_expired: heartbeats normally bump leaseUntil continuously
+//     (every HeartbeatBudget/3). If leaseUntil falls more than
+//     leaseExpiryGrace behind now, the worker has stopped heartbeating
+//     this row entirely — process death, network partition, or a wedged
+//     send path. The grace absorbs one or two missed ticks.
+//   - timeout_exceeded: a wall-clock backstop for handlers that ignore
+//     their context. The SDK installs context.WithTimeout(timeoutMS) and
+//     a well-behaved handler unwinds on its own well before this fires;
+//     this only catches a handler still running timeoutTimeoutGrace past
+//     its declared deadline. Rows with timeoutMS==0 (timeout none) are
+//     never caught by this arm.
+//
+// Un-acked rows are excluded — those are findExpiredAcks's domain. The
+// grace windows are passed in (defaulted from Config) so tests can
+// shrink them.
+func (s *session) findExpiredLeases(now time.Time, leaseGrace, timeoutGrace time.Duration) []expiredLease {
+	var out []expiredLease
+	s.inflightMu.Lock()
+	defer s.inflightMu.Unlock()
+	for id, row := range s.inflight {
+		if !row.ackReceived {
+			continue
+		}
+		if now.After(row.leaseUntil.Add(leaseGrace)) {
+			out = append(out, expiredLease{jobID: id, reason: "lease_expired"})
+			continue
+		}
+		if row.timeoutMS > 0 {
+			deadline := row.dispatchedAt.Add(time.Duration(row.timeoutMS)*time.Millisecond + timeoutGrace)
+			if now.After(deadline) {
+				out = append(out, expiredLease{jobID: id, reason: "timeout_exceeded"})
+			}
+		}
+	}
+	return out
+}
+
+// leaseExpiryGrace is the default for Config.LeaseExpiryGrace: how far
+// past leaseUntil a row must fall before the lease sweeper treats the
+// worker as gone. Larger than one heartbeat tick so a single delayed
+// heartbeat doesn't trigger a spurious revoke.
+const leaseExpiryGrace = 30 * time.Second
+
+// timeoutBackstopGrace is the default for Config.TimeoutBackstopGrace:
+// the slack past a row's declared timeout before the server force-
+// revokes. The SDK's own context deadline is the primary enforcement;
+// this only fires for ctx-ignoring handlers.
+const timeoutBackstopGrace = time.Minute
 
 // appendEvent records a state transition in the session's ring buffer.
 // Caps to sessionEventCap so a long-lived session can't grow the
