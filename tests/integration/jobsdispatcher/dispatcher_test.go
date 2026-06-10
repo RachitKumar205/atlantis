@@ -52,7 +52,7 @@ type harness struct {
 	stopFn   func()
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T, opts ...func(*jobsdispatcher.Config)) *harness {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -87,12 +87,16 @@ func newHarness(t *testing.T) *harness {
 
 	ir := &dsl.IR{
 		Jobs: []dsl.Job{
-			{Namespace: "vendor", Name: "TestJob", VisibleTo: "vendor", MaxRetries: 3},
-			{Namespace: "consumer", Name: "OpenJob", VisibleTo: "*", MaxRetries: 3},
+			// max_retries here is cosmetic — the dispatcher reads the
+			// per-row max_retries from atlantis.jobs (set by insertJob),
+			// not from the IR. These entries exist for authz (VisibleTo).
+			{Namespace: "vendor", Name: "TestJob", VisibleTo: "vendor", Retries: 3},
+			{Namespace: "vendor", Name: "WedgeJob", VisibleTo: "vendor"},
+			{Namespace: "consumer", Name: "OpenJob", VisibleTo: "*", Retries: 3},
 		},
 	}
 
-	d := jobsdispatcher.New(pool, jobsdispatcher.Config{
+	cfg := jobsdispatcher.Config{
 		HeartbeatBudget: 3 * time.Second,
 		DrainInterval:   100 * time.Millisecond,
 		BatchSize:       10,
@@ -106,7 +110,11 @@ func newHarness(t *testing.T) *harness {
 			// Default for tests: treat connections as vendor unless overridden.
 			return "vendor"
 		},
-	})
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	d := jobsdispatcher.New(pool, cfg)
 
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
@@ -433,3 +441,110 @@ func TestE2E_CoexistenceWithDirectPGWorker(t *testing.T) {
 type handlerFunc func(ctx context.Context, args []byte) error
 
 func (f handlerFunc) Handle(ctx context.Context, args []byte) error { return f(ctx, args) }
+
+// insertJobWithTimeout is insertJob plus an explicit per-attempt
+// timeout_ms, needed to exercise the dispatcher's timeout backstop.
+func insertJobWithTimeout(t *testing.T, pool *pgxpool.Pool, jobName, queue string, args []byte, maxRetries, timeoutMS int) int64 {
+	t.Helper()
+	var id int64
+	err := pool.QueryRow(context.Background(), `
+INSERT INTO atlantis.jobs (job_name, queue, args, max_retries, timeout_ms, submitted_by)
+VALUES ($1, $2, $3, $4, $5, 'test')
+RETURNING id`, jobName, queue, args, maxRetries, timeoutMS).Scan(&id)
+	if err != nil {
+		t.Fatalf("insert job with timeout: %v", err)
+	}
+	return id
+}
+
+// countDead returns how many rows for jobName sit in the DLQ.
+func countDead(t *testing.T, pool *pgxpool.Pool, jobName string) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM atlantis.jobs_dead WHERE job_name = $1`, jobName).Scan(&n); err != nil {
+		t.Fatalf("count dead: %v", err)
+	}
+	return n
+}
+
+// rowExists reports whether a live atlantis.jobs row still exists.
+func rowExists(t *testing.T, pool *pgxpool.Pool, id int64) bool {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM atlantis.jobs WHERE id = $1`, id).Scan(&n); err != nil {
+		t.Fatalf("row exists: %v", err)
+	}
+	return n > 0
+}
+
+// TestE2E_WedgedHandlerRevokedToDLQ is the regression test for the
+// 2026-06-10 incident: a handler that ignores its context and never
+// returns must be force-revoked server-side by the timeout backstop and
+// land in the DLQ once its retry budget is spent — NOT loop forever.
+func TestE2E_WedgedHandlerRevokedToDLQ(t *testing.T) {
+	// Shrink only the timeout backstop grace so the test runs fast; the
+	// lease grace stays at its default (the wedged worker keeps
+	// heartbeating, so the lease arm must NOT be what fires here).
+	h := newHarness(t, func(c *jobsdispatcher.Config) {
+		c.TimeoutBackstopGrace = 200 * time.Millisecond
+	})
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) }) // unblock the wedged goroutine at teardown
+
+	var calls atomic.Int32
+	reg := jobs.NewRegistry()
+	reg.Register("vendor.WedgeJob", handlerFunc(func(ctx context.Context, _ []byte) error {
+		calls.Add(1)
+		<-release // deliberately ignore ctx.Done() — this is the wedge
+		return nil
+	}))
+
+	w := jobs.NewDispatchedWorker(h.conn, reg, "default", jobs.ServerConfig{
+		MaxInFlight: 4,
+		PodID:       "test-wedge",
+	})
+	wCtx, wCancel := context.WithCancel(context.Background())
+	defer wCancel()
+	go w.Run(wCtx)
+
+	dCtx, dCancel := context.WithCancel(context.Background())
+	defer dCancel()
+	go h.dispatcher.RunQueue(dCtx, "default")
+
+	// max_retries=0 → one attempt then DLQ; timeout 500ms.
+	id := insertJobWithTimeout(t, h.pool, "vendor.WedgeJob", "default", []byte(`{}`), 0, 500)
+
+	// The handler must fire and wedge.
+	waitFor(t, 5*time.Second, func() bool { return calls.Load() == 1 }, "handler invoked")
+
+	// Within timeout(500ms)+grace(200ms)+sweep tick, the row is revoked
+	// and DLQ'd. Allow generous slack for CI.
+	waitFor(t, 8*time.Second, func() bool {
+		return !rowExists(t, h.pool, id) && countDead(t, h.pool, "vendor.WedgeJob") == 1
+	}, "wedged row moves to DLQ")
+
+	// And it must NOT have been re-dispatched into a second handler —
+	// the budget gate + DLQ stop the infinite loop. Give it a moment to
+	// (not) re-fire.
+	time.Sleep(1 * time.Second)
+	if got := calls.Load(); got != 1 {
+		t.Errorf("handler fired %d times, want exactly 1 (no re-dispatch loop)", got)
+	}
+}
+
+// waitFor polls cond until true or the deadline; fails with msg on
+// timeout.
+func waitFor(t *testing.T, within time.Duration, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for: %s", msg)
+}

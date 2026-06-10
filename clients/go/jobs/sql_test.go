@@ -26,6 +26,10 @@ func TestBuildClaimSQL_StampsProvenanceColumns(t *testing.T) {
 				"FOR UPDATE SKIP LOCKED",
 				"status            = 'running'",
 				"attempts          = j.attempts + 1",
+				// Retry-budget gate: a row that has burned its attempts
+				// must not be re-claimed (else the dispatcher loops it
+				// forever, as in the 2026-06-10 incident).
+				"attempts < GREATEST(max_retries, 1)",
 			} {
 				if !strings.Contains(sql, needle) {
 					t.Errorf("claim SQL missing %q", needle)

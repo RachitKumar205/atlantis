@@ -69,6 +69,7 @@ WITH ready AS (
     FROM atlantis.jobs
     WHERE queue = $1
       AND scheduled_for <= now()
+      AND attempts < GREATEST(max_retries, 1)
       AND (
         status = 'pending'
         OR (status = 'running' AND (claimed_until IS NULL OR claimed_until < now()))
@@ -256,6 +257,76 @@ FROM atlantis.jobs WHERE id = $1`, jobID, errMsg); err != nil {
 		return fmt.Errorf("delete jobs: %w", err)
 	}
 	return tx.Commit(ctx)
+}
+
+// SweepExhaustedToDLQ moves rows that have burned their retry budget
+// into atlantis.jobs_dead in one statement, returning the count moved.
+// It is the safety net for the two ways a row can reach exhaustion
+// without a terminal Fail envelope ever arriving:
+//
+//   - pending + attempts maxed: ReleaseRow (session close, ack timeout)
+//     reset the row to pending, but the claim CTE's retry gate now
+//     refuses to re-claim it (attempts >= GREATEST(max_retries,1)). With
+//     no claim and no Fail, nothing would otherwise DLQ it.
+//   - running + lease long-expired + attempts maxed: an abandoned row
+//     from a session that died without releasing (e.g. the pre-ExtendLease
+//     -fix incident rows). The extra 5-minute grace past claimed_until
+//     guarantees no live, heartbeating session still owns it.
+//
+// Both predicates require attempts >= GREATEST(max_retries,1) so a row
+// with budget left is never swept — those continue through normal claim/
+// retry. queue-scoped + LIMIT-bounded so one sweep can't lock the table.
+//
+// last_error is stamped "retries exhausted (swept)" so an operator can
+// distinguish reaper-DLQ'd rows from handler-Fail'd ones.
+func SweepExhaustedToDLQ(ctx context.Context, pool *pgxpool.Pool, queue string, limit int) (int, error) {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	rows, err := tx.Query(ctx, `
+WITH exhausted AS (
+    SELECT id
+    FROM atlantis.jobs
+    WHERE queue = $1
+      AND attempts >= GREATEST(max_retries, 1)
+      AND (
+        status = 'pending'
+        OR (status = 'running' AND claimed_until IS NOT NULL
+            AND claimed_until < now() - interval '5 minutes')
+      )
+    ORDER BY id
+    FOR UPDATE SKIP LOCKED
+    LIMIT $2
+),
+moved AS (
+    INSERT INTO atlantis.jobs_dead
+        (id, job_name, queue, args, attempts, max_retries, last_error, last_error_at, enqueued_at, submitted_by)
+    SELECT j.id, j.job_name, j.queue, j.args, j.attempts, j.max_retries,
+           'retries exhausted (swept)', now(), j.enqueued_at, j.submitted_by
+    FROM atlantis.jobs j
+    JOIN exhausted e ON e.id = j.id
+    RETURNING id
+)
+DELETE FROM atlantis.jobs WHERE id IN (SELECT id FROM moved)
+RETURNING id`, queue, limit)
+	if err != nil {
+		return 0, fmt.Errorf("sweep exhausted: %w", err)
+	}
+	n := 0
+	for rows.Next() {
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	rows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // ReleaseRow returns a row to pending state without touching attempts

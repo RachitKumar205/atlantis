@@ -76,6 +76,19 @@ type Config struct {
 	// rows to finish before forcing release. See shutdown.go.
 	ShutdownBudget time.Duration
 
+	// LeaseExpiryGrace is how far past an acked row's lease the sweeper
+	// waits before treating the worker as gone (lease_expired revoke).
+	// Defaults to leaseExpiryGrace. Larger than one heartbeat tick so a
+	// single delayed heartbeat doesn't trigger a spurious revoke.
+	LeaseExpiryGrace time.Duration
+
+	// TimeoutBackstopGrace is the slack past a row's declared per-attempt
+	// timeout before the server force-revokes a ctx-ignoring handler.
+	// Defaults to timeoutBackstopGrace. The SDK's own context deadline
+	// is the primary enforcement; this only fires when a handler ignores
+	// cancellation.
+	TimeoutBackstopGrace time.Duration
+
 	// PodID is the atlantis pod identifier (hostname-pid by default).
 	// Embedded in claimed_by as "dispatcher/<podID>/<sessionID>".
 	PodID string
@@ -186,6 +199,12 @@ func New(pool *pgxpool.Pool, cfg Config) *Dispatcher {
 	if cfg.ShutdownBudget <= 0 {
 		cfg.ShutdownBudget = 30 * time.Second
 	}
+	if cfg.LeaseExpiryGrace <= 0 {
+		cfg.LeaseExpiryGrace = leaseExpiryGrace
+	}
+	if cfg.TimeoutBackstopGrace <= 0 {
+		cfg.TimeoutBackstopGrace = timeoutBackstopGrace
+	}
 	if cfg.PodID == "" {
 		host, _ := os.Hostname()
 		if host == "" {
@@ -240,6 +259,10 @@ func (d *Dispatcher) RunQueue(ctx context.Context, queue string) {
 	// Seed drain so any pre-LISTEN rows get picked up.
 	d.drainOnce(ctx, queue)
 
+	// The exhausted-row reaper is far cheaper to run rarely than the
+	// drain — exhausted rows are an error tail, not steady-state. Run it
+	// roughly every reaperEveryTicks drain ticks rather than every tick.
+	tick := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -247,11 +270,29 @@ func (d *Dispatcher) RunQueue(ctx context.Context, queue string) {
 		case <-ticker.C:
 			d.drainOnce(ctx, queue)
 			d.sweepAckTimeouts(ctx, queue)
+			d.sweepExpiredLeases(ctx, queue)
+			tick++
+			if tick%reaperEveryTicks == 0 {
+				if n, err := jobs.SweepExhaustedToDLQ(ctx, d.pool, queue, reaperBatchLimit); err != nil {
+					d.cfg.Logger.Warn("dispatcher: sweep exhausted to DLQ", "queue", queue, "err", err)
+				} else if n > 0 {
+					d.cfg.Logger.Info("dispatcher: swept exhausted jobs to DLQ", "queue", queue, "count", n)
+				}
+			}
 		case <-notifyCh:
 			d.drainOnce(ctx, queue)
 		}
 	}
 }
+
+// reaperEveryTicks throttles the exhausted-row reaper to once per this
+// many drain ticks. With the default 1s DrainInterval that's ~30s.
+const reaperEveryTicks = 30
+
+// reaperBatchLimit caps how many exhausted rows one reaper pass moves to
+// the DLQ, so a large backlog drains over several passes without locking
+// the table for long.
+const reaperBatchLimit = 256
 
 // drainOnce claims and routes one batch.
 //
@@ -749,6 +790,57 @@ func (d *Dispatcher) sweepAckTimeouts(ctx context.Context, queue string) {
 			s.cntRevoked.Add(1)
 			s.appendEvent(sessionEvent{
 				At: now, Kind: "revoked", JobID: jobID, Note: "ack_timeout",
+			})
+		}
+	}
+}
+
+// sweepExpiredLeases revokes acked rows whose worker stopped
+// heartbeating (lease_expired) or whose handler blew past its declared
+// timeout while ignoring its context (timeout_exceeded). Unlike
+// sweepAckTimeouts — which releases straight back to pending because a
+// missed Ack is presumed transient — this routes through ReportFailure
+// so a row that has burned its retry budget lands in the DLQ instead of
+// looping. This is the gap that let the incident's handlers run forever:
+// they acked, then wedged, and nothing reclaimed them.
+func (d *Dispatcher) sweepExpiredLeases(ctx context.Context, queue string) {
+	d.mu.RLock()
+	targets := append([]*session{}, d.sessionsByQueue[queue]...)
+	d.mu.RUnlock()
+
+	now := time.Now()
+	for _, s := range targets {
+		expired := s.findExpiredLeases(now, d.cfg.LeaseExpiryGrace, d.cfg.TimeoutBackstopGrace)
+		for _, ex := range expired {
+			row, ok := s.removeInflight(ex.jobID)
+			if !ok {
+				continue
+			}
+			d.untrackInflight(ex.jobID)
+			// Best-effort Revoke so a still-alive worker cancels its
+			// handler context promptly.
+			select {
+			case s.outbox <- &DispatchEnvelope{Revoke: &Revoke{JobID: ex.jobID, Reason: ex.reason}}:
+			default:
+			}
+			// Budget-aware terminalization: DLQ if attempts exhausted,
+			// else release to pending for a fresh attempt. lookupAttempts
+			// reads the post-claim counter straight from PG.
+			attempts, maxRetries, err := d.lookupAttempts(ctx, ex.jobID)
+			if err != nil {
+				// Can't read the budget — fall back to a plain release so
+				// the row isn't stranded. The next claim re-evaluates.
+				d.cfg.Logger.Warn("dispatcher: lookup attempts on lease sweep",
+					"session", s.id, "row", ex.jobID, "err", err)
+				d.releaseClaimed(ctx, ex.jobID, s.claimedBy(), ex.reason)
+			} else if err := jobs.ReportFailure(ctx, d.pool, ex.jobID, attempts, maxRetries, ex.reason); err != nil {
+				d.cfg.Logger.Warn("dispatcher: report failure on lease sweep",
+					"session", s.id, "row", ex.jobID, "err", err)
+			}
+			revokedTotal.WithLabelValues(queue, ex.reason).Inc()
+			s.cntRevoked.Add(1)
+			s.appendEvent(sessionEvent{
+				At: now, Kind: "revoked", JobID: ex.jobID, JobName: row.jobName, Note: ex.reason,
 			})
 		}
 	}
