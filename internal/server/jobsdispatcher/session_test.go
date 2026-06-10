@@ -112,6 +112,61 @@ func TestSession_FindExpiredAcksOnlyReturnsExpired(t *testing.T) {
 	}
 }
 
+func TestSession_FindExpiredLeasesLeaseExpired(t *testing.T) {
+	s := newTestSession(t)
+	now := time.Now()
+	// Acked row whose lease fell well past the grace window.
+	s.recordDispatch(&Dispatch{JobID: 1}, now.Add(-leaseExpiryGrace-time.Minute), now.Add(-time.Hour))
+	s.recordAck(1)
+	// Acked row with a healthy lease.
+	s.recordDispatch(&Dispatch{JobID: 2}, now.Add(time.Hour), now.Add(-time.Hour))
+	s.recordAck(2)
+
+	expired := s.findExpiredLeases(now, leaseExpiryGrace, timeoutBackstopGrace)
+	if len(expired) != 1 || expired[0].jobID != 1 || expired[0].reason != "lease_expired" {
+		t.Errorf("expired = %+v, want [{1 lease_expired}]", expired)
+	}
+}
+
+func TestSession_FindExpiredLeasesExcludesUnacked(t *testing.T) {
+	s := newTestSession(t)
+	now := time.Now()
+	// Lease long expired but NEVER acked — this is findExpiredAcks's
+	// job, not the lease sweeper's.
+	s.recordDispatch(&Dispatch{JobID: 1}, now.Add(-time.Hour), now.Add(-time.Hour))
+	if got := s.findExpiredLeases(now, leaseExpiryGrace, timeoutBackstopGrace); len(got) != 0 {
+		t.Errorf("un-acked row should be excluded from lease sweep, got %+v", got)
+	}
+}
+
+func TestSession_FindExpiredLeasesTimeoutBackstop(t *testing.T) {
+	s := newTestSession(t)
+	now := time.Now()
+	// Healthy lease (so the lease_expired arm can't fire) but the
+	// handler has run well past its declared timeout + grace. dispatchedAt
+	// is stamped at recordDispatch time (~now), so evaluate at a far-
+	// future instant.
+	s.recordDispatch(&Dispatch{JobID: 1, TimeoutMS: 1000}, now.Add(time.Hour), now.Add(-time.Hour))
+	s.recordAck(1)
+	at := now.Add(time.Second + timeoutBackstopGrace + time.Minute)
+	expired := s.findExpiredLeases(at, leaseExpiryGrace, timeoutBackstopGrace)
+	if len(expired) != 1 || expired[0].reason != "timeout_exceeded" {
+		t.Errorf("expired = %+v, want [{1 timeout_exceeded}]", expired)
+	}
+}
+
+func TestSession_FindExpiredLeasesTimeoutNoneNeverFires(t *testing.T) {
+	s := newTestSession(t)
+	now := time.Now()
+	// timeout none → TimeoutMS=0; healthy lease. Nothing should ever
+	// trip the backstop no matter how far in the future we look.
+	s.recordDispatch(&Dispatch{JobID: 1, TimeoutMS: 0}, now.Add(100*time.Hour), now.Add(-time.Hour))
+	s.recordAck(1)
+	if got := s.findExpiredLeases(now.Add(50*time.Hour), leaseExpiryGrace, timeoutBackstopGrace); len(got) != 0 {
+		t.Errorf("timeout-none row should never trip the backstop, got %+v", got)
+	}
+}
+
 func TestSession_MarkDrainedZerosAvailableSlots(t *testing.T) {
 	s := newTestSession(t)
 	if got := s.availableSlots(); got != 4 {
