@@ -2,6 +2,7 @@ package entity
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/dsl/sqlparams"
@@ -16,6 +17,7 @@ import (
 type entitySnapshot struct {
 	entities    map[string]*entityMeta
 	customMeta  map[string]*customQueryMeta
+	procMeta    map[string]*customProcMeta
 	contentHash string
 }
 
@@ -25,6 +27,7 @@ func buildSnapshot(ir *dsl.IR, contentHash string) (*entitySnapshot, error) {
 	snap := &entitySnapshot{
 		entities:    make(map[string]*entityMeta, len(ir.Entities)),
 		customMeta:  make(map[string]*customQueryMeta, len(ir.Queries)),
+		procMeta:    make(map[string]*customProcMeta, len(ir.Procedures)),
 		contentHash: contentHash,
 	}
 
@@ -97,5 +100,67 @@ func buildSnapshot(ir *dsl.IR, contentHash string) (*entitySnapshot, error) {
 		snap.customMeta[key] = cqm
 	}
 
+	for i := range ir.Procedures {
+		cp := &ir.Procedures[i]
+		parts := splitEntityID(cp.Owner)
+		ns := parts[0]
+
+		pm := &customProcMeta{
+			proc:      cp,
+			inputCols: cp.Inputs,
+			timeoutMS: customProcTimeoutMS,
+		}
+
+		// Each step is normalized independently: `$name` → `$N` where N
+		// is the first-reference order WITHIN that step's SQL (the
+		// ordinal map only validates that names are declared). So each
+		// step carries its own argOrder — never accumulated across steps.
+		touched := make(map[string]struct{})
+		for si := range cp.Steps {
+			step := &cp.Steps[si]
+			switch {
+			case step.Raw != nil:
+				normSQL, argOrder, err := sqlparams.NormalizeNamed(step.Raw.SQL, cp.Inputs)
+				if err != nil {
+					return nil, fmt.Errorf("procedure %s step %d: %w", cp.Name, si, err)
+				}
+				pm.steps = append(pm.steps, procStep{sql: normSQL, argOrder: argOrder})
+				for _, t := range step.Raw.Touches {
+					touched[t] = struct{}{}
+				}
+			case step.Typed != nil:
+				// Typed-verb steps (update/delete/insert) render SQL from
+				// entity metadata; not yet supported by the dynamic
+				// executor. Registered so the method exists, but the
+				// handler returns a clear Unimplemented.
+				pm.unsupported = "typed-verb step"
+			case step.Enqueue != nil:
+				pm.unsupported = "enqueue step"
+			}
+		}
+		pm.touched = sortedKeys(touched)
+
+		fd, err := buildCustomProcedureDescs(cp, ns)
+		if err != nil {
+			return nil, fmt.Errorf("procedure %s: %w", cp.Name, err)
+		}
+		pm.requestDesc = fd.Messages().ByName(protoreflect.Name(cp.Name + "Request"))
+		pm.responseDesc = fd.Messages().ByName(protoreflect.Name(cp.Name + "Response"))
+
+		key := ns + ":" + cp.Name
+		snap.procMeta[key] = pm
+	}
+
 	return snap, nil
+}
+
+// sortedKeys returns the map keys in sorted order — used so the touched
+// -entity invalidation order is deterministic.
+func sortedKeys(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
