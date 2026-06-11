@@ -68,6 +68,20 @@ func Dial(addr string, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	opts = append([]grpc.DialOption{grpc.WithTransportCredentials(creds)}, opts...)
+	// gRPC defaults the client receive limit to 4 MiB, which is too small
+	// for bulk entity Query reads — a single page of rows carrying large
+	// jsonb/blob columns (e.g. Shopify staging raw_data) overflows it with
+	// "received message larger than max". Raise the default; callers can
+	// still override by passing their own WithDefaultCallOptions in opts
+	// (the later value wins).
+	defaults := []grpc.DialOption{
+		grpc.WithTransportCredentials(creds),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxRecvMsgBytes)),
+	}
+	opts = append(defaults, opts...)
 	return grpc.NewClient(addr, opts...)
 }
+
+// maxRecvMsgBytes is the default client-side max receive size (64 MiB).
+// Generous headroom for bulk reads without being unbounded.
+const maxRecvMsgBytes = 64 << 20
