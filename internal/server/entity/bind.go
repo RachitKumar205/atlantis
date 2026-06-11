@@ -109,9 +109,14 @@ func bindColumnValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) an
 		return b
 
 	case "vector":
+		// An unset vector binds SQL NULL, not an empty pgvector: a
+		// dimensioned column (e.g. vector(32)) rejects a 0-dimension
+		// value ("vector must have at least 1 dimension"). NULL is the
+		// correct "no embedding yet" representation for a nullable
+		// column; a NOT NULL column surfaces a clear not-null violation.
 		list := msg.Get(fd).List()
 		if list.Len() == 0 {
-			return pgvector.NewVector(nil)
+			return (*pgvector.Vector)(nil)
 		}
 		floats := make([]float32, list.Len())
 		for i := 0; i < list.Len(); i++ {
