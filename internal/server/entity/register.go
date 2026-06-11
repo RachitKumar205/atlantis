@@ -34,6 +34,7 @@ func NewServer(pool runtime.Pool, cache runtime.Cache, outbox runtime.Outbox, qc
 	s.snapshot.Store(&entitySnapshot{
 		entities:   make(map[string]*entityMeta),
 		customMeta: make(map[string]*customQueryMeta),
+		procMeta:   make(map[string]*customProcMeta),
 	})
 	return s
 }
@@ -57,7 +58,7 @@ func (s *Server) Register(grpcSrv *grpc.Server, ir *dsl.IR) error {
 		grpcSrv.RegisterService(&desc, nil)
 	}
 
-	if len(ir.Queries) > 0 {
+	if len(ir.Queries) > 0 || len(ir.Procedures) > 0 {
 		s.registerCustomServices(grpcSrv, snap)
 	}
 
@@ -112,8 +113,12 @@ func buildGRPCServiceDesc(s *Server, meta *entityMeta) grpc.ServiceDesc {
 }
 
 // registerCustomServices registers one gRPC CustomService per namespace
-// from the pre-built snapshot. Handlers capture the query key and look
-// up metadata from the current snapshot at request time.
+// from the pre-built snapshot. Both custom queries AND procedures share
+// the same per-namespace CustomService (the codegen emits them into one
+// `service CustomService`), so their method descriptors MUST be merged
+// into a single ServiceDesc per namespace — registering two ServiceDescs
+// with the same ServiceName panics a live grpc.Server. Handlers capture
+// the key and look up metadata from the current snapshot at request time.
 func (s *Server) registerCustomServices(grpcSrv *grpc.Server, snap *entitySnapshot) {
 	type nsGroup struct {
 		ns      string
@@ -121,18 +126,30 @@ func (s *Server) registerCustomServices(grpcSrv *grpc.Server, snap *entitySnapsh
 	}
 	groups := make(map[string]*nsGroup)
 
-	for key, cqm := range snap.customMeta {
-		parts := splitEntityID(cqm.query.Owner)
-		ns := parts[0]
-
+	groupFor := func(ns string) *nsGroup {
 		g, ok := groups[ns]
 		if !ok {
 			g = &nsGroup{ns: ns}
 			groups[ns] = g
 		}
+		return g
+	}
+
+	for key, cqm := range snap.customMeta {
+		ns := splitEntityID(cqm.query.Owner)[0]
+		g := groupFor(ns)
 		g.methods = append(g.methods, grpc.MethodDesc{
 			MethodName: cqm.query.Name,
 			Handler:    makeCustomHandler(s, key, ns),
+		})
+	}
+
+	for key, pm := range snap.procMeta {
+		ns := splitEntityID(pm.proc.Owner)[0]
+		g := groupFor(ns)
+		g.methods = append(g.methods, grpc.MethodDesc{
+			MethodName: pm.proc.Name,
+			Handler:    makeCustomProcedureHandler(s, key, ns),
 		})
 	}
 

@@ -39,6 +39,199 @@ type customQueryMeta struct {
 	timeoutMS int
 }
 
+// customProcTimeoutMS bounds a dynamic procedure execution. Procedures
+// hold a write tx open across all steps + cache-invalidation enqueues,
+// so the budget is wider than the 2s read-query budget. Matches the
+// compiled procedure handler's customProcTimeoutMS.
+const customProcTimeoutMS = 5000
+
+// procStep is one normalized raw-SQL step of a procedure: the SQL with
+// `$name` rewritten to `$N` and the input names in placeholder order
+// (scoped to THIS step's SQL — first-reference order within it).
+type procStep struct {
+	sql      string
+	argOrder []string
+}
+
+// customProcMeta holds the pre-computed metadata for one procedure. The
+// procedure path mirrors customQueryMeta but executes writes in a tx and
+// returns a single rows_affected count instead of scanning rows.
+type customProcMeta struct {
+	proc      *dsl.CustomProcedure
+	inputCols []dsl.QueryParam // declared inputs (for proto + bind type lookup)
+	steps     []procStep       // raw steps in declaration order
+	touched   []string         // sorted union of every step's touched entity ids
+
+	// unsupported, when non-empty, names a step kind the dynamic executor
+	// can't run yet (typed-verb / enqueue). The method is still registered
+	// so callers get a clear Unimplemented instead of "unknown method".
+	unsupported string
+
+	requestDesc  protoreflect.MessageDescriptor
+	responseDesc protoreflect.MessageDescriptor
+
+	timeoutMS int
+}
+
+// buildCustomProcedureDescs builds proto descriptors for one procedure.
+// The request mirrors the custom-query request (one field per input);
+// the response is always a single `int64 rows_affected = 1`, matching
+// the codegen's categorical procedure response shape so existing
+// generated clients are wire-compatible.
+func buildCustomProcedureDescs(cp *dsl.CustomProcedure, ns string) (protoreflect.FileDescriptor, error) {
+	goNS := goNamespace(ns)
+	pkg := fmt.Sprintf("atlantis.%s.v1", goNS)
+	fileName := fmt.Sprintf("atlantis/%s/v1/custom_%s_dynamic.proto", goNS, cp.Name)
+
+	file := &descriptorpb.FileDescriptorProto{
+		Name:    strPtr(fileName),
+		Package: strPtr(pkg),
+		Syntax:  strPtr("proto3"),
+	}
+
+	// Request message: one optional field per declared input, numbered
+	// from 1 — identical shaping to buildCustomQueryDescs.
+	reqMsg := &descriptorpb.DescriptorProto{Name: strPtr(cp.Name + "Request")}
+	needsTimestamp := false
+	for i, input := range cp.Inputs {
+		num := int32(i + 1)
+		fd := &descriptorpb.FieldDescriptorProto{Name: strPtr(input.Name), Number: &num}
+		label := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
+		fd.Label = &label
+		setProtoType(fd, input.Type)
+		reqMsg.Field = append(reqMsg.Field, fd)
+		if input.Type.Name == "timestamptz" || input.Type.Name == "date" {
+			needsTimestamp = true
+		}
+	}
+	file.MessageType = append(file.MessageType, reqMsg)
+
+	// Response message: a single int64 rows_affected = 1.
+	respMsg := &descriptorpb.DescriptorProto{Name: strPtr(cp.Name + "Response")}
+	one := int32(1)
+	i64 := descriptorpb.FieldDescriptorProto_TYPE_INT64
+	optLabel := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
+	respMsg.Field = append(respMsg.Field, &descriptorpb.FieldDescriptorProto{
+		Name:   strPtr("rows_affected"),
+		Number: &one,
+		Label:  &optLabel,
+		Type:   &i64,
+	})
+	file.MessageType = append(file.MessageType, respMsg)
+
+	if needsTimestamp {
+		file.Dependency = append(file.Dependency, "google/protobuf/timestamp.proto")
+	}
+
+	resolver := &fileResolver{
+		files:  make(map[string]protoreflect.FileDescriptor),
+		global: protoregistry.GlobalFiles,
+	}
+	fd, err := protodesc.NewFile(file, resolver)
+	if err != nil {
+		return nil, fmt.Errorf("building custom procedure descriptors for %s: %w", cp.Name, err)
+	}
+	return fd, nil
+}
+
+// makeCustomProcedureHandler mirrors makeCustomHandler for procedures:
+// it looks up the procMeta from the current snapshot at each request and
+// runs executeCustomProcedureWithReq.
+func makeCustomProcedureHandler(s *Server, procKey string, ns string) func(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+	goNS := goNamespace(ns)
+	procName := procKey
+	if idx := len(ns) + 1; idx < len(procKey) {
+		procName = procKey[idx:]
+	}
+	fullMethod := fmt.Sprintf("/atlantis.%s.v1.CustomService/%s", goNS, procName)
+
+	return func(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+		snap := s.snapshot.Load()
+		pm, ok := snap.procMeta[procKey]
+		if !ok {
+			return nil, status.Errorf(codes.NotFound, "procedure %s not found in current schema", procKey)
+		}
+
+		req := dynamicpb.NewMessage(pm.requestDesc)
+		if err := dec(req); err != nil {
+			return nil, err
+		}
+
+		execHandler := func(ctx context.Context, _ any) (any, error) {
+			return s.executeCustomProcedureWithReq(ctx, pm, req)
+		}
+
+		if interceptor == nil {
+			return execHandler(ctx, nil)
+		}
+		info := &grpc.UnaryServerInfo{Server: srv, FullMethod: fullMethod}
+		return interceptor(ctx, req, info, execHandler)
+	}
+}
+
+// executeCustomProcedureWithReq runs every step of a procedure inside one
+// transaction, accumulates RowsAffected across steps, enqueues a cache
+// generation-bump for each touched entity, and returns the total in the
+// rows_affected response field — the same contract the compiled handler
+// emits. Mirrors the dynamic entity-write tx pattern in handler.go.
+func (s *Server) executeCustomProcedureWithReq(ctx context.Context, pm *customProcMeta, req *dynamicpb.Message) (any, error) {
+	if pm.unsupported != "" {
+		return nil, status.Errorf(codes.Unimplemented,
+			"procedure %s: %s not yet supported by the dynamic server", pm.proc.Name, pm.unsupported)
+	}
+
+	ctx, cancel := runtime.Deadline(ctx, pm.timeoutMS)
+	defer cancel()
+
+	tx, err := s.pool.BeginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	var rowsAffected int64
+	for _, step := range pm.steps {
+		args := make([]any, 0, len(step.argOrder))
+		for _, name := range step.argOrder {
+			fd := pm.requestDesc.Fields().ByName(protoreflect.Name(name))
+			if fd == nil {
+				return nil, fmt.Errorf("procedure %s: input %q not found in request descriptor", pm.proc.Name, name)
+			}
+			var inputType dsl.FieldType
+			for _, in := range pm.inputCols {
+				if in.Name == name {
+					inputType = in.Type
+					break
+				}
+			}
+			args = append(args, customBindValue(req, fd, inputType))
+		}
+		tag, err := tx.Exec(ctx, step.sql, args...)
+		if err != nil {
+			return nil, err
+		}
+		rowsAffected += tag.RowsAffected()
+	}
+
+	// Tier-2 cache invalidation for every touched entity, inside the tx —
+	// identical to the dynamic entity-write path (handler.go).
+	for _, entityID := range pm.touched {
+		if err := s.outbox.EnqueueGenerationBump(ctx, tx, entityID); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	resp := dynamicpb.NewMessage(pm.responseDesc)
+	if fd := pm.responseDesc.Fields().ByName("rows_affected"); fd != nil {
+		resp.Set(fd, protoreflect.ValueOfInt64(rowsAffected))
+	}
+	return resp, nil
+}
+
 // buildCustomQueryDescs builds proto descriptors for one custom query.
 // The response is either a repeated entity or a repeated Row sub-message.
 func buildCustomQueryDescs(cq *dsl.CustomQuery, ns string) (protoreflect.FileDescriptor, error) {
