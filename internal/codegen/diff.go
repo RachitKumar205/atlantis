@@ -4,8 +4,12 @@
 package codegen
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
+	"strings"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
@@ -78,6 +82,14 @@ const (
 	KindIndexAdded   ChangeKind = "index_added"
 	KindIndexRemoved ChangeKind = "index_removed"
 
+	// KindCompositeUnique{Added,Removed}: a multi-column `unique by a, b`
+	// constraint appeared or disappeared. Adding is backfill-required (may
+	// fail on existing duplicate tuples); removing is additive. Field-level
+	// uniqueness has its own KindFieldUnique* kinds; these cover only the
+	// entity-level composite spec, which diffEntity otherwise never diffed.
+	KindCompositeUniqueAdded   ChangeKind = "composite_unique_added"
+	KindCompositeUniqueRemoved ChangeKind = "composite_unique_removed"
+
 	// KindFieldSerialAdded: BIGSERIAL added to an existing column.
 	// Sequence must be seeded to MAX(col)+1 before apply or new inserts
 	// collide with existing rows.
@@ -99,6 +111,18 @@ const (
 	KindCacheChanged ChangeKind = "cache_changed"
 
 	KindQueryTimeoutChanged ChangeKind = "query_timeout_changed"
+
+	// Custom query / procedure changes. These carry NO DDL — custom decls
+	// are served at runtime from the checkpoint IR, not migrated — but they
+	// ARE real changes (validated + persisted), so the diff must surface
+	// them or a procedure-only apply misreports as "0 changes". EntityID
+	// holds the decl's "namespace.Name" id.
+	KindCustomQueryAdded   ChangeKind = "custom_query_added"
+	KindCustomQueryRemoved ChangeKind = "custom_query_removed"
+	KindCustomQueryChanged ChangeKind = "custom_query_changed"
+	KindProcedureAdded     ChangeKind = "procedure_added"
+	KindProcedureRemoved   ChangeKind = "procedure_removed"
+	KindProcedureChanged   ChangeKind = "procedure_changed"
 )
 
 // Change is one structural difference between two IRs.
@@ -243,7 +267,115 @@ func ComputeDiff(oldIR, newIR *dsl.IR, opts ...DiffOption) *Diff {
 			diffEntity(oldE, newE, d, ctx)
 		}
 	}
+
+	// Custom queries and procedures aren't entities and emit no DDL, but a
+	// change to one is a real, persisted change — diff it so plan/apply
+	// don't report "0 changes" for a procedure-only edit.
+	diffCustomDecls(oldIR, newIR, d)
+
 	return d
+}
+
+// diffCustomDecls compares the custom-query and procedure sets by id, and by
+// canonical content for those present on both sides. All changes are
+// additive (no DDL, no stored-data impact); the Detail spells out the
+// runtime effect — a changed decl hot-reloads on apply, while a brand-new
+// one isn't dispatchable until the server restarts (its gRPC method is
+// registered at startup only).
+func diffCustomDecls(oldIR, newIR *dsl.IR, d *Diff) {
+	oldQ, newQ := indexQueries(oldIR), indexQueries(newIR)
+	for id, q := range newQ {
+		old, ok := oldQ[id]
+		switch {
+		case !ok:
+			d.Additive = append(d.Additive, Change{
+				Kind: KindCustomQueryAdded, Class: ClassAdditive, EntityID: id,
+				Detail: "custom query added (its RPC registers on the next server restart)",
+			})
+		case !customQueryContentEqual(old, q):
+			d.Additive = append(d.Additive, Change{
+				Kind: KindCustomQueryChanged, Class: ClassAdditive, EntityID: id,
+				Detail: "custom query changed (hot-reloads on apply)",
+			})
+		}
+	}
+	for id := range oldQ {
+		if _, ok := newQ[id]; !ok {
+			d.Additive = append(d.Additive, Change{
+				Kind: KindCustomQueryRemoved, Class: ClassAdditive, EntityID: id,
+				Detail: "custom query removed",
+			})
+		}
+	}
+
+	oldP, newP := indexProcedures(oldIR), indexProcedures(newIR)
+	for id, p := range newP {
+		old, ok := oldP[id]
+		switch {
+		case !ok:
+			d.Additive = append(d.Additive, Change{
+				Kind: KindProcedureAdded, Class: ClassAdditive, EntityID: id,
+				Detail: "procedure added (its RPC registers on the next server restart)",
+			})
+		case !customProcContentEqual(old, p):
+			d.Additive = append(d.Additive, Change{
+				Kind: KindProcedureChanged, Class: ClassAdditive, EntityID: id,
+				Detail: "procedure changed (hot-reloads on apply)",
+			})
+		}
+	}
+	for id := range oldP {
+		if _, ok := newP[id]; !ok {
+			d.Additive = append(d.Additive, Change{
+				Kind: KindProcedureRemoved, Class: ClassAdditive, EntityID: id,
+				Detail: "procedure removed",
+			})
+		}
+	}
+}
+
+func indexQueries(ir *dsl.IR) map[string]*dsl.CustomQuery {
+	if ir == nil {
+		return nil
+	}
+	out := make(map[string]*dsl.CustomQuery, len(ir.Queries))
+	for i := range ir.Queries {
+		q := &ir.Queries[i]
+		out[q.ID()] = q
+	}
+	return out
+}
+
+func indexProcedures(ir *dsl.IR) map[string]*dsl.CustomProcedure {
+	if ir == nil {
+		return nil
+	}
+	out := make(map[string]*dsl.CustomProcedure, len(ir.Procedures))
+	for i := range ir.Procedures {
+		p := &ir.Procedures[i]
+		out[p.ID()] = p
+	}
+	return out
+}
+
+// customQueryContentEqual / customProcContentEqual compare semantic content,
+// ignoring SourcePath (a file move is not a content change) and Pos (already
+// json:"-"). Canonical JSON is a stable fingerprint because every field
+// marshals in declaration order.
+func customQueryContentEqual(a, b *dsl.CustomQuery) bool {
+	ca, cb := *a, *b
+	ca.SourcePath, cb.SourcePath = "", ""
+	ja, _ := json.Marshal(ca)
+	jb, _ := json.Marshal(cb)
+	return bytes.Equal(ja, jb)
+}
+
+func customProcContentEqual(a, b *dsl.CustomProcedure) bool {
+	ca, cb := *a, *b
+	ca.SourcePath, cb.SourcePath = "", ""
+	ja, _ := json.Marshal(ca)
+	jb, _ := json.Marshal(cb)
+	return bytes.Equal(ja, jb)
 }
 
 // ---- per-entity diffs ----
@@ -252,8 +384,52 @@ func diffEntity(oldE, newE *dsl.Entity, d *Diff, ctx *diffCtx) {
 	diffTableName(oldE, newE, d)
 	diffFields(oldE, newE, d, ctx)
 	diffIndexes(oldE, newE, d)
+	diffUniques(oldE, newE, d)
 	diffCache(oldE, newE, d)
 	diffQueryTimeout(oldE, newE, d)
+}
+
+// diffUniques diffs entity-level composite UNIQUE specs by order-independent
+// column set. Runs only inside diffEntity — which fires only when an entity
+// exists on BOTH sides — so a brand-new entity's composite uniques come from
+// the table-create path (EmitInitial), never a spurious ADD CONSTRAINT here.
+func diffUniques(oldE, newE *dsl.Entity, d *Diff) {
+	oldKeys := uniqueSpecKeys(oldE.Uniques)
+	newKeys := uniqueSpecKeys(newE.Uniques)
+	for k, u := range newKeys {
+		if _, ok := oldKeys[k]; !ok {
+			d.append(Change{
+				Kind:     KindCompositeUniqueAdded,
+				Class:    ClassBackfillRequired,
+				EntityID: newE.ID(),
+				Detail:   "composite UNIQUE added — verify no duplicates exist: (" + strings.Join(u.Fields, ", ") + ")",
+				To:       u,
+			})
+		}
+	}
+	for k, u := range oldKeys {
+		if _, ok := newKeys[k]; !ok {
+			d.Additive = append(d.Additive, Change{
+				Kind:     KindCompositeUniqueRemoved,
+				Class:    ClassAdditive,
+				EntityID: newE.ID(),
+				Detail:   "composite UNIQUE removed: (" + strings.Join(u.Fields, ", ") + ")",
+				From:     u,
+			})
+		}
+	}
+}
+
+// uniqueSpecKeys maps each composite unique to an order-independent key so
+// reordering `unique by a, b` → `unique by b, a` is a no-op.
+func uniqueSpecKeys(specs []dsl.UniqueSpec) map[string]dsl.UniqueSpec {
+	out := make(map[string]dsl.UniqueSpec, len(specs))
+	for _, u := range specs {
+		cols := slices.Clone(u.Fields)
+		sort.Strings(cols)
+		out[strings.Join(cols, "\x00")] = u
+	}
+	return out
 }
 
 // diffTableName flags moves of the `table "..."` modifier as cross-caller
