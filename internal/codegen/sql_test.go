@@ -288,6 +288,54 @@ func TestEmit_Diff_FieldAddedNotNullNoDefaultIsBackfillBanner(t *testing.T) {
 	assertContains(t, scripts.Up, "BACKFILL REQUIRED")
 }
 
+func TestEmit_Diff_CompositeUniqueAdded(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  vendor text  sku text }`)
+	newIR := lower(t, `entity A in x { id bigint primary  vendor text  sku text  unique by vendor, sku }`)
+	d := ComputeDiff(oldIR, newIR)
+	scripts, err := EmitSQL(oldIR, newIR, d)
+	if err != nil {
+		t.Fatalf("EmitSQL: %v", err)
+	}
+	assertContains(t, scripts.Up, `ALTER TABLE "atlantis"."x_a" ADD CONSTRAINT "x_a_vendor_sku_key" UNIQUE ("vendor", "sku");`)
+	assertContains(t, scripts.Down, `ALTER TABLE "atlantis"."x_a" DROP CONSTRAINT IF EXISTS "x_a_vendor_sku_key";`)
+}
+
+func TestEmit_Diff_CompositeUniqueRemoved(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  vendor text  sku text  unique by vendor, sku }`)
+	newIR := lower(t, `entity A in x { id bigint primary  vendor text  sku text }`)
+	d := ComputeDiff(oldIR, newIR)
+	scripts, _ := EmitSQL(oldIR, newIR, d)
+	assertContains(t, scripts.Up, `ALTER TABLE "atlantis"."x_a" DROP CONSTRAINT IF EXISTS "x_a_vendor_sku_key";`)
+	assertContains(t, scripts.Down, `ALTER TABLE "atlantis"."x_a" ADD CONSTRAINT "x_a_vendor_sku_key" UNIQUE ("vendor", "sku");`)
+}
+
+// On a first apply (prior == nil) the composite unique is carried inline by
+// CREATE TABLE — there must be no duplicate ALTER TABLE ADD CONSTRAINT.
+func TestEmit_Initial_CompositeUniqueInlineNoAlter(t *testing.T) {
+	ir := lower(t, `entity A in x { id bigint primary  vendor text  sku text  unique by vendor, sku }`)
+	scripts, err := EmitInitial(ir)
+	if err != nil {
+		t.Fatalf("EmitInitial: %v", err)
+	}
+	assertContains(t, scripts.Up, `CONSTRAINT "x_a_vendor_sku_key" UNIQUE ("vendor", "sku")`)
+	assertNotContains(t, scripts.Up, "ADD CONSTRAINT")
+}
+
+func TestEmit_Diff_ProcedureChange_NotNoChanges(t *testing.T) {
+	oldIR := lowerCustom(t, customSchemaFixture)
+	newIR := lowerCustom(t, procOld)
+	d := ComputeDiff(oldIR, newIR)
+	scripts, err := EmitSQL(oldIR, newIR, d)
+	if err != nil {
+		t.Fatalf("EmitSQL: %v", err)
+	}
+	// A procedure-only apply must NOT render as a no-op...
+	assertNotContains(t, scripts.Up, "(no schema changes)")
+	// ...and should document the change (with the restart caveat) as a comment.
+	assertContains(t, scripts.Up, "-- (no SQL: procedure added")
+	assertContains(t, scripts.Up, "server restart")
+}
+
 func TestEmit_Diff_FieldRemoved(t *testing.T) {
 	oldIR := lower(t, `entity A in x { id bigint primary  v text }`)
 	newIR := lower(t, `entity A in x { id bigint primary }`)

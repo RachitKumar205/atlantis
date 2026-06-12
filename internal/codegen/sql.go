@@ -538,6 +538,19 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 		e := newByID[ch.EntityID]
 		emitUnique(up, e, ch.Field, false)
 		emitUnique(down, e, ch.Field, true)
+	case KindCompositeUniqueAdded:
+		u, _ := ch.To.(dsl.UniqueSpec)
+		e := newByID[ch.EntityID]
+		emitCompositeUnique(up, e, u.Fields, true)
+		emitCompositeUnique(down, e, u.Fields, false)
+	case KindCompositeUniqueRemoved:
+		u, _ := ch.From.(dsl.UniqueSpec)
+		e := newByID[ch.EntityID]
+		if e == nil {
+			e = oldByID[ch.EntityID]
+		}
+		emitCompositeUnique(up, e, u.Fields, false)
+		emitCompositeUnique(down, e, u.Fields, true)
 	case KindFieldReferenceAdded:
 		e := newByID[ch.EntityID]
 		f := e.FindField(ch.Field)
@@ -574,6 +587,14 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 	case KindCacheChanged, KindQueryTimeoutChanged:
 		up.line("-- (no SQL: cache / query_timeout are server-side)")
 		down.line("-- (no SQL: cache / query_timeout are server-side)")
+	case KindCustomQueryAdded, KindCustomQueryChanged, KindCustomQueryRemoved,
+		KindProcedureAdded, KindProcedureChanged, KindProcedureRemoved:
+		// Custom queries/procedures are served at runtime from the
+		// checkpoint IR, not migrated — no DDL. The comment keeps the
+		// migration file self-documenting and stops a custom-only apply
+		// from rendering as "(no schema changes)".
+		up.linef("-- (no SQL: %s)", ch.Detail)
+		down.linef("-- (no SQL: %s)", ch.Detail)
 	case KindFieldBackfillAdded, KindFieldBackfillRemoved, KindFieldBackfillChanged:
 		// The backfill modifier is metadata for `tide apply --backfill`;
 		// the schema doesn't change so no SQL is emitted in the legacy
@@ -742,6 +763,18 @@ func emitDefault(b *sqlBuilder, e *dsl.Entity, field string, d *dsl.Default) {
 		return
 	}
 	b.linef("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT %s;", qualifiedTable(e), quoteIdent(field), defaultExpr(*d))
+}
+
+// emitCompositeUnique adds or drops a multi-column UNIQUE constraint. The
+// name is deterministic (compositeUniqueName) so the DROP on `on=false`
+// finds exactly what a prior ADD created.
+func emitCompositeUnique(b *sqlBuilder, e *dsl.Entity, fields []string, on bool) {
+	name := compositeUniqueName(e, fields)
+	if on {
+		b.linef("ALTER TABLE %s ADD CONSTRAINT %s UNIQUE (%s);", qualifiedTable(e), quoteIdent(name), joinQuoted(fields))
+	} else {
+		b.linef("ALTER TABLE %s DROP CONSTRAINT IF EXISTS %s;", qualifiedTable(e), quoteIdent(name))
+	}
 }
 
 func emitUnique(b *sqlBuilder, e *dsl.Entity, field string, on bool) {
