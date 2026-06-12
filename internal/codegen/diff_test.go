@@ -207,6 +207,34 @@ func TestDiff_UniqueRemoved_IsAdditive(t *testing.T) {
 	}
 }
 
+func TestDiff_CompositeUniqueAdded_IsBackfill(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  vendor text  sku text }`)
+	newIR := lower(t, `entity A in x { id bigint primary  vendor text  sku text  unique by vendor, sku }`)
+	d := ComputeDiff(oldIR, newIR)
+	c := findChange(t, d, KindCompositeUniqueAdded)
+	if c == nil || c.Class != ClassBackfillRequired {
+		t.Errorf("composite UNIQUE added should require backfill (dupes possible), got %+v", c)
+	}
+}
+
+func TestDiff_CompositeUniqueRemoved_IsAdditive(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  vendor text  sku text  unique by vendor, sku }`)
+	newIR := lower(t, `entity A in x { id bigint primary  vendor text  sku text }`)
+	d := ComputeDiff(oldIR, newIR)
+	if c := findChange(t, d, KindCompositeUniqueRemoved); c == nil || c.Class != ClassAdditive {
+		t.Errorf("composite UNIQUE removed should be additive, got %+v", c)
+	}
+}
+
+func TestDiff_CompositeUniqueReorder_NoDiff(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  vendor text  sku text  unique by vendor, sku }`)
+	newIR := lower(t, `entity A in x { id bigint primary  vendor text  sku text  unique by sku, vendor }`)
+	d := ComputeDiff(oldIR, newIR)
+	if !d.IsEmpty() {
+		t.Errorf("reordering composite-unique columns should be a no-op, got %+v", d)
+	}
+}
+
 func TestDiff_DefaultChanged_IsAdditive(t *testing.T) {
 	oldIR := lower(t, `entity A in x { id bigint primary  v int default 1 }`)
 	newIR := lower(t, `entity A in x { id bigint primary  v int default 2 }`)
