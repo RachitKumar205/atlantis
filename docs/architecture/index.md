@@ -4,9 +4,9 @@ A map of the Atlantis system. Each section links to a deeper page.
 
 Atlantis has two binaries: a server and two CLIs that talk to it.
 
-**The server** is a Go binary serving gRPC. It registers an `AdminService` (schema management — `PlanSchema`, `ApplyMigration`, `GetMergedSchema`) used by `tide` and `tidectl`, plus one generated service per declared entity (`<Entity>Service` with `Get`, `Query`, `Create`, `Update`, `Delete`) used by the caller's application code at runtime. It also registers the standard gRPC Health Checking service and reflection. One process per Postgres database.
+**The server** is a Go binary serving gRPC. It registers an `AdminService` (schema management — `PlanSchema`, `ApplyMigration`, `GetMergedSchema`) used by `tide` and `tidectl`, plus one service per declared entity (`<Entity>Service` with `Get`, `Query`, `Create`, `Update`, `Delete`) used by the caller's application code at runtime. These entity services are dispatched from the IR at runtime, not compiled handlers — the server reads the IR checkpoint at startup and serves any entity it describes. It also registers the standard gRPC Health Checking service and reflection. One process per Postgres database.
 
-**`tide`** is the caller-side CLI. It runs in a caller's service repo, opens a gRPC connection to the server, and submits `.atl` files via `AdminService.PlanSchema` / `ApplyMigration`. It writes the server's response (SDK bytes) to local disk.
+**`tide`** is the caller-side CLI. It runs in a caller's service repo, opens a gRPC connection to the server, and submits `.atl` files via `AdminService.PlanSchema` / `ApplyMigration`. To produce the typed Go client, the caller runs `tide generate` from its own repo, which fetches the canonical IR over `GetCanonicalIR` and emits proto + typed wrappers into the caller's module — the SDK is generated caller-local, not returned in the apply response.
 
 **`tidectl`** is the operator-side CLI. It runs on the server host, invokes `internal/codegen/` in-process against local `.atl` files (from `--schema-dir` or a workspace manifest), writes emitted files into the server source tree, and shells out to `migrate` for database migrations. It speaks no gRPC.
 
@@ -14,11 +14,11 @@ The two CLIs do not call each other. They both reuse `internal/codegen/` — `ti
 
 ## What happens on `tide apply`
 
-The caller's `tide` reads `.atl` files under `schema_paths` and bundles them into a `PlanSchema` gRPC request. The server lexes, parses, and validates the bundle; cross-caller breaking changes are detected here. The IR runs through the codegen, which produces a SQL migration, proto files, Go server stubs, and the typed client SDK.
+The caller's `tide` reads `.atl` files under `schema_paths` and bundles them into a `PlanSchema` gRPC request. The server lexes, parses, and validates the bundle; cross-caller breaking changes are detected here. The IR runs through the codegen, which produces the SQL migration and the new IR checkpoint. The plan response also warns on a bare unique index the schema doesn't declare — a `CREATE UNIQUE INDEX` with no backing constraint.
 
-Atomicity: the server runs the SQL migration plus a write to its own catalog tables (recording the new schema version and the caller responsible) inside one Postgres transaction. Codegen output written to disk is **not** in that transaction — it's emitted after a successful commit. A crash between commit and emission leaves the schema migrated but the generated files stale; the next `tide apply` or `tidectl codegen` recovers.
+Atomicity: the server runs the SQL migration plus a write to its own catalog tables (recording the new schema version and the caller responsible) inside one Postgres transaction. Inside that same transaction, apply re-checks unique-index drift and **refuses** if it finds any — with a `DROP INDEX` remediation — unless `ATLANTIS_ALLOW_INDEX_DRIFT=1` is set in the server's environment. On success the server persists the new IR checkpoint and hot-reloads entity metadata via `LISTEN/NOTIFY`.
 
-The generated SDK ships back to the caller in the `ApplyMigration` response, so callers do not run their own codegen toolchain. `tide` writes those bytes into `output_dir/`.
+There is no SDK in the apply response. To produce or refresh the typed Go client, the caller runs `tide generate` from its own repo; it fetches the canonical IR over `GetCanonicalIR` and emits proto + typed wrappers into `output_dir/`. See [codegen pipeline](codegen-pipeline.md) for the generation paths.
 
 See: [codegen pipeline](codegen-pipeline.md), [schema flow](schema-flow.md).
 
@@ -30,7 +30,7 @@ The cache key shape and the invalidation invariants are in [cache architecture](
 
 ## What happens on `Create` / `Update` / `Delete<Entity>`
 
-The three mutation RPCs share a single handler shape; the codegen emits parallel methods that differ only in the SQL statement they run. Inside one Postgres transaction, the data change commits and an invalidation row is inserted into the `outbox` table for each affected cache key. The outbox row ensures the invalidation survives a server crash between commit and the memcached write.
+The three mutation RPCs share a single handler shape, dispatched at runtime from the entity's IR metadata; they differ only in the SQL statement they run. Inside one Postgres transaction, the data change commits and an invalidation row is inserted into the `outbox` table for each affected cache key. The outbox row ensures the invalidation survives a server crash between commit and the memcached write.
 
 After commit, the outbox worker drains the queue and applies invalidations to memcached.
 

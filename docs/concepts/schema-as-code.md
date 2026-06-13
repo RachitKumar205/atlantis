@@ -16,6 +16,8 @@ The atlantis server holds the applied state of every schema it has received. Tha
 
 A traditional migration tool leaves the database in whatever state the last migration produced; atlantis treats the database as a deterministic function of the input schema files. Delete an entity from a `.atl` file and `tide apply` prepares a migration to drop the table.
 
+One case breaks the reconcile-on-apply rule. If the live database carries a bare unique index the schema doesn't declare — a `CREATE UNIQUE INDEX` with no backing constraint — `tide apply` refuses rather than reconciling — applying over it would leave a hidden constraint silently rejecting legitimate writes. Drop the index, declare the uniqueness in the `.atl`, or set `ATLANTIS_ALLOW_INDEX_DRIFT=1` to apply anyway.
+
 ## What lives where
 
 A typical service repo:

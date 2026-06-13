@@ -12,6 +12,15 @@ Prereqs:
 
 atlantis creates entity tables under an `atlantis` schema by default: `atlantis.consumer_account` for `entity Account in consumer`. For an existing database the entity tables already live elsewhere. Use the `table "<schema.table>"` entity modifier to point atlantis at them. Without it, atlantis targets its default location and the existing tables go unused.
 
+## Two ways to baseline
+
+There's a dedicated operator command for this — `tidectl adopt` — and a manual `plan` / `apply` loop. They share one diff engine, so they classify the same disagreements; pick by who's driving:
+
+- **`tidectl adopt` (recommended)** introspects the live DB, diffs it against every caller's declared `.atl` in your workspace, and records the IR checkpoint **without running any DDL**. It baselines all callers atomically in one transaction, buckets every difference into addition / removal / mismatch, and **blocks on a mismatch** (a field both sides describe differently) unless you pass `--allow-drift`. Every adopt — clean or drift-accepted — is recorded in `atlantis.adopt_history`. Steps 5–6 below cover it.
+- **Manual `tide plan` + `tide apply`** is the per-caller path when an operator isn't running the workspace-wide command. Steps 4–5 cover it. It does *not* write `adopt_history`, and its zero-change promise has one exception — see [Legacy unique indexes can block apply](#legacy-unique-indexes-can-block-apply).
+
+Either way the inventory and `table "..."` declaration work (steps 1–3) is the same.
+
 ## 1. Inventory the existing schema
 
 For each table you want atlantis to manage, capture:
@@ -76,16 +85,50 @@ If `tide plan` reports unexpected DDL, one of three things is wrong:
 - A field in `.atl` doesn't match a column in prod (name or type mismatch). Fix the `.atl`.
 - An entity is missing its `table "..."` modifier and atlantis is targeting `atlantis.<ns>_<entity>` instead of the prod table. Add the modifier.
 - The `.atl` declares a column, constraint, or index that doesn't exist in prod. Either add it to prod via a separate migration first, or remove it from `.atl`.
+- The DDL diff is empty but apply still refuses. A zero-change plan is not a guarantee that `tide apply` will succeed: a legacy bare unique index the schema doesn't declare blocks apply, and it shows up only in `tide plan --format=json` (the human table omits it). See [Legacy unique indexes can block apply](#legacy-unique-indexes-can-block-apply).
 
 Iterate until the diff is empty. That confirms atlantis's view matches the database byte-for-byte.
 
-## 5. Apply
+## 5. Baseline the checkpoint
+
+**With `tidectl adopt` (recommended).** From the directory holding your workspace manifest:
+
+```
+tidectl adopt
+```
+
+This introspects the live DB, diffs it against every caller's `.atl`, and records the IR checkpoint for all of them in one transaction. A clean run prints `declared schema matches live DB` and exits 0. Outstanding additions (declared but not yet in the DB) and removals (in the DB but undeclared) are reported but don't block — they're outstanding work for a later `tide apply`. A **mismatch** — a field both sides describe differently — blocks the baseline and exits 1; resolve it by editing the `.atl` to match prod, migrating prod to match the `.atl`, or re-running with `--allow-drift` to baseline anyway (the drift is recorded in `atlantis.adopt_history` for audit).
+
+**With `tide apply` (per-caller).** When you're driving one caller at a time:
 
 ```
 tide apply
 ```
 
 Since the schema matches, the apply is a metadata write only: atlantis records the caller's `.atl` files in `caller_registrations` and updates `ir_checkpoint`. No DDL runs against the entity tables. Repeat for each caller repo.
+
+### Legacy unique indexes can block apply
+
+A zero-change plan does **not** guarantee a clean apply. atlantis enforces uniqueness it declares (`unique`, `unique by …`) as a Postgres `UNIQUE` *constraint*; a legacy database often carries the same uniqueness as a bare `CREATE UNIQUE INDEX` with no backing constraint. The DSL can't express a bare unique index, so it never appears in the DDL diff — but it's a live constraint that will silently reject writes atlantis thinks are legal.
+
+`tidectl adopt` surfaces such an index as a removal (present in the live DB, undeclared), and `tide apply` **refuses** rather than baseline over it:
+
+```
+apply blocked: the live database enforces UNIQUE index(es) this schema does not declare.
+Applying would leave a hidden constraint that silently rejects legitimate writes.
+
+  vendor.product_variants — UNIQUE index on (sku)
+    resolve: DROP INDEX "vendor"."idx_product_variants_sku_unique";
+    or declare the uniqueness in your .atl (field `unique`, or `unique by sku`)
+```
+
+The error prints the **live** index name verbatim. Resolve it one of three ways:
+
+- `DROP INDEX <name>;` against the live DB, if the index is redundant or unwanted.
+- Declare the uniqueness in the `.atl` (`unique` on the field, or `unique by a, b` on the entity) so atlantis owns it. Note that adding `unique by` is classified backfill-required — see [Add a new entity](add-a-new-entity.md).
+- Set `ATLANTIS_ALLOW_INDEX_DRIFT=1` in the apply environment to proceed knowingly (prefix `ATLANTIS_`, not `ATL_`; value exactly `1`).
+
+`tide plan` only **warns** about drift — it doesn't change the plan class or exit code, and the warning data lives only in `--format=json` (`index_drift`, `index_drift_notes`, `index_drift_error`); the human table output omits it. A partial unique index (`... WHERE <pred>`) always counts as drift, even if the same columns carry a declared full uniqueness, because the DSL can't express the predicate.
 
 ## 6. Bring atlantis up and cut over
 
@@ -104,3 +147,4 @@ Follow the standard cutover pattern: flag-gate your application's atlantis adapt
 - [DSL grammar reference](../reference/dsl-grammar.md#entity-level-clauses) — the `table` modifier alongside other entity-body clauses.
 - [Migration ownership](../architecture/migration-ownership.md) — why atlantis's bookkeeping tables stay in the `atlantis` schema even when entity tables do not.
 - [Deploy to production](deploy-to-production.md) — operator-side runbook for standing up the server.
+- [`tidectl` CLI reference](../reference/cli-tidectl.md) — `tidectl adopt` and the other operator commands.

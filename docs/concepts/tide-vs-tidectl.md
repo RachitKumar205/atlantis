@@ -8,8 +8,8 @@ atlantis ships two CLIs. `tide` runs from caller service repos and is the only p
 
 | Subcommand | Purpose |
 |---|---|
-| `tide plan --against=<endpoint>` | Read-only validation. Server returns the SQL it would run, the change classification, and any cross-caller breaks (the server refuses any apply that would invalidate another caller's current schema). |
-| `tide apply --against=<endpoint>` | Mutates schema on the server. Three independent gates grant permission: `ATL_ALLOW_APPLY_MUTATION=true` (wildcard, the default), `ATL_MUTATION_ALLOWED_CALLERS` (per-CN allowlist), or `caller_identities.can_mutate=true` (runtime per-caller flag set via the console). The server runs the DDL, writes `atlantis.ir_checkpoint` under content-hash CAS, and inserts an audit row into `atlantis.schema_versions` — all in one Postgres transaction, under an advisory lock. |
+| `tide plan --against=<endpoint>` | Read-only validation. Server returns the SQL it would run, the change classification, and any cross-caller breaks (the server refuses any apply that would invalidate another caller's current schema). Also surfaces a bare unique index the schema doesn't declare — a `CREATE UNIQUE INDEX` with no backing constraint (in `--format=json`). |
+| `tide apply --against=<endpoint>` | Mutates schema on the server. Refuses if the live database carries a bare unique index the schema doesn't declare, unless `ATLANTIS_ALLOW_INDEX_DRIFT=1`. Three independent gates grant permission: `ATL_ALLOW_APPLY_MUTATION=true` (wildcard, the default), `ATL_MUTATION_ALLOWED_CALLERS` (per-CN allowlist), or `caller_identities.can_mutate=true` (runtime per-caller flag set via the console). The server runs the DDL, writes `atlantis.ir_checkpoint` under content-hash CAS, and inserts an audit row into `atlantis.schema_versions` — all in one Postgres transaction, under an advisory lock. |
 | `tide pull` | Resyncs local `.atl` from server state. |
 | `tide diff` | Local diff between working tree and the server's IR. |
 | `tide history`, `tide blame`, `tide owners` | Inspect the version registry. |

@@ -33,13 +33,17 @@ query NoteCountByMonth for Note {
 tide apply
 ```
 
-The server validates the SQL against the schema and registers the query. Confirm with:
+The server validates the SQL against the schema and persists the query into the merged schema. Confirm with:
 
 ```
 tide show NoteCountByMonth
 ```
 
-If the canonical text comes back, the query is live in the merged schema.
+If the canonical text comes back, the query is persisted.
+
+### A brand-new query needs one server restart
+
+A custom query's gRPC method is registered at server startup. A **brand-new** query is persisted and visible to `tide show` immediately, but its RPC returns `Unimplemented` until the server restarts — restart the server once after the first `tide apply` that adds it. Editing the SQL of an **existing** query hot-reloads on `tide apply` with no restart. (Same rule for `procedure` blocks.)
 
 ## What's next
 
