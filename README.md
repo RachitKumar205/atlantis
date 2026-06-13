@@ -1,6 +1,6 @@
 # atlantis
 
-atlantis generates Postgres migrations, a typed Go client, and a cached gRPC server from a single `.atl` schema file. The same declaration produces the migration SQL, the per-entity request handler, the read-through cache, and the cache-invalidation logic. These are normally hand-written and kept in sync by convention.
+atlantis generates Postgres migrations, a typed Go client, and a cached gRPC server from a single `.atl` schema file. The same declaration produces the migration SQL, the runtime-served per-entity API, the read-through cache, and the cache-invalidation logic. These are normally hand-written and kept in sync by convention.
 
 ```
 $ tide apply
@@ -24,7 +24,7 @@ entity Order in shop {
 }
 ```
 
-Running `tide apply` from a service repo submits the file to the atlantis server. The server generates SQL migrations, a Go SDK, proto definitions, and per-entity request handlers, then applies the migration after the planner classifies it as additive, backfill-required, or breaking. The server serves `Order` over gRPC, with a memcached read-through cache in front of every read.
+Running `tide apply` from a service repo submits the file to the atlantis server. The server generates SQL migrations and proto definitions, then applies the migration after the planner classifies it as additive, backfill-required, or breaking. Apply also refuses if the live database carries a bare unique index the schema doesn't declare — a `CREATE UNIQUE INDEX` with no backing constraint (drift) — unless `ATLANTIS_ALLOW_INDEX_DRIFT=1` is set. The server serves `Order` over gRPC by dispatching from the schema at runtime — no per-entity handlers are compiled — with a memcached read-through cache in front of every read. The typed Go client is generated separately, caller-local, with `tide generate`.
 
 Cache invalidation rides the write transaction. Every Create / Update / Delete commits the data change and an outbox row in one Postgres txn, and a worker drains the outbox to invalidate memcached. Application code never writes the invalidation directly.
 
@@ -89,6 +89,7 @@ Supported:
 - pgvector with HNSW indexes
 - TimescaleDB hypertables
 - Custom queries and multi-step procedures
+- Unique-index drift detection — `tide apply` refuses over a bare unique index the schema doesn't declare (escape hatch: `ATLANTIS_ALLOW_INDEX_DRIFT=1`); `tide plan` surfaces it as a warning
 - In-process sandbox runtime with checkpoints, fork, diff, seed, and snapshot (sim backend) plus an embedded Postgres backend for full SQL fidelity
 - mTLS between client and server
 

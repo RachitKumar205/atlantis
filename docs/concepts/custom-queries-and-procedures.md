@@ -45,6 +45,16 @@ Every `sql` block declares the entities it reads or writes with `touches(...)`. 
 
 Atlantis validates parameter references and `touches(...)` targets at apply time; pure SQL errors surface when the migration runs.
 
+## Adding vs editing
+
+Editing an existing `query` or `procedure` — changing its SQL, inputs, or `touches(...)` set — hot-reloads on `tide apply`. The server swaps the schema snapshot in place and the next request runs the new definition; no restart.
+
+Adding a *brand-new* `query` or `procedure` is different. `tide apply` persists it to the checkpoint, and `tide show` lists it, but its gRPC method only registers at server startup. Until the server restarts, callers invoking the new method get a gRPC `Unimplemented` error. Restart the server to make a newly added custom declaration callable.
+
+This split exists because entity and custom-service gRPC methods are registered once when the server boots; `Reload` only swaps the metadata snapshot and does not add new method descriptors to the running server.
+
+Adding, removing, or changing a custom declaration shows up in `tide plan` and `tide diff` as an additive entry. These changes carry no DDL — custom declarations are served at runtime from the checkpoint IR, not migrated — so they never raise the plan class.
+
 ## When to reach for these
 
 - Reads that need aggregations, window functions, `DISTINCT ON`, conditional aggregates, or any shape the typed predicate language doesn't cover: `query`.

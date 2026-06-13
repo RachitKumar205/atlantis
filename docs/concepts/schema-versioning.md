@@ -2,7 +2,7 @@
 
 Every `tide apply` creates a numbered schema version. The version stores the full IR snapshot, a structural diff from the previous version, the generated SQL, the caller identity, a content hash, and a timestamp. The version registry is append-only and is the source of truth for what has been deployed and when (the `.atl` files remain the authoring authority for schema definitions).
 
-Each new version persists the IR checkpoint to Postgres with a content hash (sha256 of the canonical IR JSON). The server detects the new checkpoint via PostgreSQL `LISTEN/NOTIFY` and hot-reloads entity metadata automatically — no restart is needed for field changes to existing entities. The content hash serves as both a version identity and a CAS (compare-and-swap) token: `tide apply` rejects writes when the checkpoint has moved since planning, preventing lost updates from concurrent applies.
+Each new version persists the IR checkpoint to Postgres with a content hash (sha256 of the canonical IR JSON). The server detects the new checkpoint via PostgreSQL `LISTEN/NOTIFY` and hot-reloads entity metadata automatically — no restart is needed for field changes to existing entities or edits to existing custom queries and procedures. (A newly *added* custom query or procedure is the exception: its gRPC method registers only at startup, so it isn't callable until the server restarts — see [custom queries and procedures](custom-queries-and-procedures.md#adding-vs-editing).) The content hash serves as both a version identity and a CAS (compare-and-swap) token: `tide apply` rejects writes when the checkpoint has moved since planning, preventing lost updates from concurrent applies.
 
 ```
 $ tide history --limit=3
@@ -27,7 +27,7 @@ Each version is a self-contained record:
 
 - **IR snapshot**: the full intermediate representation of the merged schema at that point in time. Any version can be materialized into a complete `.atl` file set.
 - **Content hash**: sha256 of the canonical IR JSON. Two identical schemas always produce the same hash regardless of environment. The hash serves as both a version identity and the CAS token for conflict detection.
-- **Structural diff**: entity-level and field-level changes from the previous version — additions, removals, type changes, constraint changes.
+- **Structural diff**: entity-level and field-level changes from the previous version — additions, removals, type changes, constraint changes, composite `unique by` changes, and custom query/procedure additions, removals, and changes.
 - **Generated SQL**: the exact migration SQL that was applied.
 - **Caller identity**: which caller (from `tide.yaml`) submitted the change.
 - **Timestamp**: server-side wall-clock time of the apply.

@@ -61,6 +61,7 @@ Schema fixtures live under `testdata/schema/`. To exercise a codegen change end-
 | `internal/dsl/` | Lexer, parser, AST, IR, validator |
 | `internal/codegen/` | Emitters: proto, server, client, SQL |
 | `internal/codegen/coltype/` | Shared column-type mapping |
+| `internal/introspect/` | Live-database introspection (consumed by adopt) and the unique-index drift detector |
 | `internal/storage/pg/` | Postgres connection, transactions, outbox |
 | `internal/cache/` | Memcached client, read path, outbox worker |
 | `internal/runtime/` | Helpers linked into generated code |

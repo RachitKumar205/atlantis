@@ -49,7 +49,15 @@ Each path is walked recursively; every file with extension `.atl` is included. O
 
 `TIDE_CALLER` and `TIDE_ENDPOINT` are not consulted; use `ATL_CALLER` / `ATL_ENDPOINT`.
 
-No other environment variables are read.
+Three additional variables carry inline PEM material so CI runners never write certs to disk. When set they take precedence over the file-path fields; setting both an inline PEM and its file-path counterpart for the same material is a config error.
+
+| Variable | Overrides | Notes |
+|---|---|---|
+| `TIDE_TLS_CERT_PEM` | `tls.cert` | Inline PEM client certificate. |
+| `TIDE_TLS_KEY_PEM` | `tls.key` | Inline PEM client key. |
+| `TIDE_TLS_CA_PEM` | `tls.ca` | Inline PEM CA certificate. |
+
+`tide job` and `tide workflow` read `$USER` to stamp the submitting principal on jobs and workflow runs.
 
 ## Commands
 
@@ -60,16 +68,18 @@ Every command accepts `--config <path>` (default `tide.yaml`) and `--timeout <du
 Submits the local `.atl` files to the server, runs the migration, and prints a hint for the caller to regenerate the typed Go client. No endpoint override flag — `apply` always targets the configured `endpoint`.
 
 ```
-tide apply [--backfill <file>] [--dry-run] [--no-pull]
+tide apply [--backfill] [--dry-run] [--no-pull]
 ```
 
 | Flag | Description |
 |---|---|
-| `--backfill <file>` | Accepted for forward compatibility with backfill-required plans. The server does not yet splice the file into the migration; the caller applies the SQL manually before re-running `tide apply`. |
+| `--backfill` | Boolean. Kick off the declarative backfill flow for a `backfill_required` plan (calls `BeginBackfillPlan`). Monitor progress with `tide backfill status`. |
 | `--dry-run` | Plan only; do not apply. Same exit codes as a real apply. |
 | `--no-pull` | Skip the automatic `tide pull` before the apply. Use when offline or when the local cache is known-current. |
 
 The default flow runs `tide pull` first so cross-caller references resolve against the freshest merged schema.
+
+If the database carries a bare unique index the schema doesn't declare — a `CREATE UNIQUE INDEX` with no backing constraint — `apply` refuses with a `DROP INDEX` remediation. Set [`ATLANTIS_ALLOW_INDEX_DRIFT=1`](configuration.md#schema-drift) to apply anyway. This doesn't change the plan class or exit code.
 
 ### `tide plan`
 
@@ -84,6 +94,8 @@ tide plan [--against <host:port>] [--format {table|json}] [--no-pull]
 | `--against <host:port>` | Override the configured endpoint for this command only. |
 | `--format {table|json}` | Default `table`. `json` emits the raw planning response for downstream tools. |
 | `--no-pull` | Skip the pre-plan refresh of `.tide-cache/`. |
+
+A bare unique index the schema doesn't declare surfaces as an index-drift warning, but only under `--format=json` — in the `index_drift`, `index_drift_notes`, and `index_drift_error` fields. The `table` output does not render it. Drift never blocks `plan` or changes its exit code; `tide apply` is where it refuses unless [`ATLANTIS_ALLOW_INDEX_DRIFT=1`](configuration.md#schema-drift).
 
 ### `tide pull`
 
@@ -142,9 +154,109 @@ tide show <substring>
 
 Exits non-zero if no file matches.
 
+### `tide backfill status [<plan-hash>]`
+
+Reports the progress of a declarative backfill started by `tide apply --backfill`. With no argument, shows the latest backfill plan for the configured caller; pass a plan hash to inspect a specific one.
+
+```
+tide backfill status [<plan-hash>]
+```
+
+### `tide job submit|status|dead|retry`
+
+Submits and inspects background jobs.
+
+```
+tide job submit <job-name> [--args=JSON] [--scheduled-at=RFC3339]
+tide job status <job-id>
+tide job dead   [--job-name=...] [--limit=N]
+tide job retry  <dead-job-id>
+```
+
+`submit` enqueues a job (optionally scheduled for a future time); `status` reports one job's state; `dead` lists jobs in the dead-letter queue; `retry` re-enqueues a dead job. The submitting principal is stamped from `$USER`.
+
+### `tide workflow start|status`
+
+Starts and inspects multi-step workflows.
+
+```
+tide workflow start  <workflow-name> [--state=JSON]
+tide workflow status <workflow-id>
+```
+
+The submitting principal is stamped from `$USER`.
+
+### `tide history`
+
+Prints schema versions newest-first: version number, caller, event type, change count, and timestamp.
+
+```
+tide history [--limit N] [--caller X] [--format json]
+```
+
+### `tide diff <from-version> <to-version>`
+
+Computes the structural diff between two historical schema versions. The server loads both IR snapshots and runs the diff.
+
+```
+tide diff <from-version> <to-version>
+```
+
+### `tide blame <entity-id>`
+
+Shows per-field provenance for an entity: who introduced each field, who last modified it, and the schema versions those events map to.
+
+```
+tide blame <entity-id>
+```
+
+### `tide owners`
+
+Prints every active entity and the caller that introduced it — answers "who owns this table?" without reading version history.
+
+```
+tide owners
+```
+
+### `tide rollback`
+
+Reverts the live schema to the state captured by a prior version. The server diffs current → target and emits the migration.
+
+```
+tide rollback --to=<version> [--dry-run] [--yes]
+```
+
+| Flag | Description |
+|---|---|
+| `--to=<version>` | Target schema version to revert to. |
+| `--dry-run` | Emit the rollback plan without applying it. |
+| `--yes` | Skip the interactive confirmation. |
+
+### `tide sandbox boot|shell|spawn`
+
+Drives the schema-true in-memory simulator bound to a local IR.
+
+```
+tide sandbox boot  <path> [--addr ADDR]   # start the HTTP control plane
+tide sandbox shell <path>                 # interactive SQL REPL
+tide sandbox spawn <path> -n N            # fork N children, time it, exit
+```
+
+`boot` defaults to `127.0.0.1:0` (kernel-chosen port) unless `--addr` pins one. See the [Sandbox HTTP API](sandbox-api.md).
+
+### `tide caller alias list|add|rm`
+
+Manages caller identity aliases.
+
+```
+tide caller alias list <caller>
+tide caller alias add  <caller> <alias>
+tide caller alias rm   <caller> <alias>
+```
+
 ### `tide version`
 
-Prints `pc <version>` to stdout (the literal `pc` prefix is a vestige of the previous binary name). Does not contact the server.
+Prints the tide logo banner followed by the version. Does not contact the server (there is no `pc` prefix).
 
 ```
 tide version

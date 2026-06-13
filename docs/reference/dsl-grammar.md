@@ -29,15 +29,28 @@ EntityBody =
     { FieldDecl }
     [ "composite_pk" "by" IdentList ]
     { "unique" "by" IdentList }
-    { "index" "by" IdentList }
-    { "index" "partial" "by" IdentList "where" SQLExpr }
+    { "index" "by" IndexFieldList }
+    { "index" "partial" "by" IdentList "where" PartialPredicate }
+    { "index" "hnsw" "on" Ident "ops" VectorOps }
+    { "index" "gin" "on" Ident }
     [ "soft_delete" "by" Ident ]
     [ "touch_on_update" "by" Ident ]
     [ "partition" "by" Ident ]
     [ "table" StringLiteral ]
     [ CacheBlock ]
 
-IdentList = Ident { "," Ident }
+IdentList      = Ident { "," Ident }
+
+IndexFieldList = IndexField { "," IndexField }
+IndexField     = ( Ident | "expr" StringLiteral ) [ "asc" | "desc" ]
+
+VectorOps      = "cosine" | "l2" | "ip"
+
+PartialPredicate =
+    Ident "is" [ "not" ] "null"
+  | Ident PartialOp Literal
+
+PartialOp = "=" | "!=" | "<" | "<=" | ">" | ">="
 ```
 
 Entity names use `PascalIdent`; namespaces use `SnakeIdent`. Underscores are syntactically valid in namespaces but not conventional.
@@ -95,7 +108,7 @@ Field names use `SnakeIdent`. Modifier order is flexible, but the lexer rejects 
 | `interval` | `INTERVAL` | |
 | `numeric(p, s)` | `NUMERIC(p,s)` | arbitrary precision |
 | `uuid` | `UUID` | |
-| `vector(N)` | `vector(N)` | pgvector extension; index syntax in [Known gaps](#known-gaps) |
+| `vector(N)` | `vector(N)` | pgvector extension; index with `index hnsw on <field> ops <...>` |
 | `[]T` | `T[]` | array; element type `T` is any scalar above except `vector` and `[]T` |
 
 Go and proto mappings are in [the type mapping reference](dsl-types.md).
@@ -114,8 +127,12 @@ Go and proto mappings are in [the type mapping reference](dsl-types.md).
 
 - `composite_pk by f1, f2` — composite primary key. Member fields must each be `not null`. Mutually exclusive with per-field `primary`.
 - `unique by f1, f2` — multi-column unique constraint. May appear multiple times. For a single column, use the per-field `unique` modifier instead.
-- `index by f1, f2` — non-unique B-tree index. May appear multiple times.
-- `index partial by f1, f2 where <expr>` — partial index. The `<expr>` is any expression valid in `CREATE INDEX ... WHERE (...)`.
+- `index by f1, f2` — non-unique B-tree index. May appear multiple times. Each field may instead be an expression (`expr "lower(email)"`) and may carry a per-field `asc` or `desc` (e.g. `index by created_at desc`).
+- `index partial by f1, f2 where <predicate>` — partial index. The predicate is restricted, not arbitrary SQL: either `field is [not] null`, or `field <op> <literal>` with `<op>` one of `=`, `!=`, `<`, `<=`, `>`, `>=` (inequality is written `!=`).
+- `index hnsw on <field> ops <cosine|l2|ip>` — pgvector HNSW index over a `vector(N)` field. `ops` picks the operator class: `cosine`, `l2` (Euclidean), or `ip` (inner product).
+- `index gin on <field>` — GIN index, for `jsonb` and array fields.
+
+There is no `unique index` (nor `index unique`) form. Uniqueness is declared only with the per-field `unique` modifier or entity-level `unique by`; `index by`, `index partial`, `index hnsw`, and `index gin` are all non-unique. A live `CREATE UNIQUE INDEX` the schema doesn't account for is therefore treated as drift — `tide apply` refuses it unless `ATLANTIS_ALLOW_INDEX_DRIFT=1`. See [`tide apply`](cli-tide.md).
 - `soft_delete by <field>` — replaces row deletion with setting `<field>` (must be `timestamptz`) to `now()`. Reads filter `<field> IS NULL` automatically.
 - `touch_on_update by <field>` — Postgres trigger sets `<field>` (must be `timestamptz`) to `now()` on every `UPDATE`.
 - `partition by <field>` — Atlantis-level multi-tenant partition. Not Postgres table partitioning. Generated read RPCs inject `<field> = <caller-partition>` into the predicate; callers cannot override. The caller partition is read from the auth context.
@@ -213,7 +230,8 @@ entity, hypertable, query, procedure,
 in, for, input, output, steps, sql, touches, as,
 primary, serial, not, null, default, unique, references, check,
 on, update, delete, cascade, set, restrict, no, action,
-composite_pk, index, partial, where,
+composite_pk, index, partial, where, is,
+hnsw, ops, cosine, l2, ip, gin, asc, desc, expr,
 soft_delete, touch_on_update, partition, by,
 table,
 cache
@@ -228,4 +246,4 @@ partition_field, chunk_time_interval   // only inside hypertable { ... }
 
 ## Known gaps
 
-This reference does not yet cover: vector-index syntax (`hnsw` / `ivfflat`), explicit index methods (`using gin`, `using gist`), `on update` foreign-key actions, enum types, view declarations, and import statements. Tracked in the project issue tracker.
+This reference does not yet cover: the `ivfflat` vector-index method (only `hnsw` is supported), GiST indexes, `on update` foreign-key actions, enum types, view declarations, and import statements. Tracked in the project issue tracker.

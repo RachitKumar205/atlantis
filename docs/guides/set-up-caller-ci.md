@@ -58,6 +58,17 @@ Replace `atlantis-staging.internal:9090` with your endpoint. Drop `--format=json
 
 The job fails on any non-zero exit. `tide plan` returns 1 for backfill-required and 2 for cross-caller breaking; both should block the PR.
 
+Adding a composite `unique by a, b` to an existing entity now classifies backfill-required, so that PR exits 1 where earlier versions treated it as a no-op. That's intentional — the constraint can fail on existing duplicate tuples — so let the check block until someone confirms the data is clean.
+
+### One drift case passes plan but fails apply
+
+`tide plan` exits **0** on unique-index drift: a bare unique index the schema doesn't declare (a `CREATE UNIQUE INDEX` with no backing constraint) is reported as a warning but does **not** change the plan class or exit code. So a plan-only PR check goes green — and then the post-merge `tide apply` *refuses*, failing CI on `main` instead of on the PR.
+
+Two consequences for your pipeline:
+
+- The drift warning lives **only** in `tide plan --format=json` (`index_drift`, `index_drift_notes`, `index_drift_error`). The human table output omits it, so a CI step that drops `--format=json` hides the only signal you'd get before merge. Keep `--format=json` and have reviewers (or a parser) watch for a non-empty `index_drift`.
+- The apply job needs a remediation before it can succeed: `DROP INDEX <name>;` against the DB, declaring the uniqueness in the `.atl`, or setting `ATLANTIS_ALLOW_INDEX_DRIFT=1` (note the `ATLANTIS_` prefix) in the apply environment. See [Legacy unique indexes can block apply](adopt-an-existing-database.md#legacy-unique-indexes-can-block-apply).
+
 ## Post the plan as a PR comment
 
 Optional. Captures the plan output and posts it as a sticky comment on the PR:

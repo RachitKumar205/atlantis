@@ -27,13 +27,13 @@ The mirror lets `tidectl codegen --schema-dir` read all caller `.atl` files from
 Prod has `ATL_ALLOW_APPLY_MUTATION=true` and `ATL_MIRROR_SCHEMA=false`. Callers apply schema changes directly; the server handles migration and IR persistence in one transaction. This is the default production flow.
 
 1. Dev opens a PR in the caller repo with an `.atl` change.
-2. Caller CI runs `tide plan --against=<prod-endpoint>` on the PR. `PlanSchema` is read-only and side-effect-free; CI submits the local files in-memory and the server returns the plan without touching its database.
+2. Caller CI runs `tide plan --against=<prod-endpoint>` on the PR. `PlanSchema` is read-only and side-effect-free; CI submits the local files in-memory and the server returns the plan without touching its database. The plan response also reports any **bare unique index the schema doesn't declare** — a `CREATE UNIQUE INDEX` with no backing constraint — as a heads-up that apply will refuse (see below). Drift doesn't change the plan class; the structured data rides `--format=json` (`index_drift`).
 3. PR merges.
 4. Caller CI (on merge) runs `tide apply --against=<prod-endpoint>`.
-5. Server acquires an advisory lock, validates, applies the DDL migration, and persists the new IR checkpoint with a content hash. CAS (compare-and-swap) on the content hash rejects stale applies if the checkpoint moved since planning.
+5. Server acquires an advisory lock, validates, re-checks unique-index drift inside the locked transaction, applies the DDL migration, and persists the new IR checkpoint with a content hash. CAS (compare-and-swap) on the content hash rejects stale applies if the checkpoint moved since planning. **Apply refuses** if it finds a bare unique index the schema doesn't declare, with a `DROP INDEX` remediation, unless `ATLANTIS_ALLOW_INDEX_DRIFT=1` is set in the server's environment.
 6. A PostgreSQL trigger fires `NOTIFY atl_schema_changed`. The server's schema listener rebuilds entity metadata and swaps it atomically. In-flight requests complete on the old metadata; new requests see the updated schema immediately.
 
-No restart, no recompilation, no workspace manifest update. A rolling restart is only needed when a `tide apply` introduces a brand-new entity (not just new fields). The server binary is generic and serves any entity described by the current IR.
+No restart, no recompilation, no workspace manifest update. A rolling restart is only needed when a `tide apply` introduces a brand-new entity, custom query, or procedure — gRPC services and methods register once at startup, so a newly declared method isn't dispatchable until the next restart, even though it's already persisted and visible to `tide show`. The server binary is generic and serves any entity described by the current IR.
 
 To update the typed Go client after a schema change, the caller runs `tide generate` from its own repo (see [caller-local generation](#caller-local-sdk-generation)).
 
