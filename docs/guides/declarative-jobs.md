@@ -131,6 +131,8 @@ procedure ConfirmOrder for vendor.Order {
 
 The job row shares the procedure's tx. If the procedure rolls back, the job is never enqueued.
 
+This declares a **new** procedure, so its gRPC method registers only on the next rolling server restart — `tide apply` records the declaration but can't add the method to a running server. (Editing an existing procedure's steps hot-reloads with no restart.)
+
 ## In-process worker pattern
 
 The job handler runs inside your application binary, not inside the atlantis server. See [Jobs and workflows](../concepts/jobs-and-workflows.md) for the conceptual model. In short: atlantis stores jobs and workers pull them via `FOR UPDATE SKIP LOCKED`; the handler code runs in the app process that owns the business logic.

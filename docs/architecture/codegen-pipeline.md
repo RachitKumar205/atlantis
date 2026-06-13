@@ -62,6 +62,13 @@ Each emitter is a Go package under `internal/codegen/`:
 - **Backfill-required** — column type tightening, new `NOT NULL` without default. The caller must supply backfill SQL.
 - **Cross-caller breaking** — removing a field another caller references, dropping an entity that's a foreign-key target. Rejected.
 
+The diff also covers two declaration forms that are not plain columns:
+
+- **Composite `unique by` specs** (`diffEntity` → `diffUniques`). Adding one is backfill-required — the constraint can reject existing duplicate rows, so a human verifies first. Removing one is additive. Either direction emits an `ALTER TABLE ... ADD/DROP CONSTRAINT ... UNIQUE (...)`.
+- **Custom queries and procedures** (`diffCustomDecls`). Add, remove, and content-change are all detected and all additive. These carry **no DDL** — a `query`/`procedure` is served at runtime from the IR, so the change is a real persisted change to the checkpoint with no migration SQL.
+
+A change to an **existing** custom query or procedure hot-reloads on `tide apply`; a **brand-new** one is persisted but its gRPC method isn't dispatchable until the server restarts (custom-service methods register at startup).
+
 The migration SQL is staged under `migrations/tidectl/_staged/`. `tidectl approve` promotes it into `migrations/tidectl/` with sequential numbering.
 
 ## Transaction boundary

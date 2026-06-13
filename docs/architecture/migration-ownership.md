@@ -26,7 +26,9 @@ migrations/
 
 ## Two flows for entity schema
 
-The same set of safety mechanisms — separate history tables, advisory lock, content-hash CAS on the IR checkpoint, reversibility CI — apply in both flows. The difference is whether a human reviews the literal SQL before it runs.
+The same set of safety mechanisms — separate history tables, advisory lock, content-hash CAS on the IR checkpoint, unique-index-drift gate, reversibility CI — apply in both flows. The difference is whether a human reviews the literal SQL before it runs.
+
+The **unique-index-drift gate** runs inside the locked apply transaction: if the live database has a bare `CREATE UNIQUE INDEX` (one with no backing constraint) on declared columns the schema doesn't declare unique, apply refuses with a `DROP INDEX` remediation rather than leave a hidden constraint silently rejecting writes. Set `ATLANTIS_ALLOW_INDEX_DRIFT=1` in the server's environment to proceed knowingly. `tide plan` surfaces the same drift ahead of time as a warning.
 
 ### Default flow (`ATL_ALLOW_APPLY_MUTATION=true`)
 

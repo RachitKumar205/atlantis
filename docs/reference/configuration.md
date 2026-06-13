@@ -98,6 +98,22 @@ Three independent gates grant mutation permission:
 | `ATL_MUTATION_ALLOWED_CALLERS` | (empty) | Comma-separated CN allowlist. Empty = no per-CN exceptions. |
 | `ATL_OPERATOR_ALLOWED_CALLERS` | (empty) | Operator-only RPCs (`RevokeCaller`, `RollbackSchema`, `AdoptBaseline`). Empty falls back to `ATL_ALLOW_APPLY_MUTATION`. The self-host compose bundle defaults this to `atlantis-console` so operator actions from the console work without an extra env step. |
 
+## Schema drift
+
+`ATLANTIS_ALLOW_INDEX_DRIFT` controls whether `tide apply` proceeds over a bare unique index the schema doesn't declare — a `CREATE UNIQUE INDEX` with no backing constraint. atlantis detects such an index on columns the schema declares but never marks unique — the DSL has no `unique index` form, so any such index is invisible to the schema and silently rejects writes the schema considers legal. A partial unique index always counts as drift; the DSL cannot express one.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `ATLANTIS_ALLOW_INDEX_DRIFT` | (unset / `0`) | Default refuses the apply with a `DROP INDEX` remediation. Set to exactly `1` to apply anyway with a warning. |
+
+Note the differences from the `ATL_*` gating variables:
+
+- The prefix is `ATLANTIS_`, not `ATL_`.
+- The value is matched against the literal string `1`. Unlike the boolean `ATL_*` vars, `true` / `yes` / `on` do not enable it.
+- It only affects `tide apply`. `tide plan` always reports drift as a warning (in `--format=json` output) and never blocks, regardless of this variable.
+
+Drift does not change the plan class or the exit code. See [`tide plan` / `tide apply`](cli-tide.md) for how the warning surfaces.
+
 ## Schema mirror (dev only)
 
 These variables enable the local-development workflow where the server mirrors caller-submitted `.atl` files to disk so a file watcher can react to schema changes. Both must be `false` in production.

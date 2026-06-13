@@ -94,7 +94,7 @@ Swap `linux-amd64` for `linux-arm64` per host. SHA256SUMS for every tarball is a
 
 Leave `ATL_ALLOW_APPLY_MUTATION=true`. The opt-out exists only for regulated workloads.
 
-- **`true` (default)** — callers run `tide apply --against=<prod>` from their CI. The server validates against the live IR, acquires an advisory lock, applies the DDL, writes the new `atlantis.ir_checkpoint` row under content-hash CAS, and inserts an audit row into `atlantis.schema_versions` — all in one Postgres transaction. `NOTIFY atl_schema_changed` fires from a Postgres trigger after commit and the server's listener rebuilds entity metadata. Field changes take effect within seconds; a brand-new entity needs a rolling restart because gRPC services register at startup.
+- **`true` (default)** — callers run `tide apply --against=<prod>` from their CI. The server validates against the live IR, acquires an advisory lock, applies the DDL, writes the new `atlantis.ir_checkpoint` row under content-hash CAS, and inserts an audit row into `atlantis.schema_versions` — all in one Postgres transaction. `NOTIFY atl_schema_changed` fires from a Postgres trigger after commit and the server's listener rebuilds entity metadata. Editing an existing entity, custom query, or procedure takes effect within seconds (hot-reload). A brand-new entity, custom query, or procedure needs a rolling restart, because each gRPC method registers at startup only — hot-reload swaps the schema snapshot but can't add a method to the running server.
 - **`false` (regulated opt-in)** — the server rejects every `tide apply` mutation. Schema changes route through a PR against the atlantis deployment repo: update `atlantis.workspace.yaml`, regenerate migrations with `tidectl plan` + `tidectl approve`, deploy. Use this only when a regulator requires literal SQL review before any production database change (SOX, HIPAA, PCI). The default flow already provides cross-caller safety, reversibility, atomic IR writes, and a per-apply audit row.
 
 Two boundaries gate every apply in the default flow: mTLS pins the connecting caller to its client cert (the server requires `req.Caller` to match the CN, so a caller can only submit `.atl` files under its own namespace), and the diff classifier refuses any change that would break another caller's schema. GitHub branch protection on the caller repo is the human-review gate — reviewers read the `tide plan` output CI posted on the PR.
@@ -115,6 +115,8 @@ LOG_LEVEL=info
 ```
 
 atlantis-specific behavior toggles use the `ATL_` prefix; infra connection vars (`PG_URL`, `MEMCACHED_ADDR`, `TLS_*`, etc.) use the conventional unprefixed names. The full list is in [configuration](../reference/configuration.md).
+
+One safety override breaks the `ATL_` convention: **`ATLANTIS_ALLOW_INDEX_DRIFT`** (full `ATLANTIS_` prefix, not `ATL_`; value exactly `1`). Leave it **unset** in normal operation; `tide apply` refuses over a bare unique index the schema doesn't declare — a `CREATE UNIQUE INDEX` with no backing constraint that would silently reject writes atlantis considers legal — and that refusal is doing its job. Set it only on an apply that knowingly accepts such an index (typically during a [database adoption](adopt-an-existing-database.md#legacy-unique-indexes-can-block-apply)). See [configuration](../reference/configuration.md#schema-drift) for the exact semantics.
 
 ### TLS
 
@@ -143,7 +145,9 @@ In the regulated flow, run both:
 
 Either command exits non-zero if a migration fails; halt the deploy.
 
-For zero-downtime rollouts of entity changes, the migration must be backward-compatible with the still-running old version. `tide plan` (default) or `tidectl plan` (regulated) prints the classification — if it said `additive`, the change is safe to run while the old server is still serving. `backfill-required` and `breaking` need an explicit expand/contract sequence.
+For zero-downtime rollouts of entity changes, the migration must be backward-compatible with the still-running old version. `tide plan` (default) or `tidectl plan` (regulated) prints the classification — if it said `additive`, the change is safe to run while the old server is still serving. `backfill-required` and `breaking` need an explicit expand/contract sequence. Adding a composite `unique by a, b` to an existing entity classifies **backfill-required** (it can fail on existing duplicate tuples — verify no duplicates first); removing one is additive.
+
+Two cases where an `additive` plan still isn't a clean apply: a brand-new entity, custom query, or procedure needs a rolling restart to register its gRPC method (see [the schema-change workflow](#schema-change-workflow)), and a bare unique index the schema doesn't declare makes `tide apply` refuse until you remediate or set `ATLANTIS_ALLOW_INDEX_DRIFT=1` (above). The drift refusal doesn't show in the plan class — `tide plan` only warns, and only in `--format=json`.
 
 ## 8. Start the server
 
@@ -245,7 +249,7 @@ This is the default flow (`ATL_ALLOW_APPLY_MUTATION=true`). Schema changes no lo
 4. Caller CI (on merge to main) runs `tide apply --against=<prod-endpoint>`.
 5. The server acquires an advisory lock, validates, applies the DDL migration, and persists the new IR checkpoint with a content hash (sha256 of the IR). If two applies race, CAS (compare-and-swap) on the content hash rejects the stale one.
 6. A PostgreSQL trigger fires `NOTIFY atl_schema_changed`. The server's schema listener picks up the notification and hot-reloads entity metadata via atomic pointer swap. In-flight requests on the old schema complete normally; new requests immediately see the updated schema.
-7. No restart, no recompilation, no workspace manifest update. A rolling restart is only needed when a `tide apply` introduces a brand-new entity (not just new fields on an existing entity).
+7. No recompilation, no workspace manifest update. A rolling restart is needed only when a `tide apply` introduces a brand-new entity, custom query, or procedure — each registers its gRPC method at startup. Editing an existing one of any of those (new fields, changed query body, changed procedure steps) hot-reloads with no restart.
 
 The server is live the moment apply commits. The typed Go client does **not** update automatically — the caller runs `tide generate` in its own repo (see [step 3](#3-client-sdks-are-generated-by-each-caller)) and commits the regenerated `output_dir`. Until then, the caller keeps sending the old proto shape, which the server still accepts for additive changes.
 

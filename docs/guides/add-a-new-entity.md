@@ -41,7 +41,7 @@ To preview behaviour before applying — seed rows, run queries, capture and dif
 Common errors:
 
 - `references unknown entity shop.Customer`: the referenced entity hasn't been registered yet. Run `tide apply` from the repo that declares `shop.Customer` first.
-- `tide plan` exits 1 (backfill required): you've added a `not null` column without a `default` to an existing entity. Add a `default` or supply backfill SQL.
+- `tide plan` exits 1 (backfill required): you've added a `not null` column without a `default` to an existing entity, or added a composite `unique by a, b` to an existing entity (it can fail on existing duplicate tuples — verify none exist). Add a `default` / dedupe, or supply backfill SQL.
 - `tide plan` exits 2 (cross-caller breaking): another caller's schema depends on a field you removed or renamed. The output names the conflict.
 
 ## 4. Verify
