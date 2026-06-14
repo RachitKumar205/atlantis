@@ -40,13 +40,9 @@ func transportCreds(cfg config, log *slog.Logger) (credentials.TransportCredenti
 	if err != nil {
 		return nil, fmt.Errorf("load server cert: %w", err)
 	}
-	caPEM, err := os.ReadFile(cfg.TLSCAFile)
+	pool, err := loadClientCAPool(cfg.TLSCAFile)
 	if err != nil {
-		return nil, fmt.Errorf("read CA: %w", err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("CA file %s contained no usable certs", cfg.TLSCAFile)
+		return nil, err
 	}
 	return credentials.NewTLS(&tls.Config{
 		Certificates: []tls.Certificate{cert},
@@ -54,6 +50,22 @@ func transportCreds(cfg config, log *slog.Logger) (credentials.TransportCredenti
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		MinVersion:   tls.VersionTLS13,
 	}), nil
+}
+
+// loadClientCAPool reads the client-CA PEM bundle into an x509 pool. The
+// same pool roots both the listener's mTLS verification and the trusted-
+// proxy forwarded-cert re-validation, so a forwarded cert is held to the
+// exact trust root a directly-connecting client would be.
+func loadClientCAPool(caFile string) (*x509.CertPool, error) {
+	caPEM, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read CA: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("CA file %s contained no usable certs", caFile)
+	}
+	return pool, nil
 }
 
 // callerKey is the context key for the resolved caller identity.
@@ -69,12 +81,36 @@ func callerFromContext(ctx context.Context) string {
 	return "anonymous"
 }
 
+// applyResolvedCaller computes the caller identity for ctx and returns a
+// derived context carrying it. In trusted-proxy mode, when the live peer is
+// a configured proxy, identity comes from the re-validated forwarded client
+// cert (and the forwarded DER is stashed for the cert-binding check);
+// otherwise identity is the live peer cert CN / dev x-caller header. A
+// non-nil error means a trusted proxy forwarded no/invalid identity — the
+// RPC is rejected Unauthenticated.
+func applyResolvedCaller(ctx context.Context, fa *forwardedAuth) (context.Context, error) {
+	cn, certDER, forwarded, err := fa.resolve(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Unauthenticated, err.Error())
+	}
+	if forwarded {
+		ctx = context.WithValue(ctx, callerKey{}, cn)
+		ctx = interceptors.WithForwardedCert(ctx, certDER)
+		return ctx, nil
+	}
+	return context.WithValue(ctx, callerKey{}, resolveCaller(ctx)), nil
+}
+
 // resolveCallerInterceptor populates the callerKey context value from the
-// peer's TLS cert (production) or x-caller header (dev). Subsequent
-// interceptors and handlers read it via callerFromContext.
-func resolveCallerInterceptor() grpc.UnaryServerInterceptor {
+// peer's TLS cert (production), a trusted-proxy-forwarded cert, or the
+// x-caller header (dev). Subsequent interceptors and handlers read it via
+// callerFromContext.
+func resolveCallerInterceptor(fa *forwardedAuth) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		ctx = context.WithValue(ctx, callerKey{}, resolveCaller(ctx))
+		ctx, err := applyResolvedCaller(ctx, fa)
+		if err != nil {
+			return nil, err
+		}
 		return handler(ctx, req)
 	}
 }
@@ -84,9 +120,12 @@ func resolveCallerInterceptor() grpc.UnaryServerInterceptor {
 // that carries the resolved caller key so cert binding + auth
 // interceptors (and the WorkerSession handler itself) can read it
 // via callerFromContext just like they would on a unary RPC.
-func resolveCallerStreamInterceptor() grpc.StreamServerInterceptor {
+func resolveCallerStreamInterceptor(fa *forwardedAuth) grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		ctx := context.WithValue(ss.Context(), callerKey{}, resolveCaller(ss.Context()))
+		ctx, err := applyResolvedCaller(ss.Context(), fa)
+		if err != nil {
+			return err
+		}
 		return handler(srv, interceptors.WithStreamContext(ss, ctx))
 	}
 }

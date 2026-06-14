@@ -61,7 +61,7 @@ func TestResolveCallerStream_PopulatesContextFromCertCN(t *testing.T) {
 		seenCaller = callerFromContext(ss.Context())
 		return nil
 	}
-	intr := resolveCallerStreamInterceptor()
+	intr := resolveCallerStreamInterceptor(nil)
 	err := intr(nil, &fakeServerStream{ctx: streamCtx}, &grpc.StreamServerInfo{FullMethod: "/x/y"}, handler)
 	if err != nil {
 		t.Fatalf("interceptor returned: %v", err)
@@ -80,7 +80,7 @@ func TestResolveCallerStream_AnonymousFallback(t *testing.T) {
 		seenCaller = callerFromContext(ss.Context())
 		return nil
 	}
-	intr := resolveCallerStreamInterceptor()
+	intr := resolveCallerStreamInterceptor(nil)
 	err := intr(nil, &fakeServerStream{ctx: context.Background()}, &grpc.StreamServerInfo{FullMethod: "/x/y"}, handler)
 	if err != nil {
 		t.Fatalf("interceptor returned: %v", err)

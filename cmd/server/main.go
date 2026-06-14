@@ -196,6 +196,21 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		return err
 	}
 
+	// Trusted front-proxy mode: nil unless ATL_TRUSTED_PROXY_CALLERS is set.
+	// When non-nil, a connection from one of those CNs may forward a
+	// re-validated end-client cert that becomes the caller identity.
+	fwdAuth, err := newForwardedAuth(cfg)
+	if err != nil {
+		return err
+	}
+	if fwdAuth != nil {
+		log.Info("trusted front-proxy mode enabled",
+			"proxies", cfg.TrustedProxyCallers,
+			"header", cfg.TrustedProxyCertHeader,
+			"may_apply", cfg.TrustedProxyMayApply,
+			"may_operate", cfg.TrustedProxyMayOperate)
+	}
+
 	log.Debug("init: build rate-limit interceptor")
 	rateLimit := interceptors.NewRateLimit(pool.Raw(), interceptors.RateLimitConfig{
 		DefaultQPS:           cfg.RateLimitDefaultQPS,
@@ -238,6 +253,14 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		CallerFromContext: callerFromContext,
 		BackfillEnabled:   cfg.BackfillWorkerEnabled,
 		LogRing:           logRing,
+
+		// Trusted-proxy admin-plane policy: a forwarded identity may
+		// self-apply (default) but not invoke cross-caller operator RPCs
+		// unless explicitly opted in. ProxyForwardedFromContext is nil when
+		// the mode is off, which disables the gating entirely.
+		ProxyForwardedFromContext: proxyForwardedFromContext(fwdAuth),
+		TrustedProxyMayApply:      cfg.TrustedProxyMayApply,
+		TrustedProxyMayOperate:    cfg.TrustedProxyMayOperate,
 	})
 
 	// Cert binding: bind each caller_identities row to a specific leaf
@@ -280,7 +303,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		grpc.ChainUnaryInterceptor(
 			recoveryInterceptor(log),
 			interceptors.NewMetrics(),
-			resolveCallerInterceptor(),
+			resolveCallerInterceptor(fwdAuth),
 			certBindingChecker.Unary(),
 			authChecker.Unary(),
 			rateLimit,
@@ -289,7 +312,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		grpc.ChainStreamInterceptor(
 			recoveryStreamInterceptor(log),
 			interceptors.NewMetricsStream(),
-			resolveCallerStreamInterceptor(),
+			resolveCallerStreamInterceptor(fwdAuth),
 			certBindingChecker.Stream(),
 			authChecker.Stream(),
 			loggingStreamInterceptor(log),
