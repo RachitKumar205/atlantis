@@ -1,0 +1,32 @@
+# atlantis behind Caddy — terminate client mTLS at the edge, forward the
+# verified client certificate to the gRPC backend.
+#
+# Pair with the server configured as:
+#   ATL_TRUSTED_PROXY_CALLERS=atlantis-proxy
+# and a proxy client certificate whose CN is `atlantis-proxy`.
+# See docs/guides/run-behind-a-reverse-proxy.md for the full setup.
+#
+# The `trust_pool` / `tls_trust_pool` modules are Caddy v2.7+. On older
+# versions the CA-trust syntax differs — verify against your Caddy version.
+
+atlantis.example.com {
+	tls /certs/edge.crt /certs/edge.key {
+		client_auth {
+			mode       require_and_verify
+			trust_pool file /certs/ca.crt
+		}
+	}
+
+	reverse_proxy https://atlantis:9090 {
+		transport http {
+			versions         2            # gRPC is HTTP/2 (over TLS, via the https:// scheme)
+			tls_client_auth  /certs/proxy.crt /certs/proxy.key   # CN=atlantis-proxy
+			tls_trust_pool   file /certs/ca.crt
+			tls_server_name  atlantis     # must match the server cert SAN/CN
+		}
+
+		# Forward the verified client cert as base64-encoded DER (header-safe).
+		# header_up REPLACES any client-supplied value (sanitization).
+		header_up X-Forwarded-Client-Cert {http.request.tls.client.certificate_der_base64}
+	}
+}

@@ -114,6 +114,19 @@ Note the differences from the `ATL_*` gating variables:
 
 Drift does not change the plan class or the exit code. See [`tide plan` / `tide apply`](cli-tide.md) for how the warning surfaces.
 
+## Trusted front proxy
+
+Lets a TLS-terminating reverse proxy (nginx, Caddy, Envoy) forward a verified client certificate to the server, instead of each client connecting over mTLS directly. The server re-validates the forwarded cert against its own client CA and derives caller identity from it. Inert until `ATL_TRUSTED_PROXY_CALLERS` is set, and requires mTLS to be configured. SNI/L4 passthrough is the recommended default; reach for this mode only when the proxy must terminate TLS. See [Run behind a reverse proxy](../guides/run-behind-a-reverse-proxy.md).
+
+| Variable | Default | Notes |
+|---|---|---|
+| `ATL_TRUSTED_PROXY_CALLERS` | (unset) | Comma-separated cert CNs permitted to assert a forwarded identity. A CN here is treated as a proxy only — its connection must forward a valid client cert. Empty disables the mode. |
+| `ATL_TRUSTED_PROXY_CERT_HEADER` | `x-forwarded-client-cert` | Metadata header carrying the forwarded cert (URL-encoded PEM, base64-DER, or an Envoy XFCC value with a `Cert=` element). |
+| `ATL_TRUSTED_PROXY_MAY_APPLY` | `true` | Whether a forwarded identity may run its own `tide plan` / `apply`. |
+| `ATL_TRUSTED_PROXY_MAY_OPERATE` | `false` | Whether a forwarded identity may invoke cross-caller operator RPCs (register/revoke/adopt/rollback/aliases). High-privilege grant — leave off unless the edge is as trusted as the server. |
+
+The forwarded cert is re-validated (chain to the client CA, `clientAuth` key usage, validity window), and its fingerprint must match the caller's registered binding — so identity, authz, and per-caller cert binding stay enforced at the origin. A direct client forging the header is ignored, because its own peer CN isn't a trusted proxy.
+
 ## Schema mirror (dev only)
 
 These variables enable the local-development workflow where the server mirrors caller-submitted `.atl` files to disk so a file watcher can react to schema changes. Both must be `false` in production.

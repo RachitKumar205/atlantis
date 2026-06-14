@@ -237,7 +237,7 @@ The unit is self-contained — it runs `docker run` directly rather than shellin
 
 This is single-node only: there's no rolling deploy, so `make deploy` causes a brief gap on restart.
 
-For a public endpoint, keep mTLS terminating **at atlantis** (the caller identity is the client-cert CN) and run any reverse proxy in TCP/L4 passthrough mode. A TLS-terminating proxy would strip the client cert and collapse every caller into one identity.
+For a public endpoint, the default is to keep mTLS terminating **at atlantis** (the caller identity is the client-cert CN) and run any reverse proxy in TCP/L4 passthrough mode — a plain TLS-terminating proxy would strip the client cert and collapse every caller into one identity. If you need an L7 ingress that terminates TLS, use [trusted front-proxy mode](run-behind-a-reverse-proxy.md): the proxy forwards the verified client cert and the server re-validates it, so per-caller identity is preserved.
 
 ## Schema change workflow
 
