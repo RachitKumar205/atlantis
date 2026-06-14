@@ -200,10 +200,36 @@ func buildCertBindingCheck(cfg CertBindingConfig) func(ctx context.Context, full
 	}
 }
 
-// leafCertFromContext extracts the peer's leaf x509 cert from a
-// resolved TLS connection. Returns false in non-TLS modes (where no
-// cert was negotiated) so callers can choose how to react.
+// forwardedCertKey carries the DER of a trusted-proxy-forwarded, already-
+// re-validated end-client cert. When present it is the cert the binding
+// check fingerprints — so per-caller cert binding is preserved through a
+// TLS-terminating proxy.
+type forwardedCertKey struct{}
+
+// WithForwardedCert stashes the re-validated forwarded client cert DER on
+// the context. Set by the server's resolve interceptor only after the cert
+// has been verified (chain + clientAuth EKU + validity); this package treats
+// its presence as authoritative for the fingerprint source.
+func WithForwardedCert(ctx context.Context, der []byte) context.Context {
+	return context.WithValue(ctx, forwardedCertKey{}, der)
+}
+
+// ForwardedCertFromContext returns the forwarded client cert DER, if any. A
+// present value also marks the request as trusted-proxy-forwarded, which the
+// admin gates consult.
+func ForwardedCertFromContext(ctx context.Context) ([]byte, bool) {
+	der, ok := ctx.Value(forwardedCertKey{}).([]byte)
+	return der, ok && len(der) > 0
+}
+
+// leafCertFromContext extracts the cert the binding check fingerprints: the
+// trusted-proxy-forwarded cert when present (so binding survives edge TLS
+// termination), otherwise the live TLS peer's leaf cert. Returns false in
+// non-TLS modes (where no cert was negotiated) so callers can react.
 func leafCertFromContext(ctx context.Context) (cert leafCert, ok bool) {
+	if der, fwd := ForwardedCertFromContext(ctx); fwd {
+		return leafCert{Raw: der}, true
+	}
 	p, ok := peer.FromContext(ctx)
 	if !ok {
 		return leafCert{}, false

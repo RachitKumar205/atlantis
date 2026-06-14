@@ -108,6 +108,32 @@ type config struct {
 	// against. Default: the console CN.
 	CertBindingExemptCallers []string
 
+	// Trusted front-proxy mode. When TrustedProxyCallers is non-empty, a
+	// connection whose live peer-cert CN is in the set may forward a
+	// verified end-client cert in TrustedProxyCertHeader; the server
+	// re-validates that cert against its own ClientCAs and derives caller
+	// identity (and the cert-binding fingerprint) from it. This lets a
+	// reverse proxy (nginx/caddy/envoy) terminate the client's mTLS at the
+	// edge while every identity/authz decision stays at the origin. Empty
+	// (default) keeps the legacy behavior: identity is always the live
+	// peer cert. Requires mTLS to be configured (the proxy is itself an
+	// mTLS client).
+	TrustedProxyCallers []string
+	// TrustedProxyCertHeader is the metadata header carrying the forwarded
+	// end-client cert (URL-encoded PEM, or an Envoy XFCC value with a
+	// Cert= element). Default "x-forwarded-client-cert".
+	TrustedProxyCertHeader string
+	// TrustedProxyMayApply lets a proxy-forwarded identity satisfy the
+	// self-apply gate (`tide plan`/`apply` on its own schema). Default
+	// true — this is the normal caller/CI workflow, and the edge can
+	// already act as the caller for its own data plane.
+	TrustedProxyMayApply bool
+	// TrustedProxyMayOperate lets a proxy-forwarded identity satisfy the
+	// operator gate (cross-caller register/revoke/adopt/rollback/aliases).
+	// Default false: those manage the trust system itself, so they stay on
+	// direct mTLS unless explicitly opted in. High-privilege grant.
+	TrustedProxyMayOperate bool
+
 	// BackfillWorkerEnabled toggles the chunked-UPDATE backfill worker
 	// + the BeginBackfillPlan admin RPC. Default false until the feature
 	// is canaried in staging.
@@ -208,6 +234,11 @@ func loadConfig() (config, error) {
 		// step. Add more via comma-separated env.
 		CertBindingExemptCallers: splitCSVDefault(os.Getenv("ATL_CERT_BINDING_EXEMPT_CALLERS"), "atlantis-console"),
 
+		TrustedProxyCallers:    splitCSV(os.Getenv("ATL_TRUSTED_PROXY_CALLERS")),
+		TrustedProxyCertHeader: envStr("ATL_TRUSTED_PROXY_CERT_HEADER", "x-forwarded-client-cert"),
+		TrustedProxyMayApply:   envBool("ATL_TRUSTED_PROXY_MAY_APPLY", true),
+		TrustedProxyMayOperate: envBool("ATL_TRUSTED_PROXY_MAY_OPERATE", false),
+
 		BackfillWorkerEnabled: envBool("ATL_BACKFILL_WORKER_ENABLED", false),
 
 		JobsWorkerEnabled:  envBool("ATL_JOBS_WORKER_ENABLED", false),
@@ -234,6 +265,12 @@ func loadConfig() (config, error) {
 	hasAll := cert != "" && key != "" && ca != ""
 	if hasAny && !hasAll {
 		return c, fmt.Errorf("TLS_CERT_FILE, TLS_KEY_FILE, TLS_CA_FILE must all be set (or all empty for dev)")
+	}
+	// Trusted-proxy mode requires mTLS: the proxy authenticates to the
+	// server as an mTLS client (its CN is what gates the forwarded header),
+	// and forwarded certs are re-validated against the same ClientCAs.
+	if len(c.TrustedProxyCallers) > 0 && !hasAll {
+		return c, fmt.Errorf("ATL_TRUSTED_PROXY_CALLERS requires mTLS (set TLS_CERT_FILE, TLS_KEY_FILE, TLS_CA_FILE)")
 	}
 	return c, nil
 }

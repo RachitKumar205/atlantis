@@ -56,6 +56,14 @@ type Service struct {
 	backfillEnabled    bool
 	logRing            *obs.LogRing
 
+	// proxyForwarded reports whether the request's identity was asserted by
+	// a trusted front proxy (vs a direct mTLS client). nil when trusted-
+	// proxy mode is off. The two trustedProxyMay* flags decide which gates
+	// a forwarded identity may satisfy.
+	proxyForwarded         func(context.Context) bool
+	trustedProxyMayApply   bool
+	trustedProxyMayOperate bool
+
 	// dispatcher is the worker-poll dispatcher (set by SetDispatcher).
 	// Nil when ATL_JOBS_DISPATCHER_ENABLED=false; the four worker-
 	// admin RPCs return "not found" in that case.
@@ -97,6 +105,25 @@ type Config struct {
 	// request body. When nil the check is skipped (insecure dev mode).
 	CallerFromContext func(context.Context) string
 
+	// ProxyForwardedFromContext reports whether the request's identity came
+	// from a trusted front proxy (a forwarded, re-validated client cert)
+	// rather than a direct mTLS connection. nil disables the trusted-proxy
+	// admin-plane gating (i.e. the mode is off). When it reports true, a
+	// forwarded identity may satisfy self-apply only if TrustedProxyMayApply
+	// and operator gates only if TrustedProxyMayOperate.
+	ProxyForwardedFromContext func(context.Context) bool
+
+	// TrustedProxyMayApply lets a proxy-forwarded identity satisfy the
+	// self-apply gate (its own `tide plan`/`apply`). Default-on at the
+	// config layer.
+	TrustedProxyMayApply bool
+
+	// TrustedProxyMayOperate lets a proxy-forwarded identity satisfy the
+	// operator gate (cross-caller register/revoke/adopt/rollback/aliases).
+	// Default-off: these manage the trust system, so they stay on direct
+	// mTLS unless explicitly opted in.
+	TrustedProxyMayOperate bool
+
 	// BackfillEnabled gates the BeginBackfillPlan RPC. Default false so
 	// a server running without the backfill worker can't accept plans
 	// that would pile up unprocessed. Operator sets this to true after
@@ -131,7 +158,23 @@ func New(pool *pgxpool.Pool, cfg Config) *Service {
 		callerFromContext:  cfg.CallerFromContext,
 		backfillEnabled:    cfg.BackfillEnabled,
 		logRing:            cfg.LogRing,
+
+		proxyForwarded:         cfg.ProxyForwardedFromContext,
+		trustedProxyMayApply:   cfg.TrustedProxyMayApply,
+		trustedProxyMayOperate: cfg.TrustedProxyMayOperate,
 	}
+}
+
+// forwardedDenied returns a non-nil error when the request's identity was
+// asserted by a trusted front proxy but proxy-forwarded identities aren't
+// permitted to satisfy this gate. The edge can carry a caller's own data and
+// self-apply plane, but cross-caller operator authority stays on direct mTLS
+// unless explicitly opted in.
+func (s *Service) forwardedDenied(ctx context.Context, allowed bool, plane, envVar string) error {
+	if allowed || s.proxyForwarded == nil || !s.proxyForwarded(ctx) {
+		return nil
+	}
+	return fmt.Errorf("admin: %s is not permitted over a trusted front proxy; use a direct mTLS connection (or set %s=true)", plane, envVar)
 }
 
 // canMutate reports whether the given cert CN is permitted to invoke
@@ -152,6 +195,9 @@ func (s *Service) canMutate(cn string) bool {
 // set is empty we fall back to the legacy global wildcard so existing
 // deployments keep working.
 func (s *Service) authorizeOperator(ctx context.Context) error {
+	if err := s.forwardedDenied(ctx, s.trustedProxyMayOperate, "operator mutation", "ATL_TRUSTED_PROXY_MAY_OPERATE"); err != nil {
+		return err
+	}
 	var cn string
 	if s.callerFromContext != nil {
 		cn = s.callerFromContext(ctx)
@@ -179,6 +225,9 @@ func (s *Service) authorizeOperator(ctx context.Context) error {
 // In insecure dev mode (no TLS, no CallerFromContext) the same-CN check
 // is skipped but the mutation gate still applies.
 func (s *Service) authorizeSelfApply(ctx context.Context, reqCaller string) error {
+	if err := s.forwardedDenied(ctx, s.trustedProxyMayApply, "schema apply", "ATL_TRUSTED_PROXY_MAY_APPLY"); err != nil {
+		return err
+	}
 	var cn string
 	if s.callerFromContext != nil {
 		cn = s.callerFromContext(ctx)
