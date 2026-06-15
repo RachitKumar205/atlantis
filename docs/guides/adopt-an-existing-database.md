@@ -109,7 +109,7 @@ Since the schema matches, the apply is a metadata write only: atlantis records t
 
 ### Legacy unique indexes can block apply
 
-A zero-change plan does **not** guarantee a clean apply. atlantis enforces uniqueness it declares (`unique`, `unique by …`) as a Postgres `UNIQUE` *constraint*; a legacy database often carries the same uniqueness as a bare `CREATE UNIQUE INDEX` with no backing constraint. The DSL can't express a bare unique index, so it never appears in the DDL diff — but it's a live constraint that will silently reject writes atlantis thinks are legal.
+A zero-change plan does **not** guarantee a clean apply. atlantis enforces uniqueness it declares (`unique`, `unique by …`) as a Postgres `UNIQUE` *constraint*; a legacy database often carries the same uniqueness as a bare `CREATE UNIQUE INDEX` with no backing constraint. The DSL can express a *partial* unique index (`unique index partial`) but not a non-partial bare unique index — non-partial uniqueness is declared as a `UNIQUE` constraint (`unique` / `unique by`), not an index. So an undeclared non-partial index never appears in the DDL diff — but it's a live constraint that will silently reject writes atlantis thinks are legal.
 
 `tidectl adopt` surfaces such an index as a removal (present in the live DB, undeclared), and `tide apply` **refuses** rather than baseline over it:
 
@@ -122,13 +122,15 @@ Applying would leave a hidden constraint that silently rejects legitimate writes
     or declare the uniqueness in your .atl (field `unique`, or `unique by sku`)
 ```
 
-The error prints the **live** index name verbatim. Resolve it one of three ways:
+The error prints the **live** index name verbatim. Resolve it one of these ways:
 
 - `DROP INDEX <name>;` against the live DB, if the index is redundant or unwanted.
-- Declare the uniqueness in the `.atl` (`unique` on the field, or `unique by a, b` on the entity) so atlantis owns it. Note that adding `unique by` is classified backfill-required — see [Add a new entity](add-a-new-entity.md).
+- Declare the uniqueness in the `.atl` so atlantis owns it — match the live index's shape:
+  - **Non-partial index** — add `unique` on the field, or `unique by a, b` on the entity. Classified backfill-required (see [Add a new entity](add-a-new-entity.md)).
+  - **Partial index** (`... WHERE <pred>`) — add `unique index partial by <cols> where <pred>`, using the predicate from the error. You write the restricted DSL predicate; atlantis compares it canonically (parens, type casts, quoting, and `!=`/`<>` are normalized), so it need not match the live index text verbatim. Classified additive, but the `CREATE UNIQUE INDEX` fails if rows matching the predicate still contain duplicates.
 - Set `ATLANTIS_ALLOW_INDEX_DRIFT=1` in the apply environment to proceed knowingly (prefix `ATLANTIS_`, not `ATL_`; value exactly `1`).
 
-`tide plan` only **warns** about drift — it doesn't change the plan class or exit code, and the warning data lives only in `--format=json` (`index_drift`, `index_drift_notes`, `index_drift_error`); the human table output omits it. A partial unique index (`... WHERE <pred>`) always counts as drift, even if the same columns carry a declared full uniqueness, because the DSL can't express the predicate.
+`tide plan` only **warns** about drift — it doesn't change the plan class or exit code, and the warning data lives only in `--format=json` (`index_drift`, `index_drift_notes`, `index_drift_error`); the human table output omits it. A partial unique index (`... WHERE <pred>`) is recognized when the schema declares a matching `unique index partial` (same columns, equivalent predicate); otherwise it counts as drift.
 
 ## 6. Bring atlantis up and cut over
 
