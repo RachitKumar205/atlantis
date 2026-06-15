@@ -188,6 +188,41 @@ entity P in v {
 	assertContains(t, up, `CREATE INDEX IF NOT EXISTS "v_p_consumer_partial_idx" ON "atlantis"."v_p" ("consumer") WHERE "deleted_at" IS NULL;`)
 }
 
+func TestEmit_Initial_UniquePartialIndex(t *testing.T) {
+	ir := lower(t, `
+entity P in v {
+  id         bigint primary
+  sku        text
+  deleted_at timestamptz
+
+  unique index partial by sku where deleted_at is null
+}
+`)
+	scripts, err := EmitInitial(ir)
+	if err != nil {
+		t.Fatalf("EmitInitial: %v", err)
+	}
+	assertContains(t, scripts.Up, `CREATE UNIQUE INDEX IF NOT EXISTS "v_p_sku_unique_partial_idx" ON "atlantis"."v_p" ("sku") WHERE "deleted_at" IS NULL;`)
+}
+
+// Flipping `unique` on a partial index is a drop+recreate: the old
+// non-unique partial index is dropped and the unique one created (distinct
+// names), and DOWN reverses it.
+func TestEmit_Diff_UniquePartialToggle(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  sku text  deleted_at timestamptz  index partial by sku where deleted_at is null }`)
+	newIR := lower(t, `entity A in x { id bigint primary  sku text  deleted_at timestamptz  unique index partial by sku where deleted_at is null }`)
+	d := ComputeDiff(oldIR, newIR)
+	scripts, err := EmitSQL(oldIR, newIR, d)
+	if err != nil {
+		t.Fatalf("EmitSQL: %v", err)
+	}
+	assertContains(t, scripts.Up, `DROP INDEX IF EXISTS "atlantis"."x_a_sku_partial_idx";`)
+	assertContains(t, scripts.Up, `CREATE UNIQUE INDEX IF NOT EXISTS "x_a_sku_unique_partial_idx" ON "atlantis"."x_a" ("sku") WHERE "deleted_at" IS NULL;`)
+	// DOWN reverses exactly.
+	assertContains(t, scripts.Down, `DROP INDEX IF EXISTS "atlantis"."x_a_sku_unique_partial_idx";`)
+	assertContains(t, scripts.Down, `CREATE INDEX IF NOT EXISTS "x_a_sku_partial_idx" ON "atlantis"."x_a" ("sku") WHERE "deleted_at" IS NULL;`)
+}
+
 func TestEmit_Initial_Hypertable(t *testing.T) {
 	ir := lower(t, `
 hypertable Purchase in vendor on purchased_at {

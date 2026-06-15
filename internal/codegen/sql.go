@@ -797,22 +797,27 @@ func emitFKDrop(b *sqlBuilder, e *dsl.Entity, f *dsl.Field) {
 }
 
 func emitIndexCreate(b *sqlBuilder, e *dsl.Entity, idx dsl.Index) {
-	// Same idempotency rationale as emitEntityCreate — `IF NOT EXISTS`
-	// only on the initial-migration path. The diff-driven add-index
-	// migrations still use bare `CREATE INDEX` so an unexpected name
-	// collision is visible.
+	// `CREATE INDEX IF NOT EXISTS` on both the initial-migration and the
+	// diff-driven add-index paths — the index name is deterministic, so a
+	// re-run is a no-op rather than an error.
 	name := quoteIdent(indexName(e, idx))
 	switch idx.Kind {
 	case dsl.IndexBtree:
 		b.linef("CREATE INDEX IF NOT EXISTS %s ON %s (%s);",
 			name, qualifiedTable(e), indexFieldList(idx.Fields))
 	case dsl.IndexPartial:
+		// Only the partial form can be unique (Postgres UNIQUE constraints
+		// can't be partial) — see the DSL `unique index partial` form.
+		unique := ""
+		if idx.Unique {
+			unique = "UNIQUE "
+		}
 		where := ""
 		if idx.Where != nil {
 			where = " WHERE " + renderPartialPred(idx.Where)
 		}
-		b.linef("CREATE INDEX IF NOT EXISTS %s ON %s (%s)%s;",
-			name, qualifiedTable(e), indexFieldList(idx.Fields), where)
+		b.linef("CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)%s;",
+			unique, name, qualifiedTable(e), indexFieldList(idx.Fields), where)
 	case dsl.IndexHNSW:
 		b.linef("CREATE INDEX IF NOT EXISTS %s ON %s USING hnsw (%s %s);",
 			name, qualifiedTable(e), quoteIdent(idx.Field), idx.VecOps)
@@ -991,6 +996,9 @@ func indexName(e *dsl.Entity, idx dsl.Index) string {
 	case dsl.IndexBtree:
 		return prefix + "_" + joinFieldNames(idx.Fields) + "_idx"
 	case dsl.IndexPartial:
+		if idx.Unique {
+			return prefix + "_" + joinFieldNames(idx.Fields) + "_unique_partial_idx"
+		}
 		return prefix + "_" + joinFieldNames(idx.Fields) + "_partial_idx"
 	case dsl.IndexHNSW:
 		return prefix + "_" + idx.Field + "_hnsw_idx"

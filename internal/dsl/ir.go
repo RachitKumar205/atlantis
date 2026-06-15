@@ -535,7 +535,8 @@ type Index struct {
 	Fields []IndexField `json:"fields,omitempty"` // btree, partial
 	Field  string       `json:"field,omitempty"`  // hnsw, gin
 	VecOps VectorOps    `json:"vec_ops,omitempty"`
-	Where  *PartialPred `json:"where,omitempty"` // partial only
+	Where  *PartialPred `json:"where,omitempty"`  // partial only
+	Unique bool         `json:"unique,omitempty"` // partial only — CREATE UNIQUE INDEX
 }
 
 // PartialPred is the resolved form of a partial-index predicate.
@@ -984,6 +985,7 @@ func lowerIndex(d *IndexDecl) Index {
 		Fields: d.Fields,
 		Field:  d.Field,
 		VecOps: d.VecOps,
+		Unique: d.Unique,
 	}
 	if d.Where != nil {
 		idx.Where = &PartialPred{

@@ -234,9 +234,21 @@ func (p *Parser) parseEntityMembers() []EntityMember {
 				members = append(members, m)
 			}
 		case TokUnique:
-			// Top-level "unique by a, b" — composite UNIQUE. Differs from
-			// the field-modifier `unique` which only appears mid-field.
-			if m := p.parseUniqueDecl(); m != nil {
+			// `unique index partial ...` — a unique partial index (the only
+			// unique-index form). Otherwise top-level "unique by a, b" —
+			// composite UNIQUE. (The field-modifier `unique` only appears
+			// mid-field, never at member start.)
+			if p.pos+1 < len(p.toks) && p.toks[p.pos+1].Kind == TokIndex {
+				uniq := p.advance() // consume 'unique'
+				if idx := p.parseIndex(); idx != nil {
+					if idx.Kind != IndexPartial {
+						p.errf(uniq.Pos, "only `unique index partial` is supported; use `unique` or `unique by` for non-partial uniqueness")
+					} else {
+						idx.Unique = true
+						members = append(members, idx)
+					}
+				}
+			} else if m := p.parseUniqueDecl(); m != nil {
 				members = append(members, m)
 			}
 		case TokPrimary:
@@ -471,9 +483,21 @@ func (p *Parser) parseFieldModifiers() []FieldModifier {
 			p.expect(TokNull)
 			mods = append(mods, &ModNotNullDecl{Pos: t.Pos})
 		case TokUnique:
-			// Same disambiguation as primary: `unique by a, b` at member
-			// position is a composite UNIQUE, not a field modifier.
-			if p.pos+1 < len(p.toks) && p.toks[p.pos+1].Kind == TokBy {
+			// Disambiguation: member-level declarations that start with
+			// `unique` must not be eaten as a field modifier:
+			//   - `unique by a, b`            (composite UNIQUE)
+			//   - `unique index partial ...`  (unique partial index)
+			// But a field-level `unique` immediately followed by an `index`
+			// member (`... text unique` then `index by foo`) IS a field
+			// modifier — only `unique index partial` is the unique-index form.
+			next, next2 := TokEOF, TokEOF
+			if p.pos+1 < len(p.toks) {
+				next = p.toks[p.pos+1].Kind
+			}
+			if p.pos+2 < len(p.toks) {
+				next2 = p.toks[p.pos+2].Kind
+			}
+			if next == TokBy || (next == TokIndex && next2 == TokPartial) {
 				return mods
 			}
 			p.advance()

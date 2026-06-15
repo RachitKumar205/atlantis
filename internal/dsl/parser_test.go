@@ -235,6 +235,79 @@ entity P in x {
 	}
 }
 
+func TestParse_UniquePartialIndex(t *testing.T) {
+	f := mustParse(t, `
+entity P in x {
+  id  bigint primary
+  sku text
+  deleted_at timestamptz
+
+  unique index partial by sku where deleted_at is null
+}
+`)
+	e := f.Decls[0].(*EntityDecl)
+	var idx *IndexDecl
+	for _, m := range e.Members {
+		if id, ok := m.(*IndexDecl); ok {
+			idx = id
+		}
+	}
+	if idx == nil {
+		t.Fatal("no index parsed")
+	}
+	if idx.Kind != IndexPartial || !idx.Unique {
+		t.Fatalf("want unique partial index, got Kind=%v Unique=%v", idx.Kind, idx.Unique)
+	}
+	if idx.Where == nil || idx.Where.Field != "deleted_at" || !idx.Where.IsNull {
+		t.Errorf("predicate shape: %+v", idx.Where)
+	}
+
+	// `unique` is only valid on the partial form. When `unique index <kind>`
+	// is genuinely at member start (here after an `index by` member, so the
+	// `unique` can't attach to a field as a modifier), a non-partial kind is
+	// rejected with guidance.
+	for _, bad := range []string{
+		"entity P in x { id bigint primary  sku text\n  index by sku\n  unique index by sku }",
+		"entity P in x { id bigint primary  m jsonb\n  index gin on m\n  unique index gin on m }",
+	} {
+		err := mustParseErr(t, bad)
+		if !strings.Contains(err.Error(), "unique index partial") {
+			t.Errorf("expected a 'unique index partial' guidance error, got: %v", err)
+		}
+	}
+
+	// A field-level `unique` immediately followed by an `index` member is a
+	// field modifier + a separate index — valid, not the unique-index form.
+	f2 := mustParse(t, `
+entity Q in x {
+  id  bigint primary
+  sku text unique
+  index by sku
+}
+`)
+	e2 := f2.Decls[0].(*EntityDecl)
+	var skuUnique, sawIndex bool
+	for _, m := range e2.Members {
+		switch mm := m.(type) {
+		case *FieldDecl:
+			if mm.Name == "sku" {
+				for _, mod := range mm.Modifiers {
+					if _, ok := mod.(*ModUniqueDecl); ok {
+						skuUnique = true
+					}
+				}
+			}
+		case *IndexDecl:
+			if mm.Kind == IndexBtree && !mm.Unique {
+				sawIndex = true
+			}
+		}
+	}
+	if !skuUnique || !sawIndex {
+		t.Errorf("field-unique + index member: skuUnique=%v sawIndex=%v", skuUnique, sawIndex)
+	}
+}
+
 func TestParse_CacheBlock(t *testing.T) {
 	f := mustParse(t, `
 entity Outfit in consumer {

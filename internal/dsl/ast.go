@@ -281,6 +281,12 @@ type IndexDecl struct {
 	Pos  Position
 	Kind IndexKind
 
+	// Unique marks a unique index. Only supported on the partial form
+	// (`unique index partial by ... where ...`) — Postgres UNIQUE
+	// constraints can't be partial, so this is the only way to express
+	// uniqueness scoped by a predicate (e.g. unique among non-deleted rows).
+	Unique bool
+
 	// For btree (default) and partial btree:
 	Fields []IndexField
 

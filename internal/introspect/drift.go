@@ -40,11 +40,10 @@ type UniqueIndexDrift struct {
 	Table     string   `json:"table"`
 	IndexName string   `json:"index_name"`
 	Columns   []string `json:"columns"`
-	// Partial is true for a `... WHERE <pred>` index. A partial unique is
-	// semantically weaker than a full unique (it permits duplicates outside
-	// the predicate) and the DSL cannot express it at all, so a partial
-	// unique on declared columns is always drift regardless of any declared
-	// full-uniqueness on the same columns.
+	// Partial is true for a `... WHERE <pred>` index. It's drift unless a
+	// `unique index partial` on the same columns declares an equivalent
+	// predicate (a full-uniqueness declaration on the same columns does not
+	// cover it — a partial unique is semantically weaker).
 	Partial   bool   `json:"partial,omitempty"`
 	Predicate string `json:"predicate,omitempty"`
 }
@@ -96,13 +95,15 @@ func DetectUniqueIndexDrift(ctx context.Context, q Querier, declaredIR *dsl.IR) 
 }
 
 // declaredUnique captures, per physical table, the columns the schema
-// manages and the column-sets it declares unique. uniqueSets is keyed by
-// the order-independent uniqueKey so matching is set-based (UNIQUE(a,b) ≡
-// UNIQUE(b,a)).
+// manages and the column-sets it declares unique. uniqueSets (full
+// uniqueness from `unique` / `unique by` / PK) and partialUniques (declared
+// `unique index partial` predicates) are keyed by the order-independent
+// uniqueKey so matching is set-based (UNIQUE(a,b) ≡ UNIQUE(b,a)).
 type declaredUnique struct {
-	entityID   string
-	fields     map[string]bool
-	uniqueSets map[string]bool
+	entityID       string
+	fields         map[string]bool
+	uniqueSets     map[string]bool
+	partialUniques map[string][]*dsl.PartialPred // column-set key → declared partial predicates
 }
 
 func buildDeclaredUniques(ir *dsl.IR) map[physRef]declaredUnique {
@@ -111,9 +112,10 @@ func buildDeclaredUniques(ir *dsl.IR) map[physRef]declaredUnique {
 		e := &ir.Entities[i]
 		schema, table := physical(e)
 		du := declaredUnique{
-			entityID:   e.ID(),
-			fields:     make(map[string]bool, len(e.Fields)),
-			uniqueSets: make(map[string]bool),
+			entityID:       e.ID(),
+			fields:         make(map[string]bool, len(e.Fields)),
+			uniqueSets:     make(map[string]bool),
+			partialUniques: make(map[string][]*dsl.PartialPred),
 		}
 		for _, f := range e.Fields {
 			du.fields[f.Name] = true
@@ -126,6 +128,29 @@ func buildDeclaredUniques(ir *dsl.IR) map[physRef]declaredUnique {
 		}
 		if len(e.CompositePK) > 0 {
 			du.uniqueSets[uniqueKey(e.CompositePK)] = true
+		}
+		// `unique index partial by <cols> where <pred>` — the only unique-
+		// index form. Record (column-set → predicate). Expression-column
+		// partials are skipped: the live side skips expression indexes too.
+		for j := range e.Indexes {
+			idx := &e.Indexes[j]
+			if idx.Kind != dsl.IndexPartial || !idx.Unique || idx.Where == nil {
+				continue
+			}
+			cols := make([]string, 0, len(idx.Fields))
+			hasExpr := false
+			for _, f := range idx.Fields {
+				if f.IsExpr {
+					hasExpr = true
+					break
+				}
+				cols = append(cols, f.Name)
+			}
+			if hasExpr || len(cols) == 0 {
+				continue
+			}
+			key := uniqueKey(cols)
+			du.partialUniques[key] = append(du.partialUniques[key], idx.Where)
 		}
 		out[physRef{schema, table}] = du
 	}
@@ -142,9 +167,10 @@ type liveUniqueIndex struct {
 
 // classifyUniqueIndexDrift is the pure decision: a live bare-unique index is
 // drift when every column it covers is a declared field AND it is not
-// already declared unique (partial uniques are always drift — see the
-// Partial field doc). An index touching any undeclared column is the
-// operator's private business and is left alone.
+// already declared unique — for a full index via `unique`/`unique by`/PK,
+// for a partial index via a matching `unique index partial` declaration. An
+// index touching any undeclared column is the operator's private business
+// and is left alone.
 func classifyUniqueIndexDrift(declared map[physRef]declaredUnique, live map[physRef][]liveUniqueIndex) []UniqueIndexDrift {
 	var out []UniqueIndexDrift
 	for ref, idxs := range live {
@@ -167,10 +193,25 @@ func classifyUniqueIndexDrift(declared map[physRef]declaredUnique, live map[phys
 				continue
 			}
 			// A full unique whose columns match a declared uniqueness is
-			// exactly what the schema asked for. A partial unique can never
-			// be what the schema asked for (the DSL can't express it).
-			if !idx.partial && du.uniqueSets[uniqueKey(idx.columns)] {
-				continue
+			// exactly what the schema asked for. A partial unique matches a
+			// declared `unique index partial` on the same columns iff its
+			// predicate is equivalent to a declared one.
+			colKey := uniqueKey(idx.columns)
+			if !idx.partial {
+				if du.uniqueSets[colKey] {
+					continue
+				}
+			} else {
+				matched := false
+				for _, dp := range du.partialUniques[colKey] {
+					if predMatchesLive(dp, idx.predicate) {
+						matched = true
+						break
+					}
+				}
+				if matched {
+					continue
+				}
 			}
 			out = append(out, UniqueIndexDrift{
 				EntityID:  du.entityID,

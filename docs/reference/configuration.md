@@ -100,7 +100,7 @@ Three independent gates grant mutation permission:
 
 ## Schema drift
 
-`ATLANTIS_ALLOW_INDEX_DRIFT` controls whether `tide apply` proceeds over a bare unique index the schema doesn't declare — a `CREATE UNIQUE INDEX` with no backing constraint. atlantis detects such an index on columns the schema declares but never marks unique — the DSL has no `unique index` form, so any such index is invisible to the schema and silently rejects writes the schema considers legal. A partial unique index always counts as drift; the DSL cannot express one.
+`ATLANTIS_ALLOW_INDEX_DRIFT` controls whether `tide apply` proceeds over a bare unique index the schema doesn't declare — a `CREATE UNIQUE INDEX` with no backing constraint. atlantis detects such an index on columns the schema declares but never marks unique, silently rejecting writes the schema considers legal. A **partial** unique index is recognized when the schema declares a matching `unique index partial` (same columns, equivalent predicate); otherwise it's drift. A non-partial unique index is drift unless the columns are declared `unique` / `unique by` (the DSL has no non-partial unique-index form).
 
 | Variable | Default | Notes |
 |---|---|---|
