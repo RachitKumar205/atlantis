@@ -548,12 +548,9 @@ type Index struct {
 type PredKind string
 
 const (
-	PredKindBool    PredKind = "bool"    // n-ary and/or
-	PredKindNot     PredKind = "not"     // boolean negation
-	PredKindCompare PredKind = "compare" // <operand> <op> <operand>
-	PredKindNull    PredKind = "null"    // <operand> IS [NOT] NULL
-	PredKindIn      PredKind = "in"      // <operand> [NOT] IN (<operand>...)
-	PredKindTruthy  PredKind = "truthy"  // bare boolean operand
+	PredKindCompare PredKind = "compare" // legacy: <col> <op> <literal>
+	PredKindNull    PredKind = "null"    // legacy: <col> IS [NOT] NULL
+	PredKindExpr    PredKind = "expr"    // any other predicate, as canonical SQL text
 )
 
 // PredExpr is the resolved (IR) form of a partial-index predicate — a recursive
@@ -572,15 +569,17 @@ const (
 //
 // See MarshalJSON/UnmarshalJSON for the exact rules.
 type PredExpr struct {
-	Kind     PredKind       `json:"kind"`
-	Op       string         `json:"op,omitempty"`       // bool: and|or ; compare: =,!=,<,<=,>,>=
-	Operands []*PredExpr    `json:"operands,omitempty"` // bool
-	Inner    *PredExpr      `json:"inner,omitempty"`    // not
-	Left     *PredOperand   `json:"left,omitempty"`     // compare
-	Right    *PredOperand   `json:"right,omitempty"`    // compare
-	Arg      *PredOperand   `json:"arg,omitempty"`      // null, in, truthy
-	List     []*PredOperand `json:"list,omitempty"`     // in
-	Negated  bool           `json:"negated,omitempty"`  // null (IS NOT NULL), in (NOT IN)
+	Kind    PredKind     `json:"kind"`
+	Op      string       `json:"op,omitempty"`      // compare: =,!=,<,<=,>,>=
+	Left    *PredOperand `json:"left,omitempty"`    // compare
+	Right   *PredOperand `json:"right,omitempty"`   // compare
+	Arg     *PredOperand `json:"arg,omitempty"`     // null
+	Negated bool         `json:"negated,omitempty"` // null (IS NOT NULL)
+
+	// PredKindExpr only: the canonical predicate SQL text, and every column it
+	// references (so Columns() needs no re-parse).
+	Text string   `json:"text,omitempty"`
+	Cols []string `json:"cols,omitempty"`
 }
 
 // PredOperandKind tags a scalar operand inside a predicate.
@@ -589,29 +588,15 @@ type PredOperandKind string
 const (
 	OperandColumn  PredOperandKind = "column"
 	OperandLiteral PredOperandKind = "literal"
-	OperandFunc    PredOperandKind = "func"
-	OperandCast    PredOperandKind = "cast"
-	OperandCase    PredOperandKind = "case"
 )
 
-// PredCaseWhen is one resolved arm of a CASE operand.
-type PredCaseWhen struct {
-	Cond *PredExpr    `json:"cond"`
-	Then *PredOperand `json:"then"`
-}
-
-// PredOperand is a scalar inside a predicate: a column, literal, immutable
-// function call, cast, or CASE expression.
+// PredOperand is a scalar inside a legacy predicate node: a column reference or
+// a literal constant. (Non-legacy predicates are stored as PredKindExpr text,
+// not operand trees.)
 type PredOperand struct {
-	Kind     PredOperandKind `json:"kind"`
-	Name     string          `json:"name,omitempty"`      // column
-	Literal  *Default        `json:"literal,omitempty"`   // literal
-	FuncName string          `json:"func_name,omitempty"` // func
-	Args     []*PredOperand  `json:"args,omitempty"`      // func
-	Inner    *PredOperand    `json:"inner,omitempty"`     // cast
-	CastType string          `json:"cast_type,omitempty"` // cast
-	Whens    []PredCaseWhen  `json:"whens,omitempty"`     // case
-	Else     *PredOperand    `json:"else,omitempty"`      // case (nil if no ELSE)
+	Kind    PredOperandKind `json:"kind"`
+	Name    string          `json:"name,omitempty"`    // column
+	Literal *Default        `json:"literal,omitempty"` // literal
 }
 
 // legacyPred is the flat JSON of the two pre-tree predicate shapes. Used only by
@@ -726,55 +711,24 @@ func (lg legacyPred) toTree() *PredExpr {
 // Columns returns every column referenced anywhere in the predicate tree, in
 // pre-order. Used by IR validation to check each against the entity's fields.
 func (p *PredExpr) Columns() []string {
-	var out []string
-	var opCols func(o *PredOperand)
-	var walk func(p *PredExpr)
-	opCols = func(o *PredOperand) {
-		if o == nil {
-			return
-		}
-		switch o.Kind {
-		case OperandColumn:
-			out = append(out, o.Name)
-		case OperandFunc:
-			for _, a := range o.Args {
-				opCols(a)
-			}
-		case OperandCast:
-			opCols(o.Inner)
-		case OperandCase:
-			for _, w := range o.Whens {
-				walk(w.Cond)
-				opCols(w.Then)
-			}
-			opCols(o.Else)
-		}
+	if p == nil {
+		return nil
 	}
-	walk = func(p *PredExpr) {
-		if p == nil {
-			return
+	col := func(o *PredOperand) []string {
+		if o != nil && o.Kind == OperandColumn {
+			return []string{o.Name}
 		}
-		switch p.Kind {
-		case PredKindBool:
-			for _, o := range p.Operands {
-				walk(o)
-			}
-		case PredKindNot:
-			walk(p.Inner)
-		case PredKindCompare:
-			opCols(p.Left)
-			opCols(p.Right)
-		case PredKindNull, PredKindTruthy:
-			opCols(p.Arg)
-		case PredKindIn:
-			opCols(p.Arg)
-			for _, o := range p.List {
-				opCols(o)
-			}
-		}
+		return nil
 	}
-	walk(p)
-	return out
+	switch p.Kind {
+	case PredKindNull:
+		return col(p.Arg)
+	case PredKindCompare:
+		return append(col(p.Left), col(p.Right)...)
+	case PredKindExpr:
+		return p.Cols
+	}
+	return nil
 }
 
 // Cache holds the resolved cache stanza.
@@ -1077,7 +1031,11 @@ func lowerMembers(_ string, ms []EntityMember, e *Entity) []error {
 				Via:      mm.Via,
 			})
 		case *IndexDecl:
-			e.Indexes = append(e.Indexes, lowerIndex(mm))
+			idx, ierr := lowerIndex(mm)
+			if ierr != nil {
+				errs = append(errs, ierr)
+			}
+			e.Indexes = append(e.Indexes, idx)
 		case *UniqueDecl:
 			// Canonicalize: single-field `unique by foo` is the same shape
 			// as the field-level `unique` modifier. Lower both into
@@ -1204,7 +1162,7 @@ func lowerDefault(dv DefaultValue) (*Default, error) {
 	}
 }
 
-func lowerIndex(d *IndexDecl) Index {
+func lowerIndex(d *IndexDecl) (Index, error) {
 	idx := Index{
 		Kind:   d.Kind,
 		Fields: d.Fields,
@@ -1212,82 +1170,15 @@ func lowerIndex(d *IndexDecl) Index {
 		VecOps: d.VecOps,
 		Unique: d.Unique,
 	}
-	if d.Where != nil {
-		idx.Where = lowerPred(d.Where)
+	if d.Kind != IndexPartial {
+		return idx, nil
 	}
-	return idx
-}
-
-// lowerPred converts an AST predicate tree into the resolved IR tree.
-func lowerPred(p Pred) *PredExpr {
-	switch n := p.(type) {
-	case *PredBool:
-		ops := make([]*PredExpr, len(n.Operands))
-		for i, o := range n.Operands {
-			ops[i] = lowerPred(o)
-		}
-		return &PredExpr{Kind: PredKindBool, Op: n.Op, Operands: ops}
-	case *PredNot:
-		return &PredExpr{Kind: PredKindNot, Inner: lowerPred(n.Inner)}
-	case *PredCompare:
-		return &PredExpr{Kind: PredKindCompare, Op: n.Op,
-			Left: lowerOperand(n.Left), Right: lowerOperand(n.Right)}
-	case *PredNull:
-		return &PredExpr{Kind: PredKindNull, Arg: lowerOperand(n.Operand), Negated: n.Negated}
-	case *PredIn:
-		list := make([]*PredOperand, len(n.List))
-		for i, o := range n.List {
-			list[i] = lowerOperand(o)
-		}
-		return &PredExpr{Kind: PredKindIn, Arg: lowerOperand(n.Operand), List: list, Negated: n.Negated}
-	case *PredTruthy:
-		return &PredExpr{Kind: PredKindTruthy, Arg: lowerOperand(n.Operand)}
+	pe, err := lowerPredicate(d.WhereRaw)
+	if err != nil {
+		return idx, fmt.Errorf("%s: %w", d.WherePos, err)
 	}
-	return nil
-}
-
-// lowerOperand converts an AST operand into the resolved IR operand.
-func lowerOperand(o Operand) *PredOperand {
-	switch n := o.(type) {
-	case *OpColumn:
-		return &PredOperand{Kind: OperandColumn, Name: n.Name}
-	case *OpLiteral:
-		return &PredOperand{Kind: OperandLiteral, Literal: lowerOpLiteral(n)}
-	case *OpFunc:
-		args := make([]*PredOperand, len(n.Args))
-		for i, a := range n.Args {
-			args[i] = lowerOperand(a)
-		}
-		return &PredOperand{Kind: OperandFunc, FuncName: n.Name, Args: args}
-	case *OpCast:
-		return &PredOperand{Kind: OperandCast, Inner: lowerOperand(n.Inner), CastType: n.Type}
-	case *OpCase:
-		whens := make([]PredCaseWhen, len(n.Whens))
-		for i, w := range n.Whens {
-			whens[i] = PredCaseWhen{Cond: lowerPred(w.Cond), Then: lowerOperand(w.Then)}
-		}
-		oc := &PredOperand{Kind: OperandCase, Whens: whens}
-		if n.Else != nil {
-			oc.Else = lowerOperand(n.Else)
-		}
-		return oc
-	}
-	return nil
-}
-
-// lowerOpLiteral resolves a predicate literal operand into a Default.
-func lowerOpLiteral(l *OpLiteral) *Default {
-	switch l.Kind {
-	case LitString:
-		return &Default{Kind: DefaultIRString, Str: l.Str}
-	case LitInt:
-		return &Default{Kind: DefaultIRInt, Int: l.Int}
-	case LitFloat:
-		return &Default{Kind: DefaultIRFloat, Float: l.Float}
-	case LitBool:
-		return &Default{Kind: DefaultIRBool, Bool: l.Bool}
-	}
-	return nil
+	idx.Where = pe
+	return idx, nil
 }
 
 func lowerCache(cb *CacheBlock, _ *Entity) (*Cache, []error) {
