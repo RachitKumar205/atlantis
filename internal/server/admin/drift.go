@@ -24,7 +24,12 @@ func indexDriftError(drift []introspect.UniqueIndexDrift) error {
 		}
 		fmt.Fprintf(&b, "  %s.%s — %s on %s\n", d.Schema, d.Table, kind, d.Describe())
 		fmt.Fprintf(&b, "    resolve: %s\n", d.DropStatement())
-		if !d.Partial {
+		if d.Partial {
+			// The predicate text is the exact `pg_get_expr(indpred)` form; the
+			// declared `where` must canonicalize-equal to it.
+			fmt.Fprintf(&b, "    or declare it in your .atl: `unique index partial by %s where %s`\n",
+				strings.Join(d.Columns, ", "), d.Predicate)
+		} else {
 			fmt.Fprintf(&b, "    or declare the uniqueness in your .atl (field `unique`, or `unique by %s`)\n", strings.Join(d.Columns, ", "))
 		}
 	}

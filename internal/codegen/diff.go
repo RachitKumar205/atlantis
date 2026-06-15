@@ -724,11 +724,20 @@ func diffIndexes(oldE, newE *dsl.Entity, d *Diff) {
 	newKeys := indexKeys(newE.Indexes)
 	for k, idx := range newKeys {
 		if _, ok := oldKeys[k]; !ok {
+			// Index changes are always additive and never phase-split — a
+			// CREATE INDEX (even UNIQUE) either succeeds or fails cleanly; it
+			// has no chunked-backfill action. A unique index can fail on
+			// existing duplicates, so we warn in the detail rather than
+			// routing it through the backfill-required banner.
+			detail := "index added: " + k
+			if idx.Unique {
+				detail = "unique index added: " + k + " — CREATE UNIQUE INDEX fails if duplicates exist in the predicate subset"
+			}
 			d.Additive = append(d.Additive, Change{
 				Kind:     KindIndexAdded,
 				Class:    ClassAdditive,
 				EntityID: newE.ID(),
-				Detail:   "index added: " + k,
+				Detail:   detail,
 				To:       idx,
 			})
 		}
@@ -1000,7 +1009,12 @@ func indexKey(idx dsl.Index) string {
 		}
 		return s
 	case dsl.IndexPartial:
+		// Unique partials key distinctly from non-unique ones so toggling
+		// `unique` is detected as a drop+recreate (different index identity).
 		s := "partial:"
+		if idx.Unique {
+			s = "unique_partial:"
+		}
 		for i, f := range idx.Fields {
 			if i > 0 {
 				s += ","
@@ -1022,11 +1036,15 @@ func indexKey(idx dsl.Index) string {
 				if idx.Where.Literal != nil {
 					switch idx.Where.Literal.Kind {
 					case dsl.DefaultIRString:
-						s += " " + idx.Where.Literal.Str
+						s += " s:" + idx.Where.Literal.Str
 					case dsl.DefaultIRInt:
-						s += fmt.Sprintf(" %d", idx.Where.Literal.Int)
+						s += fmt.Sprintf(" i:%d", idx.Where.Literal.Int)
 					case dsl.DefaultIRBool:
-						s += fmt.Sprintf(" %v", idx.Where.Literal.Bool)
+						s += fmt.Sprintf(" b:%v", idx.Where.Literal.Bool)
+					case dsl.DefaultIRNow:
+						s += " now()"
+					case dsl.DefaultIRRaw:
+						s += " raw:" + idx.Where.Literal.Str
 					}
 				}
 			}

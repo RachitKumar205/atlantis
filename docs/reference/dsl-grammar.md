@@ -30,7 +30,7 @@ EntityBody =
     [ "composite_pk" "by" IdentList ]
     { "unique" "by" IdentList }
     { "index" "by" IndexFieldList }
-    { "index" "partial" "by" IdentList "where" PartialPredicate }
+    { [ "unique" ] "index" "partial" "by" IdentList "where" PartialPredicate }
     { "index" "hnsw" "on" Ident "ops" VectorOps }
     { "index" "gin" "on" Ident }
     [ "soft_delete" "by" Ident ]
@@ -129,10 +129,11 @@ Go and proto mappings are in [the type mapping reference](dsl-types.md).
 - `unique by f1, f2` — multi-column unique constraint. May appear multiple times. For a single column, use the per-field `unique` modifier instead.
 - `index by f1, f2` — non-unique B-tree index. May appear multiple times. Each field may instead be an expression (`expr "lower(email)"`) and may carry a per-field `asc` or `desc` (e.g. `index by created_at desc`).
 - `index partial by f1, f2 where <predicate>` — partial index. The predicate is restricted, not arbitrary SQL: either `field is [not] null`, or `field <op> <literal>` with `<op>` one of `=`, `!=`, `<`, `<=`, `>`, `>=` (inequality is written `!=`).
+- `unique index partial by f1, f2 where <predicate>` — partial **unique** index (`CREATE UNIQUE INDEX … WHERE …`). The only unique-index form. Use it for uniqueness scoped by a predicate — e.g. `unique index partial by sku where deleted_at is null` makes `sku` unique among non-soft-deleted rows. A Postgres UNIQUE *constraint* can't be partial, so `unique` / `unique by` can't express this. Same restricted predicate grammar as `index partial`.
 - `index hnsw on <field> ops <cosine|l2|ip>` — pgvector HNSW index over a `vector(N)` field. `ops` picks the operator class: `cosine`, `l2` (Euclidean), or `ip` (inner product).
 - `index gin on <field>` — GIN index, for `jsonb` and array fields.
 
-There is no `unique index` (nor `index unique`) form. Uniqueness is declared only with the per-field `unique` modifier or entity-level `unique by`; `index by`, `index partial`, `index hnsw`, and `index gin` are all non-unique. A live `CREATE UNIQUE INDEX` the schema doesn't account for is therefore treated as drift — `tide apply` refuses it unless `ATLANTIS_ALLOW_INDEX_DRIFT=1`. See [`tide apply`](cli-tide.md).
+The only unique-index form is `unique index partial`; `index by`, `index hnsw`, `index gin`, and the non-`unique` `index partial` are all non-unique. Non-partial uniqueness is declared with the per-field `unique` modifier or entity-level `unique by` (which emit UNIQUE constraints). A live `CREATE UNIQUE INDEX` the schema doesn't account for is treated as drift — `tide apply` refuses it unless `ATLANTIS_ALLOW_INDEX_DRIFT=1`; a declared `unique index partial` whose predicate matches the live one is recognized and not drift. See [`tide apply`](cli-tide.md).
 - `soft_delete by <field>` — replaces row deletion with setting `<field>` (must be `timestamptz`) to `now()`. Reads filter `<field> IS NULL` automatically.
 - `touch_on_update by <field>` — Postgres trigger sets `<field>` (must be `timestamptz`) to `now()` on every `UPDATE`.
 - `partition by <field>` — Atlantis-level multi-tenant partition. Not Postgres table partitioning. Generated read RPCs inject `<field> = <caller-partition>` into the predicate; callers cannot override. The caller partition is read from the auth context.

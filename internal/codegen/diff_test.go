@@ -1,6 +1,7 @@
 package codegen
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
@@ -410,6 +411,19 @@ func TestDiff_IndexAdded(t *testing.T) {
 	d := ComputeDiff(oldIR, newIR)
 	if c := findChange(t, d, KindIndexAdded); c == nil || c.Class != ClassAdditive {
 		t.Errorf("index add should be additive, got %+v", c)
+	}
+}
+
+func TestDiff_UniquePartialIndexAdded(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  sku text  deleted_at timestamptz }`)
+	newIR := lower(t, `entity A in x { id bigint primary  sku text  deleted_at timestamptz  unique index partial by sku where deleted_at is null }`)
+	d := ComputeDiff(oldIR, newIR)
+	c := findChange(t, d, KindIndexAdded)
+	if c == nil || c.Class != ClassAdditive {
+		t.Fatalf("unique partial index add should be additive, got %+v", c)
+	}
+	if !strings.Contains(c.Detail, "unique index added") {
+		t.Errorf("detail should flag uniqueness/dup risk, got %q", c.Detail)
 	}
 }
 
