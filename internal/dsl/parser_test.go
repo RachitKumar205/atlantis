@@ -229,19 +229,9 @@ entity P in x {
 	if idxs[2].Kind != IndexGIN || idxs[2].Field != "meta" {
 		t.Errorf("gin index shape: %+v", idxs[2])
 	}
-	if idxs[3].Kind != IndexPartial || !predIsNullOnCol(idxs[3].Where, "deleted_at") {
-		t.Errorf("partial index shape: %+v %+v", idxs[3], idxs[3].Where)
+	if idxs[3].Kind != IndexPartial || idxs[3].WhereRaw != "deleted_at is null" {
+		t.Errorf("partial index shape: %+v %q", idxs[3], idxs[3].WhereRaw)
 	}
-}
-
-// predIsNullOnCol reports whether p is `<col> IS NULL` (the AST shape).
-func predIsNullOnCol(p Pred, col string) bool {
-	np, ok := p.(*PredNull)
-	if !ok || np.Negated {
-		return false
-	}
-	oc, ok := np.Operand.(*OpColumn)
-	return ok && oc.Name == col
 }
 
 func TestParse_UniquePartialIndex(t *testing.T) {
@@ -267,8 +257,8 @@ entity P in x {
 	if idx.Kind != IndexPartial || !idx.Unique {
 		t.Fatalf("want unique partial index, got Kind=%v Unique=%v", idx.Kind, idx.Unique)
 	}
-	if !predIsNullOnCol(idx.Where, "deleted_at") {
-		t.Errorf("predicate shape: %+v", idx.Where)
+	if idx.WhereRaw != "deleted_at is null" {
+		t.Errorf("predicate shape: %q", idx.WhereRaw)
 	}
 
 	// `unique` is only valid on the partial form. When `unique index <kind>`

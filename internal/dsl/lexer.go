@@ -2,6 +2,7 @@ package dsl
 
 import (
 	"fmt"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -33,6 +34,16 @@ type Lexer struct {
 	// specific characters inside the body (single quotes, `--` line
 	// comments, the `*` in `SELECT *`) would crash the regular lexer.
 	armedForRawSQL bool
+
+	// sawPartial is set when TokPartial is emitted and cleared at the
+	// following TokWhere (or the entity-closing `}`); it gates armedForWhere
+	// so only a partial-index `where` triggers raw predicate capture.
+	sawPartial bool
+
+	// armedForWhere is set after a partial-index `where` keyword is emitted.
+	// The next token the lexer produces is the predicate, captured verbatim
+	// as a single TokString (see captureWherePredicate).
+	armedForWhere bool
 
 	// pending holds tokens we've already produced but haven't yet returned
 	// to the caller. Raw-SQL capture needs to emit LBRACE, then BODY, then
@@ -72,6 +83,10 @@ func (l *Lexer) next() Token {
 		l.pending = l.pending[1:]
 		return t
 	}
+	if l.armedForWhere {
+		l.armedForWhere = false
+		return l.captureWherePredicate()
+	}
 	l.skipWhitespaceAndComments()
 	if l.pos >= len(l.src) {
 		return l.tok(TokEOF, "")
@@ -102,6 +117,7 @@ func (l *Lexer) next() Token {
 		return lbrace
 	case r == '}':
 		l.advance(size)
+		l.sawPartial = false
 		return Token{Kind: TokRBrace, Value: "}", Pos: start}
 	case r == '(':
 		l.advance(size)
@@ -314,9 +330,81 @@ func (l *Lexer) scanIdentOrKeyword(start Position) Token {
 		if kw == TokTouches {
 			l.armedForRawSQL = true
 		}
+		// Arm raw capture of a partial-index `where` predicate. The predicate
+		// is a SQL expression (full operator surface) the regular scanner would
+		// choke on (`*`, `~`, `||`, …), so capture it verbatim. `where` also
+		// occurs in cache-invalidate and typed update/delete steps, so we only
+		// arm when this `where` follows a `partial` (the only producer of
+		// TokPartial is `index partial` / `unique index partial`, whose field
+		// list is always followed by the predicate `where`).
+		if kw == TokPartial {
+			l.sawPartial = true
+		}
+		if kw == TokWhere && l.sawPartial {
+			l.armedForWhere = true
+			l.sawPartial = false
+		}
 		return Token{Kind: kw, Value: text, Pos: start}
 	}
 	return Token{Kind: TokIdent, Value: text, Pos: start}
+}
+
+// captureWherePredicate captures a partial-index predicate verbatim as a single
+// TokString. The predicate is a SQL boolean expression (the full operator
+// surface), so it is captured raw rather than tokenized. It runs from just after
+// `where` to the first member terminator — a newline, the entity-closing `}`, a
+// `//` line comment, or EOF — encountered OUTSIDE a DSL `"..."` string. (`}` and
+// `//` inside a string are part of the string.) Leading and trailing horizontal
+// whitespace is trimmed. The DSL→SQL conversion happens later, at IR lowering.
+func (l *Lexer) captureWherePredicate() Token {
+	for l.pos < len(l.src) {
+		c := l.src[l.pos]
+		if c == ' ' || c == '\t' || c == '\r' {
+			l.advance(1)
+			continue
+		}
+		break
+	}
+	start := l.position()
+	bodyStart := l.pos
+loop:
+	for l.pos < len(l.src) {
+		switch c := l.src[l.pos]; {
+		case c == '\n', c == '}':
+			break loop
+		case c == '/' && l.pos+1 < len(l.src) && l.src[l.pos+1] == '/':
+			break loop
+		case c == '"':
+			if !l.skipDSLString() {
+				break loop // unterminated; let validation surface the error
+			}
+		default:
+			l.advance(1)
+		}
+	}
+	body := strings.TrimRight(string(l.src[bodyStart:l.pos]), " \t\r")
+	return Token{Kind: TokString, Value: body, Pos: start}
+}
+
+// skipDSLString advances past a DSL "..."-delimited string (cursor on the
+// opening quote), honoring `\"`/`\\` escapes. Returns false if the string is
+// unterminated before a newline or EOF (DSL strings are single-line).
+func (l *Lexer) skipDSLString() bool {
+	l.advance(1) // opening quote
+	for l.pos < len(l.src) {
+		switch l.src[l.pos] {
+		case '\\':
+			l.advance(2)
+		case '"':
+			l.advance(1)
+			return true
+		case '\n':
+			return false
+		default:
+			l.advance(1)
+		}
+	}
+	return false
 }
 
 // captureRawSQLBody consumes bytes verbatim from the current position
