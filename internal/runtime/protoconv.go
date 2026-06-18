@@ -157,14 +157,3 @@ func VectorToFloat32(v []float32) []float32 {
 	copy(out, v)
 	return out
 }
-
-// Float32ToVector is the inverse direction for caller → pgx args. Identity
-// today; same forward-compat hedge as VectorToFloat32.
-func Float32ToVector(v []float32) []float32 {
-	if v == nil {
-		return nil
-	}
-	out := make([]float32, len(v))
-	copy(out, v)
-	return out
-}

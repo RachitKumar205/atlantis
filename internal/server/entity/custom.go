@@ -15,6 +15,7 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 
+	pgvector "github.com/pgvector/pgvector-go"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/runtime"
 )
@@ -496,6 +497,14 @@ func makeCustomScanTarget(t dsl.FieldType) any {
 		return new(sql.NullTime)
 	case "bytea", "jsonb":
 		return new([]byte)
+	case "vector":
+		// Custom-query outputs carry no not-null guarantee, so scan into
+		// **pgvector.Vector: pgx sets the inner pointer to nil on a NULL
+		// (e.g. an un-embedded row's search_vec) and allocates a Vector on
+		// a value. Scanning a vector into the default *string target would
+		// instead panic when set onto the repeated-float proto field.
+		var v *pgvector.Vector
+		return &v
 	}
 	return new(string)
 }
@@ -519,6 +528,13 @@ func setCustomProtoField(msg *dynamicpb.Message, fd protoreflect.FieldDescriptor
 		v := *(target.(*[]byte))
 		if v != nil {
 			msg.Set(fd, protoreflect.ValueOfBytes(v))
+		}
+	case "vector":
+		// Mirror scanNullVector (scan.go): a NULL vector leaves the
+		// repeated-float field empty — proto3 has no explicit null for
+		// repeated fields — while a value is unpacked into the list.
+		if vp := *(target.(**pgvector.Vector)); vp != nil {
+			setRepeatedFloat32(msg, fd, vp.Slice())
 		}
 	default:
 		msg.Set(fd, protoreflect.ValueOfString(*(target.(*string))))
@@ -550,6 +566,24 @@ func customBindValue(msg *dynamicpb.Message, fd protoreflect.FieldDescriptor, t 
 		return time.Unix(sec, int64(nanos)).UTC()
 	case "bytea", "jsonb":
 		return msg.Get(fd).Bytes()
+	case "vector":
+		// Mirror bindColumnValue's vector handling: a `vector(N)` input
+		// arrives as a `repeated float` proto field and must be encoded
+		// through pgvector.NewVector so pgx emits the binary vector
+		// format. Without this case the value falls through to the
+		// .String() default below, which stringifies the float list into
+		// something Postgres rejects as an invalid vector literal
+		// ("invalid input syntax for type vector"). An unset vector binds
+		// SQL NULL — a dimensioned column rejects a 0-dimension pgvector.
+		list := msg.Get(fd).List()
+		if list.Len() == 0 {
+			return (*pgvector.Vector)(nil)
+		}
+		floats := make([]float32, list.Len())
+		for i := 0; i < list.Len(); i++ {
+			floats[i] = float32(list.Get(i).Float())
+		}
+		return pgvector.NewVector(floats)
 	}
 	return msg.Get(fd).String()
 }
