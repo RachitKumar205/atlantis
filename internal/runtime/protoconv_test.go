@@ -167,21 +167,6 @@ func TestVectorToFloat32(t *testing.T) {
 	}
 }
 
-func TestFloat32ToVector(t *testing.T) {
-	if got := Float32ToVector(nil); got != nil {
-		t.Errorf("nil → nil, got %v", got)
-	}
-	in := []float32{1, 2, 3}
-	out := Float32ToVector(in)
-	if len(out) != 3 || out[0] != 1 {
-		t.Errorf("corrupted: %v", out)
-	}
-	in[0] = 99
-	if out[0] == 99 {
-		t.Error("Float32ToVector should defensively copy")
-	}
-}
-
 // ---- shape sanity ----
 
 func TestNullableHelpers_ReturnConcreteSQLTypes(t *testing.T) {

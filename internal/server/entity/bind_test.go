@@ -91,3 +91,75 @@ func TestBindColumnValue_SetVectorBindsValue(t *testing.T) {
 		t.Errorf("vector should have 2 dims, got %d", len(v.Slice()))
 	}
 }
+
+// TestCustomBindValue_VectorWrapsThroughPgvector pins the custom-query
+// counterpart of the entity bind fix: a vector(N) *input* to a custom
+// query (e.g. `ORDER BY search_vec <=> $search_vec`) must encode through
+// pgvector.NewVector. Before the fix, customBindValue had no "vector"
+// case and fell through to msg.Get(fd).String(), stringifying the
+// repeated-float list into a literal Postgres rejected with
+// "invalid input syntax for type vector".
+func TestCustomBindValue_VectorWrapsThroughPgvector(t *testing.T) {
+	meta := vectorMeta(t)
+	cm := vectorCol(t, meta)
+	fd := meta.msgDesc.Fields().ByNumber(cm.protoNum)
+	vt := dsl.FieldType{Name: "vector", VecDim: 32}
+
+	// Populated input → a real pgvector.Vector, not a string.
+	msg := dynamicpb.NewMessage(meta.msgDesc)
+	list := msg.Mutable(fd).List()
+	list.Append(protoreflect.ValueOfFloat32(-0.024214512))
+	list.Append(protoreflect.ValueOfFloat32(0.25))
+	got := customBindValue(msg, fd, vt)
+	v, ok := got.(pgvector.Vector)
+	if !ok {
+		t.Fatalf("vector input should bind pgvector.Vector, got %T (%v)", got, got)
+	}
+	if len(v.Slice()) != 2 {
+		t.Errorf("vector should have 2 dims, got %d", len(v.Slice()))
+	}
+
+	// Unset input → SQL NULL (nil *pgvector.Vector), mirroring bindColumnValue.
+	empty := dynamicpb.NewMessage(meta.msgDesc)
+	gotNull := customBindValue(empty, fd, vt)
+	if vp, ok := gotNull.(*pgvector.Vector); !ok || vp != nil {
+		t.Errorf("unset vector should bind (*pgvector.Vector)(nil), got %T (%v)", gotNull, gotNull)
+	}
+}
+
+// TestCustomVectorOutput_ScanRoundTrip pins the output-side counterpart:
+// a custom query that SELECTs a vector(N) column must scan it NULL-safely
+// and unpack it onto the repeated-float proto field. Before the fix,
+// makeCustomScanTarget returned *string for a vector and setCustomProtoField
+// tried ValueOfString on a repeated-float field — a panic. NULL must scan
+// cleanly (un-embedded search_vec) and leave the field empty.
+func TestCustomVectorOutput_ScanRoundTrip(t *testing.T) {
+	meta := vectorMeta(t)
+	cm := vectorCol(t, meta)
+	fd := meta.msgDesc.Fields().ByNumber(cm.protoNum)
+	vt := dsl.FieldType{Name: "vector", VecDim: 32}
+
+	// Scan target must be NULL-safe (**pgvector.Vector), not *string.
+	target := makeCustomScanTarget(vt)
+	pp, ok := target.(**pgvector.Vector)
+	if !ok {
+		t.Fatalf("vector scan target should be **pgvector.Vector, got %T", target)
+	}
+
+	// Value row: pgx allocates and fills the inner Vector.
+	vec := pgvector.NewVector([]float32{0.1, -0.2, 0.3})
+	*pp = &vec
+	msg := dynamicpb.NewMessage(meta.msgDesc)
+	setCustomProtoField(msg, fd, vt, target)
+	if got := msg.Get(fd).List().Len(); got != 3 {
+		t.Errorf("value vector should set 3 floats, got %d", got)
+	}
+
+	// NULL row: inner pointer stays nil → field left empty, no panic.
+	nullTarget := makeCustomScanTarget(vt)
+	nullMsg := dynamicpb.NewMessage(meta.msgDesc)
+	setCustomProtoField(nullMsg, fd, vt, nullTarget)
+	if got := nullMsg.Get(fd).List().Len(); got != 0 {
+		t.Errorf("NULL vector should leave the field empty, got %d floats", got)
+	}
+}
