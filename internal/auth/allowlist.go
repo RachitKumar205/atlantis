@@ -1,7 +1,17 @@
 // Package auth implements caller-identity enforcement for the atlantis
-// gRPC surface. The allowlist is loaded from atlantis.caller_registrations
-// on startup and refreshed on a periodic ticker — new callers become
-// callable within a refresh interval of their first admin.ApplyMigration.
+// gRPC surface. The allowlist is the union of two sources, loaded on
+// startup and refreshed on a periodic ticker:
+//
+//   - atlantis.caller_registrations — callers that have applied schema
+//     (a row appears on their first admin.ApplyMigration).
+//   - atlantis.caller_identities — callers an operator pre-registered
+//     (console / RegisterCaller), including read-only runtime CNs that
+//     only ever open a typed client connection and never apply schema.
+//
+// A caller becomes callable within one refresh interval of landing in
+// either table. This gate only decides whether a caller may open the
+// gRPC surface at all; mutation is gated separately
+// (caller_identities.can_mutate ∪ ATL_MUTATION_ALLOWED_CALLERS).
 package auth
 
 import (
@@ -14,8 +24,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// CallerAllowlist is a snapshot of distinct callers registered via
-// atlantis.caller_registrations. The auth interceptor checks every
+// CallerAllowlist is a snapshot of the distinct callers known to the
+// server — the union of atlantis.caller_registrations and
+// atlantis.caller_identities. The auth interceptor checks every
 // non-exempt RPC against this set. Reload swaps the set atomically;
 // readers never see a partial state.
 type CallerAllowlist struct {
@@ -40,14 +51,18 @@ func New(pool *pgxpool.Pool, log *slog.Logger) *CallerAllowlist {
 	}
 }
 
-// Reload reads the full set of distinct callers from
-// atlantis.caller_registrations and swaps it in atomically. Errors
-// propagate so the caller can decide whether to abort startup or log
-// and continue with the previous snapshot.
+// Reload reads the full set of callers — caller_registrations (applied
+// schema) UNION caller_identities (operator pre-registered, including
+// read-only runtime CNs) — and swaps it in atomically. Errors propagate
+// so the caller can decide whether to abort startup or log and continue
+// with the previous snapshot.
 func (a *CallerAllowlist) Reload(ctx context.Context) error {
-	rows, err := a.pool.Query(ctx, `SELECT DISTINCT caller FROM atlantis.caller_registrations`)
+	rows, err := a.pool.Query(ctx, `
+		SELECT caller FROM atlantis.caller_registrations
+		UNION
+		SELECT caller FROM atlantis.caller_identities`)
 	if err != nil {
-		return fmt.Errorf("auth: query caller_registrations: %w", err)
+		return fmt.Errorf("auth: query caller allowlist: %w", err)
 	}
 	defer rows.Close()
 	fresh := map[string]struct{}{}
