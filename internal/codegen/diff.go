@@ -840,6 +840,7 @@ func mergedNames[V any](a, b map[string]V) []string {
 // typeEqual compares two field types structurally.
 func typeEqual(a, b dsl.FieldType) bool {
 	if a.Name != b.Name || a.Array != b.Array || a.VecDim != b.VecDim ||
+		a.Len != b.Len ||
 		a.NumP != b.NumP || a.NumS != b.NumS || a.HasNumP != b.HasNumP {
 		return false
 	}
@@ -896,6 +897,18 @@ func classifyTypeChange(oldT, newT dsl.FieldType) ChangeClass {
 		// numeric precision/scale
 		if oldT.Name == "numeric" {
 			if newT.NumP < oldT.NumP || newT.NumS < oldT.NumS {
+				return ClassBackfillRequired
+			}
+			return ClassAdditive
+		}
+		// varchar(N) length. Postgres widens a varchar in place (no table
+		// rewrite, no scan), so widening is additive; narrowing can
+		// truncate existing rows, so it needs validation. Len 0 is the
+		// "no declared limit" (unbounded) sentinel — the widest — so a
+		// change to unbounded never truncates and unbounded → bounded can.
+		if oldT.Name == "varchar" {
+			narrows := newT.Len != 0 && (oldT.Len == 0 || newT.Len < oldT.Len)
+			if narrows {
 				return ClassBackfillRequired
 			}
 			return ClassAdditive

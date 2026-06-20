@@ -158,6 +158,35 @@ func TestDiff_VectorDimChange_IsBreaking(t *testing.T) {
 	}
 }
 
+func TestDiff_VarcharWiden_IsAdditive(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  v varchar(10) }`)
+	newIR := lower(t, `entity A in x { id bigint primary  v varchar(255) }`)
+	d := ComputeDiff(oldIR, newIR)
+	c := findChange(t, d, KindFieldTypeChanged)
+	if c == nil || c.Class != ClassAdditive {
+		t.Errorf("varchar(10)→varchar(255) widening should be additive, got %+v", c)
+	}
+}
+
+func TestDiff_VarcharNarrow_IsBackfill(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  v varchar(255) }`)
+	newIR := lower(t, `entity A in x { id bigint primary  v varchar(10) }`)
+	d := ComputeDiff(oldIR, newIR)
+	c := findChange(t, d, KindFieldTypeChanged)
+	if c == nil || c.Class != ClassBackfillRequired {
+		t.Errorf("varchar(255)→varchar(10) narrowing should require backfill, got %+v", c)
+	}
+}
+
+func TestDiff_VarcharSameLength_NoChange(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  v varchar(64) }`)
+	newIR := lower(t, `entity A in x { id bigint primary  v varchar(64) }`)
+	d := ComputeDiff(oldIR, newIR)
+	if c := findChange(t, d, KindFieldTypeChanged); c != nil {
+		t.Errorf("equal varchar lengths should emit no type change, got %+v", c)
+	}
+}
+
 func TestDiff_NotNullTightened_NoDefault_IsBackfill(t *testing.T) {
 	oldIR := lower(t, `entity A in x { id bigint primary  v text }`)
 	newIR := lower(t, `entity A in x { id bigint primary  v text not null }`)
