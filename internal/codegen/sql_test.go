@@ -399,6 +399,15 @@ func TestEmit_Diff_TypeChange(t *testing.T) {
 	assertContains(t, scripts.Down, `ALTER COLUMN "id" TYPE SMALLINT`)
 }
 
+func TestEmit_Diff_VarcharWiden(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  v varchar(10) }`)
+	newIR := lower(t, `entity A in x { id bigint primary  v varchar(255) }`)
+	d := ComputeDiff(oldIR, newIR)
+	scripts, _ := EmitSQL(oldIR, newIR, d)
+	assertContains(t, scripts.Up, `ALTER COLUMN "v" TYPE VARCHAR(255)`)
+	assertContains(t, scripts.Down, `ALTER COLUMN "v" TYPE VARCHAR(10)`)
+}
+
 func TestEmit_Diff_DefaultChanged(t *testing.T) {
 	oldIR := lower(t, `entity A in x { id bigint primary  v int default 1 }`)
 	newIR := lower(t, `entity A in x { id bigint primary  v int default 2 }`)
