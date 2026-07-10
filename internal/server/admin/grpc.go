@@ -10,8 +10,8 @@ import (
 	"google.golang.org/grpc/mem"
 )
 
-// jsonCodec mirrors the codec the `pc` CLI installs on the client side
-// (cmd/pc/client.go). Registering here means a `pc` invocation can use
+// jsonCodec mirrors the codec the `tide` CLI installs on the client side.
+// Registering here means a `tide` invocation can use
 // `ForceCodecV2(jsonCodec{})` and the server will negotiate to JSON.
 //
 // The codec is registered once at package init.
@@ -46,7 +46,7 @@ func init() { encoding.RegisterCodecV2(jsonCodec{}) }
 // proto module or hit a chicken-and-egg with the entity emitter. The
 // hand-rolled ServiceDesc uses JSON envelopes — the wire shape
 // (POST /atlantis.admin.v1.Admin/RPC with a JSON body) is stable for the
-// `pc` CLI.
+// `tide` CLI.
 
 // AdminServer is the typed interface gRPC's RegisterService machinery
 // uses for runtime conformance checking. It mirrors what a buf-generated

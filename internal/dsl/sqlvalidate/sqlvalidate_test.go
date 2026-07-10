@@ -29,7 +29,7 @@ entity SavedOutfit in consumer {
   deleted_at  timestamptz
 }
 ` + extra
-	f, err := dsl.Parse("t.pc", []byte(src))
+	f, err := dsl.Parse("t.atl", []byte(src))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -169,7 +169,7 @@ query Mismatched for Account {
 	}
 }
 
-func TestValidateCustomQuery_AtlantisSchemaQualifier(t *testing.T) {
+func TestValidateCustomQuery_SchemaQualifier(t *testing.T) {
 	// Fully-qualified `atlantis.consumer_account` works too.
 	ir := lowerWithCustom(t, `
 query Qualified for Account {

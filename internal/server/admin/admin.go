@@ -874,7 +874,7 @@ func mirrorFiles(root, caller string, files []SubmittedFile) error {
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
 		}
-		tmp, err := os.CreateTemp(filepath.Dir(dst), ".pc-mirror-*")
+		tmp, err := os.CreateTemp(filepath.Dir(dst), ".atl-mirror-*")
 		if err != nil {
 			return fmt.Errorf("temp file: %w", err)
 		}

@@ -64,7 +64,7 @@ func FuzzHandleIssue(f *testing.F) {
 		[]byte("not json"),
 		[]byte("\x00\x01\x02"),
 		// caller-only, no CSR.
-		[]byte(`{"caller":"backend"}`),
+		[]byte(`{"caller":"api"}`),
 		// CSR-only, no caller.
 		[]byte(`{"csr_pem":"not a real pem"}`),
 		// Reserved CNs (must always be rejected).
@@ -72,13 +72,13 @@ func FuzzHandleIssue(f *testing.F) {
 		mustSeed(f, "atlantis-console", "atlantis-console"),
 		mustSeed(f, "atlantis-signer", "atlantis-signer"),
 		// Mismatched CN (must always be rejected).
-		mustSeed(f, "backend", "vendor"),
+		mustSeed(f, "api", "worker"),
 		mustSeed(f, "", "anything"),
 		mustSeed(f, "with space", "with space"),
 		// Well-formed but absurd CSR.
 		mustSeed(f, "good-caller", "good-caller"),
 		// Unicode & control chars in caller.
-		mustSeed(f, "backend\x00admin", "backend\x00admin"),
+		mustSeed(f, "api\x00admin", "api\x00admin"),
 		mustSeed(f, "back\nend", "back\nend"),
 		// Very long caller.
 		mustSeed(f, strings.Repeat("a", 4096), strings.Repeat("a", 4096)),

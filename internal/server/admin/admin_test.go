@@ -134,8 +134,8 @@ func TestAuthorizeSelfApply_InsecureDevModeWithoutWildcardRejects(t *testing.T) 
 
 func TestParseSubmitted_ProducesFiles(t *testing.T) {
 	files := []SubmittedFile{
-		{Path: "a.pc", Content: []byte(`entity A in x { id bigint primary }`)},
-		{Path: "b.pc", Content: []byte(`entity B in x { id bigint primary }`)},
+		{Path: "a.atl", Content: []byte(`entity A in x { id bigint primary }`)},
+		{Path: "b.atl", Content: []byte(`entity B in x { id bigint primary }`)},
 	}
 	parsed, errs := parseSubmitted("caller-1", files)
 	if len(errs) != 0 {
@@ -152,22 +152,22 @@ func TestParseSubmitted_ProducesFiles(t *testing.T) {
 
 func TestParseSubmitted_SurfacesErrors(t *testing.T) {
 	files := []SubmittedFile{
-		{Path: "good.pc", Content: []byte(`entity A in x { id bigint primary }`)},
-		{Path: "bad.pc", Content: []byte(`entity { definitely not a parseable .atl file }`)},
+		{Path: "good.atl", Content: []byte(`entity A in x { id bigint primary }`)},
+		{Path: "bad.atl", Content: []byte(`entity { definitely not a parseable .atl file }`)},
 	}
 	_, errs := parseSubmitted("caller-1", files)
 	if len(errs) == 0 {
 		t.Fatalf("expected at least one parse error")
 	}
-	if !strings.Contains(errs[0], "bad.pc") {
+	if !strings.Contains(errs[0], "bad.atl") {
 		t.Errorf("error should name the offending file, got %q", errs[0])
 	}
 }
 
 func TestComputePlanID_StableForSameInput(t *testing.T) {
 	files := []*dsl.File{
-		{Path: "caller-1:a.pc"},
-		{Path: "caller-1:b.pc"},
+		{Path: "caller-1:a.atl"},
+		{Path: "caller-1:b.atl"},
 	}
 	id1 := computePlanID("caller-1", files, nil)
 	id2 := computePlanID("caller-1", files, nil)
@@ -177,7 +177,7 @@ func TestComputePlanID_StableForSameInput(t *testing.T) {
 }
 
 func TestComputePlanID_ChangesWithCheckpoint(t *testing.T) {
-	files := []*dsl.File{{Path: "caller-1:a.pc"}}
+	files := []*dsl.File{{Path: "caller-1:a.atl"}}
 	idA := computePlanID("caller-1", files, nil)
 	idB := computePlanID("caller-1", files, &dsl.IR{Version: 1})
 	if idA == idB {
@@ -186,15 +186,15 @@ func TestComputePlanID_ChangesWithCheckpoint(t *testing.T) {
 }
 
 func TestComputePlanID_StableUnderFileReorder(t *testing.T) {
-	f1 := []*dsl.File{{Path: "caller-1:a.pc"}, {Path: "caller-1:b.pc"}}
-	f2 := []*dsl.File{{Path: "caller-1:b.pc"}, {Path: "caller-1:a.pc"}}
+	f1 := []*dsl.File{{Path: "caller-1:a.atl"}, {Path: "caller-1:b.atl"}}
+	f2 := []*dsl.File{{Path: "caller-1:b.atl"}, {Path: "caller-1:a.atl"}}
 	if computePlanID("caller-1", f1, nil) != computePlanID("caller-1", f2, nil) {
 		t.Errorf("PlanID should be invariant under file order; reordering changed it")
 	}
 }
 
 func TestComputePlanID_DiffersAcrossCallers(t *testing.T) {
-	files := []*dsl.File{{Path: "caller:a.pc"}}
+	files := []*dsl.File{{Path: "caller:a.atl"}}
 	idA := computePlanID("caller-A", files, nil)
 	idB := computePlanID("caller-B", files, nil)
 	if idA == idB {
@@ -208,8 +208,8 @@ func TestComputePlanID_DiffersAcrossCallers(t *testing.T) {
 
 func TestComputeMergedSchemaVersion_StableForIdenticalInput(t *testing.T) {
 	entries := []mergedEntry{
-		{caller: "backend", path: "auth/schema.pc", content: "entity A in x {}"},
-		{caller: "data-pipeline", path: "catalog/schema.pc", content: "entity B in x {}"},
+		{caller: "api", path: "auth/schema.atl", content: "entity A in x {}"},
+		{caller: "data-pipeline", path: "catalog/schema.atl", content: "entity B in x {}"},
 	}
 	v1 := computeMergedSchemaVersion(entries)
 	v2 := computeMergedSchemaVersion(entries)
@@ -219,8 +219,8 @@ func TestComputeMergedSchemaVersion_StableForIdenticalInput(t *testing.T) {
 }
 
 func TestComputeMergedSchemaVersion_ShiftsOnContentChange(t *testing.T) {
-	base := []mergedEntry{{caller: "x", path: "p.pc", content: "alpha"}}
-	bumped := []mergedEntry{{caller: "x", path: "p.pc", content: "beta"}}
+	base := []mergedEntry{{caller: "x", path: "p.atl", content: "alpha"}}
+	bumped := []mergedEntry{{caller: "x", path: "p.atl", content: "beta"}}
 	if computeMergedSchemaVersion(base) == computeMergedSchemaVersion(bumped) {
 		t.Errorf("content change must shift the version (otherwise tide pull would never refresh)")
 	}
@@ -276,9 +276,9 @@ func TestImpactReport_SortedByCaller(t *testing.T) {
 		},
 	}
 	others := []*dsl.File{
-		{Path: "zeta-caller:a.pc"},
-		{Path: "alpha-caller:a.pc"},
-		{Path: "mu-caller:a.pc"},
+		{Path: "zeta-caller:a.atl"},
+		{Path: "alpha-caller:a.atl"},
+		{Path: "mu-caller:a.atl"},
 	}
 	rep := buildImpactReport("planning-caller", others, d, nil)
 	for i := 1; i < len(rep); i++ {

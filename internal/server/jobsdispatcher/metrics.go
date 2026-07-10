@@ -52,7 +52,7 @@ var (
 	}, []string{"queue", "reason"})
 
 	// sessionsActive is the current count of connected worker sessions
-	// per queue+caller. Useful for "is anyone listening on vendor?"
+	// per queue+caller. Useful for "is anyone listening on ingestion?"
 	// dashboards.
 	sessionsActive = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "atlantis",

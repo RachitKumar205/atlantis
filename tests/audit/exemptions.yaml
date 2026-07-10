@@ -4,34 +4,20 @@
 # directory of internal/). Glob patterns are accepted; prefer exact-file
 # entries so each cutover PR removes one line.
 #
-# Every entry should disappear by the time Step 9b completes. The target
-# is an empty list — at that point the audit goes red on any direct-pool
-# callsite in the monorepo. Leaving an exemption in place after its
-# replacement lands means the gate is no longer protecting anything.
+# Every entry should disappear once the caller has fully cut over to the
+# atlantis typed gRPC client. The target is an empty list — at that point
+# the audit goes red on any direct-pool callsite in the scanned repos.
+# Leaving an exemption in place after its replacement lands means the gate
+# is no longer protecting anything.
 #
-# Note: a single entry matches the same relative path in every caller
-# repo. `internal/auth/postgres_repository.go` exempts both backend's
-# and data-pipeline's auth repository — both will be removed by their
-# respective cutover PRs, both belong on the list now.
+# A single entry matches the same relative path in every caller repo scanned
+# by AUDIT_CALLER_ROOTS. Add one line per file being migrated; remove the
+# line when the corresponding cutover PR lands.
+#
+# Example:
+#
+#   files:
+#     - "internal/users/postgres_repository.go"    # migrating in PR #42
+#     - "internal/platform/database/postgres.go"   # pool setup, removed last
 
-files:
-  # Pool-construction files. Deleted once the caller-side pool itself
-  # goes away.
-  - "internal/platform/database/postgres.go"        # backend pool setup
-  - "internal/platform/database/database.go"        # data-pipeline pool setup
-
-  # Bucket B repositories awaiting caller cutover (Step 9b). One entry
-  # per file; each PR removes the file and the corresponding entry.
-  - "internal/auth/postgres_repository.go"          # backend + data-pipeline
-  - "internal/cart/postgres_repository.go"          # backend cart
-  - "internal/catalog/postgres_inventory.go"        # data-pipeline catalog
-  - "internal/catalog/postgres_orders.go"           # data-pipeline catalog
-  - "internal/catalog/postgres_products.go"         # data-pipeline catalog
-  - "internal/catalog/postgres_repository.go"       # data-pipeline catalog
-  - "internal/csvimport/postgres_repository.go"     # data-pipeline csvimport
-  - "internal/moodboard/postgres_repository.go"     # backend moodboard
-  - "internal/outfit/postgres_repository.go"        # backend outfit
-  - "internal/search/syncer.go"                     # backend search
-  - "internal/vendor/postgres_repository.go"       # backend + data-pipeline
-  - "internal/useritems/postgres_repository.go"     # backend useritems
-  - "internal/vibesearch/postgres_repository.go"    # backend vibesearch
+files: []

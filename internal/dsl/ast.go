@@ -789,8 +789,8 @@ type JobTimeout struct {
 //
 // Zero (unset) means "use the server's global HeartbeatBudget."
 // Operators set this on jobs whose handlers do IO-bound work that
-// genuinely exceeds the default (bulk product fetches, video
-// encoding, ML training). It does NOT relax the per-attempt timeout
+// genuinely exceeds the default (bulk imports, video encoding,
+// ML training). It does NOT relax the per-attempt timeout
 // — that's the separate `timeout` modifier and bounds how long a
 // SINGLE handler invocation runs. The heartbeat budget bounds how
 // often the worker must signal liveness.

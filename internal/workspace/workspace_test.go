@@ -16,7 +16,7 @@ callers:
     source: git
     repo: file:///nope
     ref: main
-    paths: [a.pc]
+    paths: [a.atl]
 `)
 	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "version") {
 		t.Fatalf("want version error, got %v", err)
@@ -41,12 +41,12 @@ callers:
     source: git
     repo: file:///x
     ref: main
-    paths: [a.pc]
+    paths: [a.atl]
   - name: consumer
     source: git
     repo: file:///y
     ref: main
-    paths: [b.pc]
+    paths: [b.atl]
 `)
 	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "more than once") {
 		t.Fatalf("want duplicate error, got %v", err)
@@ -62,7 +62,7 @@ callers:
     source: git
     repo: file:///x
     ref: main
-    paths: [a.pc]
+    paths: [a.atl]
 `)
 		if _, err := Load(p); err == nil {
 			t.Errorf("want rejection of name %q", bad)
@@ -78,7 +78,7 @@ callers:
     source: http
     repo: https://example.com
     ref: main
-    paths: [a.pc]
+    paths: [a.atl]
 `)
 	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "source") {
 		t.Fatalf("want source error, got %v", err)
@@ -86,7 +86,7 @@ callers:
 }
 
 func TestLoad_RejectsAbsoluteOrNonCanonicalPaths(t *testing.T) {
-	for _, bad := range []string{"/etc/passwd", "a/../b.pc"} {
+	for _, bad := range []string{"/etc/passwd", "a/../b.atl"} {
 		p := writeManifest(t, `
 version: 1
 callers:
@@ -110,12 +110,12 @@ callers:
     source: git
     repo: file:///somewhere
     ref: main
-    paths: [internal/auth/schema.pc, internal/cart/schema.pc]
+    paths: [internal/auth/schema.atl, internal/cart/schema.atl]
   - name: vendor
     source: git
     repo: file:///elsewhere
     ref: v1.2.3
-    paths: [internal/auth/schema.pc]
+    paths: [internal/auth/schema.atl]
 `)
 	w, err := Load(p)
 	if err != nil {
@@ -133,8 +133,8 @@ func TestResolve_ClonesAndReturnsAbsolutePaths(t *testing.T) {
 	gitOrSkip(t)
 
 	upstream := mkGitRepo(t, map[string]string{
-		"internal/auth/schema.pc": "entity Account in consumer { id bigint primary }\n",
-		"internal/cart/schema.pc": "entity Cart in consumer { id bigint primary }\n",
+		"internal/auth/schema.atl": "entity Account in consumer { id bigint primary }\n",
+		"internal/cart/schema.atl": "entity Cart in consumer { id bigint primary }\n",
 	})
 
 	manifest := writeManifest(t, `
@@ -144,7 +144,7 @@ callers:
     source: git
     repo: `+upstream+`
     ref: master
-    paths: [internal/auth/schema.pc, internal/cart/schema.pc]
+    paths: [internal/auth/schema.atl, internal/cart/schema.atl]
 `)
 	w, err := Load(manifest)
 	if err != nil {
@@ -177,7 +177,7 @@ func TestResolve_ReusesCacheAcrossCalls(t *testing.T) {
 	gitOrSkip(t)
 
 	upstream := mkGitRepo(t, map[string]string{
-		"a.pc": "entity A in consumer { id bigint primary }\n",
+		"a.atl": "entity A in consumer { id bigint primary }\n",
 	})
 	manifest := writeManifest(t, `
 version: 1
@@ -186,7 +186,7 @@ callers:
     source: git
     repo: `+upstream+`
     ref: master
-    paths: [a.pc]
+    paths: [a.atl]
 `)
 	w, _ := Load(manifest)
 	cache := filepath.Join(t.TempDir(), "cache")
@@ -215,7 +215,7 @@ func TestResolve_RejectsMissingPath(t *testing.T) {
 	gitOrSkip(t)
 
 	upstream := mkGitRepo(t, map[string]string{
-		"present.pc": "entity A in x { id bigint primary }\n",
+		"present.atl": "entity A in x { id bigint primary }\n",
 	})
 	manifest := writeManifest(t, `
 version: 1
@@ -224,7 +224,7 @@ callers:
     source: git
     repo: `+upstream+`
     ref: master
-    paths: [missing.pc]
+    paths: [missing.atl]
 `)
 	w, _ := Load(manifest)
 	if _, err := w.Resolve(filepath.Join(t.TempDir(), "cache")); err == nil {
@@ -238,16 +238,16 @@ func TestLoad_AcceptsLocalSource(t *testing.T) {
 	p := writeManifest(t, `
 version: 1
 callers:
-  - name: backend
+  - name: api
     source: local
-    path: ../backend
+    path: ../api
     paths: [internal]
 `)
 	w, err := Load(p)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(w.Callers) != 1 || w.Callers[0].Source != "local" || w.Callers[0].Path != "../backend" {
+	if len(w.Callers) != 1 || w.Callers[0].Source != "local" || w.Callers[0].Path != "../api" {
 		t.Errorf("unexpected: %+v", w.Callers)
 	}
 }
@@ -259,9 +259,9 @@ func TestLoad_AcceptsMixedSources(t *testing.T) {
 	p := writeManifest(t, `
 version: 1
 callers:
-  - name: backend
+  - name: api
     source: local
-    path: ../backend
+    path: ../api
     paths: [internal]
   - name: data_pipeline
     source: git
@@ -282,18 +282,18 @@ func TestLoad_LocalRejectsRepoAndRef(t *testing.T) {
 		"with repo": `
 version: 1
 callers:
-  - name: backend
+  - name: api
     source: local
-    path: ../backend
+    path: ../api
     repo: file:///x
     paths: [internal]
 `,
 		"with ref": `
 version: 1
 callers:
-  - name: backend
+  - name: api
     source: local
-    path: ../backend
+    path: ../api
     ref: main
     paths: [internal]
 `,
@@ -313,7 +313,7 @@ func TestLoad_LocalRequiresPath(t *testing.T) {
 	p := writeManifest(t, `
 version: 1
 callers:
-  - name: backend
+  - name: api
     source: local
     paths: [internal]
 `)
@@ -328,11 +328,11 @@ func TestLoad_GitRejectsPath(t *testing.T) {
 	p := writeManifest(t, `
 version: 1
 callers:
-  - name: backend
+  - name: api
     source: git
     repo: file:///x
     ref: main
-    path: ../backend
+    path: ../api
     paths: [internal]
 `)
 	if _, err := Load(p); err == nil {
@@ -342,16 +342,16 @@ callers:
 
 // TestResolve_Local_RelativeToManifestDir: relative paths in the
 // manifest resolve against the manifest's own directory, not the cwd
-// where tidectl was invoked. That keeps `path: ../backend` stable
+// where tidectl was invoked. That keeps `path: ../api` stable
 // regardless of where the operator runs the command from.
 func TestResolve_Local_RelativeToManifestDir(t *testing.T) {
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "backend", "internal"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "api", "internal"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	// .atl file inside the caller's tree so the paths walk picks it up.
 	if err := os.WriteFile(
-		filepath.Join(root, "backend", "internal", "a.atl"),
+		filepath.Join(root, "api", "internal", "a.atl"),
 		[]byte("entity A in x { id bigint primary }"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -362,9 +362,9 @@ func TestResolve_Local_RelativeToManifestDir(t *testing.T) {
 	body := `
 version: 1
 callers:
-  - name: backend
+  - name: api
     source: local
-    path: ../backend
+    path: ../api
     paths: [internal]
 `
 	if err := os.WriteFile(manifestPath, []byte(body), 0o644); err != nil {
@@ -392,7 +392,7 @@ func TestResolve_Local_MissingPath(t *testing.T) {
 	manifest := writeManifest(t, `
 version: 1
 callers:
-  - name: backend
+  - name: api
     source: local
     path: /this/does/not/exist
     paths: [internal]

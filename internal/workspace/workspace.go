@@ -71,7 +71,7 @@ type Caller struct {
 	// Path is the filesystem location of the caller's working tree.
 	// Required when source is "local"; rejected otherwise. Relative
 	// paths resolve against the manifest's own directory so
-	// `path: ../backend` works regardless of where the operator
+	// `path: ../api` works regardless of where the operator
 	// invokes tidectl from.
 	Path string `yaml:"path,omitempty"`
 
@@ -235,7 +235,7 @@ func (w *Workspace) resolveCaller(c Caller, cacheDir string) (string, error) {
 
 // resolveLocal returns the absolute path to the caller's working tree.
 // Relative paths in the manifest resolve against the manifest's own
-// directory so `path: ../backend` is stable across invocations from
+// directory so `path: ../api` is stable across invocations from
 // different working directories. The directory must exist; we don't
 // auto-create it because that would mask typos.
 func (w *Workspace) resolveLocal(c Caller) (string, error) {

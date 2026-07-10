@@ -22,7 +22,7 @@ import (
 //	  .tide-cache/
 //	    schema/
 //	      <namespace>/
-//	        <entity>.pc     ← exactly what the server returned
+//	        <entity>.atl    ← exactly what the server returned
 //	    version.json        ← {"version": "abc123..."} from the last pull
 //
 // `.tide-cache/` is gitignored (recommended in docs/DSL_AUTHORING.md). The

@@ -299,8 +299,8 @@ func Field(w io.Writer, key, val string) {
 
 // Row renders a status row under a Header:
 //
-//	●  backend                  added field display_name
-//	·  data-pipeline          (no impact)
+//	●  api                      added field display_name
+//	·  data-pipeline            (no impact)
 //
 // state controls the bullet: "active" → colored ●, "muted" → · in
 // faint grey, "warn" → ●  in brass, "ok" → ●  in sage, "err" → ●  in

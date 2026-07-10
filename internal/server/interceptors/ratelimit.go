@@ -65,7 +65,7 @@ func (c RateLimitConfig) withDefaults() RateLimitConfig {
 // NewRateLimit wires a token-bucket-per-caller interceptor. Token buckets
 // are created lazily on first request from a caller; the goroutine-safe
 // map carries them indefinitely (callers are a low-cardinality set —
-// today's tally is `backend`, `data-pipeline`, future analytics / ML).
+// callers are a low-cardinality set; expect O(10) even for large deployments).
 //
 // Load shedding policy:
 //   - When the pgxpool is below the saturation cutoff, every request

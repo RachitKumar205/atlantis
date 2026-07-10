@@ -51,7 +51,7 @@ func vectorCol(t *testing.T, meta *entityMeta) columnMeta {
 	return columnMeta{}
 }
 
-// TestBindColumnValue_EmptyVectorIsNull pins the fix for the Vendor
+// TestBindColumnValue_EmptyVectorIsNull pins the fix for the bulk
 // import failure: an unset vector column must bind SQL NULL, not an
 // empty pgvector — pgvector rejects a 0-dimension value for a
 // dimensioned column ("vector must have at least 1 dimension").

@@ -49,7 +49,7 @@ func TestCheckWorkerAuthz_MismatchedCaller(t *testing.T) {
 }
 
 func TestCheckWorkerAuthz_AliasMatchesVisibleTo(t *testing.T) {
-	// The PostgreSQL-roles / AD-SID pattern: a cert CN "worker" with
+	// The PostgreSQL-roles / AD-SID pattern: a cert CN "worker" (not "vendor") with
 	// alias "vendor" should satisfy visible_to="vendor". Schema doesn't
 	// know about the identity rename; aliases bridge it.
 	err := CheckWorkerAuthz("worker", []string{"vendor"}, []string{"vendor.BulkImport"}, newTestIR())

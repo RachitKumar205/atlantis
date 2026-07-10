@@ -22,9 +22,9 @@ import (
 //	$ cat atlantis.dev.yaml
 //	version: 1
 //	callers:
-//	  - name: backend
+//	  - name: api
 //	    source: local
-//	    path: ../backend
+//	    path: ../api
 //	    paths: [internal]
 //	  - name: data_pipeline
 //	    source: local
@@ -58,9 +58,9 @@ func cmdDev(args []string) int {
 			fmt.Fprintln(os.Stderr, "")
 			fmt.Fprintln(os.Stderr, "  version: 1")
 			fmt.Fprintln(os.Stderr, "  callers:")
-			fmt.Fprintln(os.Stderr, "    - name: backend")
+			fmt.Fprintln(os.Stderr, "    - name: api")
 			fmt.Fprintln(os.Stderr, "      source: local")
-			fmt.Fprintln(os.Stderr, "      path: ../backend")
+			fmt.Fprintln(os.Stderr, "      path: ../api")
 			fmt.Fprintln(os.Stderr, "      paths: [internal]")
 			return 2
 		}

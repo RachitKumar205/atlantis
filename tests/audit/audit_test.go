@@ -1,6 +1,6 @@
 //go:build audit
 
-// Caller audit. Walks every caller repo (backend, data-pipeline) and
+// Caller audit. Walks caller repos listed in AUDIT_CALLER_ROOTS and
 // asserts that no file outside the explicit exemption list invokes a
 // PG connection directly. The intent is to make a regression of the
 // atlantis contract loud and immediate: once a caller has cut over
@@ -27,9 +27,9 @@
 //
 // Configuration:
 //
-//   - AUDIT_CALLER_ROOTS: comma-separated absolute paths to scan. Defaults
-//     to "../backend,../data-pipeline" (sibling-dir layout from the
-//     atlantis repo root).
+//   - AUDIT_CALLER_ROOTS: required. Comma-separated absolute (or relative)
+//     paths to the caller repos to scan. The test skips when unset — set it
+//     in CI to the checked-out paths of every caller repo.
 //   - AUDIT_EXEMPTIONS:   path to exemptions.yaml. Defaults to
 //     tests/audit/exemptions.yaml.
 
@@ -82,21 +82,18 @@ type exemptionsFile struct {
 }
 
 func TestNoDirectPGAccessInCallers(t *testing.T) {
-	// Anchor relative paths to the atlantis repo root rather than the
-	// test working directory. `go test` runs each package in its own dir,
-	// so `../backend` would resolve to tests/backend without this.
-	repoRoot := repoRootFromTestFile()
-
-	defaultRoots := strings.Join([]string{
-		filepath.Join(repoRoot, "..", "backend"),
-		filepath.Join(repoRoot, "..", "data-pipeline"),
-	}, ",")
-	roots := strings.Split(getenv("AUDIT_CALLER_ROOTS", defaultRoots), ",")
+	rawRoots := getenv("AUDIT_CALLER_ROOTS", "")
+	if rawRoots == "" {
+		t.Skip("AUDIT_CALLER_ROOTS is not set; set it to a comma-separated list of caller repo paths to audit")
+	}
+	roots := strings.Split(rawRoots, ",")
 	for i := range roots {
 		roots[i] = strings.TrimSpace(roots[i])
 	}
 
-	defaultExemptions := filepath.Join(repoRoot, "tests", "audit", "exemptions.yaml")
+	// Default exemptions file sits next to this test file.
+	_, thisFile, _, _ := runtime.Caller(0)
+	defaultExemptions := filepath.Join(filepath.Dir(thisFile), "exemptions.yaml")
 	exemptions := loadExemptions(t, getenv("AUDIT_EXEMPTIONS", defaultExemptions))
 
 	var violations []string

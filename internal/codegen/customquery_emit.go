@@ -1,6 +1,6 @@
 // Custom-query and procedure codegen.
 //
-// One CustomService is emitted per namespace, regardless of which .pc
+// One CustomService is emitted per namespace, regardless of which .atl
 // file each query / procedure originally lived in. Grouping by
 // namespace keeps the per-namespace package layout uniform with the
 // rest of the generated code (gen/go/server/<ns>/, clients/go/client/<ns>/,

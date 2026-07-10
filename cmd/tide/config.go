@@ -12,15 +12,15 @@ import (
 //
 // Example:
 //
-//	caller: backend
-//	endpoint: atlantis-dev.your-org.internal:443
+//	caller: api
+//	endpoint: atlantis.your-org.internal:443
 //	schema_paths:
-//	  - internal/outfit
-//	  - internal/cart
+//	  - internal/users
+//	  - internal/orders
 //	tls:
-//	  cert: ~/.config/atlantis/dev-client.pem
-//	  key:  ~/.config/atlantis/dev-client-key.pem
-//	  ca:   ~/.config/atlantis/atlantis-ca.pem
+//	  cert: ~/.config/atlantis/client.pem
+//	  key:  ~/.config/atlantis/client-key.pem
+//	  ca:   ~/.config/atlantis/ca.pem
 //
 // Every field is overridable via env (ATL_CALLER, ATL_ENDPOINT, TIDE_TLS_*) so
 // CI runners can configure the same `tide` binary without touching tide.yaml.

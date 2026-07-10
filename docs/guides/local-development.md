@@ -16,22 +16,22 @@ In the atlantis repo root:
 ```yaml
 version: 1
 callers:
-  - name: consumer
+  - name: api
     source: local
-    path: ../backend
+    path: ../api
     paths:
       - internal/auth/schema.atl
-      - internal/cart/schema.atl
-  - name: vendor
+      - internal/orders/schema.atl
+  - name: data-pipeline
     source: local
     path: ../data-pipeline
     paths:
       - internal/auth/schema.atl
-      - internal/order/schema.atl
+      - internal/jobs/schema.atl
 ```
 
 - `source: local` reads the working tree. No `git clone`, no commit required. Edit a `.atl`, the next codegen run picks it up.
-- `path:` resolves against the manifest's own directory. `../backend` works regardless of where you invoke `tidectl dev` from.
+- `path:` resolves against the manifest's own directory. `../api` works regardless of where you invoke `tidectl dev` from.
 - `paths:` is a flat list of `.atl` files relative to the caller's `path`. The manifest is auditable — there is no globbing. Add a row when you add a schema file.
 
 For mixed setups (one caller pinned via git, one local), each row independently picks its source kind. `source: git` callers still need `repo:` and `ref:`.
@@ -74,8 +74,8 @@ The two manifests can coexist in the same atlantis deployment repo. Commit `atla
 ## Common errors
 
 - `atlantis.dev.yaml not found` — create the manifest at the repo root, or pass `--workspace <path>`.
-- `caller backend: local path ../backend: stat ...: no such file or directory` — the path in the manifest doesn't exist on disk. Check the relative path resolves against the manifest's directory, not your shell's cwd.
-- `caller backend: path is not allowed for source: git` — you set both `path:` and `repo:`/`ref:` on one caller. Pick one mode per row.
+- `caller api: local path ../api: stat ...: no such file or directory` — the path in the manifest doesn't exist on disk. Check the relative path resolves against the manifest's directory, not your shell's cwd.
+- `caller api: path is not allowed for source: git` — you set both `path:` and `repo:`/`ref:` on one caller. Pick one mode per row.
 - `pg pool init: ...` from the server — `PG_URL` is wrong or Postgres isn't reachable.
 - `memcached: ...` from the server — `MEMCACHED_ADDR` is wrong, or memcached isn't running.
 - `permission denied for table ...` — the role in `PG_URL` doesn't have grants on the caller schemas. See [Adopt an existing database](adopt-an-existing-database.md) §3 for the grant SQL.

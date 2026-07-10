@@ -1,4 +1,4 @@
-// tide — caller-side CLI invoked from inside backend / data-pipeline repos.
+// tide — caller-side CLI invoked from inside caller repos.
 //
 //	tide apply [--no-pull]                     submit + apply this repo's .atl files
 //	tide apply --backfill                      kick off declarative backfill for a backfill_required plan

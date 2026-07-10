@@ -4,7 +4,7 @@
 -- declarations from operational identity.
 --
 -- Why:
---   - A cert CN rename (e.g. `vendor` → `worker`) shouldn't require
+--   - A cert CN rename (e.g. `vendor` → `vendor-v2`) shouldn't require
 --     rewriting every `.atl` file that has `visible_to "vendor"`.
 --   - Multi-environment deploys may want the same `.atl` schema to
 --     resolve to different physical identities per environment.

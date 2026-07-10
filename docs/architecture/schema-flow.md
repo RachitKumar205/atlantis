@@ -79,8 +79,8 @@ In the live-apply path, `tide apply` persists the new IR and the server hot-relo
 
 ```yaml
 callers:
-  - name: backend
-    repo: github.com/example/backend
+  - name: api
+    repo: github.com/example/api
     ref:  v1.42.0
     paths:
       - internal

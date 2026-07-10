@@ -3,7 +3,7 @@
 // SDK module-boundary test. Verifies the typed-client sub-module
 // (github.com/rachitkumar205/atlantis/clients/go) never imports anything from atlantis's main
 // module. The whole point of the sub-module split is that caller repos
-// — backend, data-pipeline, future iOS / ML / web consumers — see only
+// — API services, data pipelines, mobile / ML / web consumers — see only
 // the proto types + gRPC stubs + thin client wrappers, never atlantis's
 // internal/codegen, internal/dsl, internal/cache, the server impl, the
 // pgx pool, memcached, or the DSL parser.

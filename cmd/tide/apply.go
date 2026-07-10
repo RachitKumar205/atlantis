@@ -213,7 +213,7 @@ func cmdApply(args []string) int {
 	// errors and IR-lowering errors (missing FK targets, etc.) into the
 	// same field; the message distinguishes them so a "references unknown
 	// entity vendor.Foo" error doesn't send you hunting for syntax issues
-	// when really data-pipeline just hasn't run `tide apply` yet.
+	// when really another caller just hasn't run `tide apply` yet.
 	if len(planResp.ParseErrors) > 0 {
 		fmt.Fprintln(os.Stderr, "tide: schema validation failed:")
 		for _, e := range planResp.ParseErrors {
