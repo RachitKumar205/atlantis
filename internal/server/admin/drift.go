@@ -36,3 +36,42 @@ func indexDriftError(drift []introspect.UniqueIndexDrift) error {
 	b.WriteString("\nIf this index is intentional and you accept it, set ATLANTIS_ALLOW_INDEX_DRIFT=1 to apply anyway.")
 	return errors.New(b.String())
 }
+
+// checkDriftError is the structured refusal `tide apply` returns when the
+// declared CHECK constraints and the live table's CHECK constraints diverge.
+// It lists each divergence in both directions with the operator's remediation
+// path and the override escape hatch. Mirrors indexDriftError's layout.
+func checkDriftError(drift []introspect.CheckConstraintDrift) error {
+	var b strings.Builder
+	b.WriteString("apply blocked: CHECK constraints diverge between this schema and the live database.\n")
+	b.WriteString("atlantis does not manage CHECK constraints on existing tables, so applying would leave the divergence in place.\n\n")
+	for _, d := range drift {
+		switch d.Kind {
+		case introspect.CheckDeclaredNotEnforced:
+			fmt.Fprintf(&b, "  %s.%s — declared check is NOT enforced live:\n", d.Schema, d.Table)
+			fmt.Fprintf(&b, "      declared: %s\n", d.Declared)
+			fmt.Fprintf(&b, "      resolve:  reconcile the live constraint to %s (drop the stale one, then ADD CONSTRAINT)\n", d.Definition)
+		case introspect.CheckLiveNotDeclared:
+			fmt.Fprintf(&b, "  %s.%s — live constraint %q is NOT declared:\n", d.Schema, d.Table, d.ConstraintName)
+			fmt.Fprintf(&b, "      live:    %s\n", d.Definition)
+			fmt.Fprintf(&b, "      resolve: declare it in your .atl, or DROP CONSTRAINT %s if unintended\n", d.ConstraintName)
+		}
+	}
+	b.WriteString("\nIf the difference is intentional or cosmetic (e.g. `col IS NULL OR ...`), set ATLANTIS_ALLOW_CHECK_DRIFT=1 to apply anyway.")
+	return errors.New(b.String())
+}
+
+// columnDriftError is the structured refusal `tide apply` returns when a
+// column's live type/width diverges from the declaration. Mirrors
+// indexDriftError's layout.
+func columnDriftError(drift []introspect.ColumnTypeDrift) error {
+	var b strings.Builder
+	b.WriteString("apply blocked: column type(s) diverge between this schema and the live database.\n")
+	b.WriteString("The diff path compares against the IR checkpoint, not the live DB, so applying would leave the divergence in place.\n\n")
+	for _, d := range drift {
+		fmt.Fprintf(&b, "  %s.%s.%s — declared %s, live %s\n", d.Schema, d.Table, d.Column, d.Declared, d.Live)
+		fmt.Fprintf(&b, "    resolve: ALTER TABLE %s.%s ALTER COLUMN %s TYPE %s;\n", d.Schema, d.Table, d.Column, d.Declared)
+	}
+	b.WriteString("\nIf the live type is intentional, update your .atl to match — or set ATLANTIS_ALLOW_COLUMN_DRIFT=1 to apply anyway.")
+	return errors.New(b.String())
+}

@@ -317,6 +317,25 @@ type PlanResponse struct {
 	IndexDrift      []introspect.UniqueIndexDrift `json:"index_drift,omitempty"`
 	IndexDriftNotes []string                      `json:"index_drift_notes,omitempty"`
 	IndexDriftError string                        `json:"index_drift_error,omitempty"`
+
+	// CheckDrift lists CHECK constraints that diverge between the declared
+	// schema and the live table — declared-not-enforced (the .atl's check
+	// isn't on the table) or live-not-declared (the table enforces a check
+	// the .atl doesn't). Same lifecycle as IndexDrift: a plan-time warning,
+	// and `tide apply` refuses on a non-empty list unless
+	// ATLANTIS_ALLOW_CHECK_DRIFT=1. CheckDriftError carries the message when
+	// the check itself couldn't run.
+	CheckDrift      []introspect.CheckConstraintDrift `json:"check_drift,omitempty"`
+	CheckDriftNotes []string                          `json:"check_drift_notes,omitempty"`
+	CheckDriftError string                            `json:"check_drift_error,omitempty"`
+
+	// ColumnDrift lists columns whose live type/width differs from the
+	// declared one (e.g. live varchar(10) vs declared varchar(255)). Same
+	// lifecycle as the others: a plan-time warning, and `tide apply` refuses
+	// on a non-empty list unless ATLANTIS_ALLOW_COLUMN_DRIFT=1.
+	ColumnDrift      []introspect.ColumnTypeDrift `json:"column_drift,omitempty"`
+	ColumnDriftNotes []string                     `json:"column_drift_notes,omitempty"`
+	ColumnDriftError string                       `json:"column_drift_error,omitempty"`
 }
 
 // CustomDeclCount tallies custom queries and procedures.
@@ -525,6 +544,24 @@ func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanRespons
 		driftErrMsg = driftErr.Error()
 	}
 
+	// Same for CHECK-constraint drift: the differ never manages CHECKs, so a
+	// constraint that diverged from the .atl at adoption stays divergent and
+	// only surfaces as a runtime 23514. Read-only here; the apply path
+	// re-checks inside the locked tx and refuses.
+	checkDrift, checkNotes, checkErr := introspect.DetectCheckConstraintDrift(ctx, s.pool, newIR)
+	var checkErrMsg string
+	if checkErr != nil {
+		checkErrMsg = checkErr.Error()
+	}
+
+	// And column type/width drift (live column type ≠ declared) — the
+	// checkpoint→live half of the varchar-length gap. Read-only here.
+	columnDrift, columnNotes, columnErr := introspect.DetectColumnTypeDrift(ctx, s.pool, newIR)
+	var columnErrMsg string
+	if columnErr != nil {
+		columnErrMsg = columnErr.Error()
+	}
+
 	resp := &PlanResponse{
 		PlanID:          computePlanID(req.Caller, callerFiles, prior),
 		Class:           translateClass(d.HighestClass()),
@@ -546,6 +583,12 @@ func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanRespons
 		IndexDrift:             indexDrift,
 		IndexDriftNotes:        driftNotes,
 		IndexDriftError:        driftErrMsg,
+		CheckDrift:             checkDrift,
+		CheckDriftNotes:        checkNotes,
+		CheckDriftError:        checkErrMsg,
+		ColumnDrift:            columnDrift,
+		ColumnDriftNotes:       columnNotes,
+		ColumnDriftError:       columnErrMsg,
 	}
 	for _, ch := range d.Breaking {
 		resp.BreakingDetail = append(resp.BreakingDetail,
@@ -728,6 +771,39 @@ func (s *Service) ApplyMigration(ctx context.Context, req ApplyRequest) (*ApplyR
 		}
 		if len(drift) > 0 {
 			return nil, indexDriftError(drift)
+		}
+	}
+
+	// Refuse to apply while CHECK constraints diverge between the .atl and
+	// the live table — the differ doesn't manage CHECKs, so applying would
+	// silently leave the divergence in place (the carts `awaiting_checkout`
+	// outage). Read inside the locked tx so the verdict is authoritative.
+	// The operator reconciles the constraint out-of-band, or sets
+	// ATLANTIS_ALLOW_CHECK_DRIFT=1 to proceed knowingly (e.g. a cosmetic
+	// `col IS NULL OR ...` difference).
+	if os.Getenv("ATLANTIS_ALLOW_CHECK_DRIFT") != "1" {
+		drift, _, derr := introspect.DetectCheckConstraintDrift(ctx, tx, newIR)
+		if derr != nil {
+			return nil, fmt.Errorf("apply: check-drift check failed: %w", derr)
+		}
+		if len(drift) > 0 {
+			return nil, checkDriftError(drift)
+		}
+	}
+
+	// Refuse to apply while a column's live type/width diverges from the
+	// declaration — the diff path compares against the checkpoint, not live,
+	// so applying would leave e.g. a varchar(10) in place under a varchar(255)
+	// declaration (the value-too-long outage). Read inside the locked tx. The
+	// operator reconciles the column out-of-band, or sets
+	// ATLANTIS_ALLOW_COLUMN_DRIFT=1 to proceed knowingly.
+	if os.Getenv("ATLANTIS_ALLOW_COLUMN_DRIFT") != "1" {
+		drift, _, derr := introspect.DetectColumnTypeDrift(ctx, tx, newIR)
+		if derr != nil {
+			return nil, fmt.Errorf("apply: column-drift check failed: %w", derr)
+		}
+		if len(drift) > 0 {
+			return nil, columnDriftError(drift)
 		}
 	}
 

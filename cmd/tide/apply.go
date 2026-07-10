@@ -59,6 +59,14 @@ type planResponse struct {
 	IndexDrift      []indexDriftItem `json:"index_drift,omitempty"`
 	IndexDriftNotes []string         `json:"index_drift_notes,omitempty"`
 	IndexDriftError string           `json:"index_drift_error,omitempty"`
+
+	CheckDrift      []checkDriftItem `json:"check_drift,omitempty"`
+	CheckDriftNotes []string         `json:"check_drift_notes,omitempty"`
+	CheckDriftError string           `json:"check_drift_error,omitempty"`
+
+	ColumnDrift      []columnDriftItem `json:"column_drift,omitempty"`
+	ColumnDriftNotes []string          `json:"column_drift_notes,omitempty"`
+	ColumnDriftError string            `json:"column_drift_error,omitempty"`
 }
 
 // indexDriftItem mirrors introspect.UniqueIndexDrift over the JSON wire.
@@ -69,6 +77,25 @@ type indexDriftItem struct {
 	Columns   []string `json:"columns"`
 	Partial   bool     `json:"partial,omitempty"`
 	Predicate string   `json:"predicate,omitempty"`
+}
+
+// checkDriftItem mirrors introspect.CheckConstraintDrift over the JSON wire.
+type checkDriftItem struct {
+	Kind           string `json:"kind"` // declared_not_enforced | live_not_declared
+	Schema         string `json:"schema"`
+	Table          string `json:"table"`
+	ConstraintName string `json:"constraint_name,omitempty"`
+	Declared       string `json:"declared,omitempty"`
+	Definition     string `json:"definition"`
+}
+
+// columnDriftItem mirrors introspect.ColumnTypeDrift over the JSON wire.
+type columnDriftItem struct {
+	Schema   string `json:"schema"`
+	Table    string `json:"table"`
+	Column   string `json:"column"`
+	Declared string `json:"declared"`
+	Live     string `json:"live"`
 }
 
 type extensionStatus struct {
@@ -349,6 +376,61 @@ func printImpactReport(p planResponse) {
 		fmt.Println()
 	}
 	printIndexDrift(p)
+	printCheckDrift(p)
+	printColumnDrift(p)
+}
+
+// printColumnDrift surfaces columns whose live type/width differs from the
+// declaration. `tide apply` refuses on them unless ATLANTIS_ALLOW_COLUMN_DRIFT=1.
+func printColumnDrift(p planResponse) {
+	if p.ColumnDriftError != "" {
+		cliout.Header(os.Stdout, "column drift")
+		cliout.Row(os.Stdout, "warn", "check skipped", p.ColumnDriftError)
+		fmt.Println()
+		return
+	}
+	if len(p.ColumnDrift) == 0 && len(p.ColumnDriftNotes) == 0 {
+		return
+	}
+	cliout.Header(os.Stdout, "column drift")
+	for _, d := range p.ColumnDrift {
+		cliout.Row(os.Stdout, "coral", d.Schema+"."+d.Table+"."+d.Column, "declared "+d.Declared+", live "+d.Live)
+	}
+	for _, n := range p.ColumnDriftNotes {
+		cliout.Row(os.Stdout, "muted", "note", n)
+	}
+	cliout.SubRow(os.Stdout, "reconcile out-of-band, or ATLANTIS_ALLOW_COLUMN_DRIFT=1 to apply anyway")
+	fmt.Println()
+}
+
+// printCheckDrift surfaces CHECK constraints that diverge between the .atl
+// and the live table. Like index drift, these don't change the plan class,
+// but `tide apply` refuses on them unless ATLANTIS_ALLOW_CHECK_DRIFT=1.
+func printCheckDrift(p planResponse) {
+	if p.CheckDriftError != "" {
+		cliout.Header(os.Stdout, "check drift")
+		cliout.Row(os.Stdout, "warn", "check skipped", p.CheckDriftError)
+		fmt.Println()
+		return
+	}
+	if len(p.CheckDrift) == 0 && len(p.CheckDriftNotes) == 0 {
+		return
+	}
+	cliout.Header(os.Stdout, "check drift")
+	for _, d := range p.CheckDrift {
+		if d.Kind == "live_not_declared" {
+			cliout.Row(os.Stdout, "coral", d.Schema+"."+d.Table, "undeclared CHECK "+d.ConstraintName)
+			cliout.SubRow(os.Stdout, "live: "+d.Definition)
+		} else {
+			cliout.Row(os.Stdout, "coral", d.Schema+"."+d.Table, "declared CHECK not enforced live")
+			cliout.SubRow(os.Stdout, "declared: "+d.Declared)
+		}
+	}
+	for _, n := range p.CheckDriftNotes {
+		cliout.Row(os.Stdout, "muted", "note", n)
+	}
+	cliout.SubRow(os.Stdout, "reconcile out-of-band, or ATLANTIS_ALLOW_CHECK_DRIFT=1 to apply anyway")
+	fmt.Println()
 }
 
 // printIndexDrift surfaces live UNIQUE indexes the schema doesn't declare.
