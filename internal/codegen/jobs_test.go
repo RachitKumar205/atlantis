@@ -171,9 +171,9 @@ job AlphaJob in vendor { args { y int not null } }
 
 func TestPascalCaseJobField(t *testing.T) {
 	cases := map[string]string{
-		"vendor_id":              "VendorId",
-		"import_strategy":        "ImportStrategy",
-		"x":                      "X",
+		"vendor_id":             "VendorId",
+		"import_strategy":       "ImportStrategy",
+		"x":                     "X",
 		"vendor_fulfillment_id": "VendorFulfillmentId",
 	}
 	for in, want := range cases {
