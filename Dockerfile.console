@@ -31,7 +31,7 @@ COPY web/console/ ./
 RUN npm run build
 
 # ── Stage 2: Go build ─────────────────────────────────────────────────────────
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS go-build
+FROM --platform=$BUILDPLATFORM golang:1.25.12-alpine AS go-build
 
 # CGO toolchain. The console binary embeds the sandbox runtime, which
 # depends on pg_query_go (vendored libpg_query, statically linked).
