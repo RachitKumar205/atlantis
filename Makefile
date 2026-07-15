@@ -138,6 +138,8 @@ codegen: ## Regenerate proto, server, client, sql from .atl; then buf generate; 
 .PHONY: proto
 proto: ## Run buf generate against the regenerated .proto tree
 	@which buf >/dev/null || (echo "install buf: brew install bufbuild/buf/buf" && exit 1)
+	$(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6
+	$(GO) install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
 	buf lint
 	buf generate
 

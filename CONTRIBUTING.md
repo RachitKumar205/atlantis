@@ -47,6 +47,8 @@ make test                  # unit tests on the codegen and the emitted code
 make codegen-check         # fails CI if regenerated output differs from committed
 ```
 
+`make proto` (called by `make codegen`) installs `protoc-gen-go` and `protoc-gen-go-grpc` automatically before running `buf generate`. To run `buf generate` directly, install them first: `go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6 && go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1`.
+
 `make codegen-check` is the gate that keeps the committed generated tree in sync with what the codegen would emit. Run it before opening a PR.
 
 Schema fixtures live under `testdata/schema/`. To exercise a codegen change end-to-end, edit a fixture, run `make codegen`, and inspect the diff under `gen/`.
