@@ -98,24 +98,8 @@ func TestTier2_SoftDelete_RejectsNotNull(t *testing.T) {
 	}
 }
 
-func TestTier2_PartialPredicateComparison(t *testing.T) {
-	ir := mustLower(t, `entity A in x {
-  id     bigint primary
-  status text
-  index partial by id where status = "active"
-}`)
-	idx := ir.Entities[0].Indexes[0]
-	w := idx.Where
-	if w == nil || w.Kind != PredKindCompare || w.Op != "=" {
-		t.Fatalf("partial pred op missing: %+v", w)
-	}
-	if w.Left == nil || w.Left.Kind != OperandColumn || w.Left.Name != "status" {
-		t.Errorf("partial pred lhs wrong: %+v", w.Left)
-	}
-	if w.Right == nil || w.Right.Literal == nil || w.Right.Literal.Str != "active" {
-		t.Errorf("partial pred literal wrong: %+v", w.Right)
-	}
-}
+// TestTier2_PartialPredicateComparison lives in predicate_test.go: lowering a
+// `where` predicate needs Postgres's parser, so it is cgo-only.
 
 func TestTier2_ExpressionIndex(t *testing.T) {
 	ir := mustLower(t, `entity A in x {

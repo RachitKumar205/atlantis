@@ -91,3 +91,7 @@ atlantis.dev.yaml
 
 # migrations/tidectl/ is also derived — populated by operators running
 # tidectl plan/approve against their own workspace. (See note above on .dev/.)
+
+# Release artifacts. `make release-tide` / `make release-clis-native` write
+# tarballs here; they are uploaded by the release workflow, never committed.
+/dist/

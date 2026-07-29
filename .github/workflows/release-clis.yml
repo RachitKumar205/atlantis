@@ -1,25 +1,26 @@
 # Release workflow for the atlantis CLIs (tide + tidectl).
 #
 # Triggers on any `v*` tag push (e.g. `git tag v0.4.0 && git push --tags`).
-# Builds tide + tidectl for linux/{amd64,arm64}, then aggregates the
-# tarballs + a single SHA256SUMS file into the auto-created GitHub
-# Release for the tag.
 #
-# Linux only for now: tide and tidectl both transitively depend on
-# pg_query_go (libpg_query via cgo), so a CGO-aware build is required.
-# linux/amd64 runs native on ubuntu-latest; linux/arm64 cross-compiles
-# from the same amd64 runner via gcc-aarch64-linux-gnu — both stay on
-# free amd64 runners on public AND private repos. macOS was tried via
-# zig cc cross-compile and rejected: zig's bundled macOS SDK stub
-# doesn't ship libresolv.tbd, which Go's net package links unconditionally
-# on darwin. Mac users build from source for now:
+# The two CLIs build differently because only one of them needs cgo.
+#
+#   tide      — the client end users install. It sends raw .atl bytes to the
+#               server and does no local parsing, so it has no cgo dependency
+#               and cross-compiles to darwin/{arm64,amd64}, linux/{amd64,arm64},
+#               and windows/amd64 from a single runner in seconds.
+#
+#   tidectl   — the operator CLI. It validates SQL locally through
+#               pg_query_go (libpg_query via cgo), so each target needs its own
+#               C toolchain. It runs on the server host, so linux/{amd64,arm64}
+#               is the whole supported surface: amd64 native on ubuntu-latest,
+#               arm64 cross-compiled via gcc-aarch64-linux-gnu — both on free
+#               amd64 runners for public and private repos.
+#
+# Install:
+#   curl -sSL https://github.com/<org>/atlantis/releases/download/$VERSION/tide-$VERSION-darwin-arm64.tar.gz \
+#     | tar -xz --strip-components=1 -C /usr/local/bin tide-*-darwin-arm64/tide
+# or from source (needs a C toolchain only if you want `tide sandbox`):
 #   go install github.com/<org>/atlantis/cmd/tide@v0.4.0
-#   go install github.com/<org>/atlantis/cmd/tidectl@v0.4.0
-#
-# Linux operators install the tarballs with:
-#   curl -sSL https://github.com/<org>/atlantis/releases/download/$VERSION/tidectl-$VERSION-linux-amd64.tar.gz \
-#     | tar -xz --strip-components=1 -C /usr/local/bin tidectl-*-linux-amd64/tidectl
-# Caller-repo CI workflows install tide the same way, swapping the binary name.
 
 name: release-clis
 
@@ -32,15 +33,9 @@ permissions:
   contents: write  # needed to create / attach to the GH release
 
 jobs:
-  build:
-    name: build ${{ matrix.os }}/${{ matrix.arch }}
-    runs-on: ${{ matrix.runs-on }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: linux, arch: amd64, runs-on: ubuntu-latest, cc: "" }
-          - { os: linux, arch: arm64, runs-on: ubuntu-latest, cc: aarch64-linux-gnu-gcc, apt-cross: gcc-aarch64-linux-gnu }
+  build-tide:
+    name: build tide (all platforms)
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -66,13 +61,53 @@ jobs:
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
           buf generate
 
+      - name: Build tide tarballs for every platform
+        # Pure-Go cross-compile: no CC, no matrix, no cross-toolchain.
+        run: make release-tide VERSION=${{ github.ref_name }}
+
+      - name: Upload tarballs
+        uses: actions/upload-artifact@v4
+        with:
+          name: tide-all-platforms
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  build-tidectl:
+    name: build tidectl ${{ matrix.os }}/${{ matrix.arch }}
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux, arch: amd64, runs-on: ubuntu-latest, cc: "" }
+          - { os: linux, arch: arm64, runs-on: ubuntu-latest, cc: aarch64-linux-gnu-gcc, apt-cross: gcc-aarch64-linux-gnu }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.12"
+          cache: true
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate proto Go code from atlantis/common/v1
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+          buf generate
+
       - name: Install cross-toolchain (${{ matrix.apt-cross }})
         if: matrix.apt-cross != ''
         run: |
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.apt-cross }}
 
-      - name: Build tide + tidectl tarballs (${{ matrix.os }}/${{ matrix.arch }})
+      - name: Build tidectl tarball (${{ matrix.os }}/${{ matrix.arch }})
         env:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
@@ -82,14 +117,14 @@ jobs:
       - name: Upload tarballs
         uses: actions/upload-artifact@v4
         with:
-          name: clis-${{ matrix.os }}-${{ matrix.arch }}
+          name: tidectl-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/*.tar.gz
           if-no-files-found: error
           retention-days: 1
 
   release:
     name: attach to GitHub Release
-    needs: build
+    needs: [build-tide, build-tidectl]
     runs-on: ubuntu-latest
 
     steps:

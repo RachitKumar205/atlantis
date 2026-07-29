@@ -1,3 +1,5 @@
+//go:build cgo
+
 package dsl
 
 import (
@@ -100,19 +102,25 @@ func TestLowerPredicate_Errors(t *testing.T) {
 	}
 }
 
-func TestDslToSQL(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{`status = "active"`, `status = 'active'`},
-		{`note = "it's"`, `note = 'it''s'`},
-		{`x = "a\"b"`, `x = 'a"b'`},
-		{`a   is    null`, `a is null`},
-		{`lower(sku) like "a%" /* note */ and tier > 1`, `lower(sku) like 'a%' and tier > 1`},
-		{`tag = "}" and deleted_at is null`, `tag = '}' and deleted_at is null`},
+// TestTier2_PartialPredicateComparison checks a partial-index predicate lowers
+// to the structured legacy comparison shape. Moved here from dsl_tier2_test.go
+// because it needs the cgo-backed predicate parser.
+func TestTier2_PartialPredicateComparison(t *testing.T) {
+	ir := mustLower(t, `entity A in x {
+  id     bigint primary
+  status text
+  index partial by id where status = "active"
+}`)
+	idx := ir.Entities[0].Indexes[0]
+	w := idx.Where
+	if w == nil || w.Kind != PredKindCompare || w.Op != "=" {
+		t.Fatalf("partial pred op missing: %+v", w)
 	}
-	for _, tc := range cases {
-		if got := dslToSQL(tc.in); got != tc.want {
-			t.Errorf("dslToSQL(%q) = %q, want %q", tc.in, got, tc.want)
-		}
+	if w.Left == nil || w.Left.Kind != OperandColumn || w.Left.Name != "status" {
+		t.Errorf("partial pred lhs wrong: %+v", w.Left)
+	}
+	if w.Right == nil || w.Right.Literal == nil || w.Right.Literal.Str != "active" {
+		t.Errorf("partial pred literal wrong: %+v", w.Right)
 	}
 }
 

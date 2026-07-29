@@ -57,37 +57,69 @@ build-tidectl: ## Build the server-side admin CLI
 build-tide: ## Build the caller-side CLI
 	$(GO) build $(GOFLAGS) -o $(BIN_DIR)/tide ./cmd/tide
 
-# Output directory for release artifacts. Gitignored via .dev/.
+# Output directory for release artifacts. Gitignored via /dist/.
 RELEASE_DIR := dist
 
-# CLIs cross-compiled per platform. Each entry produces a tarball named
-# `<cli>-<version>-<os>-<arch>.tar.gz` under dist/. Add a row to publish
-# a new CLI.
-RELEASE_CLIS := tide tidectl
+# CLIs published per platform. Each entry produces a tarball named
+# `<cli>-<version>-<os>-<arch>.tar.gz` under dist/.
+#
+# The two CLIs ship differently because only one of them needs cgo.
+# tide is a thin client: plan and apply send raw .atl bytes and the
+# server does all parsing, so nothing in tide reaches pg_query_go and it
+# cross-compiles to every platform from one runner. tidectl validates
+# SQL locally (sqlvalidate -> pg_query_go -> libpg_query), so it needs a
+# real toolchain per target; it runs on the server host, which is Linux.
+RELEASE_TIDE_PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64
+RELEASE_CGO_CLIS       := tidectl
 
 # Resolved native host platform (used by release-clis-native to label
 # the output tarballs). Override with GOOS / GOARCH when invoking.
 NATIVE_OS   := $(shell $(GO) env GOOS)
 NATIVE_ARCH := $(shell $(GO) env GOARCH)
 
-# `make release-clis-native VERSION=v0.4.0` builds every CLI in
-# RELEASE_CLIS for the HOST OS+arch with CGO enabled, lays out the
-# tarballs under dist/, and emits a SHA256SUMS scoped to that
-# platform. tide and tidectl both transitively depend on pg_query_go
-# (libpg_query via cgo), so cross-compiling all platforms from one
-# runner needs a CGO cross-toolchain pile that isn't worth maintaining
-# in a Makefile — the workflow (.github/workflows/release-clis.yml)
-# fans out across native runners (ubuntu amd64/arm64 + macos
-# amd64/arm64) and aggregates the artifacts in a final job. Operators
-# install with `curl -L … | tar xz` — no go toolchain needed.
+# `make release-tide VERSION=v0.4.0` cross-compiles tide for every
+# platform in RELEASE_TIDE_PLATFORMS from whatever host runs it, with
+# CGO off. No cross-toolchain is involved: tide has no cgo dependency,
+# so this is a pure-Go build matrix a single runner completes in
+# seconds. This is the artifact end users install.
+.PHONY: release-tide
+release-tide: ## Cross-compile tide tarballs for every platform: make release-tide VERSION=v0.4.0
+	@case "$(VERSION)" in v[0-9]*) : ;; *) \
+	  echo "Usage: make release-tide VERSION=v0.4.0"; \
+	  echo "       (got '$(VERSION)' — must look like v0.4.0)"; \
+	  exit 1 ;; esac
+	@mkdir -p $(RELEASE_DIR)
+	@for plat in $(RELEASE_TIDE_PLATFORMS); do \
+	  os=$${plat%%/*}; arch=$${plat##*/}; \
+	  ext=""; [ "$$os" = "windows" ] && ext=".exe"; \
+	  out=$(RELEASE_DIR)/tide-$(VERSION)-$$os-$$arch; \
+	  echo "==> building $$out"; \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
+	    $(GO) build -trimpath \
+	      -ldflags "-s -w -X main.version=$(VERSION)" \
+	      -o $$out/tide$$ext ./cmd/tide || exit 1; \
+	  cp LICENSE $$out/LICENSE 2>/dev/null || true; \
+	  tar -czf $$out.tar.gz -C $(RELEASE_DIR) $$(basename $$out); \
+	  rm -rf $$out; \
+	done
+	@echo ""
+	@echo "==> $(RELEASE_DIR)/ (tide, all platforms)"
+	@ls -la $(RELEASE_DIR)/
+
+# `make release-clis-native VERSION=v0.4.0` builds the cgo-requiring
+# CLIs for the HOST OS+arch and lays out tarballs under dist/. tidectl
+# links libpg_query, so each target needs its own toolchain; the
+# workflow (.github/workflows/release-clis.yml) runs this once per
+# native runner and aggregates in a final job. Operators install with
+# `curl -L … | tar xz` — no go toolchain needed.
 .PHONY: release-clis-native
-release-clis-native: ## Cross-compile tide + tidectl tarballs for the native host platform: make release-clis-native VERSION=v0.4.0
+release-clis-native: ## Build cgo CLI tarballs for the native host platform: make release-clis-native VERSION=v0.4.0
 	@case "$(VERSION)" in v[0-9]*) : ;; *) \
 	  echo "Usage: make release-clis-native VERSION=v0.4.0"; \
 	  echo "       (got '$(VERSION)' — must look like v0.4.0)"; \
 	  exit 1 ;; esac
 	@mkdir -p $(RELEASE_DIR)
-	@for cli in $(RELEASE_CLIS); do \
+	@for cli in $(RELEASE_CGO_CLIS); do \
 	  out=$(RELEASE_DIR)/$$cli-$(VERSION)-$(NATIVE_OS)-$(NATIVE_ARCH); \
 	  echo "==> building $$out"; \
 	  CGO_ENABLED=1 \

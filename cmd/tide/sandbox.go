@@ -1,3 +1,5 @@
+//go:build cgo
+
 // cmd/tide sandbox — user-facing entry point to the schema-true
 // in-memory simulator. Three subcommands:
 //
