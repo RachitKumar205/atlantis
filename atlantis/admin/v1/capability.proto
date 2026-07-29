@@ -1,0 +1,82 @@
+// Authorization declared as data.
+//
+// Every Admin method states the capability it requires as a method option, in
+// the same file that defines the method. The alternative — a lookup table in
+// the server package — is the shape of bug this replaces: authorization used
+// to be hand-written inside method bodies, and because the admin prefix is
+// exempt from the caller allowlist, an RPC whose author forgot the check was
+// authorized by nothing at all. A parallel table has the same failure mode one
+// level up; it drifts the first time someone adds an RPC and edits one file.
+//
+// Two properties follow from putting it here. The requirement survives into the
+// generated descriptor, so a single interceptor can enforce every method and no
+// handler needs to remember. And startup can walk the descriptor and refuse to
+// boot when any method is left UNSPECIFIED, which turns "shipped an
+// unauthenticated endpoint" from a code-review question into a process that
+// will not start.
+
+syntax = "proto3";
+
+package atlantis.admin.v1;
+
+import "google/protobuf/descriptor.proto";
+
+extend google.protobuf.MethodOptions {
+  // Required on every method. A method that omits it, or sets it to
+  // CAPABILITY_UNSPECIFIED, aborts server startup.
+  Capability required_capability = 50001;
+}
+
+// Capability is the unit of authorization. Grants are per-caller; a request is
+// permitted when the caller's granted set contains the invoked method's
+// declared requirement.
+//
+// The granularity is deliberate rather than minimal. Splitting reads by what
+// they actually expose is the point: LOGS_READ is separate from SCHEMA_READ
+// because the log ring carries driver error text — pgx renders a unique
+// violation as `DETAIL: Key (email)=(alice@example.com)` — which makes it a
+// row-value surface wearing an observability label. Collapsing the two would
+// grant every schema reader the ability to sample other callers' data.
+enum Capability {
+  // Never valid. Present only so the zero value is a boot failure rather than
+  // a silent grant.
+  CAPABILITY_UNSPECIFIED = 0;
+
+  // Deliberately unauthenticated. Exists so that an open endpoint is a
+  // greppable, reviewable choice instead of an omission that looks identical
+  // to one.
+  CAPABILITY_PUBLIC = 1;
+
+  // Read the merged schema, canonical IR, version history, lineage, and
+  // ownership. Reveals every caller's schema, so it is not implied by any
+  // write capability.
+  CAPABILITY_SCHEMA_READ = 2;
+
+  // Compute a plan. Read-only against the database, but it discloses
+  // cross-caller impact and live drift, so it is stronger than SCHEMA_READ.
+  CAPABILITY_SCHEMA_PLAN = 3;
+
+  // Mutate the caller's own schema. Bounded further at apply time by the
+  // caller's apply policy, which decides which plan classes may proceed
+  // without a human. This capability is the grant; the policy is the ceiling.
+  CAPABILITY_SCHEMA_APPLY = 4;
+
+  // Inspect declarative jobs and workflows.
+  CAPABILITY_JOBS_READ = 5;
+
+  // Submit, retry, and start jobs and workflows.
+  CAPABILITY_JOBS_WRITE = 6;
+
+  // Inspect connected dispatcher workers.
+  CAPABILITY_WORKERS_READ = 7;
+
+  // Read the server's structured-log ring. Separate from SCHEMA_READ because
+  // it can expose row values; see the note above.
+  CAPABILITY_LOGS_READ = 8;
+
+  // Cross-caller and identity operations: adopt a baseline, roll the shared
+  // checkpoint back, register or revoke callers, rewrite aliases, drain or
+  // evict workers. Every one of these affects callers other than the one
+  // making the request.
+  CAPABILITY_OPERATOR = 9;
+}

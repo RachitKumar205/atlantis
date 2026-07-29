@@ -20,60 +20,150 @@ syntax = "proto3";
 
 package atlantis.admin.v1;
 
+import "atlantis/admin/v1/capability.proto";
 import "google/protobuf/timestamp.proto";
 
 // ---------------------------------------------------------------------------
 // Service
+//
+// Every method declares the capability it requires. This is enforced twice: a
+// single interceptor checks the caller's grants against the declaration on each
+// request, and startup walks this descriptor and refuses to boot if any method
+// is left UNSPECIFIED. No handler performs its own authorization.
 // ---------------------------------------------------------------------------
 
 service AdminService {
   // Schema lifecycle.
-  rpc PlanSchema(PlanSchemaRequest) returns (PlanSchemaResponse);
-  rpc ApplyMigration(ApplyMigrationRequest) returns (ApplyMigrationResponse);
-  rpc GetMergedSchema(GetMergedSchemaRequest) returns (GetMergedSchemaResponse);
-  rpc GetCanonicalIR(GetCanonicalIRRequest) returns (GetCanonicalIRResponse);
-  rpc GetCallerFiles(GetCallerFilesRequest) returns (GetCallerFilesResponse);
-  rpc AdoptBaseline(AdoptBaselineRequest) returns (AdoptBaselineResponse);
+
+  // Read-only against the database, but it discloses cross-caller impact and
+  // live drift, so it requires more than SCHEMA_READ.
+  rpc PlanSchema(PlanSchemaRequest) returns (PlanSchemaResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_PLAN;
+  }
+  rpc ApplyMigration(ApplyMigrationRequest) returns (ApplyMigrationResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_APPLY;
+  }
+  rpc GetMergedSchema(GetMergedSchemaRequest) returns (GetMergedSchemaResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  rpc GetCanonicalIR(GetCanonicalIRRequest) returns (GetCanonicalIRResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  rpc GetCallerFiles(GetCallerFilesRequest) returns (GetCallerFilesResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  // Rewrites the shared checkpoint from an existing database, affecting every
+  // caller — an operator action, not a caller one.
+  rpc AdoptBaseline(AdoptBaselineRequest) returns (AdoptBaselineResponse) {
+    option (required_capability) = CAPABILITY_OPERATOR;
+  }
 
   // Backfill.
-  rpc BeginBackfillPlan(BeginBackfillPlanRequest) returns (BeginBackfillPlanResponse);
-  rpc GetBackfillStatus(GetBackfillStatusRequest) returns (GetBackfillStatusResponse);
+
+  rpc BeginBackfillPlan(BeginBackfillPlanRequest) returns (BeginBackfillPlanResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_APPLY;
+  }
+  rpc GetBackfillStatus(GetBackfillStatusRequest) returns (GetBackfillStatusResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
 
   // Declarative jobs.
-  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse);
-  rpc GetJobStatus(GetJobStatusRequest) returns (GetJobStatusResponse);
-  rpc ListDeadJobs(ListDeadJobsRequest) returns (ListDeadJobsResponse);
-  rpc RetryDeadJob(RetryDeadJobRequest) returns (RetryDeadJobResponse);
+
+  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse) {
+    option (required_capability) = CAPABILITY_JOBS_WRITE;
+  }
+  rpc GetJobStatus(GetJobStatusRequest) returns (GetJobStatusResponse) {
+    option (required_capability) = CAPABILITY_JOBS_READ;
+  }
+  rpc ListDeadJobs(ListDeadJobsRequest) returns (ListDeadJobsResponse) {
+    option (required_capability) = CAPABILITY_JOBS_READ;
+  }
+  rpc RetryDeadJob(RetryDeadJobRequest) returns (RetryDeadJobResponse) {
+    option (required_capability) = CAPABILITY_JOBS_WRITE;
+  }
 
   // Workflows.
-  rpc StartWorkflow(StartWorkflowRequest) returns (StartWorkflowResponse);
-  rpc GetWorkflowStatus(GetWorkflowStatusRequest) returns (GetWorkflowStatusResponse);
+
+  rpc StartWorkflow(StartWorkflowRequest) returns (StartWorkflowResponse) {
+    option (required_capability) = CAPABILITY_JOBS_WRITE;
+  }
+  rpc GetWorkflowStatus(GetWorkflowStatusRequest) returns (GetWorkflowStatusResponse) {
+    option (required_capability) = CAPABILITY_JOBS_READ;
+  }
 
   // Schema history and lineage.
-  rpc GetSchemaHistory(GetSchemaHistoryRequest) returns (GetSchemaHistoryResponse);
-  rpc GetSchemaVersion(GetSchemaVersionRequest) returns (GetSchemaVersionResponse);
-  rpc DiffSchemaVersions(DiffSchemaVersionsRequest) returns (DiffSchemaVersionsResponse);
-  rpc GetEntityLineage(GetEntityLineageRequest) returns (GetEntityLineageResponse);
-  rpc GetEntityOwners(GetEntityOwnersRequest) returns (GetEntityOwnersResponse);
-  rpc RollbackSchema(RollbackSchemaRequest) returns (RollbackSchemaResponse);
-  rpc PreviewRollback(PreviewRollbackRequest) returns (PreviewRollbackResponse);
 
-  // Caller identity.
-  rpc GetCallers(GetCallersRequest) returns (GetCallersResponse);
-  rpc RegisterCaller(RegisterCallerRequest) returns (RegisterCallerResponse);
-  rpc RevokeCaller(RevokeCallerRequest) returns (RevokeCallerResponse);
-  rpc RecordCallerCertExpiry(RecordCallerCertExpiryRequest) returns (RecordCallerCertExpiryResponse);
-  rpc GetCallerAliases(GetCallerAliasesRequest) returns (GetCallerAliasesResponse);
-  rpc SetCallerAliases(SetCallerAliasesRequest) returns (SetCallerAliasesResponse);
+  rpc GetSchemaHistory(GetSchemaHistoryRequest) returns (GetSchemaHistoryResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  rpc GetSchemaVersion(GetSchemaVersionRequest) returns (GetSchemaVersionResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  rpc DiffSchemaVersions(DiffSchemaVersionsRequest) returns (DiffSchemaVersionsResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  rpc GetEntityLineage(GetEntityLineageRequest) returns (GetEntityLineageResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  rpc GetEntityOwners(GetEntityOwnersRequest) returns (GetEntityOwnersResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  // Reverts the shared checkpoint for every caller in one transaction.
+  rpc RollbackSchema(RollbackSchemaRequest) returns (RollbackSchemaResponse) {
+    option (required_capability) = CAPABILITY_OPERATOR;
+  }
+  // Read-only preview of the above; discloses the same cross-caller impact a
+  // plan does.
+  rpc PreviewRollback(PreviewRollbackRequest) returns (PreviewRollbackResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_PLAN;
+  }
+
+  // Caller identity. Every mutation here changes who may talk to the server at
+  // all, so all of them are operator-only.
+
+  rpc GetCallers(GetCallersRequest) returns (GetCallersResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  rpc RegisterCaller(RegisterCallerRequest) returns (RegisterCallerResponse) {
+    option (required_capability) = CAPABILITY_OPERATOR;
+  }
+  rpc RevokeCaller(RevokeCallerRequest) returns (RevokeCallerResponse) {
+    option (required_capability) = CAPABILITY_OPERATOR;
+  }
+  rpc RecordCallerCertExpiry(RecordCallerCertExpiryRequest) returns (RecordCallerCertExpiryResponse) {
+    option (required_capability) = CAPABILITY_OPERATOR;
+  }
+  rpc GetCallerAliases(GetCallerAliasesRequest) returns (GetCallerAliasesResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  // Aliases decide which callers can see one another's entities.
+  rpc SetCallerAliases(SetCallerAliasesRequest) returns (SetCallerAliasesResponse) {
+    option (required_capability) = CAPABILITY_OPERATOR;
+  }
 
   // Observability.
-  rpc GetLogs(GetLogsRequest) returns (GetLogsResponse);
+
+  // Not SCHEMA_READ: the log ring carries driver error text that can include
+  // row values. See the note on CAPABILITY_LOGS_READ.
+  rpc GetLogs(GetLogsRequest) returns (GetLogsResponse) {
+    option (required_capability) = CAPABILITY_LOGS_READ;
+  }
 
   // Worker dispatcher.
-  rpc ListConnectedWorkers(ListConnectedWorkersRequest) returns (ListConnectedWorkersResponse);
-  rpc GetWorkerSession(GetWorkerSessionRequest) returns (GetWorkerSessionResponse);
-  rpc DrainWorker(DrainWorkerRequest) returns (DrainWorkerResponse);
-  rpc EvictWorker(EvictWorkerRequest) returns (EvictWorkerResponse);
+
+  rpc ListConnectedWorkers(ListConnectedWorkersRequest) returns (ListConnectedWorkersResponse) {
+    option (required_capability) = CAPABILITY_WORKERS_READ;
+  }
+  rpc GetWorkerSession(GetWorkerSessionRequest) returns (GetWorkerSessionResponse) {
+    option (required_capability) = CAPABILITY_WORKERS_READ;
+  }
+  // Drain and evict terminate work in flight on another process.
+  rpc DrainWorker(DrainWorkerRequest) returns (DrainWorkerResponse) {
+    option (required_capability) = CAPABILITY_OPERATOR;
+  }
+  rpc EvictWorker(EvictWorkerRequest) returns (EvictWorkerResponse) {
+    option (required_capability) = CAPABILITY_OPERATOR;
+  }
 }
 
 // ---------------------------------------------------------------------------
