@@ -1,0 +1,746 @@
+// The Admin service: the control surface `tide`, `tidectl`, and the console
+// all speak. It was hand-rolled over a JSON codec for its first year, which
+// meant every RPC existed in four hand-maintained copies (server descriptor,
+// two CLI clients, console BFF) with no schema anyone could check them
+// against. This file is that schema.
+//
+// Two translation choices are load-bearing:
+//
+// Opaque JSON payloads (IR snapshots, schema diffs, job args, workflow state)
+// are `bytes`, not google.protobuf.Struct. They must round-trip byte-exact:
+// plan ids and checkpoint addresses are content hashes over the IR JSON, and
+// schema_versions.diff is stored as JSONB. Struct would reorder keys and
+// renormalize numbers, silently changing hashes.
+//
+// Timestamps that Go models as time.Time become google.protobuf.Timestamp.
+// The many *_at fields typed `string` in Go are RFC3339 text the server
+// formats itself; those stay `string` so their wire bytes do not move.
+
+syntax = "proto3";
+
+package atlantis.admin.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+service AdminService {
+  // Schema lifecycle.
+  rpc PlanSchema(PlanSchemaRequest) returns (PlanSchemaResponse);
+  rpc ApplyMigration(ApplyMigrationRequest) returns (ApplyMigrationResponse);
+  rpc GetMergedSchema(GetMergedSchemaRequest) returns (GetMergedSchemaResponse);
+  rpc GetCanonicalIR(GetCanonicalIRRequest) returns (GetCanonicalIRResponse);
+  rpc GetCallerFiles(GetCallerFilesRequest) returns (GetCallerFilesResponse);
+  rpc AdoptBaseline(AdoptBaselineRequest) returns (AdoptBaselineResponse);
+
+  // Backfill.
+  rpc BeginBackfillPlan(BeginBackfillPlanRequest) returns (BeginBackfillPlanResponse);
+  rpc GetBackfillStatus(GetBackfillStatusRequest) returns (GetBackfillStatusResponse);
+
+  // Declarative jobs.
+  rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse);
+  rpc GetJobStatus(GetJobStatusRequest) returns (GetJobStatusResponse);
+  rpc ListDeadJobs(ListDeadJobsRequest) returns (ListDeadJobsResponse);
+  rpc RetryDeadJob(RetryDeadJobRequest) returns (RetryDeadJobResponse);
+
+  // Workflows.
+  rpc StartWorkflow(StartWorkflowRequest) returns (StartWorkflowResponse);
+  rpc GetWorkflowStatus(GetWorkflowStatusRequest) returns (GetWorkflowStatusResponse);
+
+  // Schema history and lineage.
+  rpc GetSchemaHistory(GetSchemaHistoryRequest) returns (GetSchemaHistoryResponse);
+  rpc GetSchemaVersion(GetSchemaVersionRequest) returns (GetSchemaVersionResponse);
+  rpc DiffSchemaVersions(DiffSchemaVersionsRequest) returns (DiffSchemaVersionsResponse);
+  rpc GetEntityLineage(GetEntityLineageRequest) returns (GetEntityLineageResponse);
+  rpc GetEntityOwners(GetEntityOwnersRequest) returns (GetEntityOwnersResponse);
+  rpc RollbackSchema(RollbackSchemaRequest) returns (RollbackSchemaResponse);
+  rpc PreviewRollback(PreviewRollbackRequest) returns (PreviewRollbackResponse);
+
+  // Caller identity.
+  rpc GetCallers(GetCallersRequest) returns (GetCallersResponse);
+  rpc RegisterCaller(RegisterCallerRequest) returns (RegisterCallerResponse);
+  rpc RevokeCaller(RevokeCallerRequest) returns (RevokeCallerResponse);
+  rpc RecordCallerCertExpiry(RecordCallerCertExpiryRequest) returns (RecordCallerCertExpiryResponse);
+  rpc GetCallerAliases(GetCallerAliasesRequest) returns (GetCallerAliasesResponse);
+  rpc SetCallerAliases(SetCallerAliasesRequest) returns (SetCallerAliasesResponse);
+
+  // Observability.
+  rpc GetLogs(GetLogsRequest) returns (GetLogsResponse);
+
+  // Worker dispatcher.
+  rpc ListConnectedWorkers(ListConnectedWorkersRequest) returns (ListConnectedWorkersResponse);
+  rpc GetWorkerSession(GetWorkerSessionRequest) returns (GetWorkerSessionResponse);
+  rpc DrainWorker(DrainWorkerRequest) returns (DrainWorkerResponse);
+  rpc EvictWorker(EvictWorkerRequest) returns (EvictWorkerResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Shared types
+// ---------------------------------------------------------------------------
+
+// PlanClass is the routing decision for a proposed schema change. It is the
+// entire caller-side mental model: additive applies, backfill_required needs
+// staged SQL, cross_caller_breaking needs a PR against atlantis itself, and
+// unparseable means the DSL or its custom SQL did not compile.
+enum PlanClass {
+  PLAN_CLASS_UNSPECIFIED = 0;
+  PLAN_CLASS_ADDITIVE = 1;
+  PLAN_CLASS_BACKFILL_REQUIRED = 2;
+  PLAN_CLASS_CROSS_CALLER_BREAKING = 3;
+  PLAN_CLASS_UNPARSEABLE = 4;
+}
+
+// SubmittedFile is one .atl source file as shipped by a caller. Content is
+// raw bytes: the client never parses, the server does all lowering.
+message SubmittedFile {
+  string path = 1;
+  bytes content = 2;
+}
+
+// CallerSubmission groups one caller's files, for multi-caller adopt.
+message CallerSubmission {
+  string caller = 1;
+  repeated SubmittedFile files = 2;
+}
+
+// ImpactEntry describes how one caller is affected by a plan, including the
+// plan's own caller.
+message ImpactEntry {
+  string caller = 1;
+  bool affected = 2;
+  string detail = 3;
+}
+
+message CustomDeclCount {
+  int32 queries = 1;
+  int32 procedures = 2;
+}
+
+// ExtensionStatus reports one required Postgres extension. Action is one of
+// "ok" (already enabled), "enable" (atlantis will CREATE EXTENSION inside the
+// apply transaction), or "missing" (an operator must install it at the OS
+// level first — apply refuses until then).
+message ExtensionStatus {
+  string name = 1;
+  string trigger = 2;
+  string action = 3;
+  string install_hint = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Drift
+//
+// Three independent checks compare the declared schema against the live
+// database. Each blocks apply unless its escape hatch is set, because each
+// represents a constraint the database enforces that the schema does not know
+// about — the shape of bug that silently rejects legitimate writes.
+// ---------------------------------------------------------------------------
+
+message UniqueIndexDrift {
+  string entity_id = 1;
+  string schema = 2;
+  string table = 3;
+  string index_name = 4;
+  repeated string columns = 5;
+  // Partial marks a `... WHERE <pred>` index. It is drift unless a
+  // `unique index partial` on the same columns declares an equivalent
+  // predicate: a full-uniqueness declaration does not cover it, because a
+  // partial unique is semantically weaker.
+  bool partial = 6;
+  string predicate = 7;
+}
+
+enum CheckDriftKind {
+  CHECK_DRIFT_KIND_UNSPECIFIED = 0;
+  // The .atl declares a CHECK the live table does not enforce.
+  CHECK_DRIFT_KIND_DECLARED_NOT_ENFORCED = 1;
+  // The live table enforces a CHECK the .atl does not declare.
+  CHECK_DRIFT_KIND_LIVE_NOT_DECLARED = 2;
+}
+
+message CheckConstraintDrift {
+  CheckDriftKind kind = 1;
+  string entity_id = 2;
+  string schema = 3;
+  string table = 4;
+  // Live constraint name; empty for a declared-only check, where the
+  // temp-table name carries no meaning.
+  string constraint_name = 5;
+  // Verbatim .atl check expression.
+  string declared = 6;
+  // Postgres-normalized `CHECK (...)` deparse — either the declared check's
+  // normalized form or the live constraint's definition.
+  string definition = 7;
+}
+
+message ColumnTypeDrift {
+  string entity_id = 1;
+  string schema = 2;
+  string table = 3;
+  string column = 4;
+  // Both are Postgres format_type deparses, e.g. "character varying(255)".
+  string declared = 5;
+  string live = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Schema lifecycle
+// ---------------------------------------------------------------------------
+
+message PlanSchemaRequest {
+  string caller = 1;
+  repeated SubmittedFile files = 2;
+}
+
+message PlanSchemaResponse {
+  string plan_id = 1;
+  PlanClass class = 2;
+  string up_sql = 3;
+  string down_sql = 4;
+  repeated ImpactEntry impact_report = 5;
+  repeated string parse_errors = 6;
+  repeated string breaking_detail = 7;
+
+  // Content hash of the IR checkpoint at plan time, returned in
+  // ApplyMigrationRequest so the server can detect a compare-and-swap
+  // conflict against a checkpoint that moved underneath the caller.
+  string checkpoint_hash = 8;
+
+  // pg_query_go validation failures for query/procedure blocks.
+  repeated string custom_sql_errors = 9;
+
+  CustomDeclCount custom_count = 10;
+
+  // Phase-split outputs for `tide apply --backfill`; empty for other plans.
+  // backfill_fields drives the chunked-UPDATE worker, one entry per field,
+  // with the user expression and PK column already resolved against the new IR.
+  string pre_backfill_up_sql = 11;
+  string pre_backfill_indexes_sql = 12;
+  string post_backfill_up_sql = 13;
+  string post_backfill_indexes_sql = 14;
+  repeated BackfillFieldRef backfill_fields = 15;
+
+  // Extensions the new IR requires. Empty when the schema needs none.
+  repeated ExtensionStatus extensions = 16;
+
+  // Drift is reported as a plan-time warning here and enforced at apply.
+  // The *_error fields carry a message when a check could not run at all,
+  // which must not be read as "no drift found".
+  repeated UniqueIndexDrift index_drift = 17;
+  repeated string index_drift_notes = 18;
+  string index_drift_error = 19;
+
+  repeated CheckConstraintDrift check_drift = 20;
+  repeated string check_drift_notes = 21;
+  string check_drift_error = 22;
+
+  repeated ColumnTypeDrift column_drift = 23;
+  repeated string column_drift_notes = 24;
+  string column_drift_error = 25;
+}
+
+message ApplyMigrationRequest {
+  string caller = 1;
+  string plan_id = 2;
+  repeated SubmittedFile files = 3;
+  // CAS token from PlanSchemaResponse.
+  string checkpoint_hash = 4;
+}
+
+message ApplyMigrationResponse {
+  string applied_at = 1;
+  int64 version = 2;
+  string content_hash = 3;
+}
+
+message GetMergedSchemaRequest {
+  string since_version = 1;
+}
+
+message GetMergedSchemaResponse {
+  string version = 1;
+  repeated SubmittedFile files = 2;
+}
+
+message GetCallerFilesRequest {
+  string caller = 1;
+}
+
+message GetCallerFilesResponse {
+  repeated SubmittedFile files = 1;
+}
+
+message GetCanonicalIRRequest {}
+
+// GetCanonicalIRResponse carries the canonical IR exactly as stored in the
+// checkpoint, proto field numbers included, so a caller generating a typed
+// client produces wire-identical messages. content_hash pins the schema
+// version that generation ran against.
+message GetCanonicalIRResponse {
+  bytes ir = 1;
+  string content_hash = 2;
+}
+
+message AdoptDriftItem {
+  string entity_id = 1;
+  string field = 2;
+  string kind = 3;
+  // One of "addition", "removal", "mismatch".
+  string severity = 4;
+  string detail = 5;
+}
+
+message AdoptBaselineRequest {
+  repeated CallerSubmission submissions = 1;
+  // Single-caller shortcut: a non-empty caller is treated as a one-element
+  // submissions list. Ignored when submissions is set.
+  string caller = 2;
+  repeated SubmittedFile files = 3;
+  bool allow_drift = 4;
+  string adopted_by = 5;
+}
+
+message AdoptBaselineResponse {
+  bool checkpoint_written = 1;
+  // True when a previous adopt with the same file hash already succeeded.
+  bool already_adopted = 2;
+  repeated AdoptDriftItem drift = 3;
+  repeated string warnings = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Backfill
+// ---------------------------------------------------------------------------
+
+message BackfillFieldRef {
+  string entity_id = 1;
+  string field = 2;
+  string expression = 3;
+  string pk_column = 4;
+  string table_name = 5;
+}
+
+message BackfillFieldStatus {
+  string entity_id = 1;
+  string field = 2;
+  string status = 3;
+  int64 rows_processed = 4;
+  string last_pk = 5;
+  string error_msg = 6;
+}
+
+// BeginBackfillPlanRequest carries no SQL. The server recomputes every
+// statement from the submitted files: accepting caller-supplied DDL here
+// would let any apply-capable credential run arbitrary SQL as the atlantis
+// role, which is the whole reason this RPC is shaped the way it is.
+message BeginBackfillPlanRequest {
+  string caller = 1;
+  string plan_id = 2;
+  repeated SubmittedFile files = 3;
+}
+
+message BeginBackfillPlanResponse {
+  string plan_hash = 1;
+  bool accepted = 2;
+  bool already_running = 3;
+  bool already_complete = 4;
+  string message = 5;
+}
+
+message GetBackfillStatusRequest {
+  string plan_hash = 1;
+  string latest_for_caller = 2;
+}
+
+message GetBackfillStatusResponse {
+  string plan_hash = 1;
+  string caller = 2;
+  string status = 3;
+  string error_msg = 4;
+  string started_at = 5;
+  string completed_at = 6;
+  repeated BackfillFieldStatus fields = 7;
+}
+
+// ---------------------------------------------------------------------------
+// Declarative jobs
+// ---------------------------------------------------------------------------
+
+message SubmitJobRequest {
+  string job_name = 1;
+  bytes args = 2;
+  // RFC3339; empty means now.
+  string scheduled_at = 3;
+  string submitted_by = 4;
+}
+
+message SubmitJobResponse {
+  string job_id = 1;
+}
+
+message GetJobStatusRequest {
+  string job_id = 1;
+}
+
+message JobStatus {
+  string job_id = 1;
+  string job_name = 2;
+  string queue = 3;
+  bytes args = 4;
+  string status = 5;
+  int32 attempts = 6;
+  int32 max_retries = 7;
+  string last_error = 8;
+  string last_error_at = 9;
+  string scheduled_for = 10;
+  string started_at = 11;
+  string completed_at = 12;
+  string enqueued_at = 13;
+  string submitted_by = 14;
+  // progress_pct is -1 when the handler has never checkpointed, so the wire
+  // shape distinguishes "0% done" from "uninstrumented".
+  int32 progress_pct = 15;
+  string progress_msg = 16;
+  string progress_at = 17;
+}
+
+message GetJobStatusResponse {
+  bool found = 1;
+  JobStatus job = 2;
+}
+
+message ListDeadJobsRequest {
+  string job_name = 1;
+  int32 limit = 2;
+}
+
+message ListDeadJobsResponse {
+  repeated JobStatus jobs = 1;
+}
+
+message RetryDeadJobRequest {
+  string job_id = 1;
+}
+
+message RetryDeadJobResponse {
+  string job_id = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Workflows
+// ---------------------------------------------------------------------------
+
+message StartWorkflowRequest {
+  string workflow_name = 1;
+  bytes state = 2;
+  string submitted_by = 3;
+}
+
+message StartWorkflowResponse {
+  string workflow_id = 1;
+}
+
+message GetWorkflowStatusRequest {
+  string workflow_id = 1;
+}
+
+message WorkflowStatus {
+  string workflow_id = 1;
+  string workflow_name = 2;
+  string status = 3;
+  string current_step = 4;
+  string started_at = 5;
+  string completed_at = 6;
+  string error_msg = 7;
+  string submitted_by = 8;
+}
+
+message GetWorkflowStatusResponse {
+  bool found = 1;
+  WorkflowStatus workflow = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Schema history and lineage
+// ---------------------------------------------------------------------------
+
+message GetSchemaHistoryRequest {
+  int32 limit = 1;
+  int64 before = 2;
+  string caller = 3;
+}
+
+message SchemaVersionSummary {
+  int64 version = 1;
+  string caller = 2;
+  string plan_class = 3;
+  string event_type = 4;
+  int32 change_count = 5;
+  string created_at = 6;
+  // sha256 of the IR snapshot; a git-style content address.
+  string ir_hash = 7;
+}
+
+message GetSchemaHistoryResponse {
+  repeated SchemaVersionSummary versions = 1;
+  bool has_more = 2;
+}
+
+message GetSchemaVersionRequest {
+  int64 version = 1;
+}
+
+message GetSchemaVersionResponse {
+  int64 version = 1;
+  string caller = 2;
+  string plan_class = 3;
+  string event_type = 4;
+  bytes diff = 5;
+  string up_sql = 6;
+  string down_sql = 7;
+  bytes ir_snapshot = 8;
+  string created_at = 9;
+  // Absent for the root version, which has no parent.
+  optional int64 parent_version = 10;
+  string ir_hash = 11;
+}
+
+message DiffSchemaVersionsRequest {
+  int64 from_version = 1;
+  int64 to_version = 2;
+}
+
+message DiffSchemaVersionsResponse {
+  int64 from_version = 1;
+  int64 to_version = 2;
+  bytes diff = 3;
+  bytes from_ir = 4;
+  bytes to_ir = 5;
+}
+
+message GetEntityLineageRequest {
+  string entity_id = 1;
+}
+
+message EntityLineageEntry {
+  string entity_id = 1;
+  string field_name = 2;
+  string introduced_by = 3;
+  int64 introduced_at = 4;
+  string last_modified_by = 5;
+  int64 last_modified_at = 6;
+  // Absent while the field is still present in the schema.
+  optional int64 removed_at = 7;
+}
+
+message GetEntityLineageResponse {
+  repeated EntityLineageEntry entries = 1;
+}
+
+message GetEntityOwnersRequest {}
+
+message EntityOwnerEntry {
+  string entity_id = 1;
+  string introduced_by = 2;
+  int64 introduced_at = 3;
+  int32 field_count = 4;
+}
+
+message GetEntityOwnersResponse {
+  repeated EntityOwnerEntry owners = 1;
+}
+
+message RollbackSchemaRequest {
+  int64 to_version = 1;
+  string caller = 2;
+}
+
+message RollbackSchemaResponse {
+  int64 new_version = 1;
+  string up_sql = 2;
+}
+
+message PreviewRollbackRequest {
+  int64 to_version = 1;
+}
+
+message PreviewRollbackResponse {
+  int64 target_version = 1;
+  int64 current_version = 2;
+  // SQL that would run on execute.
+  string up_sql = 3;
+  string plan_class = 4;
+  int32 change_count = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Caller identity
+// ---------------------------------------------------------------------------
+
+message CallerInfo {
+  string caller = 1;
+  int32 file_count = 2;
+  // RFC3339; empty if never applied.
+  string last_applied_at = 3;
+  int64 schema_version = 4;
+  bool registered = 5;
+  bool can_mutate = 6;
+  // RFC3339; empty when no cert was issued through the console.
+  string cert_expires_at = 7;
+}
+
+message GetCallersRequest {}
+
+message GetCallersResponse {
+  repeated CallerInfo callers = 1;
+}
+
+message RegisterCallerRequest {
+  string caller = 1;
+  bool can_mutate = 2;
+  // Operator email, recorded for audit.
+  string created_by = 3;
+}
+
+message RegisterCallerResponse {
+  string caller = 1;
+  bool can_mutate = 2;
+}
+
+message RevokeCallerRequest {
+  string caller = 1;
+}
+
+message RevokeCallerResponse {
+  int32 files_removed = 1;
+}
+
+message RecordCallerCertExpiryRequest {
+  string caller = 1;
+  // RFC3339. Required.
+  string expires_at = 2;
+  // Hex-encoded SHA-256 of the signed leaf cert's DER bytes. Once set, every
+  // authenticated RPC from this caller must present a cert whose fingerprint
+  // matches — that is how rotation and revocation invalidate prior certs
+  // without a CRL.
+  string fingerprint = 3;
+}
+
+message RecordCallerCertExpiryResponse {
+  string caller = 1;
+  string expires_at = 2;
+}
+
+message GetCallerAliasesRequest {
+  string caller = 1;
+}
+
+message GetCallerAliasesResponse {
+  string caller = 1;
+  repeated string aliases = 2;
+}
+
+message SetCallerAliasesRequest {
+  string caller = 1;
+  repeated string aliases = 2;
+}
+
+message SetCallerAliasesResponse {
+  string caller = 1;
+  repeated string aliases = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Observability
+// ---------------------------------------------------------------------------
+
+message GetLogsRequest {
+  uint64 since = 1;
+  // Caps records returned, applied after the since-cursor filter. Zero means
+  // no extra cap; the response is still bounded by the ring's capacity.
+  int32 limit = 2;
+}
+
+message LogEntry {
+  uint64 seq = 1;
+  string time = 2;
+  string level = 3;
+  string msg = 4;
+  map<string, string> attrs = 5;
+}
+
+message GetLogsResponse {
+  repeated LogEntry records = 1;
+  uint64 last_seq = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Worker dispatcher
+// ---------------------------------------------------------------------------
+
+message DispatcherSessionSnapshot {
+  string session_id = 1;
+  string caller = 2;
+  string queue = 3;
+  string pod_id = 4;
+  string sdk_version = 5;
+  google.protobuf.Timestamp connected_at = 6;
+  google.protobuf.Timestamp last_heartbeat_at = 7;
+  int32 max_in_flight = 8;
+  int32 inflight_count = 9;
+  int64 dispatched = 10;
+  int64 completed = 11;
+  int64 failed = 12;
+  int64 revoked = 13;
+  bool drained = 14;
+}
+
+message DispatcherInflightDetail {
+  int64 job_id = 1;
+  string job_name = 2;
+  google.protobuf.Timestamp dispatched_at = 3;
+  bool ack_received = 4;
+}
+
+message DispatcherEventSnapshot {
+  google.protobuf.Timestamp at = 1;
+  string kind = 2;
+  int64 job_id = 3;
+  string job_name = 4;
+  string note = 5;
+}
+
+message DispatcherSessionDetail {
+  DispatcherSessionSnapshot snapshot = 1;
+  repeated string job_names = 2;
+  repeated DispatcherInflightDetail inflight = 3;
+  repeated DispatcherEventSnapshot events = 4;
+}
+
+message ListConnectedWorkersRequest {}
+
+message ListConnectedWorkersResponse {
+  repeated DispatcherSessionSnapshot sessions = 1;
+}
+
+message GetWorkerSessionRequest {
+  string session_id = 1;
+}
+
+message GetWorkerSessionResponse {
+  DispatcherSessionDetail session = 1;
+}
+
+message DrainWorkerRequest {
+  string session_id = 1;
+}
+
+message DrainWorkerResponse {}
+
+message EvictWorkerRequest {
+  string session_id = 1;
+}
+
+message EvictWorkerResponse {}

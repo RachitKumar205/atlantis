@@ -84,10 +84,11 @@ atlantis.dev.yaml
 /gen/
 /clients/go/client/
 /clients/go/pb/
-# Per-namespace proto dirs are generated. atlantis/common/ is hand-written
-# and stays tracked; ignore everything else.
+# Per-namespace proto dirs are generated. atlantis/common/ and
+# atlantis/admin/ are hand-written and stay tracked; ignore everything else.
 /atlantis/*/
 !/atlantis/common/
+!/atlantis/admin/
 
 # migrations/tidectl/ is also derived — populated by operators running
 # tidectl plan/approve against their own workspace. (See note above on .dev/.)
