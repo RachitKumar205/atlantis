@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
@@ -43,37 +45,41 @@ type GetSchemaHistoryResponse struct {
 	HasMore  bool                   `json:"has_more"`
 }
 
-func (s *Service) GetSchemaHistory(ctx context.Context, req GetSchemaHistoryRequest) (*GetSchemaHistoryResponse, error) {
+func (s *Service) GetSchemaHistory(ctx context.Context, req *adminpb.GetSchemaHistoryRequest) (*adminpb.GetSchemaHistoryResponse, error) {
+	// No-PG path, matching the rest of the package.
+	if s.pool == nil {
+		return &adminpb.GetSchemaHistoryResponse{}, nil
+	}
 	limit := int32(25)
-	if req.Limit > 0 && req.Limit <= 100 {
-		limit = req.Limit
+	if req.GetLimit() > 0 && req.GetLimit() <= 100 {
+		limit = req.GetLimit()
 	}
 	// Fetch limit+1 so we can detect whether there are more rows.
 	fetchLimit := limit + 1
 
 	var rows pgx.Rows
 	var err error
-	if req.Caller != "" && req.Before > 0 {
+	if req.GetCaller() != "" && req.GetBefore() > 0 {
 		rows, err = s.pool.Query(ctx, `
 SELECT version, caller, plan_class, event_type, diff, created_at, ir_hash
 FROM atlantis.schema_versions
 WHERE version < $1 AND caller = $2
 ORDER BY version DESC
-LIMIT $3`, req.Before, req.Caller, fetchLimit)
-	} else if req.Caller != "" {
+LIMIT $3`, req.GetBefore(), req.GetCaller(), fetchLimit)
+	} else if req.GetCaller() != "" {
 		rows, err = s.pool.Query(ctx, `
 SELECT version, caller, plan_class, event_type, diff, created_at, ir_hash
 FROM atlantis.schema_versions
 WHERE caller = $1
 ORDER BY version DESC
-LIMIT $2`, req.Caller, fetchLimit)
-	} else if req.Before > 0 {
+LIMIT $2`, req.GetCaller(), fetchLimit)
+	} else if req.GetBefore() > 0 {
 		rows, err = s.pool.Query(ctx, `
 SELECT version, caller, plan_class, event_type, diff, created_at, ir_hash
 FROM atlantis.schema_versions
 WHERE version < $1
 ORDER BY version DESC
-LIMIT $2`, req.Before, fetchLimit)
+LIMIT $2`, req.GetBefore(), fetchLimit)
 	} else {
 		rows, err = s.pool.Query(ctx, `
 SELECT version, caller, plan_class, event_type, diff, created_at, ir_hash
@@ -107,8 +113,8 @@ LIMIT $1`, fetchLimit)
 		versions = versions[:limit]
 	}
 
-	return &GetSchemaHistoryResponse{
-		Versions: versions,
+	return &adminpb.GetSchemaHistoryResponse{
+		Versions: schemaVersionSummariesToPB(versions),
 		HasMore:  hasMore,
 	}, nil
 }
@@ -149,8 +155,8 @@ type GetSchemaVersionResponse struct {
 	IRHash     string          `json:"ir_hash"`
 }
 
-func (s *Service) GetSchemaVersion(ctx context.Context, req GetSchemaVersionRequest) (*GetSchemaVersionResponse, error) {
-	if req.Version <= 0 {
+func (s *Service) GetSchemaVersion(ctx context.Context, req *adminpb.GetSchemaVersionRequest) (*adminpb.GetSchemaVersionResponse, error) {
+	if req.GetVersion() <= 0 {
 		return nil, errors.New("admin: version must be a positive integer")
 	}
 	var resp GetSchemaVersionResponse
@@ -159,19 +165,19 @@ func (s *Service) GetSchemaVersion(ctx context.Context, req GetSchemaVersionRequ
 SELECT version, caller, plan_class, event_type, diff, up_sql, down_sql,
        ir_snapshot, created_at, parent_version, ir_hash
 FROM atlantis.schema_versions
-WHERE version = $1`, req.Version).Scan(
+WHERE version = $1`, req.GetVersion()).Scan(
 		&resp.Version, &resp.Caller, &resp.PlanClass, &resp.EventType,
 		&resp.Diff, &resp.UpSQL, &resp.DownSQL,
 		&resp.IRSnapshot, &createdAt, &resp.ParentVer, &resp.IRHash,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("admin: schema version %d not found", req.Version)
+			return nil, fmt.Errorf("admin: schema version %d not found", req.GetVersion())
 		}
 		return nil, fmt.Errorf("query schema_versions: %w", err)
 	}
 	resp.CreatedAt = fmt.Sprintf("%v", createdAt)
-	return &resp, nil
+	return schemaVersionToPB(&resp), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -191,8 +197,8 @@ type DiffSchemaVersionsResponse struct {
 	ToIR        json.RawMessage `json:"to_ir,omitempty"`
 }
 
-func (s *Service) DiffSchemaVersions(ctx context.Context, req DiffSchemaVersionsRequest) (*DiffSchemaVersionsResponse, error) {
-	if req.FromVersion <= 0 || req.ToVersion <= 0 {
+func (s *Service) DiffSchemaVersions(ctx context.Context, req *adminpb.DiffSchemaVersionsRequest) (*adminpb.DiffSchemaVersionsResponse, error) {
+	if req.GetFromVersion() <= 0 || req.GetToVersion() <= 0 {
 		return nil, errors.New("admin: both from_version and to_version must be positive integers")
 	}
 
@@ -210,11 +216,11 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, ver).Scan(
 		return raw, ir, err
 	}
 
-	fromRaw, fromIR, err := loadSnapshot(req.FromVersion)
+	fromRaw, fromIR, err := loadSnapshot(req.GetFromVersion())
 	if err != nil {
 		return nil, err
 	}
-	toRaw, toIR, err := loadSnapshot(req.ToVersion)
+	toRaw, toIR, err := loadSnapshot(req.GetToVersion())
 	if err != nil {
 		return nil, err
 	}
@@ -225,12 +231,12 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, ver).Scan(
 		return nil, fmt.Errorf("marshal diff: %w", err)
 	}
 
-	return &DiffSchemaVersionsResponse{
-		FromVersion: req.FromVersion,
-		ToVersion:   req.ToVersion,
+	return &adminpb.DiffSchemaVersionsResponse{
+		FromVersion: req.GetFromVersion(),
+		ToVersion:   req.GetToVersion(),
 		Diff:        diffJSON,
-		FromIR:      fromRaw,
-		ToIR:        toRaw,
+		FromIr:      fromRaw,
+		ToIr:        toRaw,
 	}, nil
 }
 
@@ -256,8 +262,8 @@ type GetEntityLineageResponse struct {
 	Entries []EntityLineageEntry `json:"entries"`
 }
 
-func (s *Service) GetEntityLineage(ctx context.Context, req GetEntityLineageRequest) (*GetEntityLineageResponse, error) {
-	if req.EntityID == "" {
+func (s *Service) GetEntityLineage(ctx context.Context, req *adminpb.GetEntityLineageRequest) (*adminpb.GetEntityLineageResponse, error) {
+	if req.GetEntityId() == "" {
 		return nil, errors.New("admin: entity_id is required")
 	}
 
@@ -266,7 +272,7 @@ SELECT entity_id, field_name, introduced_by, introduced_at,
        last_modified_by, last_modified_at, removed_at
 FROM atlantis.entity_lineage
 WHERE entity_id = $1
-ORDER BY field_name`, req.EntityID)
+ORDER BY field_name`, req.GetEntityId())
 	if err != nil {
 		return nil, fmt.Errorf("query entity_lineage: %w", err)
 	}
@@ -285,7 +291,7 @@ ORDER BY field_name`, req.EntityID)
 		return nil, err
 	}
 
-	return &GetEntityLineageResponse{Entries: entries}, nil
+	return &adminpb.GetEntityLineageResponse{Entries: lineageToPB(entries)}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -305,7 +311,11 @@ type GetEntityOwnersResponse struct {
 	Owners []EntityOwnerEntry `json:"owners"`
 }
 
-func (s *Service) GetEntityOwners(ctx context.Context, _ GetEntityOwnersRequest) (*GetEntityOwnersResponse, error) {
+func (s *Service) GetEntityOwners(ctx context.Context, _ *adminpb.GetEntityOwnersRequest) (*adminpb.GetEntityOwnersResponse, error) {
+	// No-PG path, matching the rest of the package.
+	if s.pool == nil {
+		return &adminpb.GetEntityOwnersResponse{}, nil
+	}
 	rows, err := s.pool.Query(ctx, `
 SELECT e.entity_id, e.introduced_by, e.introduced_at,
        COALESCE(f.cnt, 0) AS field_count
@@ -335,7 +345,7 @@ ORDER BY e.entity_id`)
 		return nil, err
 	}
 
-	return &GetEntityOwnersResponse{Owners: owners}, nil
+	return &adminpb.GetEntityOwnersResponse{Owners: ownersToPB(owners)}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -352,14 +362,14 @@ type RollbackSchemaResponse struct {
 	UpSQL      string `json:"up_sql"`
 }
 
-func (s *Service) RollbackSchema(ctx context.Context, req RollbackSchemaRequest) (*RollbackSchemaResponse, error) {
+func (s *Service) RollbackSchema(ctx context.Context, req *adminpb.RollbackSchemaRequest) (*adminpb.RollbackSchemaResponse, error) {
 	if err := s.authorizeOperator(ctx); err != nil {
 		return nil, err
 	}
-	if req.ToVersion <= 0 {
+	if req.GetToVersion() <= 0 {
 		return nil, errors.New("admin: to_version must be a positive integer")
 	}
-	if req.Caller == "" {
+	if req.GetCaller() == "" {
 		return nil, errors.New("admin: caller identity is required")
 	}
 
@@ -377,10 +387,10 @@ func (s *Service) RollbackSchema(ctx context.Context, req RollbackSchemaRequest)
 	// Load target version's IR snapshot.
 	var targetIRRaw []byte
 	err = tx.QueryRow(ctx, `
-SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.ToVersion).Scan(&targetIRRaw)
+SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.GetToVersion()).Scan(&targetIRRaw)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("admin: schema version %d not found", req.ToVersion)
+			return nil, fmt.Errorf("admin: schema version %d not found", req.GetToVersion())
 		}
 		return nil, fmt.Errorf("load target version: %w", err)
 	}
@@ -415,9 +425,9 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.ToVers
 	}
 
 	checkpointHash, _ := loadCheckpointHashTx(ctx, tx)
-	parentVer := req.ToVersion
+	parentVer := req.GetToVersion()
 	version, err := s.persistCheckpoint(ctx, tx, targetIR, versionMeta{
-		Caller:       req.Caller,
+		Caller:       req.GetCaller(),
 		PlanClass:    d.HighestClass().String(),
 		Diff:         d,
 		UpSQL:        scripts.Up,
@@ -434,9 +444,9 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.ToVers
 		return nil, err
 	}
 
-	return &RollbackSchemaResponse{
+	return &adminpb.RollbackSchemaResponse{
 		NewVersion: version,
-		UpSQL:      scripts.Up,
+		UpSql:      scripts.Up,
 	}, nil
 }
 
@@ -468,20 +478,20 @@ type PreviewRollbackResponse struct {
 // the user clicks Execute after reviewing, and the real RPC recomputes
 // from a fresh consistent snapshot inside its own transaction. The
 // preview is informational; the executing call is authoritative.
-func (s *Service) PreviewRollback(ctx context.Context, req PreviewRollbackRequest) (*PreviewRollbackResponse, error) {
+func (s *Service) PreviewRollback(ctx context.Context, req *adminpb.PreviewRollbackRequest) (*adminpb.PreviewRollbackResponse, error) {
 	if err := s.authorizeOperator(ctx); err != nil {
 		return nil, err
 	}
-	if req.ToVersion <= 0 {
+	if req.GetToVersion() <= 0 {
 		return nil, errors.New("admin: to_version must be a positive integer")
 	}
 
 	var targetIRRaw []byte
 	err := s.pool.QueryRow(ctx, `
-SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.ToVersion).Scan(&targetIRRaw)
+SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.GetToVersion()).Scan(&targetIRRaw)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("admin: schema version %d not found", req.ToVersion)
+			return nil, fmt.Errorf("admin: schema version %d not found", req.GetToVersion())
 		}
 		return nil, fmt.Errorf("load target version: %w", err)
 	}
@@ -509,11 +519,146 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.ToVers
 		return nil, fmt.Errorf("emit rollback sql: %w", err)
 	}
 
-	return &PreviewRollbackResponse{
-		TargetVersion:  req.ToVersion,
+	return &adminpb.PreviewRollbackResponse{
+		TargetVersion:  req.GetToVersion(),
 		CurrentVersion: currentVersion,
-		UpSQL:          scripts.Up,
+		UpSql:          scripts.Up,
 		PlanClass:      d.HighestClass().String(),
-		ChangeCount:    len(d.Additive) + len(d.BackfillRequired) + len(d.Breaking),
+		ChangeCount:    int32(len(d.Additive) + len(d.BackfillRequired) + len(d.Breaking)),
 	}, nil
+}
+
+// --- Wire conversion ---
+//
+// Two nullable columns cross as proto3 `optional`: parent_version is absent
+// for the root schema version, and removed_at is absent while a field is still
+// present. Both are *int64 on the JSON side with omitempty, so absent means
+// the key disappears — mapping them to a plain 0 would invent a parent version
+// 0 and a removal at the Unix epoch.
+
+func schemaVersionSummariesToPB(in []SchemaVersionSummary) []*adminpb.SchemaVersionSummary {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*adminpb.SchemaVersionSummary, 0, len(in))
+	for _, v := range in {
+		out = append(out, &adminpb.SchemaVersionSummary{
+			Version: v.Version, Caller: v.Caller, PlanClass: v.PlanClass,
+			EventType: v.EventType, ChangeCount: int32(v.ChangeCount),
+			CreatedAt: v.CreatedAt, IrHash: v.IRHash,
+		})
+	}
+	return out
+}
+
+func schemaVersionSummariesFromPB(in []*adminpb.SchemaVersionSummary) []SchemaVersionSummary {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]SchemaVersionSummary, 0, len(in))
+	for _, v := range in {
+		out = append(out, SchemaVersionSummary{
+			Version: v.GetVersion(), Caller: v.GetCaller(), PlanClass: v.GetPlanClass(),
+			EventType: v.GetEventType(), ChangeCount: int(v.GetChangeCount()),
+			CreatedAt: v.GetCreatedAt(), IRHash: v.GetIrHash(),
+		})
+	}
+	return out
+}
+
+func schemaVersionToPB(v *GetSchemaVersionResponse) *adminpb.GetSchemaVersionResponse {
+	out := &adminpb.GetSchemaVersionResponse{
+		Version: v.Version, Caller: v.Caller, PlanClass: v.PlanClass,
+		EventType: v.EventType, Diff: v.Diff, UpSql: v.UpSQL, DownSql: v.DownSQL,
+		IrSnapshot: v.IRSnapshot, CreatedAt: v.CreatedAt, IrHash: v.IRHash,
+	}
+	// Copy rather than alias, matching the FromPB direction. Assigning a nil
+	// *int64 is a no-op, so a guard here would protect nothing.
+	if v.ParentVer != nil {
+		pv := *v.ParentVer
+		out.ParentVersion = &pv
+	}
+	return out
+}
+
+func schemaVersionFromPB(p *adminpb.GetSchemaVersionResponse) *GetSchemaVersionResponse {
+	out := &GetSchemaVersionResponse{
+		Version: p.GetVersion(), Caller: p.GetCaller(), PlanClass: p.GetPlanClass(),
+		EventType: p.GetEventType(), Diff: p.GetDiff(), UpSQL: p.GetUpSql(),
+		DownSQL: p.GetDownSql(), IRSnapshot: p.GetIrSnapshot(),
+		CreatedAt: p.GetCreatedAt(), IRHash: p.GetIrHash(),
+	}
+	if p.ParentVersion != nil {
+		v := p.GetParentVersion()
+		out.ParentVer = &v
+	}
+	return out
+}
+
+func lineageToPB(in []EntityLineageEntry) []*adminpb.EntityLineageEntry {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*adminpb.EntityLineageEntry, 0, len(in))
+	for _, e := range in {
+		pb := &adminpb.EntityLineageEntry{
+			EntityId: e.EntityID, FieldName: e.FieldName,
+			IntroducedBy: e.IntroducedBy, IntroducedAt: e.IntroducedAt,
+			LastModifiedBy: e.LastModifiedBy, LastModifiedAt: e.LastModifiedAt,
+		}
+		if e.RemovedAt != nil {
+			ra := *e.RemovedAt
+			pb.RemovedAt = &ra
+		}
+		out = append(out, pb)
+	}
+	return out
+}
+
+func lineageFromPB(in []*adminpb.EntityLineageEntry) []EntityLineageEntry {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]EntityLineageEntry, 0, len(in))
+	for _, e := range in {
+		entry := EntityLineageEntry{
+			EntityID: e.GetEntityId(), FieldName: e.GetFieldName(),
+			IntroducedBy: e.GetIntroducedBy(), IntroducedAt: e.GetIntroducedAt(),
+			LastModifiedBy: e.GetLastModifiedBy(), LastModifiedAt: e.GetLastModifiedAt(),
+		}
+		if e.RemovedAt != nil {
+			v := e.GetRemovedAt()
+			entry.RemovedAt = &v
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func ownersToPB(in []EntityOwnerEntry) []*adminpb.EntityOwnerEntry {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*adminpb.EntityOwnerEntry, 0, len(in))
+	for _, o := range in {
+		out = append(out, &adminpb.EntityOwnerEntry{
+			EntityId: o.EntityID, IntroducedBy: o.IntroducedBy,
+			IntroducedAt: o.IntroducedAt, FieldCount: int32(o.FieldCount),
+		})
+	}
+	return out
+}
+
+func ownersFromPB(in []*adminpb.EntityOwnerEntry) []EntityOwnerEntry {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]EntityOwnerEntry, 0, len(in))
+	for _, o := range in {
+		out = append(out, EntityOwnerEntry{
+			EntityID: o.GetEntityId(), IntroducedBy: o.GetIntroducedBy(),
+			IntroducedAt: o.GetIntroducedAt(), FieldCount: int(o.GetFieldCount()),
+		})
+	}
+	return out
 }

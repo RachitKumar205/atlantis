@@ -71,19 +71,19 @@ type AdminServer interface {
 	RetryDeadJob(context.Context, *adminpb.RetryDeadJobRequest) (*adminpb.RetryDeadJobResponse, error)
 	StartWorkflow(context.Context, *adminpb.StartWorkflowRequest) (*adminpb.StartWorkflowResponse, error)
 	GetWorkflowStatus(context.Context, *adminpb.GetWorkflowStatusRequest) (*adminpb.GetWorkflowStatusResponse, error)
-	GetSchemaHistory(context.Context, GetSchemaHistoryRequest) (*GetSchemaHistoryResponse, error)
-	GetSchemaVersion(context.Context, GetSchemaVersionRequest) (*GetSchemaVersionResponse, error)
-	DiffSchemaVersions(context.Context, DiffSchemaVersionsRequest) (*DiffSchemaVersionsResponse, error)
-	GetEntityLineage(context.Context, GetEntityLineageRequest) (*GetEntityLineageResponse, error)
-	GetEntityOwners(context.Context, GetEntityOwnersRequest) (*GetEntityOwnersResponse, error)
-	RollbackSchema(context.Context, RollbackSchemaRequest) (*RollbackSchemaResponse, error)
-	PreviewRollback(context.Context, PreviewRollbackRequest) (*PreviewRollbackResponse, error)
+	GetSchemaHistory(context.Context, *adminpb.GetSchemaHistoryRequest) (*adminpb.GetSchemaHistoryResponse, error)
+	GetSchemaVersion(context.Context, *adminpb.GetSchemaVersionRequest) (*adminpb.GetSchemaVersionResponse, error)
+	DiffSchemaVersions(context.Context, *adminpb.DiffSchemaVersionsRequest) (*adminpb.DiffSchemaVersionsResponse, error)
+	GetEntityLineage(context.Context, *adminpb.GetEntityLineageRequest) (*adminpb.GetEntityLineageResponse, error)
+	GetEntityOwners(context.Context, *adminpb.GetEntityOwnersRequest) (*adminpb.GetEntityOwnersResponse, error)
+	RollbackSchema(context.Context, *adminpb.RollbackSchemaRequest) (*adminpb.RollbackSchemaResponse, error)
+	PreviewRollback(context.Context, *adminpb.PreviewRollbackRequest) (*adminpb.PreviewRollbackResponse, error)
 	GetCallerFiles(context.Context, *adminpb.GetCallerFilesRequest) (*adminpb.GetCallerFilesResponse, error)
 	GetCallers(context.Context, *adminpb.GetCallersRequest) (*adminpb.GetCallersResponse, error)
 	RegisterCaller(context.Context, *adminpb.RegisterCallerRequest) (*adminpb.RegisterCallerResponse, error)
 	RevokeCaller(context.Context, *adminpb.RevokeCallerRequest) (*adminpb.RevokeCallerResponse, error)
 	RecordCallerCertExpiry(context.Context, *adminpb.RecordCallerCertExpiryRequest) (*adminpb.RecordCallerCertExpiryResponse, error)
-	GetLogs(context.Context, GetLogsRequest) (*GetLogsResponse, error)
+	GetLogs(context.Context, *adminpb.GetLogsRequest) (*adminpb.GetLogsResponse, error)
 	ListConnectedWorkers(context.Context, *adminpb.ListConnectedWorkersRequest) (*adminpb.ListConnectedWorkersResponse, error)
 	GetWorkerSession(context.Context, *adminpb.GetWorkerSessionRequest) (*adminpb.GetWorkerSessionResponse, error)
 	DrainWorker(context.Context, *adminpb.DrainWorkerRequest) (*adminpb.DrainWorkerResponse, error)
@@ -783,11 +783,13 @@ func handleGetSchemaHistory(srv any, ctx context.Context, dec func(any) error, i
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeGetSchemaHistory(svc *Service, ctx context.Context, req *GetSchemaHistoryRequest) (any, error) {
-	resp, err := svc.GetSchemaHistory(ctx, *req)
+	pbResp, err := svc.GetSchemaHistory(ctx, &adminpb.GetSchemaHistoryRequest{Limit: req.Limit, Before: req.Before, Caller: req.Caller})
 	if err != nil {
 		return nil, err
 	}
+	resp := &GetSchemaHistoryResponse{Versions: schemaVersionSummariesFromPB(pbResp.GetVersions()), HasMore: pbResp.GetHasMore()}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -814,11 +816,13 @@ func handleGetSchemaVersion(srv any, ctx context.Context, dec func(any) error, i
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeGetSchemaVersion(svc *Service, ctx context.Context, req *GetSchemaVersionRequest) (any, error) {
-	resp, err := svc.GetSchemaVersion(ctx, *req)
+	pbResp, err := svc.GetSchemaVersion(ctx, &adminpb.GetSchemaVersionRequest{Version: req.Version})
 	if err != nil {
 		return nil, err
 	}
+	resp := schemaVersionFromPB(pbResp)
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -845,11 +849,13 @@ func handleDiffSchemaVersions(srv any, ctx context.Context, dec func(any) error,
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeDiffSchemaVersions(svc *Service, ctx context.Context, req *DiffSchemaVersionsRequest) (any, error) {
-	resp, err := svc.DiffSchemaVersions(ctx, *req)
+	pbResp, err := svc.DiffSchemaVersions(ctx, &adminpb.DiffSchemaVersionsRequest{FromVersion: req.FromVersion, ToVersion: req.ToVersion})
 	if err != nil {
 		return nil, err
 	}
+	resp := &DiffSchemaVersionsResponse{FromVersion: pbResp.GetFromVersion(), ToVersion: pbResp.GetToVersion(), Diff: pbResp.GetDiff(), FromIR: pbResp.GetFromIr(), ToIR: pbResp.GetToIr()}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -876,11 +882,13 @@ func handleGetEntityLineage(srv any, ctx context.Context, dec func(any) error, i
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeGetEntityLineage(svc *Service, ctx context.Context, req *GetEntityLineageRequest) (any, error) {
-	resp, err := svc.GetEntityLineage(ctx, *req)
+	pbResp, err := svc.GetEntityLineage(ctx, &adminpb.GetEntityLineageRequest{EntityId: req.EntityID})
 	if err != nil {
 		return nil, err
 	}
+	resp := &GetEntityLineageResponse{Entries: lineageFromPB(pbResp.GetEntries())}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -909,11 +917,13 @@ func handleGetEntityOwners(srv any, ctx context.Context, dec func(any) error, in
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeGetEntityOwners(svc *Service, ctx context.Context, req *GetEntityOwnersRequest) (any, error) {
-	resp, err := svc.GetEntityOwners(ctx, *req)
+	pbResp, err := svc.GetEntityOwners(ctx, &adminpb.GetEntityOwnersRequest{})
 	if err != nil {
 		return nil, err
 	}
+	resp := &GetEntityOwnersResponse{Owners: ownersFromPB(pbResp.GetOwners())}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -940,11 +950,13 @@ func handleRollbackSchema(srv any, ctx context.Context, dec func(any) error, int
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeRollbackSchema(svc *Service, ctx context.Context, req *RollbackSchemaRequest) (any, error) {
-	resp, err := svc.RollbackSchema(ctx, *req)
+	pbResp, err := svc.RollbackSchema(ctx, &adminpb.RollbackSchemaRequest{ToVersion: req.ToVersion, Caller: req.Caller})
 	if err != nil {
 		return nil, err
 	}
+	resp := &RollbackSchemaResponse{NewVersion: pbResp.GetNewVersion(), UpSQL: pbResp.GetUpSql()}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -971,11 +983,13 @@ func handlePreviewRollback(srv any, ctx context.Context, dec func(any) error, in
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokePreviewRollback(svc *Service, ctx context.Context, req *PreviewRollbackRequest) (any, error) {
-	resp, err := svc.PreviewRollback(ctx, *req)
+	pbResp, err := svc.PreviewRollback(ctx, &adminpb.PreviewRollbackRequest{ToVersion: req.ToVersion})
 	if err != nil {
 		return nil, err
 	}
+	resp := &PreviewRollbackResponse{TargetVersion: pbResp.GetTargetVersion(), CurrentVersion: pbResp.GetCurrentVersion(), UpSQL: pbResp.GetUpSql(), PlanClass: pbResp.GetPlanClass(), ChangeCount: int(pbResp.GetChangeCount())}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -1205,11 +1219,21 @@ func handleGetLogs(srv any, ctx context.Context, dec func(any) error, intercepto
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeGetLogs(svc *Service, ctx context.Context, req *GetLogsRequest) (any, error) {
-	resp, err := svc.GetLogs(ctx, *req)
+	// Clamp rather than narrow, as invokeListDeadJobs does: an int64 limit
+	// above int32 wraps to a small positive number, so a request for "no
+	// meaningful cap" silently returns one record. Reachable — the console's
+	// /api/logs?limit= parses into an int and only rejects n <= 0.
+	logLimit := req.Limit
+	if logLimit > math.MaxInt32 {
+		logLimit = math.MaxInt32
+	}
+	pbResp, err := svc.GetLogs(ctx, &adminpb.GetLogsRequest{Since: req.Since, Limit: int32(logLimit)})
 	if err != nil {
 		return nil, err
 	}
+	resp := &GetLogsResponse{Records: logEntriesFromPB(pbResp.GetRecords()), LastSeq: pbResp.GetLastSeq()}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err

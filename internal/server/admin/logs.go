@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
 
 // ---------------------------------------------------------------------------
@@ -45,24 +47,24 @@ type GetLogsResponse struct {
 // Returns an empty response when LogRing was not configured at boot —
 // for tests and the legacy single-binary path where the ring isn't
 // installed.
-func (s *Service) GetLogs(ctx context.Context, req GetLogsRequest) (*GetLogsResponse, error) {
+func (s *Service) GetLogs(ctx context.Context, req *adminpb.GetLogsRequest) (*adminpb.GetLogsResponse, error) {
 	if s.logRing == nil {
-		return &GetLogsResponse{}, nil
+		return &adminpb.GetLogsResponse{}, nil
 	}
 
-	recs, head := s.logRing.Since(req.Since)
-	if req.Limit > 0 && len(recs) > req.Limit {
+	recs, head := s.logRing.Since(req.GetSince())
+	if limit := int(req.GetLimit()); limit > 0 && len(recs) > limit {
 		// Keep the newest L entries — the SPA renders tail-anchored.
-		recs = recs[len(recs)-req.Limit:]
+		recs = recs[len(recs)-limit:]
 	}
 
-	out := make([]LogEntry, len(recs))
+	out := make([]*adminpb.LogEntry, len(recs))
 	for i, r := range recs {
 		attrs := make(map[string]string, len(r.Attrs))
 		for _, kv := range r.Attrs {
 			attrs[kv.Key] = kv.Val
 		}
-		out[i] = LogEntry{
+		out[i] = &adminpb.LogEntry{
 			Seq:   r.Seq,
 			Time:  r.Time.UTC().Format(time.RFC3339Nano),
 			Level: slogLevelName(r.Level),
@@ -71,7 +73,7 @@ func (s *Service) GetLogs(ctx context.Context, req GetLogsRequest) (*GetLogsResp
 		}
 	}
 
-	return &GetLogsResponse{Records: out, LastSeq: head}, nil
+	return &adminpb.GetLogsResponse{Records: out, LastSeq: head}, nil
 }
 
 func slogLevelName(l slog.Level) string {
@@ -85,4 +87,31 @@ func slogLevelName(l slog.Level) string {
 	default:
 		return "debug"
 	}
+}
+
+// logEntriesFromPB rebuilds the JSON shape. Records is non-omitempty, and the
+// handler has two empty paths that emitted different JSON:
+//
+//	logRing == nil          -> early return, nil slice  -> "records":null
+//	ring configured, empty  -> make(..., 0)             -> "records":[]
+//
+// So the guard tests nil rather than length. Using len(in)==0 collapses both
+// onto null and breaks the second; dropping the guard collapses both onto []
+// and breaks the first. An earlier draft did the latter, and the test written
+// alongside it asserted the wrong branch, certifying the drift.
+func logEntriesFromPB(in []*adminpb.LogEntry) []LogEntry {
+	if in == nil {
+		return nil
+	}
+	out := make([]LogEntry, 0, len(in))
+	for _, r := range in {
+		out = append(out, LogEntry{
+			Seq:   r.GetSeq(),
+			Time:  r.GetTime(),
+			Level: r.GetLevel(),
+			Msg:   r.GetMsg(),
+			Attrs: r.GetAttrs(),
+		})
+	}
+	return out
 }

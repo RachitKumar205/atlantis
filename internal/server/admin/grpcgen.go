@@ -89,6 +89,14 @@ var migratedRPCs = map[string]bool{
 	"GetMergedSchema":        true,
 	"GetCanonicalIR":         true,
 	"GetCallerFiles":         true,
+	"GetSchemaHistory":       true,
+	"GetSchemaVersion":       true,
+	"DiffSchemaVersions":     true,
+	"GetEntityLineage":       true,
+	"GetEntityOwners":        true,
+	"RollbackSchema":         true,
+	"PreviewRollback":        true,
+	"GetLogs":                true,
 }
 
 // ---------------------------------------------------------------------------
@@ -194,4 +202,36 @@ func (g *grpcServer) GetCanonicalIR(ctx context.Context, req *adminpb.GetCanonic
 
 func (g *grpcServer) GetCallerFiles(ctx context.Context, req *adminpb.GetCallerFilesRequest) (*adminpb.GetCallerFilesResponse, error) {
 	return g.svc.GetCallerFiles(ctx, req)
+}
+
+func (g *grpcServer) GetSchemaHistory(ctx context.Context, req *adminpb.GetSchemaHistoryRequest) (*adminpb.GetSchemaHistoryResponse, error) {
+	return g.svc.GetSchemaHistory(ctx, req)
+}
+
+func (g *grpcServer) GetSchemaVersion(ctx context.Context, req *adminpb.GetSchemaVersionRequest) (*adminpb.GetSchemaVersionResponse, error) {
+	return g.svc.GetSchemaVersion(ctx, req)
+}
+
+func (g *grpcServer) DiffSchemaVersions(ctx context.Context, req *adminpb.DiffSchemaVersionsRequest) (*adminpb.DiffSchemaVersionsResponse, error) {
+	return g.svc.DiffSchemaVersions(ctx, req)
+}
+
+func (g *grpcServer) GetEntityLineage(ctx context.Context, req *adminpb.GetEntityLineageRequest) (*adminpb.GetEntityLineageResponse, error) {
+	return g.svc.GetEntityLineage(ctx, req)
+}
+
+func (g *grpcServer) GetEntityOwners(ctx context.Context, req *adminpb.GetEntityOwnersRequest) (*adminpb.GetEntityOwnersResponse, error) {
+	return g.svc.GetEntityOwners(ctx, req)
+}
+
+func (g *grpcServer) RollbackSchema(ctx context.Context, req *adminpb.RollbackSchemaRequest) (*adminpb.RollbackSchemaResponse, error) {
+	return g.svc.RollbackSchema(ctx, req)
+}
+
+func (g *grpcServer) PreviewRollback(ctx context.Context, req *adminpb.PreviewRollbackRequest) (*adminpb.PreviewRollbackResponse, error) {
+	return g.svc.PreviewRollback(ctx, req)
+}
+
+func (g *grpcServer) GetLogs(ctx context.Context, req *adminpb.GetLogsRequest) (*adminpb.GetLogsResponse, error) {
+	return g.svc.GetLogs(ctx, req)
 }

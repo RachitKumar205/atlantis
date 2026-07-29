@@ -1083,3 +1083,153 @@ func TestCanonicalIRShimKeepsBytesVerbatim(t *testing.T) {
 		t.Errorf("IR was re-encoded or reordered: %s", b)
 	}
 }
+
+// --- History and logs ---
+
+// parent_version and removed_at are nullable columns crossing as proto3
+// `optional`. Both are *int64 with omitempty on the JSON side, so absent means
+// the key disappears — mapping them to a plain 0 would invent a parent version
+// 0 and a removal at the Unix epoch, and the key would reappear.
+func TestNullableHistoryFieldsStayAbsent(t *testing.T) {
+	root := schemaVersionFromPB(&adminpb.GetSchemaVersionResponse{Version: 1})
+	if root.ParentVer != nil {
+		t.Errorf("root version got a parent: %v", *root.ParentVer)
+	}
+	b, err := json.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "parent_version") {
+		t.Errorf("absent parent_version emitted a key: %s", b)
+	}
+
+	parent := int64(7)
+	child := schemaVersionFromPB(&adminpb.GetSchemaVersionResponse{Version: 8, ParentVersion: &parent})
+	if child.ParentVer == nil || *child.ParentVer != 7 {
+		t.Errorf("parent_version lost: %+v", child.ParentVer)
+	}
+
+	live := lineageFromPB([]*adminpb.EntityLineageEntry{{EntityId: "x.A"}})
+	if live[0].RemovedAt != nil {
+		t.Errorf("a live field got a removal time: %v", *live[0].RemovedAt)
+	}
+	removed := int64(9)
+	gone := lineageFromPB([]*adminpb.EntityLineageEntry{{EntityId: "x.A", RemovedAt: &removed}})
+	if gone[0].RemovedAt == nil || *gone[0].RemovedAt != 9 {
+		t.Errorf("removed_at lost: %+v", gone[0].RemovedAt)
+	}
+}
+
+func TestHistoryConverterPairsRoundTrip(t *testing.T) {
+	t.Run("summaries", func(t *testing.T) {
+		in := []SchemaVersionSummary{{
+			Version: 3, Caller: "svc", PlanClass: "additive", EventType: "apply",
+			ChangeCount: 2, CreatedAt: "t", IRHash: "h",
+		}}
+		if got := schemaVersionSummariesFromPB(schemaVersionSummariesToPB(in)); !reflect.DeepEqual(got, in) {
+			t.Errorf("got %+v, want %+v", got, in)
+		}
+	})
+	t.Run("lineage", func(t *testing.T) {
+		removed := int64(4)
+		in := []EntityLineageEntry{{
+			EntityID: "x.A", FieldName: "f", IntroducedBy: "svc", IntroducedAt: 1,
+			LastModifiedBy: "svc2", LastModifiedAt: 2, RemovedAt: &removed,
+		}}
+		if got := lineageFromPB(lineageToPB(in)); !reflect.DeepEqual(got, in) {
+			t.Errorf("got %+v, want %+v", got, in)
+		}
+	})
+	t.Run("owners", func(t *testing.T) {
+		in := []EntityOwnerEntry{{EntityID: "x.A", IntroducedBy: "svc", IntroducedAt: 1, FieldCount: 3}}
+		if got := ownersFromPB(ownersToPB(in)); !reflect.DeepEqual(got, in) {
+			t.Errorf("got %+v, want %+v", got, in)
+		}
+	})
+	t.Run("schema version", func(t *testing.T) {
+		parent := int64(2)
+		in := &GetSchemaVersionResponse{
+			Version: 3, Caller: "svc", PlanClass: "additive", EventType: "apply",
+			Diff: json.RawMessage(`{"a":1}`), UpSQL: "up", DownSQL: "down",
+			IRSnapshot: json.RawMessage(`{"ir":1}`), CreatedAt: "t",
+			ParentVer: &parent, IRHash: "h",
+		}
+		got := schemaVersionFromPB(schemaVersionToPB(in))
+		if !reflect.DeepEqual(got, in) {
+			t.Errorf("got %+v, want %+v", got, in)
+		}
+	})
+}
+
+// GetLogs has two empty paths that emit different JSON, and an earlier draft
+// of this test asserted the wrong one for the wrong input — certifying a
+// regression rather than catching it. Both are pinned now.
+//
+// The contrast with ListDeadJobs (which emits null) is the point: there is no
+// package-wide rule, only what each handler's own code did.
+func TestGetLogsEmptyRecordShapes(t *testing.T) {
+	// logRing == nil takes the early return with a nil slice.
+	nilRing, err := json.Marshal(&GetLogsResponse{Records: logEntriesFromPB(nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(nilRing), `"records":null`) {
+		t.Errorf(`nil ring: want "records":null, got %s`, nilRing)
+	}
+
+	// A configured ring with nothing in it builds make(..., 0).
+	emptyRing, err := json.Marshal(&GetLogsResponse{Records: logEntriesFromPB([]*adminpb.LogEntry{})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(emptyRing), `"records":[]`) {
+		t.Errorf(`empty ring: want "records":[], got %s`, emptyRing)
+	}
+}
+
+// The three history collections were the one field family this slice left
+// uncovered. All emit null when empty, matching the handlers' `var x []T`.
+// Without these, changing a converter's empty guard to make(...) flips
+// `tide history` against a fresh database from null to [] with nothing failing.
+func TestHistoryEmptyCollectionsMarshalAsNull(t *testing.T) {
+	for _, tc := range []struct{ name, got, want string }{
+		{
+			"versions",
+			mustJSON(t, &GetSchemaHistoryResponse{Versions: schemaVersionSummariesFromPB(nil)}),
+			`{"versions":null,"has_more":false}`,
+		},
+		{
+			"entries",
+			mustJSON(t, &GetEntityLineageResponse{Entries: lineageFromPB(nil)}),
+			`{"entries":null}`,
+		},
+		{
+			"owners",
+			mustJSON(t, &GetEntityOwnersResponse{Owners: ownersFromPB(nil)}),
+			`{"owners":null}`,
+		},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s:\n got: %s\nwant: %s", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestLogEntryAttrsSurviveRoundTrip(t *testing.T) {
+	got := logEntriesFromPB([]*adminpb.LogEntry{{
+		Seq: 1, Time: "t", Level: "INFO", Msg: "m",
+		Attrs: map[string]string{"k": "v"},
+	}})
+	if len(got) != 1 || got[0].Attrs["k"] != "v" {
+		t.Errorf("attrs lost: %+v", got)
+	}
+}

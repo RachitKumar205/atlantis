@@ -81,8 +81,11 @@ func TestMigratedRPCsAreTracked(t *testing.T) {
 	t.Logf("%d/%d RPCs migrated; pending: %v", len(migrated), sd.Methods().Len(), pending)
 
 	if len(pending) == 0 {
-		t.Log("all RPCs migrated — delete grpc.go, the JSON structs, and " +
-			"migratedRPCs, and collapse grpcServer into *Service")
+		t.Log("all RPCs migrated. grpcServer can collapse into *Service and " +
+			"migratedRPCs can go, but grpc.go and the legacy structs cannot be " +
+			"deleted until the clients move off the JSON path — and four handlers " +
+			"in history.go still scan rows into those structs rather than into " +
+			"protobuf, which is why their *ToPB converters exist")
 	}
 }
 
@@ -201,14 +204,31 @@ func TestGeneratedPathValidatesInput(t *testing.T) {
 	}
 }
 
-// TestUnmigratedRPCAnswersUnimplemented pins the property the migration relies
-// on: an RPC that has not moved is cleanly unimplemented on this path rather
-// than silently misbehaving, so the JSON path remains its only route.
-func TestUnmigratedRPCAnswersUnimplemented(t *testing.T) {
-	client := dialTestServer(t, &Service{})
+// TestNoRPCAnswersUnimplemented is the completion property, replacing the test
+// that used to assert the opposite for a specific not-yet-migrated method.
+//
+// Every method now dispatches to a real handler, so the embedded
+// UnimplementedAdminServiceServer should be unreachable. Adding an RPC to the
+// proto without implementing it fails here — which is the same guarantee the
+// hand-rolled AdminServer interface used to give at compile time, and the
+// reason migratedRPCs can eventually be deleted along with grpc.go.
+func TestNoRPCAnswersUnimplemented(t *testing.T) {
+	sd := adminpb.File_atlantis_admin_v1_admin_proto.Services().ByName("AdminService")
+	if sd == nil {
+		t.Fatal("AdminService missing from the compiled descriptor")
+	}
+	conn, panics := dialTestConn(t, &Service{})
+	ctx := context.Background()
 
-	_, err := client.GetEntityOwners(context.Background(), &adminpb.GetEntityOwnersRequest{})
-	if status.Code(err) != codes.Unimplemented {
-		t.Fatalf("got %v (code %v), want Unimplemented", err, status.Code(err))
+	for i := 0; i < sd.Methods().Len(); i++ {
+		m := sd.Methods().Get(i)
+		full := "/" + string(sd.FullName()) + "/" + string(m.Name())
+		err := conn.Invoke(ctx, full, dynamicpb.NewMessage(m.Input()), dynamicpb.NewMessage(m.Output()))
+		if status.Code(err) == codes.Unimplemented {
+			t.Errorf("%s is declared in the proto but not implemented on grpcServer", m.Name())
+		}
+	}
+	if got := panics.seen(); len(got) > 0 {
+		t.Errorf("handler(s) panicked: %v", got)
 	}
 }
