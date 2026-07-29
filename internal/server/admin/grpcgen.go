@@ -65,8 +65,12 @@ func RegisterGenerated(srv *grpc.Server, svc *Service) {
 // the implementations lets a test hold the descriptor to account; see the note
 // on UnimplementedAdminServiceServer above for why the compiler no longer can.
 var migratedRPCs = map[string]bool{
-	"GetCallerAliases": true,
-	"SetCallerAliases": true,
+	"GetCallerAliases":       true,
+	"SetCallerAliases":       true,
+	"GetCallers":             true,
+	"RegisterCaller":         true,
+	"RevokeCaller":           true,
+	"RecordCallerCertExpiry": true,
 }
 
 // ---------------------------------------------------------------------------
@@ -84,4 +88,20 @@ func (g *grpcServer) GetCallerAliases(ctx context.Context, req *adminpb.GetCalle
 
 func (g *grpcServer) SetCallerAliases(ctx context.Context, req *adminpb.SetCallerAliasesRequest) (*adminpb.SetCallerAliasesResponse, error) {
 	return g.svc.SetCallerAliases(ctx, req)
+}
+
+func (g *grpcServer) GetCallers(ctx context.Context, req *adminpb.GetCallersRequest) (*adminpb.GetCallersResponse, error) {
+	return g.svc.GetCallers(ctx, req)
+}
+
+func (g *grpcServer) RegisterCaller(ctx context.Context, req *adminpb.RegisterCallerRequest) (*adminpb.RegisterCallerResponse, error) {
+	return g.svc.RegisterCaller(ctx, req)
+}
+
+func (g *grpcServer) RevokeCaller(ctx context.Context, req *adminpb.RevokeCallerRequest) (*adminpb.RevokeCallerResponse, error) {
+	return g.svc.RevokeCaller(ctx, req)
+}
+
+func (g *grpcServer) RecordCallerCertExpiry(ctx context.Context, req *adminpb.RecordCallerCertExpiryRequest) (*adminpb.RecordCallerCertExpiryResponse, error) {
+	return g.svc.RecordCallerCertExpiry(ctx, req)
 }

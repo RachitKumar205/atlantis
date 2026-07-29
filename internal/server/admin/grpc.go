@@ -78,10 +78,10 @@ type AdminServer interface {
 	RollbackSchema(context.Context, RollbackSchemaRequest) (*RollbackSchemaResponse, error)
 	PreviewRollback(context.Context, PreviewRollbackRequest) (*PreviewRollbackResponse, error)
 	GetCallerFiles(context.Context, GetCallerFilesRequest) (*GetCallerFilesResponse, error)
-	GetCallers(context.Context, GetCallersRequest) (*GetCallersResponse, error)
-	RegisterCaller(context.Context, RegisterCallerRequest) (*RegisterCallerResponse, error)
-	RevokeCaller(context.Context, RevokeCallerRequest) (*RevokeCallerResponse, error)
-	RecordCallerCertExpiry(context.Context, RecordCallerCertExpiryRequest) (*RecordCallerCertExpiryResponse, error)
+	GetCallers(context.Context, *adminpb.GetCallersRequest) (*adminpb.GetCallersResponse, error)
+	RegisterCaller(context.Context, *adminpb.RegisterCallerRequest) (*adminpb.RegisterCallerResponse, error)
+	RevokeCaller(context.Context, *adminpb.RevokeCallerRequest) (*adminpb.RevokeCallerResponse, error)
+	RecordCallerCertExpiry(context.Context, *adminpb.RecordCallerCertExpiryRequest) (*adminpb.RecordCallerCertExpiryResponse, error)
 	GetLogs(context.Context, GetLogsRequest) (*GetLogsResponse, error)
 	ListConnectedWorkers(context.Context, ListConnectedWorkersRequest) (*ListConnectedWorkersResponse, error)
 	GetWorkerSession(context.Context, GetWorkerSessionRequest) (*GetWorkerSessionResponse, error)
@@ -853,11 +853,46 @@ func handleGetCallers(srv any, ctx context.Context, dec func(any) error, interce
 	return interceptor(ctx, &req, info, handler)
 }
 
-func invokeGetCallers(svc *Service, ctx context.Context, req *GetCallersRequest) (any, error) {
-	resp, err := svc.GetCallers(ctx, *req)
+// callerInfosToJSON rebuilds the pre-migration JSON shape from protobuf.
+//
+// Extracted so it can be tested directly: CallerInfo carries omitempty on
+// three fields, so which keys appear in the emitted object depends on zero
+// values surviving the round trip exactly. That is a hand-maintained
+// invariant, and the console SPA reads the result — the kind of thing a later
+// cleanup deletes because it looks redundant.
+//
+// The nil return for an empty input is deliberate and load-bearing: the
+// pre-migration handler built `var out []CallerInfo` and never assigned it
+// when there were no rows, so the response marshalled as `"callers":null`.
+// Returning an empty slice would emit `"callers":[]` instead.
+func callerInfosToJSON(in []*adminpb.CallerInfo) []CallerInfo {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]CallerInfo, 0, len(in))
+	for _, c := range in {
+		out = append(out, CallerInfo{
+			Caller:        c.GetCaller(),
+			FileCount:     int(c.GetFileCount()),
+			LastAppliedAt: c.GetLastAppliedAt(),
+			SchemaVersion: c.GetSchemaVersion(),
+			Registered:    c.GetRegistered(),
+			CanMutate:     c.GetCanMutate(),
+			CertExpiresAt: c.GetCertExpiresAt(),
+		})
+	}
+	return out
+}
+
+// Migration shim: the Service method now takes and returns protobuf types, so
+// these handlers translate for as long as the JSON path exists. Both they and
+// the structs they decode into disappear with this file.
+func invokeGetCallers(svc *Service, ctx context.Context, _ *GetCallersRequest) (any, error) {
+	pbResp, err := svc.GetCallers(ctx, &adminpb.GetCallersRequest{})
 	if err != nil {
 		return nil, err
 	}
+	resp := &GetCallersResponse{Callers: callerInfosToJSON(pbResp.GetCallers())}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -884,11 +919,17 @@ func handleRegisterCaller(srv any, ctx context.Context, dec func(any) error, int
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see invokeGetCallerAliases.
 func invokeRegisterCaller(svc *Service, ctx context.Context, req *RegisterCallerRequest) (any, error) {
-	resp, err := svc.RegisterCaller(ctx, *req)
+	pbResp, err := svc.RegisterCaller(ctx, &adminpb.RegisterCallerRequest{
+		Caller:    req.Caller,
+		CanMutate: req.CanMutate,
+		CreatedBy: req.CreatedBy,
+	})
 	if err != nil {
 		return nil, err
 	}
+	resp := &RegisterCallerResponse{Caller: pbResp.GetCaller(), CanMutate: pbResp.GetCanMutate()}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -915,11 +956,13 @@ func handleRevokeCaller(srv any, ctx context.Context, dec func(any) error, inter
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see invokeGetCallerAliases.
 func invokeRevokeCaller(svc *Service, ctx context.Context, req *RevokeCallerRequest) (any, error) {
-	resp, err := svc.RevokeCaller(ctx, *req)
+	pbResp, err := svc.RevokeCaller(ctx, &adminpb.RevokeCallerRequest{Caller: req.Caller})
 	if err != nil {
 		return nil, err
 	}
+	resp := &RevokeCallerResponse{FilesRemoved: int(pbResp.GetFilesRemoved())}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -946,11 +989,17 @@ func handleRecordCallerCertExpiry(srv any, ctx context.Context, dec func(any) er
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see invokeGetCallerAliases.
 func invokeRecordCallerCertExpiry(svc *Service, ctx context.Context, req *RecordCallerCertExpiryRequest) (any, error) {
-	resp, err := svc.RecordCallerCertExpiry(ctx, *req)
+	pbResp, err := svc.RecordCallerCertExpiry(ctx, &adminpb.RecordCallerCertExpiryRequest{
+		Caller:      req.Caller,
+		ExpiresAt:   req.ExpiresAt,
+		Fingerprint: req.Fingerprint,
+	})
 	if err != nil {
 		return nil, err
 	}
+	resp := &RecordCallerCertExpiryResponse{Caller: pbResp.GetCaller(), ExpiresAt: pbResp.GetExpiresAt()}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err

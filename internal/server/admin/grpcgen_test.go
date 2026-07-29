@@ -4,6 +4,8 @@ import (
 	"context"
 	"net"
 	"sort"
+	"strings"
+	"sync"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -40,7 +42,7 @@ func TestMigratedRPCsAreTracked(t *testing.T) {
 	// Requests are empty dynamic messages. A migrated RPC may well reject one
 	// as invalid — that is fine and is the point. Any code other than
 	// Unimplemented means a real handler ran.
-	conn := dialTestConn(t, &Service{})
+	conn, panics := dialTestConn(t, &Service{})
 	ctx := context.Background()
 
 	var migrated, pending []string
@@ -68,6 +70,13 @@ func TestMigratedRPCsAreTracked(t *testing.T) {
 		}
 	}
 
+	// A panicking handler answers Internal, which the loop above counts as
+	// migrated. That is the reading this test cannot afford to get wrong, so
+	// assert no handler panicked rather than trusting the classification.
+	if got := panics.seen(); len(got) > 0 {
+		t.Errorf("handler(s) panicked and were counted as migrated: %v", got)
+	}
+
 	sort.Strings(pending)
 	t.Logf("%d/%d RPCs migrated; pending: %v", len(migrated), sd.Methods().Len(), pending)
 
@@ -77,19 +86,55 @@ func TestMigratedRPCsAreTracked(t *testing.T) {
 	}
 }
 
+// panicRecorder captures handler panics instead of letting them kill the test
+// process, and remembers them so a test can assert none happened.
+//
+// Recovering silently would be worse than not recovering: TestMigratedRPCsAreTracked
+// classifies any non-Unimplemented response as "this RPC is migrated", so a
+// handler that segfaults would be counted as working and the suite would go
+// green over it. Recording is what keeps the recovery honest.
+type panicRecorder struct {
+	mu      sync.Mutex
+	methods []string
+}
+
+func (p *panicRecorder) record(method string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.methods = append(p.methods, method)
+}
+
+func (p *panicRecorder) seen() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.methods...)
+}
+
 // dialTestConn stands up the generated service over an in-process connection.
-// The new path had no coverage at all before this: the two migrated RPCs were
+// The new path had no coverage at all before this: the migrated RPCs were
 // verified by the compiler and nothing else.
 //
 // Note the absence of ForceCodecV2 here, unlike every real client. That is
 // what lets these tests speak protobuf to the generated service; see the note
 // on grpcServer about why the production clients cannot migrate per-RPC over
 // their existing connections.
-func dialTestConn(t *testing.T, svc *Service) *grpc.ClientConn {
+func dialTestConn(t *testing.T, svc *Service) (*grpc.ClientConn, *panicRecorder) {
 	t.Helper()
 
 	lis := bufconn.Listen(1 << 20)
-	srv := grpc.NewServer()
+	// Mirrors the recovery interceptor cmd/server installs (cmd/server/auth.go),
+	// so a panicking handler fails one call rather than the whole process.
+	panics := &panicRecorder{}
+	srv := grpc.NewServer(grpc.UnaryInterceptor(
+		func(ctx context.Context, req any, info *grpc.UnaryServerInfo, h grpc.UnaryHandler) (resp any, err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					panics.record(info.FullMethod)
+					err = status.Errorf(codes.Internal, "panic: %v", r)
+				}
+			}()
+			return h(ctx, req)
+		}))
 	RegisterGenerated(srv, svc)
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
@@ -104,12 +149,20 @@ func dialTestConn(t *testing.T, svc *Service) *grpc.ClientConn {
 		t.Fatalf("dial: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	return conn
+	return conn, panics
 }
 
 func dialTestServer(t *testing.T, svc *Service) adminpb.AdminServiceClient {
 	t.Helper()
-	return adminpb.NewAdminServiceClient(dialTestConn(t, svc))
+	conn, panics := dialTestConn(t, svc)
+	// Any panic in these focused tests is a bug in the handler under test,
+	// never an expected outcome.
+	t.Cleanup(func() {
+		if got := panics.seen(); len(got) > 0 {
+			t.Errorf("handler(s) panicked: %v", got)
+		}
+	})
+	return adminpb.NewAdminServiceClient(conn)
 }
 
 // TestGeneratedPathServesMigratedRPC proves the protobuf path actually works
@@ -131,6 +184,10 @@ func TestGeneratedPathServesMigratedRPC(t *testing.T) {
 // TestGeneratedPathValidatesInput pins that argument validation survived the
 // move to protobuf getters, where an absent field yields a zero value rather
 // than being distinguishable from an empty one.
+//
+// It asserts the message, not merely that some error came back: a nil-pointer
+// panic recovered into codes.Internal would satisfy "an error occurred" while
+// proving the opposite of what this test is for.
 func TestGeneratedPathValidatesInput(t *testing.T) {
 	client := dialTestServer(t, &Service{})
 
@@ -138,6 +195,9 @@ func TestGeneratedPathValidatesInput(t *testing.T) {
 		&adminpb.GetCallerAliasesRequest{})
 	if err == nil {
 		t.Fatal("expected an error for an empty caller")
+	}
+	if !strings.Contains(err.Error(), "caller is required") {
+		t.Errorf("want the validation error, got: %v", err)
 	}
 }
 

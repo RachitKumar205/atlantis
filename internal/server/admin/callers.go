@@ -6,9 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
 
 // ---------------------------------------------------------------------------
@@ -43,7 +46,12 @@ type GetCallersResponse struct {
 // (operator-registered) and caller_registrations (anyone who has ever
 // `tide apply`'d). A caller may appear with 0 file_count if they were
 // registered through the console but have not yet pushed schema.
-func (s *Service) GetCallers(ctx context.Context, _ GetCallersRequest) (*GetCallersResponse, error) {
+func (s *Service) GetCallers(ctx context.Context, _ *adminpb.GetCallersRequest) (*adminpb.GetCallersResponse, error) {
+	// No-PG test path, matching the other methods in this package. Without it
+	// this is the one migrated RPC that segfaults rather than returning.
+	if s.pool == nil {
+		return &adminpb.GetCallersResponse{}, nil
+	}
 	// FULL OUTER JOIN against an aggregated registrations subquery + the
 	// identities table so each side fills in for the other:
 	//   - identities-only: registered=true, file_count=0
@@ -76,15 +84,26 @@ ORDER BY caller`)
 	}
 	defer rows.Close()
 
-	var out []CallerInfo
+	var out []*adminpb.CallerInfo
 	for rows.Next() {
-		var ci CallerInfo
+		ci := &adminpb.CallerInfo{}
+		var fileCount int64
 		var lastAt *string
 		var schemaVer *int64
 		var certExp *string
-		if err := rows.Scan(&ci.Caller, &ci.FileCount, &lastAt, &schemaVer, &ci.Registered, &ci.CanMutate, &certExp); err != nil {
+		if err := rows.Scan(&ci.Caller, &fileCount, &lastAt, &schemaVer, &ci.Registered, &ci.CanMutate, &certExp); err != nil {
 			return nil, err
 		}
+		// file_count is a COUNT(*), so Postgres returns int8 while the wire
+		// field is int32. Unreachable in practice — it would take two billion
+		// .atl files for one caller — but report rather than clamp: a clamped
+		// 2147483647 is indistinguishable from a real count, whereas the
+		// pre-migration scan into `int` surfaced an out-of-range bigint as an
+		// error on 32-bit builds. Keep the louder behaviour.
+		if fileCount > math.MaxInt32 {
+			return nil, fmt.Errorf("admin: file_count %d for caller %q exceeds the wire field's range", fileCount, ci.Caller)
+		}
+		ci.FileCount = int32(fileCount)
 		if lastAt != nil {
 			ci.LastAppliedAt = *lastAt
 		}
@@ -99,7 +118,7 @@ ORDER BY caller`)
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return &GetCallersResponse{Callers: out}, nil
+	return &adminpb.GetCallersResponse{Callers: out}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -143,28 +162,28 @@ func validCallerName(s string) bool {
 // console's audit_log instead.
 //
 // Operator-only.
-func (s *Service) RegisterCaller(ctx context.Context, req RegisterCallerRequest) (*RegisterCallerResponse, error) {
+func (s *Service) RegisterCaller(ctx context.Context, req *adminpb.RegisterCallerRequest) (*adminpb.RegisterCallerResponse, error) {
 	if err := s.authorizeOperator(ctx); err != nil {
 		return nil, err
 	}
-	if !validCallerName(req.Caller) {
+	if !validCallerName(req.GetCaller()) {
 		return nil, errors.New("admin: caller name must be 1-64 chars, lowercase alphanumeric + '-' (interior only)")
 	}
 	// Reject names atlantis reserves for its own infrastructure CNs.
-	switch req.Caller {
+	switch req.GetCaller() {
 	case "atlantis", "atlantis-console", "atlantis-signer", "anonymous":
-		return nil, fmt.Errorf("admin: %q is reserved", req.Caller)
+		return nil, fmt.Errorf("admin: %q is reserved", req.GetCaller())
 	}
 
 	_, err := s.pool.Exec(ctx, `
 INSERT INTO atlantis.caller_identities (caller, can_mutate, created_by)
 VALUES ($1, $2, $3)
 ON CONFLICT (caller) DO UPDATE SET can_mutate = EXCLUDED.can_mutate`,
-		req.Caller, req.CanMutate, req.CreatedBy)
+		req.GetCaller(), req.GetCanMutate(), req.GetCreatedBy())
 	if err != nil {
 		return nil, fmt.Errorf("register caller: %w", err)
 	}
-	return &RegisterCallerResponse{Caller: req.Caller, CanMutate: req.CanMutate}, nil
+	return &adminpb.RegisterCallerResponse{Caller: req.GetCaller(), CanMutate: req.GetCanMutate()}, nil
 }
 
 // isRegisteredCaller reports whether the named caller exists in
@@ -248,17 +267,17 @@ type RecordCallerCertExpiryResponse struct {
 // leaves the old fingerprint in place; the caller will keep working
 // with the old cert until a successful re-record (operationally we
 // surface the BFF error and the operator retries).
-func (s *Service) RecordCallerCertExpiry(ctx context.Context, req RecordCallerCertExpiryRequest) (*RecordCallerCertExpiryResponse, error) {
+func (s *Service) RecordCallerCertExpiry(ctx context.Context, req *adminpb.RecordCallerCertExpiryRequest) (*adminpb.RecordCallerCertExpiryResponse, error) {
 	if err := s.authorizeOperator(ctx); err != nil {
 		return nil, err
 	}
-	if !validCallerName(req.Caller) {
+	if !validCallerName(req.GetCaller()) {
 		return nil, errors.New("admin: invalid caller name")
 	}
-	if req.ExpiresAt == "" {
+	if req.GetExpiresAt() == "" {
 		return nil, errors.New("admin: expires_at is required")
 	}
-	exp, err := time.Parse(time.RFC3339, req.ExpiresAt)
+	exp, err := time.Parse(time.RFC3339, req.GetExpiresAt())
 	if err != nil {
 		return nil, fmt.Errorf("admin: parse expires_at: %w", err)
 	}
@@ -268,8 +287,8 @@ func (s *Service) RecordCallerCertExpiry(ctx context.Context, req RecordCallerCe
 	// value would silently land as a non-matching fingerprint and lock
 	// the caller out, so reject early at the boundary.
 	var fp []byte
-	if req.Fingerprint != "" {
-		fp, err = hex.DecodeString(req.Fingerprint)
+	if req.GetFingerprint() != "" {
+		fp, err = hex.DecodeString(req.GetFingerprint())
 		if err != nil {
 			return nil, fmt.Errorf("admin: parse fingerprint: %w", err)
 		}
@@ -285,14 +304,14 @@ func (s *Service) RecordCallerCertExpiry(ctx context.Context, req RecordCallerCe
 UPDATE atlantis.caller_identities
    SET cert_expires_at  = $2,
        cert_fingerprint = COALESCE($3, cert_fingerprint)
- WHERE caller = $1`, req.Caller, exp.UTC(), fp)
+ WHERE caller = $1`, req.GetCaller(), exp.UTC(), fp)
 	if err != nil {
 		return nil, fmt.Errorf("update caller cert: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return nil, fmt.Errorf("admin: caller %q is not registered", req.Caller)
+		return nil, fmt.Errorf("admin: caller %q is not registered", req.GetCaller())
 	}
-	return &RecordCallerCertExpiryResponse{Caller: req.Caller, ExpiresAt: exp.UTC().Format(time.RFC3339)}, nil
+	return &adminpb.RecordCallerCertExpiryResponse{Caller: req.GetCaller(), ExpiresAt: exp.UTC().Format(time.RFC3339)}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -318,11 +337,11 @@ type RevokeCallerResponse struct {
 // minted for this CN starts failing Unauthenticated within one cache
 // TTL (~5s). This is the revocation mechanism — no CRL, no OCSP, just
 // the row going away.
-func (s *Service) RevokeCaller(ctx context.Context, req RevokeCallerRequest) (*RevokeCallerResponse, error) {
+func (s *Service) RevokeCaller(ctx context.Context, req *adminpb.RevokeCallerRequest) (*adminpb.RevokeCallerResponse, error) {
 	if err := s.authorizeOperator(ctx); err != nil {
 		return nil, err
 	}
-	if req.Caller == "" {
+	if req.GetCaller() == "" {
 		return nil, fmt.Errorf("caller is required")
 	}
 
@@ -333,16 +352,22 @@ func (s *Service) RevokeCaller(ctx context.Context, req RevokeCallerRequest) (*R
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
 	tag, err := tx.Exec(ctx, `
-DELETE FROM atlantis.caller_registrations WHERE caller = $1`, req.Caller)
+DELETE FROM atlantis.caller_registrations WHERE caller = $1`, req.GetCaller())
 	if err != nil {
 		return nil, fmt.Errorf("revoke caller_registrations: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-DELETE FROM atlantis.caller_identities WHERE caller = $1`, req.Caller); err != nil {
+DELETE FROM atlantis.caller_identities WHERE caller = $1`, req.GetCaller()); err != nil {
 		return nil, fmt.Errorf("revoke caller_identities: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit revoke: %w", err)
 	}
-	return &RevokeCallerResponse{FilesRemoved: int(tag.RowsAffected())}, nil
+	// RowsAffected is int64, the wire field int32. See the note in GetCallers
+	// on reporting rather than clamping.
+	removed := tag.RowsAffected()
+	if removed > math.MaxInt32 {
+		return nil, fmt.Errorf("admin: revoked %d rows for caller %q, which exceeds the wire field's range", removed, req.GetCaller())
+	}
+	return &adminpb.RevokeCallerResponse{FilesRemoved: int32(removed)}, nil
 }
