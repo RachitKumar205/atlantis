@@ -351,6 +351,15 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 
 	log.Debug("init: register admin service")
 	admin.Register(srv, adminSvc)
+	// admin.RegisterGenerated is deliberately not called yet. The protobuf
+	// service exists and is exercised by tests, but serving it here would
+	// expose a path that no interceptor guards: AuthChecker's exempt list
+	// covers "/atlantis.admin.v1.Admin/", which does not prefix-match
+	// "/atlantis.admin.v1.AdminService/", and the capability interceptor is
+	// not installed. Adding the new prefix to the exempt list would ship an
+	// endpoint whose only gate is the wildcard-defaulting authorizeOperator —
+	// the exact hole the capability work exists to close. It is registered in
+	// the change that installs the interceptor.
 
 	// Backfill worker — gated by ATL_BACKFILL_WORKER_ENABLED. Shares
 	// workerCtx with the invalidate worker so SIGTERM stops both, and

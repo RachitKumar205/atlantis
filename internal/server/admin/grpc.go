@@ -8,6 +8,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/encoding"
 	"google.golang.org/grpc/mem"
+
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
 
 // jsonCodec mirrors the codec the `tide` CLI installs on the client side.
@@ -85,8 +87,11 @@ type AdminServer interface {
 	GetWorkerSession(context.Context, GetWorkerSessionRequest) (*GetWorkerSessionResponse, error)
 	DrainWorker(context.Context, DrainWorkerRequest) (*DrainWorkerResponse, error)
 	EvictWorker(context.Context, EvictWorkerRequest) (*EvictWorkerResponse, error)
-	GetCallerAliases(context.Context, GetCallerAliasesRequest) (*GetCallerAliasesResponse, error)
-	SetCallerAliases(context.Context, SetCallerAliasesRequest) (*SetCallerAliasesResponse, error)
+	// Migrated to protobuf types; the JSON handlers above translate. As each
+	// remaining RPC moves, its entry here changes shape too, until the whole
+	// interface and this file are deleted.
+	GetCallerAliases(context.Context, *adminpb.GetCallerAliasesRequest) (*adminpb.GetCallerAliasesResponse, error)
+	SetCallerAliases(context.Context, *adminpb.SetCallerAliasesRequest) (*adminpb.SetCallerAliasesResponse, error)
 }
 
 // Compile-time check: *Service is the implementation of
@@ -1131,12 +1136,18 @@ func handleGetCallerAliases(srv any, ctx context.Context, dec func(any) error, i
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim: GetCallerAliases now takes and returns protobuf types, so
+// this handler translates for as long as the JSON path exists. Both this
+// function and the struct it decodes into disappear with the file.
 func invokeGetCallerAliases(svc *Service, ctx context.Context, req *GetCallerAliasesRequest) (any, error) {
-	resp, err := svc.GetCallerAliases(ctx, *req)
+	resp, err := svc.GetCallerAliases(ctx, &adminpb.GetCallerAliasesRequest{Caller: req.Caller})
 	if err != nil {
 		return nil, err
 	}
-	raw, err := json.Marshal(resp)
+	raw, err := json.Marshal(GetCallerAliasesResponse{
+		Caller:  resp.GetCaller(),
+		Aliases: resp.GetAliases(),
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1162,12 +1173,19 @@ func handleSetCallerAliases(srv any, ctx context.Context, dec func(any) error, i
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see invokeGetCallerAliases.
 func invokeSetCallerAliases(svc *Service, ctx context.Context, req *SetCallerAliasesRequest) (any, error) {
-	resp, err := svc.SetCallerAliases(ctx, *req)
+	resp, err := svc.SetCallerAliases(ctx, &adminpb.SetCallerAliasesRequest{
+		Caller:  req.Caller,
+		Aliases: req.Aliases,
+	})
 	if err != nil {
 		return nil, err
 	}
-	raw, err := json.Marshal(resp)
+	raw, err := json.Marshal(SetCallerAliasesResponse{
+		Caller:  resp.GetCaller(),
+		Aliases: resp.GetAliases(),
+	})
 	if err != nil {
 		return nil, err
 	}

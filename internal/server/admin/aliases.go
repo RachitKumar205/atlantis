@@ -20,6 +20,8 @@ import (
 	"sort"
 
 	"github.com/jackc/pgx/v5"
+
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
 
 // LookupCallerAliases returns the aliases configured for a caller.
@@ -84,36 +86,36 @@ type SetCallerAliasesResponse struct {
 //     are responsible for not creating conflicts.
 //   - Reserved names ("atlantis", "atlantis-console", etc.) are
 //     rejected the same way they are in RegisterCaller.
-func (s *Service) SetCallerAliases(ctx context.Context, req SetCallerAliasesRequest) (*SetCallerAliasesResponse, error) {
+func (s *Service) SetCallerAliases(ctx context.Context, req *adminpb.SetCallerAliasesRequest) (*adminpb.SetCallerAliasesResponse, error) {
 	if err := s.authorizeOperator(ctx); err != nil {
 		return nil, err
 	}
-	if req.Caller == "" {
+	if req.GetCaller() == "" {
 		return nil, errors.New("admin: caller is required")
 	}
 
-	cleaned, err := normalizeAliases(req.Caller, req.Aliases)
+	cleaned, err := normalizeAliases(req.GetCaller(), req.GetAliases())
 	if err != nil {
 		return nil, err
 	}
 
 	if s.pool == nil {
 		// No-PG test path: succeed without writing anything.
-		return &SetCallerAliasesResponse{Caller: req.Caller, Aliases: cleaned}, nil
+		return &adminpb.SetCallerAliasesResponse{Caller: req.GetCaller(), Aliases: cleaned}, nil
 	}
 
 	res, err := s.pool.Exec(ctx, `
 UPDATE atlantis.caller_identities
    SET aliases = $2
- WHERE caller = $1`, req.Caller, cleaned)
+ WHERE caller = $1`, req.GetCaller(), cleaned)
 	if err != nil {
 		return nil, fmt.Errorf("update aliases: %w", err)
 	}
 	if res.RowsAffected() == 0 {
-		return nil, fmt.Errorf("admin: caller %q is not registered; register first via RegisterCaller", req.Caller)
+		return nil, fmt.Errorf("admin: caller %q is not registered; register first via RegisterCaller", req.GetCaller())
 	}
 
-	return &SetCallerAliasesResponse{Caller: req.Caller, Aliases: cleaned}, nil
+	return &adminpb.SetCallerAliasesResponse{Caller: req.GetCaller(), Aliases: cleaned}, nil
 }
 
 type GetCallerAliasesRequest struct {
@@ -132,18 +134,18 @@ type GetCallerAliasesResponse struct {
 // Returns the alias list (empty if no aliases set). Returns an error
 // when the caller isn't registered so the BFF can distinguish
 // "registered, no aliases" from "404 — no such caller."
-func (s *Service) GetCallerAliases(ctx context.Context, req GetCallerAliasesRequest) (*GetCallerAliasesResponse, error) {
-	if req.Caller == "" {
+func (s *Service) GetCallerAliases(ctx context.Context, req *adminpb.GetCallerAliasesRequest) (*adminpb.GetCallerAliasesResponse, error) {
+	if req.GetCaller() == "" {
 		return nil, errors.New("admin: caller is required")
 	}
 	if s.pool == nil {
-		return &GetCallerAliasesResponse{Caller: req.Caller, Aliases: nil}, nil
+		return &adminpb.GetCallerAliasesResponse{Caller: req.GetCaller(), Aliases: nil}, nil
 	}
 	var aliases []string
 	err := s.pool.QueryRow(ctx, `
-SELECT aliases FROM atlantis.caller_identities WHERE caller = $1`, req.Caller).Scan(&aliases)
+SELECT aliases FROM atlantis.caller_identities WHERE caller = $1`, req.GetCaller()).Scan(&aliases)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("admin: caller %q is not registered", req.Caller)
+		return nil, fmt.Errorf("admin: caller %q is not registered", req.GetCaller())
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lookup aliases: %w", err)
@@ -151,7 +153,7 @@ SELECT aliases FROM atlantis.caller_identities WHERE caller = $1`, req.Caller).S
 	if aliases == nil {
 		aliases = []string{}
 	}
-	return &GetCallerAliasesResponse{Caller: req.Caller, Aliases: aliases}, nil
+	return &adminpb.GetCallerAliasesResponse{Caller: req.GetCaller(), Aliases: aliases}, nil
 }
 
 // normalizeAliases trims, dedups, sorts, and validates. Centralised
