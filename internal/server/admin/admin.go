@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/dsl/sqlvalidate"
@@ -39,7 +40,7 @@ import (
 //  2. `mutationAllowed` — a per-CN allowlist. The intended prod posture:
 //     `allowApplyMutation=false` and only CI's caller CNs in this set,
 //     so a leaked app-server cert can't push schema.
-//  3. `req.Caller == cert CN` on apply/backfill — a caller may only
+//  3. `req.GetCaller() == cert CN` on apply/backfill — a caller may only
 //     mutate its OWN schema. Even if a CN is on the mutation allowlist,
 //     it can't impersonate a different caller in the request body.
 //
@@ -88,7 +89,7 @@ type Config struct {
 	// permitted to invoke schema-mutating RPCs (ApplyMigration,
 	// BeginBackfillPlan). Empty means no per-CN exceptions — only
 	// AllowApplyMutation grants permission. Independent of (and in
-	// addition to) the req.Caller-matches-CN check.
+	// addition to) the req.GetCaller()-matches-CN check.
 	MutationAllowedCallers []string
 
 	// OperatorAllowedCallers is the per-CN allowlist of identities
@@ -100,7 +101,7 @@ type Config struct {
 
 	// CallerFromContext extracts the authenticated cert CN from the
 	// request context. The admin service uses it to enforce that
-	// req.Caller matches the connecting CN on apply/backfill so a
+	// req.GetCaller() matches the connecting CN on apply/backfill so a
 	// caller can't impersonate another caller's identity in the
 	// request body. When nil the check is skipped (insecure dev mode).
 	CallerFromContext func(context.Context) string
@@ -189,8 +190,8 @@ func (s *Service) canMutate(cn string) bool {
 
 // authorizeOperator enforces the operator-mutation gate for RPCs that
 // administrate other callers' state (revoke, rollback, adopt). Unlike
-// self-apply there is no req.Caller-matches-CN check — the operator
-// (typically the console) acts ON BEHALF OF a human admin and req.Caller
+// self-apply there is no req.GetCaller()-matches-CN check — the operator
+// (typically the console) acts ON BEHALF OF a human admin and req.GetCaller()
 // names the TARGET caller, not the actor. When the OperatorAllowedCallers
 // set is empty we fall back to the legacy global wildcard so existing
 // deployments keep working.
@@ -219,7 +220,7 @@ func (s *Service) authorizeOperator(ctx context.Context) error {
 //
 //   - the connecting cert CN is allowed to mutate (via wildcard, env-var
 //     allowlist, OR caller_identities.can_mutate=true), AND
-//   - req.Caller matches the connecting cert CN (so a CN allowed to
+//   - req.GetCaller() matches the connecting cert CN (so a CN allowed to
 //     mutate can only mutate its own namespace, not someone else's).
 //
 // In insecure dev mode (no TLS, no CallerFromContext) the same-CN check
@@ -365,7 +366,7 @@ type ImpactEntry struct {
 type ApplyRequest struct {
 	Caller         string
 	PlanID         string
-	UpSQL          string // re-submitted by caller to detect drift since planning
+	UpSQL          string // accepted for wire compatibility; never read — the server recomputes from Files. Deleted with this struct.
 	Files          []SubmittedFile
 	CheckpointHash string // CAS token from PlanResponse; empty for pre-CAS clients
 }
@@ -405,15 +406,15 @@ type GetCallerFilesResponse struct {
 
 // GetCallerFiles returns all registered .atl files for a single caller,
 // ordered by file_path. Read-only.
-func (s *Service) GetCallerFiles(ctx context.Context, req GetCallerFilesRequest) (*GetCallerFilesResponse, error) {
-	if req.Caller == "" {
+func (s *Service) GetCallerFiles(ctx context.Context, req *adminpb.GetCallerFilesRequest) (*adminpb.GetCallerFilesResponse, error) {
+	if req.GetCaller() == "" {
 		return nil, fmt.Errorf("caller is required")
 	}
 	rows, err := s.pool.Query(ctx, `
 SELECT file_path, content
 FROM atlantis.caller_registrations
 WHERE caller = $1
-ORDER BY file_path`, req.Caller)
+ORDER BY file_path`, req.GetCaller())
 	if err != nil {
 		return nil, fmt.Errorf("load caller files: %w", err)
 	}
@@ -430,7 +431,7 @@ ORDER BY file_path`, req.Caller)
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return &GetCallerFilesResponse{Files: files}, nil
+	return &adminpb.GetCallerFilesResponse{Files: submittedFilesToPB(files)}, nil
 }
 
 // GetCanonicalIRRequest is the input to GetCanonicalIR. No fields today;
@@ -458,25 +459,26 @@ type GetCanonicalIRResponse struct {
 //
 // We do NOT write to caller_registrations here — that happens only when
 // ApplyMigration succeeds. PlanSchema is read-only.
-func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanResponse, error) {
-	if req.Caller == "" {
+func (s *Service) PlanSchema(ctx context.Context, req *adminpb.PlanSchemaRequest) (*adminpb.PlanSchemaResponse, error) {
+	reqFiles := submittedFilesFromPB(req.GetFiles())
+	if req.GetCaller() == "" {
 		return nil, errors.New("admin: caller identity is required")
 	}
 
 	// Pass 1: parse the caller's submitted files into one big File set so
 	// we can detect DSL errors before merging with anything.
-	callerFiles, parseErrs := parseSubmitted(req.Caller, req.Files)
+	callerFiles, parseErrs := parseSubmitted(req.GetCaller(), reqFiles)
 	if len(parseErrs) > 0 {
 		// Surface parse errors up front. The plan is "unclean" — no apply
 		// is possible until the caller fixes its own DSL.
-		return &PlanResponse{
-			Class:       ClassUnclean,
+		return &adminpb.PlanSchemaResponse{
+			Class:       adminpb.PlanClass_PLAN_CLASS_UNPARSEABLE,
 			ParseErrors: parseErrs,
 		}, nil
 	}
 
 	// Load every other caller's stored files.
-	others, err := s.loadOtherCallers(ctx, req.Caller)
+	others, err := s.loadOtherCallers(ctx, req.GetCaller())
 	if err != nil {
 		return nil, fmt.Errorf("load other callers: %w", err)
 	}
@@ -491,8 +493,8 @@ func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanRespons
 	allFiles := append(callerFiles, others...)
 	newIR, err := dsl.Lower(allFiles)
 	if err != nil {
-		return &PlanResponse{
-			Class:       ClassUnclean,
+		return &adminpb.PlanSchemaResponse{
+			Class:       adminpb.PlanClass_PLAN_CLASS_UNPARSEABLE,
 			ParseErrors: []string{err.Error()},
 		}, nil
 	}
@@ -502,10 +504,10 @@ func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanRespons
 
 	// Build caller-ownership context so the diff engine can downgrade
 	// removals that only affect the submitting caller.
-	ownership := buildEntityOwnership(req.Caller, callerFiles, others)
+	ownership := buildEntityOwnership(req.GetCaller(), callerFiles, others)
 	crossRefs := buildCrossCallerRefs(others)
 	d := codegen.ComputeDiff(prior, newIR,
-		codegen.WithCallerContext(req.Caller, ownership, crossRefs))
+		codegen.WithCallerContext(req.GetCaller(), ownership, crossRefs))
 
 	// Validate every custom query/procedure with pg_query_go. Lowering catches
 	// dep-free rules; this catches syntax and unresolved table refs.
@@ -514,7 +516,7 @@ func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanRespons
 	// re-validated here. It was already validated when its owning caller
 	// submitted it; re-validating under whatever rules are in force now
 	// would block this caller's apply on drift in some unrelated caller.
-	customSQLErrs := validateCustomSQL(newIR, req.Caller)
+	customSQLErrs := validateCustomSQL(newIR, req.GetCaller())
 
 	// Emit SQL and build the impact report.
 	var scripts codegen.SQLScripts
@@ -562,31 +564,31 @@ func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanRespons
 		columnErrMsg = columnErr.Error()
 	}
 
-	resp := &PlanResponse{
-		PlanID:          computePlanID(req.Caller, callerFiles, prior),
-		Class:           translateClass(d.HighestClass()),
-		UpSQL:           scripts.Up,
-		DownSQL:         scripts.Down,
-		ImpactReport:    buildImpactReport(req.Caller, others, d, newIR),
+	resp := &adminpb.PlanSchemaResponse{
+		PlanId:          computePlanID(req.GetCaller(), callerFiles, prior),
+		Class:           planClassToPB(translateClass(d.HighestClass())),
+		UpSql:           scripts.Up,
+		DownSql:         scripts.Down,
+		ImpactReport:    impactToPB(buildImpactReport(req.GetCaller(), others, d, newIR)),
 		CheckpointHash:  s.loadCheckpointHash(ctx),
-		CustomSQLErrors: customSQLErrs,
-		CustomCount: CustomDeclCount{
-			Queries:    len(newIR.Queries),
-			Procedures: len(newIR.Procedures),
+		CustomSqlErrors: customSQLErrs,
+		CustomCount: &adminpb.CustomDeclCount{
+			Queries:    int32(len(newIR.Queries)),
+			Procedures: int32(len(newIR.Procedures)),
 		},
-		PreBackfillUpSQL:       scripts.PreBackfillUp,
-		PreBackfillIndexesSQL:  scripts.PreBackfillIndexes,
-		PostBackfillUpSQL:      scripts.PostBackfillUp,
-		PostBackfillIndexesSQL: scripts.PostBackfillIndexes,
-		BackfillFields:         translateBackfillFields(scripts.BackfillFields),
-		Extensions:             extStatuses,
-		IndexDrift:             indexDrift,
+		PreBackfillUpSql:       scripts.PreBackfillUp,
+		PreBackfillIndexesSql:  scripts.PreBackfillIndexes,
+		PostBackfillUpSql:      scripts.PostBackfillUp,
+		PostBackfillIndexesSql: scripts.PostBackfillIndexes,
+		BackfillFields:         backfillFieldsToPB(translateBackfillFields(scripts.BackfillFields)),
+		Extensions:             extensionsToPB(extStatuses),
+		IndexDrift:             indexDriftToPB(indexDrift),
 		IndexDriftNotes:        driftNotes,
 		IndexDriftError:        driftErrMsg,
-		CheckDrift:             checkDrift,
+		CheckDrift:             checkDriftToPB(checkDrift),
 		CheckDriftNotes:        checkNotes,
 		CheckDriftError:        checkErrMsg,
-		ColumnDrift:            columnDrift,
+		ColumnDrift:            columnDriftToPB(columnDrift),
 		ColumnDriftNotes:       columnNotes,
 		ColumnDriftError:       columnErrMsg,
 	}
@@ -596,7 +598,7 @@ func (s *Service) PlanSchema(ctx context.Context, req PlanRequest) (*PlanRespons
 	}
 	// Custom-SQL failures mark the plan unparseable; nothing can apply until fixed.
 	if len(customSQLErrs) > 0 {
-		resp.Class = ClassUnclean
+		resp.Class = adminpb.PlanClass_PLAN_CLASS_UNPARSEABLE
 	}
 	return resp, nil
 }
@@ -664,24 +666,25 @@ func validateCustomSQL(ir *dsl.IR, caller string) []string {
 // ApplyMigration runs the planned SQL in a tx, upserts the caller's files,
 // and writes a new IR checkpoint. Serialized by a cluster-wide advisory lock.
 // A stale PlanID is rejected; any failure rolls back.
-func (s *Service) ApplyMigration(ctx context.Context, req ApplyRequest) (*ApplyResponse, error) {
-	if req.Caller == "" {
+func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigrationRequest) (*adminpb.ApplyMigrationResponse, error) {
+	reqFiles := submittedFilesFromPB(req.GetFiles())
+	if req.GetCaller() == "" {
 		return nil, errors.New("admin: caller identity is required")
 	}
-	// Enforce per-CN mutation allowlist + that req.Caller matches the
+	// Enforce per-CN mutation allowlist + that req.GetCaller() matches the
 	// connecting cert CN. A leaked cert can therefore only push schema
 	// for ITS OWN caller namespace, not anyone else's.
-	if err := s.authorizeSelfApply(ctx, req.Caller); err != nil {
+	if err := s.authorizeSelfApply(ctx, req.GetCaller()); err != nil {
 		return nil, err
 	}
-	if req.PlanID == "" {
+	if req.GetPlanId() == "" {
 		return nil, errors.New("admin: plan_id is required")
 	}
 
 	// Refuse to apply on top of an in-flight backfill — between Phase 1
 	// and Phase 3 the schema is in a partially-applied state and a
 	// concurrent unrelated apply can leave it corrupted.
-	if planHash, inflight, err := hasInflightBackfill(ctx, s.pool, req.Caller); err == nil && inflight {
+	if planHash, inflight, err := hasInflightBackfill(ctx, s.pool, req.GetCaller()); err == nil && inflight {
 		return nil, fmt.Errorf("admin: backfill %s is in flight for this caller — wait for it to complete (or fail) before applying", planHash)
 	}
 
@@ -696,16 +699,16 @@ func (s *Service) ApplyMigration(ctx context.Context, req ApplyRequest) (*ApplyR
 		return nil, fmt.Errorf("advisory lock: %w", err)
 	}
 
-	if err := s.upsertCallerFiles(ctx, tx, req.Caller, req.Files); err != nil {
+	if err := s.upsertCallerFiles(ctx, tx, req.GetCaller(), reqFiles); err != nil {
 		return nil, err
 	}
 
 	// Re-plan from the persisted state to detect drift.
-	parsed, parseErrs := parseSubmitted(req.Caller, req.Files)
+	parsed, parseErrs := parseSubmitted(req.GetCaller(), reqFiles)
 	if len(parseErrs) > 0 {
 		return nil, fmt.Errorf("admin: parse failed during apply: %v", parseErrs)
 	}
-	others, err := s.loadOtherCallersTx(ctx, tx, req.Caller)
+	others, err := s.loadOtherCallersTx(ctx, tx, req.GetCaller())
 	if err != nil {
 		return nil, err
 	}
@@ -720,22 +723,22 @@ func (s *Service) ApplyMigration(ctx context.Context, req ApplyRequest) (*ApplyR
 	codegen.AssignProtoNumbers(prior, newIR)
 
 	// Build caller-ownership context for the diff (same as PlanSchema).
-	applyOwnership := buildEntityOwnership(req.Caller, parsed, others)
+	applyOwnership := buildEntityOwnership(req.GetCaller(), parsed, others)
 	applyCrossRefs := buildCrossCallerRefs(others)
 	d := codegen.ComputeDiff(prior, newIR,
-		codegen.WithCallerContext(req.Caller, applyOwnership, applyCrossRefs))
+		codegen.WithCallerContext(req.GetCaller(), applyOwnership, applyCrossRefs))
 
 	// Re-validate inside the lock: another caller's apply between plan and apply
 	// can change which tables are visible. Same caller-scoping rationale as
 	// the PlanSchema call site above.
-	if msgs := validateCustomSQL(newIR, req.Caller); len(msgs) > 0 {
+	if msgs := validateCustomSQL(newIR, req.GetCaller()); len(msgs) > 0 {
 		return nil, fmt.Errorf("admin: custom SQL validation failed: %v", msgs)
 	}
 
-	gotPlanID := computePlanID(req.Caller, parsed, prior)
-	if gotPlanID != req.PlanID {
+	gotPlanID := computePlanID(req.GetCaller(), parsed, prior)
+	if gotPlanID != req.GetPlanId() {
 		return nil, fmt.Errorf("admin: plan %s is stale; current plan is %s — re-run tide apply",
-			req.PlanID, gotPlanID)
+			req.GetPlanId(), gotPlanID)
 	}
 	if d.HighestClass() == codegen.ClassCrossCallerBreaking {
 		return nil, fmt.Errorf("admin: plan is breaking and cannot be auto-applied")
@@ -813,12 +816,12 @@ func (s *Service) ApplyMigration(ctx context.Context, req ApplyRequest) (*ApplyR
 
 	// Use client-provided hash when available (what they planned against);
 	// fall back to reading it server-side inside the advisory-locked tx.
-	expectedHash := req.CheckpointHash
+	expectedHash := req.GetCheckpointHash()
 	if expectedHash == "" {
 		expectedHash, _ = loadCheckpointHashTx(ctx, tx)
 	}
 	meta := versionMeta{
-		Caller:       req.Caller,
+		Caller:       req.GetCaller(),
 		PlanClass:    d.HighestClass().String(),
 		Diff:         d,
 		UpSQL:        scripts.Up,
@@ -840,12 +843,12 @@ func (s *Service) ApplyMigration(ctx context.Context, req ApplyRequest) (*ApplyR
 	}
 
 	if s.mirrorEnabled {
-		if err := mirrorFiles(s.mirrorDir, req.Caller, req.Files); err != nil {
-			fmt.Fprintf(os.Stderr, "admin: mirror after apply (caller=%s): %v\n", req.Caller, err)
+		if err := mirrorFiles(s.mirrorDir, req.GetCaller(), reqFiles); err != nil {
+			fmt.Fprintf(os.Stderr, "admin: mirror after apply (caller=%s): %v\n", req.GetCaller(), err)
 		}
 	}
 
-	return &ApplyResponse{AppliedAt: nowUTC(), Version: version, ContentHash: newHash}, nil
+	return &adminpb.ApplyMigrationResponse{AppliedAt: nowUTC(), Version: version, ContentHash: newHash}, nil
 }
 
 // mirrorFiles writes each file atomically to <root>/<caller>/<path>.
@@ -902,8 +905,17 @@ func mirrorFiles(root, caller string, files []SubmittedFile) error {
 }
 
 // GetMergedSchema returns the union of every caller's registered files.
-// When req.SinceVersion equals the current version, Files is omitted.
-func (s *Service) GetMergedSchema(ctx context.Context, req GetMergedSchemaRequest) (*GetMergedSchemaResponse, error) {
+// When req.GetSinceVersion() equals the current version, Files is omitted.
+func (s *Service) GetMergedSchema(ctx context.Context, req *adminpb.GetMergedSchemaRequest) (*adminpb.GetMergedSchemaResponse, error) {
+	// No-PG path. GetMergedSchema and GetCanonicalIR are the two RPCs in this
+	// file that reach the pool without an earlier guard rejecting the request,
+	// so TestMigratedRPCsAreTracked — which dials a pool-less Service — panics
+	// without these. The version must match what a fresh database returns
+	// rather than being empty: computeMergedSchemaVersion(nil) is the sha256 of
+	// no files, and "" is a version no real path can produce.
+	if s.pool == nil {
+		return &adminpb.GetMergedSchemaResponse{Version: computeMergedSchemaVersion(nil)}, nil
+	}
 	rows, err := s.pool.Query(ctx, `
 SELECT caller, file_path, content
 FROM atlantis.caller_registrations
@@ -926,13 +938,13 @@ ORDER BY caller, file_path`)
 	}
 
 	version := computeMergedSchemaVersion(raw)
-	resp := &GetMergedSchemaResponse{Version: version}
-	if req.SinceVersion == version {
+	resp := &adminpb.GetMergedSchemaResponse{Version: version}
+	if req.GetSinceVersion() == version {
 		// Client is up to date — return version only.
 		return resp, nil
 	}
 	for _, e := range raw {
-		resp.Files = append(resp.Files, SubmittedFile{
+		resp.Files = append(resp.Files, &adminpb.SubmittedFile{
 			Path:    e.path,
 			Content: []byte(e.content),
 		})
@@ -945,18 +957,24 @@ ORDER BY caller, file_path`)
 // typed client from this so wire encoding matches the server exactly;
 // re-lowering the .atl files locally could assign different field numbers.
 // Read-only. Returns an empty IR on a fresh database.
-func (s *Service) GetCanonicalIR(ctx context.Context, _ GetCanonicalIRRequest) (*GetCanonicalIRResponse, error) {
+func (s *Service) GetCanonicalIR(ctx context.Context, _ *adminpb.GetCanonicalIRRequest) (*adminpb.GetCanonicalIRResponse, error) {
+	// No-PG path; see the note in GetMergedSchema. Returns the same
+	// empty-checkpoint shape a fresh database does, so `tide generate` hits its
+	// existing "server has no schema yet" branch rather than a new one.
+	if s.pool == nil {
+		return &adminpb.GetCanonicalIRResponse{Ir: []byte("null")}, nil
+	}
 	var raw []byte
 	var contentHash string
 	err := s.pool.QueryRow(ctx,
 		`SELECT ir, content_hash FROM atlantis.ir_checkpoint WHERE id = 1`).Scan(&raw, &contentHash)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return &GetCanonicalIRResponse{IR: json.RawMessage("null")}, nil
+			return &adminpb.GetCanonicalIRResponse{Ir: []byte("null")}, nil
 		}
 		return nil, fmt.Errorf("load canonical IR: %w", err)
 	}
-	return &GetCanonicalIRResponse{IR: raw, ContentHash: contentHash}, nil
+	return &adminpb.GetCanonicalIRResponse{Ir: raw, ContentHash: contentHash}, nil
 }
 
 // mergedEntry is the in-memory shape of one caller_registrations row used

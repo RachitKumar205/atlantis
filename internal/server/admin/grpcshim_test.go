@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/introspect"
 )
 
 // The JSON path is what production serves while the protobuf migration is in
@@ -824,5 +825,261 @@ func TestAdoptDriftConverterCopiesEveryField(t *testing.T) {
 	}}
 	if got := adoptDriftFromPB(adoptDriftToPB(in)); !reflect.DeepEqual(got, in) {
 		t.Errorf("round trip lost data:\n got: %+v\nwant: %+v", got, in)
+	}
+}
+
+// --- Schema lifecycle ---
+
+// PlanClass moved from a Go string type whose values went on the wire verbatim
+// to a proto enum. Two things must hold: the JSON strings are unchanged, and
+// UNSPECIFIED does not silently become "unparseable" — the old translateClass
+// default conflated "failed to classify" with "the DSL did not parse", which
+// reported a destructive plan to the client as a syntax error.
+func TestPlanClassWireStringsUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		in   ClassName
+		want string
+	}{
+		{ClassAdditive, "additive"},
+		{ClassBackfill, "backfill_required"},
+		{ClassBreaking, "cross_caller_breaking"},
+		{ClassUnclean, "unparseable"},
+	} {
+		got := planClassFromPB(planClassToPB(tc.in))
+		if string(got) != tc.want {
+			t.Errorf("%s round-tripped to %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestPlanClassUnspecifiedIsNotUnparseable(t *testing.T) {
+	if got := planClassFromPB(adminpb.PlanClass_PLAN_CLASS_UNSPECIFIED); got != "" {
+		t.Errorf("UNSPECIFIED mapped to %q; it must not be conflated with a parse failure", got)
+	}
+	if got := planClassToPB(ClassName("nonsense")); got != adminpb.PlanClass_PLAN_CLASS_UNSPECIFIED {
+		t.Errorf("an unknown ClassName mapped to %v, want UNSPECIFIED", got)
+	}
+}
+
+// PlanResponse is the widest message in the service. Every field is set to a
+// distinct non-zero value and the round trip compared as a struct, so a field
+// dropped from both directions cannot hide behind matching JSON.
+func TestPlanResponseConverterCopiesEveryField(t *testing.T) {
+	pb := &adminpb.PlanSchemaResponse{
+		PlanId:          "p1",
+		Class:           adminpb.PlanClass_PLAN_CLASS_BACKFILL_REQUIRED,
+		UpSql:           "UP",
+		DownSql:         "DOWN",
+		ImpactReport:    []*adminpb.ImpactEntry{{Caller: "c", Affected: true, Detail: "d"}},
+		ParseErrors:     []string{"pe"},
+		BreakingDetail:  []string{"bd"},
+		CheckpointHash:  "ch",
+		CustomSqlErrors: []string{"cse"},
+		CustomCount:     &adminpb.CustomDeclCount{Queries: 2, Procedures: 3},
+
+		PreBackfillUpSql:       "pre",
+		PreBackfillIndexesSql:  "preIdx",
+		PostBackfillUpSql:      "post",
+		PostBackfillIndexesSql: "postIdx",
+		BackfillFields: []*adminpb.BackfillFieldRef{{
+			EntityId: "x.A", Field: "f", Expression: "e", PkColumn: "id", TableName: "t",
+		}},
+		Extensions: []*adminpb.ExtensionStatus{{
+			Name: "vector", Trigger: "x.A.embedding", Action: "enable", InstallHint: "hint",
+		}},
+
+		IndexDrift: []*adminpb.UniqueIndexDrift{{
+			EntityId: "x.A", Schema: "atlantis", Table: "t", IndexName: "i",
+			Columns: []string{"c1"}, Partial: true, Predicate: "p",
+		}},
+		IndexDriftNotes: []string{"in"},
+		IndexDriftError: "ie",
+
+		CheckDrift: []*adminpb.CheckConstraintDrift{{
+			Kind:     adminpb.CheckDriftKind_CHECK_DRIFT_KIND_LIVE_NOT_DECLARED,
+			EntityId: "x.A", Schema: "atlantis", Table: "t",
+			ConstraintName: "ck", Declared: "d", Definition: "def",
+		}},
+		CheckDriftNotes: []string{"cn"},
+		CheckDriftError: "ce",
+
+		ColumnDrift: []*adminpb.ColumnTypeDrift{{
+			EntityId: "x.A", Schema: "atlantis", Table: "t",
+			Column: "c", Declared: "varchar(255)", Live: "varchar(10)",
+		}},
+		ColumnDriftNotes: []string{"con"},
+		ColumnDriftError: "coe",
+	}
+
+	got := planResponseFromPB(pb)
+
+	// Spot-check the fields most likely to be silently dropped: the nested
+	// message, the enum, and one of each drift kind.
+	if got.Class != ClassBackfill {
+		t.Errorf("Class = %q, want backfill_required", got.Class)
+	}
+	if got.CustomCount.Queries != 2 || got.CustomCount.Procedures != 3 {
+		t.Errorf("CustomCount = %+v", got.CustomCount)
+	}
+	if len(got.IndexDrift) != 1 || !got.IndexDrift[0].Partial {
+		t.Errorf("IndexDrift lost data: %+v", got.IndexDrift)
+	}
+	if len(got.CheckDrift) != 1 || got.CheckDrift[0].Kind != introspect.CheckLiveNotDeclared {
+		t.Errorf("CheckDrift lost the kind: %+v", got.CheckDrift)
+	}
+	if len(got.ColumnDrift) != 1 || got.ColumnDrift[0].Live != "varchar(10)" {
+		t.Errorf("ColumnDrift lost data: %+v", got.ColumnDrift)
+	}
+
+	// Then the exhaustive check: no field may be left at its zero value, which
+	// is what a dropped mapping produces.
+	v := reflect.ValueOf(*got)
+	for i := 0; i < v.NumField(); i++ {
+		if v.Field(i).IsZero() {
+			t.Errorf("PlanResponse.%s is zero — the mapping dropped it",
+				v.Type().Field(i).Name)
+		}
+	}
+}
+
+// This file's standard is to pin emitted bytes, not Go values — which keys
+// exist is the invariant, and no struct assertion answers it. PlanResponse is
+// the widest message in the service (25 fields, 19 omitempty), so the two
+// shapes that actually ship get goldens.
+func TestPlanResponseJSONGoldens(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *adminpb.PlanSchemaResponse
+		want string
+	}{
+		{
+			// The parse-error path builds a pb with a nil CustomCount. It must
+			// still emit the nested object, since the JSON side holds a value
+			// rather than a pointer.
+			name: "parse error",
+			in: &adminpb.PlanSchemaResponse{
+				Class:       adminpb.PlanClass_PLAN_CLASS_UNPARSEABLE,
+				ParseErrors: []string{"boom"},
+			},
+			want: `{"plan_id":"","class":"unparseable","up_sql":"","down_sql":"","impact_report":null,` +
+				`"parse_errors":["boom"],"breaking_detail":null,"checkpoint_hash":"",` +
+				`"custom_count":{"queries":0,"procedures":0}}`,
+		},
+		{
+			// impact_report, parse_errors and breaking_detail are the three
+			// non-omitempty slices: nil must stay null, and a converter
+			// returning an empty slice would flip them to [].
+			name: "clean additive",
+			in: &adminpb.PlanSchemaResponse{
+				PlanId:       "p1",
+				Class:        adminpb.PlanClass_PLAN_CLASS_ADDITIVE,
+				UpSql:        "CREATE TABLE x();",
+				ImpactReport: []*adminpb.ImpactEntry{{Caller: "svc", Affected: true}},
+				CustomCount:  &adminpb.CustomDeclCount{Queries: 1},
+			},
+			want: `{"plan_id":"p1","class":"additive","up_sql":"CREATE TABLE x();","down_sql":"",` +
+				`"impact_report":[{"caller":"svc","affected":true}],"parse_errors":null,` +
+				`"breaking_detail":null,"checkpoint_hash":"","custom_count":{"queries":1,"procedures":0}}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(planResponseFromPB(tc.in))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(b) != tc.want {
+				t.Errorf("\n got: %s\nwant: %s", b, tc.want)
+			}
+		})
+	}
+}
+
+func TestEmptyFileResponsesMarshalAsNull(t *testing.T) {
+	merged, err := json.Marshal(&GetMergedSchemaResponse{
+		Version: "v", Files: submittedFilesFromPB(nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(merged) != `{"version":"v","files":null}` {
+		t.Errorf("got %s", merged)
+	}
+
+	callerFiles, err := json.Marshal(&GetCallerFilesResponse{Files: submittedFilesFromPB(nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(callerFiles) != `{"files":null}` {
+		t.Errorf("got %s", callerFiles)
+	}
+}
+
+// The reflection check above only asks whether each top-level field is
+// non-zero, so for the six slice-of-struct fields it cannot see an inner field
+// dropped from both directions. Round-tripping each pair catches that
+// structurally, and keeps working as fields are added.
+func TestSchemaConverterPairsRoundTrip(t *testing.T) {
+	t.Run("impact", func(t *testing.T) {
+		in := []ImpactEntry{{Caller: "c", Affected: true, Detail: "d"}}
+		if got := impactFromPB(impactToPB(in)); !reflect.DeepEqual(got, in) {
+			t.Errorf("got %+v, want %+v", got, in)
+		}
+	})
+	t.Run("extensions", func(t *testing.T) {
+		in := []extensionStatus{{Name: "vector", Trigger: "x.A.e", Action: "enable", InstallHint: "h"}}
+		if got := extensionsFromPB(extensionsToPB(in)); !reflect.DeepEqual(got, in) {
+			t.Errorf("got %+v, want %+v", got, in)
+		}
+	})
+	t.Run("backfill fields", func(t *testing.T) {
+		in := []BackfillFieldRef{{EntityID: "x.A", Field: "f", Expression: "e", PKColumn: "id", TableName: "t"}}
+		if got := backfillFieldsFromPB(backfillFieldsToPB(in)); !reflect.DeepEqual(got, in) {
+			t.Errorf("got %+v, want %+v", got, in)
+		}
+	})
+	t.Run("index drift", func(t *testing.T) {
+		in := []introspect.UniqueIndexDrift{{
+			EntityID: "x.A", Schema: "atlantis", Table: "t", IndexName: "i",
+			Columns: []string{"c"}, Partial: true, Predicate: "p",
+		}}
+		if got := indexDriftFromPB(indexDriftToPB(in)); !reflect.DeepEqual(got, in) {
+			t.Errorf("got %+v, want %+v", got, in)
+		}
+	})
+	t.Run("check drift", func(t *testing.T) {
+		in := []introspect.CheckConstraintDrift{{
+			Kind: introspect.CheckLiveNotDeclared, EntityID: "x.A", Schema: "atlantis",
+			Table: "t", ConstraintName: "ck", Declared: "d", Definition: "def",
+		}}
+		if got := checkDriftFromPB(checkDriftToPB(in)); !reflect.DeepEqual(got, in) {
+			t.Errorf("got %+v, want %+v", got, in)
+		}
+	})
+	t.Run("column drift", func(t *testing.T) {
+		in := []introspect.ColumnTypeDrift{{
+			EntityID: "x.A", Schema: "atlantis", Table: "t",
+			Column: "c", Declared: "varchar(255)", Live: "varchar(10)",
+		}}
+		if got := columnDriftFromPB(columnDriftToPB(in)); !reflect.DeepEqual(got, in) {
+			t.Errorf("got %+v, want %+v", got, in)
+		}
+	})
+}
+
+// The checkpoint bytes must survive verbatim: callers pin a content hash over
+// them, so a re-encode that reorders keys changes what they pinned.
+func TestCanonicalIRShimKeepsBytesVerbatim(t *testing.T) {
+	raw := []byte(`{"b":1,"a":[2,3]}`)
+	resp := &GetCanonicalIRResponse{
+		IR:          json.RawMessage((&adminpb.GetCanonicalIRResponse{Ir: raw}).GetIr()),
+		ContentHash: "h",
+	}
+	b, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"ir":{"b":1,"a":[2,3]}`) {
+		t.Errorf("IR was re-encoded or reordered: %s", b)
 	}
 }

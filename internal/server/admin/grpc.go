@@ -58,10 +58,10 @@ func init() { encoding.RegisterCodecV2(jsonCodec{}) }
 // which panics on a non-interface type). *Service satisfies this
 // interface by carrying the same method set.
 type AdminServer interface {
-	PlanSchema(context.Context, PlanRequest) (*PlanResponse, error)
-	ApplyMigration(context.Context, ApplyRequest) (*ApplyResponse, error)
-	GetMergedSchema(context.Context, GetMergedSchemaRequest) (*GetMergedSchemaResponse, error)
-	GetCanonicalIR(context.Context, GetCanonicalIRRequest) (*GetCanonicalIRResponse, error)
+	PlanSchema(context.Context, *adminpb.PlanSchemaRequest) (*adminpb.PlanSchemaResponse, error)
+	ApplyMigration(context.Context, *adminpb.ApplyMigrationRequest) (*adminpb.ApplyMigrationResponse, error)
+	GetMergedSchema(context.Context, *adminpb.GetMergedSchemaRequest) (*adminpb.GetMergedSchemaResponse, error)
+	GetCanonicalIR(context.Context, *adminpb.GetCanonicalIRRequest) (*adminpb.GetCanonicalIRResponse, error)
 	BeginBackfillPlan(context.Context, *adminpb.BeginBackfillPlanRequest) (*adminpb.BeginBackfillPlanResponse, error)
 	GetBackfillStatus(context.Context, *adminpb.GetBackfillStatusRequest) (*adminpb.GetBackfillStatusResponse, error)
 	AdoptBaseline(context.Context, *adminpb.AdoptBaselineRequest) (*adminpb.AdoptBaselineResponse, error)
@@ -78,7 +78,7 @@ type AdminServer interface {
 	GetEntityOwners(context.Context, GetEntityOwnersRequest) (*GetEntityOwnersResponse, error)
 	RollbackSchema(context.Context, RollbackSchemaRequest) (*RollbackSchemaResponse, error)
 	PreviewRollback(context.Context, PreviewRollbackRequest) (*PreviewRollbackResponse, error)
-	GetCallerFiles(context.Context, GetCallerFilesRequest) (*GetCallerFilesResponse, error)
+	GetCallerFiles(context.Context, *adminpb.GetCallerFilesRequest) (*adminpb.GetCallerFilesResponse, error)
 	GetCallers(context.Context, *adminpb.GetCallersRequest) (*adminpb.GetCallersResponse, error)
 	RegisterCaller(context.Context, *adminpb.RegisterCallerRequest) (*adminpb.RegisterCallerResponse, error)
 	RevokeCaller(context.Context, *adminpb.RevokeCallerRequest) (*adminpb.RevokeCallerResponse, error)
@@ -179,11 +179,53 @@ func handlePlanSchema(srv any, ctx context.Context, dec func(any) error, interce
 	return interceptor(ctx, &req, info, handler)
 }
 
+// planResponseFromPB rebuilds the legacy JSON shape. Extracted so the mapping
+// is testable: PlanResponse is the widest message in the service — 25 fields,
+// most tagged omitempty — and an inline literal in the shim could drop any one
+// of them without a test noticing.
+func planResponseFromPB(p *adminpb.PlanSchemaResponse) *PlanResponse {
+	return &PlanResponse{
+		PlanID:          p.GetPlanId(),
+		Class:           planClassFromPB(p.GetClass()),
+		UpSQL:           p.GetUpSql(),
+		DownSQL:         p.GetDownSql(),
+		ImpactReport:    impactFromPB(p.GetImpactReport()),
+		ParseErrors:     p.GetParseErrors(),
+		BreakingDetail:  p.GetBreakingDetail(),
+		CheckpointHash:  p.GetCheckpointHash(),
+		CustomSQLErrors: p.GetCustomSqlErrors(),
+		CustomCount: CustomDeclCount{
+			Queries:    int(p.GetCustomCount().GetQueries()),
+			Procedures: int(p.GetCustomCount().GetProcedures()),
+		},
+		PreBackfillUpSQL:       p.GetPreBackfillUpSql(),
+		PreBackfillIndexesSQL:  p.GetPreBackfillIndexesSql(),
+		PostBackfillUpSQL:      p.GetPostBackfillUpSql(),
+		PostBackfillIndexesSQL: p.GetPostBackfillIndexesSql(),
+		BackfillFields:         backfillFieldsFromPB(p.GetBackfillFields()),
+		Extensions:             extensionsFromPB(p.GetExtensions()),
+		IndexDrift:             indexDriftFromPB(p.GetIndexDrift()),
+		IndexDriftNotes:        p.GetIndexDriftNotes(),
+		IndexDriftError:        p.GetIndexDriftError(),
+		CheckDrift:             checkDriftFromPB(p.GetCheckDrift()),
+		CheckDriftNotes:        p.GetCheckDriftNotes(),
+		CheckDriftError:        p.GetCheckDriftError(),
+		ColumnDrift:            columnDriftFromPB(p.GetColumnDrift()),
+		ColumnDriftNotes:       p.GetColumnDriftNotes(),
+		ColumnDriftError:       p.GetColumnDriftError(),
+	}
+}
+
+// Migration shim; see the note on invokeGetCallers.
 func invokePlan(svc *Service, ctx context.Context, req *PlanRequest) (any, error) {
-	resp, err := svc.PlanSchema(ctx, *req)
+	pbResp, err := svc.PlanSchema(ctx, &adminpb.PlanSchemaRequest{
+		Caller: req.Caller,
+		Files:  submittedFilesToPB(req.Files),
+	})
 	if err != nil {
 		return nil, err
 	}
+	resp := planResponseFromPB(pbResp)
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -210,10 +252,25 @@ func handleApplyMigration(srv any, ctx context.Context, dec func(any) error, int
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
+//
+// ApplyRequest.UpSQL is dropped rather than forwarded. It was documented as a
+// drift check and never read by the server, which recomputes the SQL from the
+// submitted files — the same property BeginBackfillPlan now enforces.
 func invokeApply(svc *Service, ctx context.Context, req *ApplyRequest) (any, error) {
-	resp, err := svc.ApplyMigration(ctx, *req)
+	pbResp, err := svc.ApplyMigration(ctx, &adminpb.ApplyMigrationRequest{
+		Caller:         req.Caller,
+		PlanId:         req.PlanID,
+		Files:          submittedFilesToPB(req.Files),
+		CheckpointHash: req.CheckpointHash,
+	})
 	if err != nil {
 		return nil, err
+	}
+	resp := &ApplyResponse{
+		AppliedAt:   pbResp.GetAppliedAt(),
+		Version:     pbResp.GetVersion(),
+		ContentHash: pbResp.GetContentHash(),
 	}
 	raw, err := json.Marshal(resp)
 	if err != nil {
@@ -247,10 +304,15 @@ func handleGetMergedSchema(srv any, ctx context.Context, dec func(any) error, in
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeGetMergedSchema(svc *Service, ctx context.Context, req *GetMergedSchemaRequest) (any, error) {
-	resp, err := svc.GetMergedSchema(ctx, *req)
+	pbResp, err := svc.GetMergedSchema(ctx, &adminpb.GetMergedSchemaRequest{SinceVersion: req.SinceVersion})
 	if err != nil {
 		return nil, err
+	}
+	resp := &GetMergedSchemaResponse{
+		Version: pbResp.GetVersion(),
+		Files:   submittedFilesFromPB(pbResp.GetFiles()),
 	}
 	raw, err := json.Marshal(resp)
 	if err != nil {
@@ -283,10 +345,15 @@ func handleGetCanonicalIR(srv any, ctx context.Context, dec func(any) error, int
 	return interceptor(ctx, &req, info, handler)
 }
 
-func invokeGetCanonicalIR(svc *Service, ctx context.Context, req *GetCanonicalIRRequest) (any, error) {
-	resp, err := svc.GetCanonicalIR(ctx, *req)
+// Migration shim; see the note on invokeGetCallers.
+func invokeGetCanonicalIR(svc *Service, ctx context.Context, _ *GetCanonicalIRRequest) (any, error) {
+	pbResp, err := svc.GetCanonicalIR(ctx, &adminpb.GetCanonicalIRRequest{})
 	if err != nil {
 		return nil, err
+	}
+	resp := &GetCanonicalIRResponse{
+		IR:          json.RawMessage(pbResp.GetIr()),
+		ContentHash: pbResp.GetContentHash(),
 	}
 	raw, err := json.Marshal(resp)
 	if err != nil {
@@ -935,11 +1002,13 @@ func handleGetCallerFiles(srv any, ctx context.Context, dec func(any) error, int
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeGetCallerFiles(svc *Service, ctx context.Context, req *GetCallerFilesRequest) (any, error) {
-	resp, err := svc.GetCallerFiles(ctx, *req)
+	pbResp, err := svc.GetCallerFiles(ctx, &adminpb.GetCallerFilesRequest{Caller: req.Caller})
 	if err != nil {
 		return nil, err
 	}
+	resp := &GetCallerFilesResponse{Files: submittedFilesFromPB(pbResp.GetFiles())}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err

@@ -84,6 +84,11 @@ var migratedRPCs = map[string]bool{
 	"BeginBackfillPlan":      true,
 	"GetBackfillStatus":      true,
 	"AdoptBaseline":          true,
+	"PlanSchema":             true,
+	"ApplyMigration":         true,
+	"GetMergedSchema":        true,
+	"GetCanonicalIR":         true,
+	"GetCallerFiles":         true,
 }
 
 // ---------------------------------------------------------------------------
@@ -169,4 +174,24 @@ func (g *grpcServer) GetBackfillStatus(ctx context.Context, req *adminpb.GetBack
 
 func (g *grpcServer) AdoptBaseline(ctx context.Context, req *adminpb.AdoptBaselineRequest) (*adminpb.AdoptBaselineResponse, error) {
 	return g.svc.AdoptBaseline(ctx, req)
+}
+
+func (g *grpcServer) PlanSchema(ctx context.Context, req *adminpb.PlanSchemaRequest) (*adminpb.PlanSchemaResponse, error) {
+	return g.svc.PlanSchema(ctx, req)
+}
+
+func (g *grpcServer) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigrationRequest) (*adminpb.ApplyMigrationResponse, error) {
+	return g.svc.ApplyMigration(ctx, req)
+}
+
+func (g *grpcServer) GetMergedSchema(ctx context.Context, req *adminpb.GetMergedSchemaRequest) (*adminpb.GetMergedSchemaResponse, error) {
+	return g.svc.GetMergedSchema(ctx, req)
+}
+
+func (g *grpcServer) GetCanonicalIR(ctx context.Context, req *adminpb.GetCanonicalIRRequest) (*adminpb.GetCanonicalIRResponse, error) {
+	return g.svc.GetCanonicalIR(ctx, req)
+}
+
+func (g *grpcServer) GetCallerFiles(ctx context.Context, req *adminpb.GetCallerFilesRequest) (*adminpb.GetCallerFilesResponse, error) {
+	return g.svc.GetCallerFiles(ctx, req)
 }
