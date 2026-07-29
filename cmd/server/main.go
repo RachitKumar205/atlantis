@@ -33,6 +33,7 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/obs"
 	"github.com/rachitkumar205/atlantis/internal/server/admin"
+	"github.com/rachitkumar205/atlantis/internal/server/authz"
 	"github.com/rachitkumar205/atlantis/internal/server/entity"
 	"github.com/rachitkumar205/atlantis/internal/server/interceptors"
 	"github.com/rachitkumar205/atlantis/internal/server/jobsdispatcher"
@@ -65,6 +66,29 @@ func main() {
 
 	log, logRing := buildLogger(cfg)
 	log.Info("atlantis starting", "version", version)
+
+	// Refuse to start if any Admin RPC declares no required capability.
+	//
+	// This runs before anything is listening, and before the database is
+	// touched, because the failure it catches is "an endpoint reachable with
+	// no authorization at all" — the one condition where continuing to boot
+	// is strictly worse than not starting. It is the same check the package's
+	// tests run, so the build normally fails long before a deploy does; this
+	// is the backstop for a binary assembled some other way.
+	adminPolicy, err := authz.AdminPolicy()
+	if err != nil {
+		log.Error("refusing to start: admin authorization policy is incomplete", "err", err)
+		os.Exit(2)
+	}
+	// Enforcement is not live yet: the policy is keyed by the generated
+	// service path (atlantis.admin.v1.AdminService), while the hand-rolled
+	// descriptor still serves at atlantis.admin.v1.Admin. Installing the
+	// interceptor now would match nothing and read as authorization that
+	// isn't happening, so it goes in with the migration that moves the
+	// service. Validating the declarations is useful on its own in the
+	// meantime — a method added without one still cannot ship.
+	log.Info("admin authorization policy validated",
+		"methods", len(adminPolicy.Methods()), "enforcing", false)
 
 	// Top-level context cancels on SIGINT / SIGTERM.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
