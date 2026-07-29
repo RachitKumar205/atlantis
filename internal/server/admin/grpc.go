@@ -69,8 +69,8 @@ type AdminServer interface {
 	GetJobStatus(context.Context, *adminpb.GetJobStatusRequest) (*adminpb.GetJobStatusResponse, error)
 	ListDeadJobs(context.Context, *adminpb.ListDeadJobsRequest) (*adminpb.ListDeadJobsResponse, error)
 	RetryDeadJob(context.Context, *adminpb.RetryDeadJobRequest) (*adminpb.RetryDeadJobResponse, error)
-	StartWorkflow(context.Context, StartWorkflowRequest) (*StartWorkflowResponse, error)
-	GetWorkflowStatus(context.Context, GetWorkflowStatusRequest) (*GetWorkflowStatusResponse, error)
+	StartWorkflow(context.Context, *adminpb.StartWorkflowRequest) (*adminpb.StartWorkflowResponse, error)
+	GetWorkflowStatus(context.Context, *adminpb.GetWorkflowStatusRequest) (*adminpb.GetWorkflowStatusResponse, error)
 	GetSchemaHistory(context.Context, GetSchemaHistoryRequest) (*GetSchemaHistoryResponse, error)
 	GetSchemaVersion(context.Context, GetSchemaVersionRequest) (*GetSchemaVersionResponse, error)
 	DiffSchemaVersions(context.Context, DiffSchemaVersionsRequest) (*DiffSchemaVersionsResponse, error)
@@ -417,12 +417,7 @@ func handleSubmitJob(srv any, ctx context.Context, dec func(any) error, intercep
 
 // Migration shim; see the note on invokeGetCallers.
 func invokeSubmitJob(svc *Service, ctx context.Context, req *SubmitJobRequest) (any, error) {
-	pbResp, err := svc.SubmitJob(ctx, &adminpb.SubmitJobRequest{
-		JobName:     req.JobName,
-		Args:        req.Args,
-		ScheduledAt: req.ScheduledAt,
-		SubmittedBy: req.SubmittedBy,
-	})
+	pbResp, err := svc.SubmitJob(ctx, submitJobRequestToPB(req))
 	if err != nil {
 		return nil, err
 	}
@@ -585,11 +580,38 @@ func handleStartWorkflow(srv any, ctx context.Context, dec func(any) error, inte
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Request mappings are extracted for the same reason the response ones are:
+// the shims' early-return paths leave these fields unread, so a dropped field
+// is invisible to any test that only exercises validation errors. Deleting
+// State here would silently start every workflow with an empty state.
+func startWorkflowRequestToPB(req *StartWorkflowRequest) *adminpb.StartWorkflowRequest {
+	return &adminpb.StartWorkflowRequest{
+		WorkflowName: req.WorkflowName,
+		State:        req.State,
+		SubmittedBy:  req.SubmittedBy,
+	}
+}
+
+func getWorkflowStatusRequestToPB(req *GetWorkflowStatusRequest) *adminpb.GetWorkflowStatusRequest {
+	return &adminpb.GetWorkflowStatusRequest{WorkflowId: req.WorkflowID}
+}
+
+func submitJobRequestToPB(req *SubmitJobRequest) *adminpb.SubmitJobRequest {
+	return &adminpb.SubmitJobRequest{
+		JobName:     req.JobName,
+		Args:        req.Args,
+		ScheduledAt: req.ScheduledAt,
+		SubmittedBy: req.SubmittedBy,
+	}
+}
+
+// Migration shim; see the note on invokeGetCallers.
 func invokeStartWorkflow(svc *Service, ctx context.Context, req *StartWorkflowRequest) (any, error) {
-	resp, err := svc.StartWorkflow(ctx, *req)
+	pbResp, err := svc.StartWorkflow(ctx, startWorkflowRequestToPB(req))
 	if err != nil {
 		return nil, err
 	}
+	resp := &StartWorkflowResponse{WorkflowID: pbResp.GetWorkflowId()}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -616,11 +638,15 @@ func handleGetWorkflowStatus(srv any, ctx context.Context, dec func(any) error, 
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeGetWorkflowStatus(svc *Service, ctx context.Context, req *GetWorkflowStatusRequest) (any, error) {
-	resp, err := svc.GetWorkflowStatus(ctx, *req)
+	pbResp, err := svc.GetWorkflowStatus(ctx, getWorkflowStatusRequestToPB(req))
 	if err != nil {
 		return nil, err
 	}
+	// Workflow is a value on the JSON side, so a not-found response has always
+	// carried a fully zero object rather than omitting the key.
+	resp := &GetWorkflowStatusResponse{Found: pbResp.GetFound(), Workflow: workflowStatusFromPB(pbResp.GetWorkflow())}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err

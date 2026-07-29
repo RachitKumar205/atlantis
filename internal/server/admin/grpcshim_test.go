@@ -489,3 +489,118 @@ func TestJobProgressPctSentinelSurvivesMarshalling(t *testing.T) {
 		t.Errorf("zero should be omitted, got %s", zero)
 	}
 }
+
+// --- Workflow conversion ---
+
+// Same asymmetry as GetJobStatus: Workflow is a value tagged omitempty (a
+// no-op for structs), so a not-found response has always emitted a fully zero
+// object. Asserted as exact bytes, since WorkflowStatus carries omitempty on
+// four fields and which keys survive is the invariant.
+func TestGetWorkflowStatusNotFoundEmitsZeroWorkflow(t *testing.T) {
+	b, err := json.Marshal(&GetWorkflowStatusResponse{
+		Found: false, Workflow: workflowStatusFromPB(nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"Found":false,"Workflow":{"WorkflowID":"","WorkflowName":"","Status":"","StartedAt":""}}`
+	if string(b) != want {
+		t.Errorf("\n got: %s\nwant: %s", b, want)
+	}
+}
+
+func TestWorkflowStatusConverterCopiesEveryField(t *testing.T) {
+	in := WorkflowStatus{
+		WorkflowID: "1", WorkflowName: "wf", Status: "running",
+		CurrentStep: "s2", StartedAt: "t1", CompletedAt: "t2",
+		ErrorMsg: "boom", SubmittedBy: "cli:me",
+	}
+	if got := workflowStatusFromPB(workflowStatusToPB(in)); !reflect.DeepEqual(got, in) {
+		t.Errorf("round trip lost data:\n got: %+v\nwant: %+v", got, in)
+	}
+}
+
+func TestStartWorkflowShimRejectsWhenMutationDisabled(t *testing.T) {
+	_, err := invokeStartWorkflow(&Service{}, context.Background(), &StartWorkflowRequest{})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "workflow submission disabled") {
+		t.Errorf("got %v, want the disabled-server error", err)
+	}
+}
+
+func TestGetWorkflowStatusShimRejectsEmptyID(t *testing.T) {
+	_, err := invokeGetWorkflowStatus(&Service{}, context.Background(), &GetWorkflowStatusRequest{})
+	if err == nil || !strings.Contains(err.Error(), "WorkflowID is required") {
+		t.Errorf("got %v, want the WorkflowID validation error", err)
+	}
+}
+
+// --- Request mappings ---
+//
+// The response direction is covered above. The request direction was not, and
+// could not be: every shim test drives an early-return validation path, which
+// is exactly where the mapped fields go unread. Dropping State from the
+// StartWorkflow mapping would silently start every workflow with an empty
+// state and leave the whole suite green.
+
+func TestStartWorkflowRequestMappingCopiesEveryField(t *testing.T) {
+	in := &StartWorkflowRequest{
+		WorkflowName: "wf",
+		State:        json.RawMessage(`{"k":1}`),
+		SubmittedBy:  "cli:me",
+	}
+	got := startWorkflowRequestToPB(in)
+	if got.GetWorkflowName() != in.WorkflowName {
+		t.Errorf("WorkflowName = %q, want %q", got.GetWorkflowName(), in.WorkflowName)
+	}
+	if string(got.GetState()) != string(in.State) {
+		t.Errorf("State = %s, want %s", got.GetState(), in.State)
+	}
+	if got.GetSubmittedBy() != in.SubmittedBy {
+		t.Errorf("SubmittedBy = %q, want %q", got.GetSubmittedBy(), in.SubmittedBy)
+	}
+}
+
+// A caller that omits State must still reach the server as nil, so the
+// "{}" default fires there rather than an empty payload being persisted.
+func TestStartWorkflowRequestMappingKeepsNilState(t *testing.T) {
+	if got := startWorkflowRequestToPB(&StartWorkflowRequest{WorkflowName: "wf"}); got.GetState() != nil {
+		t.Errorf("State = %#v, want nil", got.GetState())
+	}
+}
+
+func TestGetWorkflowStatusRequestMappingCopiesID(t *testing.T) {
+	if got := getWorkflowStatusRequestToPB(&GetWorkflowStatusRequest{WorkflowID: "42"}); got.GetWorkflowId() != "42" {
+		t.Errorf("WorkflowId = %q, want 42", got.GetWorkflowId())
+	}
+}
+
+func TestSubmitJobRequestMappingCopiesEveryField(t *testing.T) {
+	in := &SubmitJobRequest{
+		JobName:     "j",
+		Args:        json.RawMessage(`{"a":1}`),
+		ScheduledAt: "2026-07-30T00:00:00Z",
+		SubmittedBy: "cli:me",
+	}
+	got := submitJobRequestToPB(in)
+	if got.GetJobName() != in.JobName {
+		t.Errorf("JobName = %q, want %q", got.GetJobName(), in.JobName)
+	}
+	if string(got.GetArgs()) != string(in.Args) {
+		t.Errorf("Args = %s, want %s", got.GetArgs(), in.Args)
+	}
+	if got.GetScheduledAt() != in.ScheduledAt {
+		t.Errorf("ScheduledAt = %q, want %q", got.GetScheduledAt(), in.ScheduledAt)
+	}
+	if got.GetSubmittedBy() != in.SubmittedBy {
+		t.Errorf("SubmittedBy = %q, want %q", got.GetSubmittedBy(), in.SubmittedBy)
+	}
+}
+
+func TestSubmitJobRequestMappingKeepsNilArgs(t *testing.T) {
+	if got := submitJobRequestToPB(&SubmitJobRequest{JobName: "j"}); got.GetArgs() != nil {
+		t.Errorf("Args = %#v, want nil", got.GetArgs())
+	}
+}
