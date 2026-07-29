@@ -83,6 +83,7 @@ var migratedRPCs = map[string]bool{
 	"GetWorkflowStatus":      true,
 	"BeginBackfillPlan":      true,
 	"GetBackfillStatus":      true,
+	"AdoptBaseline":          true,
 }
 
 // ---------------------------------------------------------------------------
@@ -164,4 +165,8 @@ func (g *grpcServer) BeginBackfillPlan(ctx context.Context, req *adminpb.BeginBa
 
 func (g *grpcServer) GetBackfillStatus(ctx context.Context, req *adminpb.GetBackfillStatusRequest) (*adminpb.GetBackfillStatusResponse, error) {
 	return g.svc.GetBackfillStatus(ctx, req)
+}
+
+func (g *grpcServer) AdoptBaseline(ctx context.Context, req *adminpb.AdoptBaselineRequest) (*adminpb.AdoptBaselineResponse, error) {
+	return g.svc.AdoptBaseline(ctx, req)
 }

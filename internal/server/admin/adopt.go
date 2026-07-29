@@ -11,6 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/introspect"
@@ -95,16 +97,16 @@ type AdoptBaselineResponse struct {
 // in a single transaction. Either every caller baselines or none do.
 // FK refs that cross caller namespaces resolve naturally because the
 // IR lowering sees the full set.
-func (s *Service) AdoptBaseline(ctx context.Context, req AdoptBaselineRequest) (*AdoptBaselineResponse, error) {
+func (s *Service) AdoptBaseline(ctx context.Context, req *adminpb.AdoptBaselineRequest) (*adminpb.AdoptBaselineResponse, error) {
 	if err := s.authorizeOperator(ctx); err != nil {
 		return nil, err
 	}
-	subs := req.Submissions
+	subs := callerSubmissionsFromPB(req.GetSubmissions())
 	if len(subs) == 0 {
-		if req.Caller == "" || len(req.Files) == 0 {
+		if req.GetCaller() == "" || len(req.GetFiles()) == 0 {
 			return nil, errors.New("admin: at least one CallerSubmission is required")
 		}
-		subs = []CallerSubmission{{Caller: req.Caller, Files: req.Files}}
+		subs = []CallerSubmission{{Caller: req.GetCaller(), Files: submittedFilesFromPB(req.GetFiles())}}
 	}
 	for i, s := range subs {
 		if s.Caller == "" {
@@ -144,7 +146,7 @@ func (s *Service) AdoptBaseline(ctx context.Context, req AdoptBaselineRequest) (
 		}
 	}
 	if allMatch {
-		return &AdoptBaselineResponse{AlreadyAdopted: true, CheckpointWritten: true}, nil
+		return &adminpb.AdoptBaselineResponse{AlreadyAdopted: true, CheckpointWritten: true}, nil
 	}
 
 	// Parse + lower the union of every submission. Other callers
@@ -186,10 +188,10 @@ func (s *Service) AdoptBaseline(ctx context.Context, req AdoptBaselineRequest) (
 			mismatchCount++
 		}
 	}
-	if mismatchCount > 0 && !req.AllowDrift {
-		return &AdoptBaselineResponse{
+	if mismatchCount > 0 && !req.GetAllowDrift() {
+		return &adminpb.AdoptBaselineResponse{
 			CheckpointWritten: false,
-			Drift:             drift,
+			Drift:             adoptDriftToPB(drift),
 			Warnings:          warnings,
 		}, nil
 	}
@@ -200,7 +202,7 @@ func (s *Service) AdoptBaseline(ctx context.Context, req AdoptBaselineRequest) (
 		if err := s.upsertCallerFiles(ctx, tx, sub.Caller, sub.Files); err != nil {
 			return nil, err
 		}
-		if err := insertAdoptHistory(ctx, tx, sub.Caller, hashesNow[sub.Caller], drift, req.AllowDrift, req.AdoptedBy); err != nil {
+		if err := insertAdoptHistory(ctx, tx, sub.Caller, hashesNow[sub.Caller], drift, req.GetAllowDrift(), req.GetAdoptedBy()); err != nil {
 			return nil, fmt.Errorf("insert adopt history for %s: %w", sub.Caller, err)
 		}
 	}
@@ -227,9 +229,9 @@ func (s *Service) AdoptBaseline(ctx context.Context, req AdoptBaselineRequest) (
 		return nil, err
 	}
 
-	return &AdoptBaselineResponse{
+	return &adminpb.AdoptBaselineResponse{
 		CheckpointWritten: true,
-		Drift:             drift,
+		Drift:             adoptDriftToPB(drift),
 		Warnings:          warnings,
 	}, nil
 }
@@ -391,4 +393,101 @@ func classifyDriftSeverity(kind string) string {
 		return "removal"
 	}
 	return "mismatch"
+}
+
+// --- Wire conversion ---
+
+func callerSubmissionsFromPB(in []*adminpb.CallerSubmission) []CallerSubmission {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]CallerSubmission, 0, len(in))
+	for _, sub := range in {
+		out = append(out, CallerSubmission{
+			Caller: sub.GetCaller(),
+			Files:  submittedFilesFromPB(sub.GetFiles()),
+		})
+	}
+	return out
+}
+
+func callerSubmissionsToPB(in []CallerSubmission) []*adminpb.CallerSubmission {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*adminpb.CallerSubmission, 0, len(in))
+	for _, sub := range in {
+		out = append(out, &adminpb.CallerSubmission{
+			Caller: sub.Caller,
+			Files:  submittedFilesToPB(sub.Files),
+		})
+	}
+	return out
+}
+
+func adoptDriftToPB(in []AdoptDriftItem) []*adminpb.AdoptDriftItem {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]*adminpb.AdoptDriftItem, 0, len(in))
+	for _, d := range in {
+		out = append(out, &adminpb.AdoptDriftItem{
+			EntityId: d.EntityID,
+			Field:    d.Field,
+			Kind:     d.Kind,
+			Severity: d.Severity,
+			Detail:   d.Detail,
+		})
+	}
+	return out
+}
+
+// adoptDriftFromPB keeps nil as nil so the field marshals as null, which is
+// what the pre-migration handler emitted — both when the drift check found
+// nothing and on the already-adopted path, where it never runs.
+//
+// Collapsing empty to nil is only safe because translateDrift cannot produce
+// an empty non-nil slice: it short-circuits on Diff.IsEmpty and otherwise
+// appends to a nil slice. Change that to a make() and the JSON silently flips
+// from [] to null here.
+func adoptDriftFromPB(in []*adminpb.AdoptDriftItem) []AdoptDriftItem {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]AdoptDriftItem, 0, len(in))
+	for _, d := range in {
+		out = append(out, AdoptDriftItem{
+			EntityID: d.GetEntityId(),
+			Field:    d.GetField(),
+			Kind:     d.GetKind(),
+			Severity: d.GetSeverity(),
+			Detail:   d.GetDetail(),
+		})
+	}
+	return out
+}
+
+// adoptBaselineRequestToPB and adoptBaselineResponseFromPB are extracted for
+// the reason the other mappings in this migration are: an inline literal in
+// the shim is unfalsifiable. Dropping AllowDrift from it would silently
+// disable --allow-drift and write a false value into adopt_history, and no
+// test could fail, because the shim itself cannot be driven without a pool —
+// authorizeOperator rejects a zero Service before anything else runs.
+func adoptBaselineRequestToPB(req *AdoptBaselineRequest) *adminpb.AdoptBaselineRequest {
+	return &adminpb.AdoptBaselineRequest{
+		Submissions: callerSubmissionsToPB(req.Submissions),
+		Caller:      req.Caller,
+		Files:       submittedFilesToPB(req.Files),
+		AllowDrift:  req.AllowDrift,
+		AdoptedBy:   req.AdoptedBy,
+	}
+}
+
+func adoptBaselineResponseFromPB(p *adminpb.AdoptBaselineResponse) *AdoptBaselineResponse {
+	return &AdoptBaselineResponse{
+		CheckpointWritten: p.GetCheckpointWritten(),
+		AlreadyAdopted:    p.GetAlreadyAdopted(),
+		Drift:             adoptDriftFromPB(p.GetDrift()),
+		Warnings:          p.GetWarnings(),
+	}
 }

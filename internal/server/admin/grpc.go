@@ -64,7 +64,7 @@ type AdminServer interface {
 	GetCanonicalIR(context.Context, GetCanonicalIRRequest) (*GetCanonicalIRResponse, error)
 	BeginBackfillPlan(context.Context, *adminpb.BeginBackfillPlanRequest) (*adminpb.BeginBackfillPlanResponse, error)
 	GetBackfillStatus(context.Context, *adminpb.GetBackfillStatusRequest) (*adminpb.GetBackfillStatusResponse, error)
-	AdoptBaseline(context.Context, AdoptBaselineRequest) (*AdoptBaselineResponse, error)
+	AdoptBaseline(context.Context, *adminpb.AdoptBaselineRequest) (*adminpb.AdoptBaselineResponse, error)
 	SubmitJob(context.Context, *adminpb.SubmitJobRequest) (*adminpb.SubmitJobResponse, error)
 	GetJobStatus(context.Context, *adminpb.GetJobStatusRequest) (*adminpb.GetJobStatusResponse, error)
 	ListDeadJobs(context.Context, *adminpb.ListDeadJobsRequest) (*adminpb.ListDeadJobsResponse, error)
@@ -415,11 +415,13 @@ func handleAdoptBaseline(srv any, ctx context.Context, dec func(any) error, inte
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeAdoptBaseline(svc *Service, ctx context.Context, req *AdoptBaselineRequest) (any, error) {
-	resp, err := svc.AdoptBaseline(ctx, *req)
+	pbResp, err := svc.AdoptBaseline(ctx, adoptBaselineRequestToPB(req))
 	if err != nil {
 		return nil, err
 	}
+	resp := adoptBaselineResponseFromPB(pbResp)
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err

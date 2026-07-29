@@ -708,3 +708,121 @@ func TestBackfillFieldStatusRoundTrip(t *testing.T) {
 		t.Error("nil input should map to nil so the field marshals as null")
 	}
 }
+
+// --- Adopt ---
+
+// AdoptBaselineRequest has two ways to say the same thing: a submissions list,
+// or a single caller plus files. The server falls back to the second only when
+// the first is empty, so both halves have to survive the mapping — and neither
+// can be reached through invokeAdoptBaseline, since authorizeOperator rejects a
+// pool-less Service first. Asserting the mapper directly is the only coverage
+// available, and without it dropping AllowDrift silently disables --allow-drift.
+func TestAdoptBaselineRequestMappingCarriesEveryField(t *testing.T) {
+	req := &AdoptBaselineRequest{
+		Submissions: []CallerSubmission{
+			{Caller: "a", Files: []SubmittedFile{{Path: "a.atl", Content: []byte("x")}}},
+		},
+		Caller:     "solo",
+		Files:      []SubmittedFile{{Path: "s.atl", Content: []byte("y")}},
+		AllowDrift: true,
+		AdoptedBy:  "ops@example.com",
+	}
+	got := adoptBaselineRequestToPB(req)
+
+	if n := len(got.GetSubmissions()); n != 1 || got.GetSubmissions()[0].GetCaller() != "a" {
+		t.Errorf("Submissions not carried: %+v", got.GetSubmissions())
+	}
+	if got.GetCaller() != "solo" {
+		t.Errorf("Caller = %q, want solo", got.GetCaller())
+	}
+	if n := len(got.GetFiles()); n != 1 || got.GetFiles()[0].GetPath() != "s.atl" {
+		t.Errorf("Files not carried: %+v", got.GetFiles())
+	}
+	if !got.GetAllowDrift() {
+		t.Error("AllowDrift dropped — --allow-drift would silently stop working")
+	}
+	if got.GetAdoptedBy() != "ops@example.com" {
+		t.Errorf("AdoptedBy = %q, want ops@example.com", got.GetAdoptedBy())
+	}
+}
+
+// The three response construction sites, pinned as bytes.
+func TestAdoptBaselineResponseShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *adminpb.AdoptBaselineResponse
+		want string
+	}{
+		{
+			name: "already adopted",
+			in:   &adminpb.AdoptBaselineResponse{AlreadyAdopted: true, CheckpointWritten: true},
+			want: `{"CheckpointWritten":true,"AlreadyAdopted":true,"Drift":null,"Warnings":null}`,
+		},
+		{
+			name: "drift refused",
+			in: &adminpb.AdoptBaselineResponse{
+				Drift: []*adminpb.AdoptDriftItem{{EntityId: "x.A", Kind: "field_type_changed", Severity: "mismatch"}},
+			},
+			want: `{"CheckpointWritten":false,"AlreadyAdopted":false,"Drift":[{"entity_id":"x.A","kind":"field_type_changed","severity":"mismatch"}],"Warnings":null}`,
+		},
+		{
+			name: "success with warnings",
+			in:   &adminpb.AdoptBaselineResponse{CheckpointWritten: true, Warnings: []string{"w1"}},
+			want: `{"CheckpointWritten":true,"AlreadyAdopted":false,"Drift":null,"Warnings":["w1"]}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(adoptBaselineResponseFromPB(tc.in))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(b) != tc.want {
+				t.Errorf("\n got: %s\nwant: %s", b, tc.want)
+			}
+		})
+	}
+}
+
+func TestCallerSubmissionRoundTrip(t *testing.T) {
+	subs := []CallerSubmission{
+		{Caller: "a", Files: []SubmittedFile{{Path: "a.atl", Content: []byte("x")}}},
+		{Caller: "b", Files: []SubmittedFile{{Path: "b.atl", Content: []byte("y")}}},
+	}
+	if got := callerSubmissionsFromPB(callerSubmissionsToPB(subs)); !reflect.DeepEqual(got, subs) {
+		t.Errorf("round trip lost data:\n got: %+v\nwant: %+v", got, subs)
+	}
+	// Nil in, nil out — for consistency with the other file mappers, not
+	// because the single-caller fallback depends on it: that branch tests
+	// len(subs)==0, and callerSubmissionsFromPB collapses empty to nil anyway.
+	if callerSubmissionsToPB(nil) != nil {
+		t.Error("nil submissions should map to nil")
+	}
+}
+
+// Drift is nil when the check finds nothing, and on the already-adopted path
+// where it never runs. Both marshal as null.
+func TestAdoptDriftKeepsNilNil(t *testing.T) {
+	for _, in := range [][]*adminpb.AdoptDriftItem{nil, {}} {
+		if got := adoptDriftFromPB(in); got != nil {
+			t.Errorf("adoptDriftFromPB(%#v) = %#v, want nil", in, got)
+		}
+	}
+	b, err := json.Marshal(&AdoptBaselineResponse{Drift: adoptDriftFromPB(nil)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"Drift":null`) {
+		t.Errorf(`want "Drift":null, got %s`, b)
+	}
+}
+
+func TestAdoptDriftConverterCopiesEveryField(t *testing.T) {
+	in := []AdoptDriftItem{{
+		EntityID: "x.A", Field: "f", Kind: "field_type_changed",
+		Severity: "mismatch", Detail: "declared text, live bigint",
+	}}
+	if got := adoptDriftFromPB(adoptDriftToPB(in)); !reflect.DeepEqual(got, in) {
+		t.Errorf("round trip lost data:\n got: %+v\nwant: %+v", got, in)
+	}
+}
