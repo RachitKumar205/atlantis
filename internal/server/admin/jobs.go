@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+
 	"github.com/rachitkumar205/atlantis/jobs"
 )
 
@@ -23,11 +25,12 @@ import (
 // queue) so the caller doesn't have to thread those values from
 // declaration to call site.
 //
-// Args MUST validate against the job's declared `args { ... }` shape;
-// the server does a structural check (every required field present,
-// each value's JSON-shape compatible with the declared type). Deep
-// type checking — string-length bounds, CHECK predicates — runs at
-// handler invocation time, not at submit time.
+// Args SHOULD match the job's declared `args { ... }` shape, but nothing
+// enforces that: the server stores the payload opaquely and never inspects it.
+// A structural check at submit time — every required field present, each
+// value JSON-shape-compatible with its declared type — was the intent and has
+// never been implemented, so a malformed payload surfaces as a handler failure
+// rather than a rejected submission.
 type SubmitJobRequest struct {
 	JobName     string          `json:"JobName"`
 	Args        json.RawMessage `json:"Args,omitempty"`
@@ -114,11 +117,11 @@ type RetryDeadJobResponse struct {
 // per-call. A non-existent JobName is rejected — the caller
 // presumably typo'd a name, or referenced a job that hasn't shipped
 // to atlantis yet.
-func (s *Service) SubmitJob(ctx context.Context, req SubmitJobRequest) (*SubmitJobResponse, error) {
+func (s *Service) SubmitJob(ctx context.Context, req *adminpb.SubmitJobRequest) (*adminpb.SubmitJobResponse, error) {
 	if !s.allowApplyMutation {
 		return nil, errors.New("admin: job submission is disabled on this server (set ATL_ALLOW_APPLY_MUTATION=true to enable)")
 	}
-	if req.JobName == "" {
+	if req.GetJobName() == "" {
 		return nil, errors.New("admin: JobName is required")
 	}
 
@@ -135,7 +138,7 @@ func (s *Service) SubmitJob(ctx context.Context, req SubmitJobRequest) (*SubmitJ
 	}
 	var spec *jobSpec
 	for i := range ir.Jobs {
-		if ir.Jobs[i].ID() == req.JobName {
+		if ir.Jobs[i].ID() == req.GetJobName() {
 			spec = &jobSpec{
 				maxRetries:  ir.Jobs[i].Retries,
 				timeoutMS:   ir.Jobs[i].TimeoutMS,
@@ -147,20 +150,25 @@ func (s *Service) SubmitJob(ctx context.Context, req SubmitJobRequest) (*SubmitJ
 		}
 	}
 	if spec == nil {
-		return nil, fmt.Errorf("admin: unknown job %q (declare it in a .atl file and run `tide apply`)", req.JobName)
+		return nil, fmt.Errorf("admin: unknown job %q (declare it in a .atl file and run `tide apply`)", req.GetJobName())
 	}
 	// RBAC: when the job declares `visible_to`, only the named caller
-	// (or "*" for any) can submit. The SubmittedBy field on the
-	// request carries the caller identity the interceptor resolved;
-	// we strip the "cli:" prefix if present so operator submissions
-	// match the DSL-declared caller name.
+	// (or "*" for any) can submit. We strip the "cli:" prefix if present so
+	// operator submissions match the DSL-declared caller name.
+	//
+	// SubmittedBy is client-supplied and unverified — cmd/tide sets it from
+	// $USER — so this gate is advisory, not a security boundary: any
+	// authenticated caller can name whatever identity the job declares. The
+	// server does resolve a real caller (callerFromContext, used by
+	// authorizeOperator and authorizeSelfApply); wiring it in here belongs
+	// with the capability work rather than with a type migration.
 	if spec.visibleTo != "" && spec.visibleTo != "*" {
-		submitter := req.SubmittedBy
+		submitter := req.GetSubmittedBy()
 		if len(submitter) > 4 && submitter[:4] == "cli:" {
 			submitter = submitter[4:]
 		}
 		if submitter != spec.visibleTo {
-			return nil, fmt.Errorf("admin: caller %q is not allowed to submit %s (visible_to = %q)", submitter, req.JobName, spec.visibleTo)
+			return nil, fmt.Errorf("admin: caller %q is not allowed to submit %s (visible_to = %q)", submitter, req.GetJobName(), spec.visibleTo)
 		}
 	}
 
@@ -173,7 +181,7 @@ func (s *Service) SubmitJob(ctx context.Context, req SubmitJobRequest) (*SubmitJ
 		spec.timeoutMS = 30 * 60 * 1000
 	}
 
-	args := req.Args
+	args := json.RawMessage(req.GetArgs())
 	if len(args) == 0 {
 		args = json.RawMessage("{}")
 	}
@@ -182,8 +190,8 @@ func (s *Service) SubmitJob(ctx context.Context, req SubmitJobRequest) (*SubmitJ
 	// the server side keeps the SQL constant — passing nil means
 	// "fire immediately," any value means "wait until then."
 	var scheduledForArg any
-	if req.ScheduledAt != "" {
-		scheduledForArg = req.ScheduledAt
+	if req.GetScheduledAt() != "" {
+		scheduledForArg = req.GetScheduledAt()
 	}
 
 	// timeout_ms is NULLable: a job declared `timeout none` gets a
@@ -213,19 +221,19 @@ RETURNING id`
 		spec.maxRetries,
 		timeoutArg,
 		scheduledForArg,
-		req.SubmittedBy,
+		req.GetSubmittedBy(),
 		traceCtx,
 	).Scan(&id); err != nil {
 		return nil, fmt.Errorf("insert job: %w", err)
 	}
-	return &SubmitJobResponse{JobID: fmt.Sprintf("%d", id)}, nil
+	return &adminpb.SubmitJobResponse{JobId: fmt.Sprintf("%d", id)}, nil
 }
 
 // GetJobStatus reads one atlantis.jobs row. Returns Found=false (not
 // an error) when the id doesn't exist; this lets the CLI render the
 // "not found" case without distinguishing it from a transport error.
-func (s *Service) GetJobStatus(ctx context.Context, req GetJobStatusRequest) (*GetJobStatusResponse, error) {
-	if req.JobID == "" {
+func (s *Service) GetJobStatus(ctx context.Context, req *adminpb.GetJobStatusRequest) (*adminpb.GetJobStatusResponse, error) {
+	if req.GetJobId() == "" {
 		return nil, errors.New("admin: JobID is required")
 	}
 	row := s.pool.QueryRow(ctx, `
@@ -233,23 +241,31 @@ SELECT id, job_name, queue, args, status, attempts, max_retries,
        COALESCE(last_error, ''), last_error_at, scheduled_for,
        started_at, completed_at, enqueued_at, COALESCE(submitted_by, ''),
        progress_pct, COALESCE(progress_msg, ''), progress_at
-FROM atlantis.jobs WHERE id = $1`, req.JobID)
+FROM atlantis.jobs WHERE id = $1`, req.GetJobId())
 	var js JobStatus
 	js, err := scanJobRow(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return &GetJobStatusResponse{Found: false}, nil
+			return &adminpb.GetJobStatusResponse{Found: false}, nil
 		}
 		return nil, err
 	}
-	return &GetJobStatusResponse{Found: true, Job: js}, nil
+	return &adminpb.GetJobStatusResponse{Found: true, Job: jobStatusToPB(js)}, nil
 }
 
 // ListDeadJobs paginates the DLQ. Filtering by JobName lets the
 // operator narrow to one job kind for triage; default returns
 // across all kinds.
-func (s *Service) ListDeadJobs(ctx context.Context, req ListDeadJobsRequest) (*ListDeadJobsResponse, error) {
-	limit := req.Limit
+func (s *Service) ListDeadJobs(ctx context.Context, req *adminpb.ListDeadJobsRequest) (*adminpb.ListDeadJobsResponse, error) {
+	// No-PG path, matching the rest of the package. This is the job RPC an
+	// empty probe request reaches the pool through — the other three reject
+	// on a missing id or a disabled mutation flag first — so without the
+	// guard it segfaults. They panic too, given a request that gets past
+	// their own checks.
+	if s.pool == nil {
+		return &adminpb.ListDeadJobsResponse{}, nil
+	}
+	limit := req.GetLimit()
 	if limit <= 0 {
 		limit = 50
 	}
@@ -262,31 +278,31 @@ FROM atlantis.jobs_dead
 WHERE ($1 = '' OR job_name = $1)
 ORDER BY moved_at DESC
 LIMIT $2`
-	rs, err := s.pool.Query(ctx, q, req.JobName, limit)
+	rs, err := s.pool.Query(ctx, q, req.GetJobName(), limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rs.Close()
-	var out []JobStatus
+	var out []*adminpb.JobStatus
 	for rs.Next() {
 		js, err := scanJobRow(rs)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, js)
+		out = append(out, jobStatusToPB(js))
 	}
-	return &ListDeadJobsResponse{Jobs: out}, rs.Err()
+	return &adminpb.ListDeadJobsResponse{Jobs: out}, rs.Err()
 }
 
 // RetryDeadJob moves a DLQ row back into atlantis.jobs with attempts
 // reset to 0, status reset to pending. The DLQ row is deleted in the
 // same tx. The new row's id is the same as the DLQ row's so existing
 // references (logs, alerts) don't lose correlation.
-func (s *Service) RetryDeadJob(ctx context.Context, req RetryDeadJobRequest) (*RetryDeadJobResponse, error) {
+func (s *Service) RetryDeadJob(ctx context.Context, req *adminpb.RetryDeadJobRequest) (*adminpb.RetryDeadJobResponse, error) {
 	if !s.allowApplyMutation {
 		return nil, errors.New("admin: job retry is disabled on this server")
 	}
-	if req.JobID == "" {
+	if req.GetJobId() == "" {
 		return nil, errors.New("admin: JobID is required")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -302,20 +318,20 @@ INSERT INTO atlantis.jobs
 SELECT id, job_name, queue, args, 'pending', 0, max_retries,
        now(), enqueued_at, submitted_by
 FROM atlantis.jobs_dead WHERE id = $1`
-	res, err := tx.Exec(ctx, moveSQL, req.JobID)
+	res, err := tx.Exec(ctx, moveSQL, req.GetJobId())
 	if err != nil {
 		return nil, fmt.Errorf("re-insert: %w", err)
 	}
 	if res.RowsAffected() == 0 {
-		return nil, fmt.Errorf("admin: dead job %s not found", req.JobID)
+		return nil, fmt.Errorf("admin: dead job %s not found", req.GetJobId())
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM atlantis.jobs_dead WHERE id = $1`, req.JobID); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM atlantis.jobs_dead WHERE id = $1`, req.GetJobId()); err != nil {
 		return nil, fmt.Errorf("delete dead: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return &RetryDeadJobResponse{JobID: req.JobID}, nil
+	return &adminpb.RetryDeadJobResponse{JobId: req.GetJobId()}, nil
 }
 
 // jobSpec is the minimal slice of dsl.Job the SubmitJob path needs.
@@ -389,4 +405,73 @@ func formatNullable(t *time.Time) string {
 		return ""
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+// --- Wire conversion ---
+//
+// Two asymmetries need preserving in both directions, plus one narrowing.
+//
+// Args is json.RawMessage on the JSON side and bytes on the wire. Both carry
+// opaque JSON the server never interprets, so the copy is verbatim — but nil
+// must stay nil, because a nil RawMessage marshals as `null` while an empty
+// non-nil one is not valid JSON at all and makes encoding/json fail.
+//
+// Attempts, MaxRetries, and ProgressPct narrow int to int32 unchecked. Safe by
+// schema: migrations/infra/0006_jobs.up.sql declares attempts and max_retries
+// as INT (int4), and progress_pct is scanned through an int16. Unlike
+// callers.go COUNT(*), none of these can exceed the wire type.
+//
+// GetJobStatusResponse.Job is a value, tagged omitempty — which does nothing
+// for a struct, so a not-found response still emits a fully zero Job object.
+// The proto models it as a message pointer, nil when absent. jobStatusFromPB
+// therefore maps nil to the zero value rather than propagating nil, or the
+// key would disappear from a response that has always contained it.
+
+func jobStatusToPB(j JobStatus) *adminpb.JobStatus {
+	return &adminpb.JobStatus{
+		JobId:        j.JobID,
+		JobName:      j.JobName,
+		Queue:        j.Queue,
+		Args:         j.Args,
+		Status:       j.Status,
+		Attempts:     int32(j.Attempts),
+		MaxRetries:   int32(j.MaxRetries),
+		LastError:    j.LastError,
+		LastErrorAt:  j.LastErrorAt,
+		ScheduledFor: j.ScheduledFor,
+		StartedAt:    j.StartedAt,
+		CompletedAt:  j.CompletedAt,
+		EnqueuedAt:   j.EnqueuedAt,
+		SubmittedBy:  j.SubmittedBy,
+		ProgressPct:  int32(j.ProgressPct),
+		ProgressMsg:  j.ProgressMsg,
+		ProgressAt:   j.ProgressAt,
+	}
+}
+
+func jobStatusFromPB(p *adminpb.JobStatus) JobStatus {
+	// A nil message becomes the zero value, not a zero-value-with-nil-Args
+	// distinction the JSON side cannot express anyway.
+	if p == nil {
+		return JobStatus{}
+	}
+	return JobStatus{
+		JobID:        p.GetJobId(),
+		JobName:      p.GetJobName(),
+		Queue:        p.GetQueue(),
+		Args:         p.GetArgs(),
+		Status:       p.GetStatus(),
+		Attempts:     int(p.GetAttempts()),
+		MaxRetries:   int(p.GetMaxRetries()),
+		LastError:    p.GetLastError(),
+		LastErrorAt:  p.GetLastErrorAt(),
+		ScheduledFor: p.GetScheduledFor(),
+		StartedAt:    p.GetStartedAt(),
+		CompletedAt:  p.GetCompletedAt(),
+		EnqueuedAt:   p.GetEnqueuedAt(),
+		SubmittedBy:  p.GetSubmittedBy(),
+		ProgressPct:  int(p.GetProgressPct()),
+		ProgressMsg:  p.GetProgressMsg(),
+		ProgressAt:   p.GetProgressAt(),
+	}
 }

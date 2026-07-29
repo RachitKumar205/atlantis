@@ -75,6 +75,10 @@ var migratedRPCs = map[string]bool{
 	"GetWorkerSession":       true,
 	"DrainWorker":            true,
 	"EvictWorker":            true,
+	"SubmitJob":              true,
+	"GetJobStatus":           true,
+	"ListDeadJobs":           true,
+	"RetryDeadJob":           true,
 }
 
 // ---------------------------------------------------------------------------
@@ -124,4 +128,20 @@ func (g *grpcServer) DrainWorker(ctx context.Context, req *adminpb.DrainWorkerRe
 
 func (g *grpcServer) EvictWorker(ctx context.Context, req *adminpb.EvictWorkerRequest) (*adminpb.EvictWorkerResponse, error) {
 	return g.svc.EvictWorker(ctx, req)
+}
+
+func (g *grpcServer) SubmitJob(ctx context.Context, req *adminpb.SubmitJobRequest) (*adminpb.SubmitJobResponse, error) {
+	return g.svc.SubmitJob(ctx, req)
+}
+
+func (g *grpcServer) GetJobStatus(ctx context.Context, req *adminpb.GetJobStatusRequest) (*adminpb.GetJobStatusResponse, error) {
+	return g.svc.GetJobStatus(ctx, req)
+}
+
+func (g *grpcServer) ListDeadJobs(ctx context.Context, req *adminpb.ListDeadJobsRequest) (*adminpb.ListDeadJobsResponse, error) {
+	return g.svc.ListDeadJobs(ctx, req)
+}
+
+func (g *grpcServer) RetryDeadJob(ctx context.Context, req *adminpb.RetryDeadJobRequest) (*adminpb.RetryDeadJobResponse, error) {
+	return g.svc.RetryDeadJob(ctx, req)
 }

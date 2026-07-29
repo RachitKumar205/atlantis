@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/encoding"
@@ -64,10 +65,10 @@ type AdminServer interface {
 	BeginBackfillPlan(context.Context, BeginBackfillPlanRequest) (*BeginBackfillPlanResponse, error)
 	GetBackfillStatus(context.Context, GetBackfillStatusRequest) (*GetBackfillStatusResponse, error)
 	AdoptBaseline(context.Context, AdoptBaselineRequest) (*AdoptBaselineResponse, error)
-	SubmitJob(context.Context, SubmitJobRequest) (*SubmitJobResponse, error)
-	GetJobStatus(context.Context, GetJobStatusRequest) (*GetJobStatusResponse, error)
-	ListDeadJobs(context.Context, ListDeadJobsRequest) (*ListDeadJobsResponse, error)
-	RetryDeadJob(context.Context, RetryDeadJobRequest) (*RetryDeadJobResponse, error)
+	SubmitJob(context.Context, *adminpb.SubmitJobRequest) (*adminpb.SubmitJobResponse, error)
+	GetJobStatus(context.Context, *adminpb.GetJobStatusRequest) (*adminpb.GetJobStatusResponse, error)
+	ListDeadJobs(context.Context, *adminpb.ListDeadJobsRequest) (*adminpb.ListDeadJobsResponse, error)
+	RetryDeadJob(context.Context, *adminpb.RetryDeadJobRequest) (*adminpb.RetryDeadJobResponse, error)
 	StartWorkflow(context.Context, StartWorkflowRequest) (*StartWorkflowResponse, error)
 	GetWorkflowStatus(context.Context, GetWorkflowStatusRequest) (*GetWorkflowStatusResponse, error)
 	GetSchemaHistory(context.Context, GetSchemaHistoryRequest) (*GetSchemaHistoryResponse, error)
@@ -414,11 +415,18 @@ func handleSubmitJob(srv any, ctx context.Context, dec func(any) error, intercep
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeSubmitJob(svc *Service, ctx context.Context, req *SubmitJobRequest) (any, error) {
-	resp, err := svc.SubmitJob(ctx, *req)
+	pbResp, err := svc.SubmitJob(ctx, &adminpb.SubmitJobRequest{
+		JobName:     req.JobName,
+		Args:        req.Args,
+		ScheduledAt: req.ScheduledAt,
+		SubmittedBy: req.SubmittedBy,
+	})
 	if err != nil {
 		return nil, err
 	}
+	resp := &SubmitJobResponse{JobID: pbResp.GetJobId()}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -445,11 +453,16 @@ func handleGetJobStatus(srv any, ctx context.Context, dec func(any) error, inter
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeGetJobStatus(svc *Service, ctx context.Context, req *GetJobStatusRequest) (any, error) {
-	resp, err := svc.GetJobStatus(ctx, *req)
+	pbResp, err := svc.GetJobStatus(ctx, &adminpb.GetJobStatusRequest{JobId: req.JobID})
 	if err != nil {
 		return nil, err
 	}
+	// Job is a value on the JSON side, so a not-found response has always
+	// carried a fully zero object rather than omitting the key. jobStatusFromPB
+	// maps the nil message back to that zero value.
+	resp := &GetJobStatusResponse{Found: pbResp.GetFound(), Job: jobStatusFromPB(pbResp.GetJob())}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -478,11 +491,41 @@ func handleListDeadJobs(srv any, ctx context.Context, dec func(any) error, inter
 	return interceptor(ctx, &req, info, handler)
 }
 
+// deadJobsToJSON returns nil for an empty list so the field marshals as null.
+//
+// Unlike ListConnectedWorkers, which emitted [] because the dispatcher handed
+// it a non-nil slice, this handler built `var out []JobStatus` and only ever
+// appended — so an empty dead-letter queue has always produced {"Jobs":null},
+// and `tide job dead --format=json` prints that. There is no general rule
+// here: each RPC has to match whatever its own pre-migration code emitted.
+func deadJobsToJSON(in []*adminpb.JobStatus) []JobStatus {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]JobStatus, 0, len(in))
+	for _, j := range in {
+		out = append(out, jobStatusFromPB(j))
+	}
+	return out
+}
+
+// Migration shim; see the note on invokeGetCallers.
 func invokeListDeadJobs(svc *Service, ctx context.Context, req *ListDeadJobsRequest) (any, error) {
-	resp, err := svc.ListDeadJobs(ctx, *req)
+	// Clamp rather than narrow: an int64 limit above int32 wraps negative,
+	// which this handler reads as "unset" and silently replaces with 50 —
+	// turning an absurd request into a plausible-looking small answer.
+	limit := req.Limit
+	if limit > math.MaxInt32 {
+		limit = math.MaxInt32
+	}
+	pbResp, err := svc.ListDeadJobs(ctx, &adminpb.ListDeadJobsRequest{
+		JobName: req.JobName,
+		Limit:   int32(limit),
+	})
 	if err != nil {
 		return nil, err
 	}
+	resp := &ListDeadJobsResponse{Jobs: deadJobsToJSON(pbResp.GetJobs())}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -509,11 +552,13 @@ func handleRetryDeadJob(srv any, ctx context.Context, dec func(any) error, inter
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeRetryDeadJob(svc *Service, ctx context.Context, req *RetryDeadJobRequest) (any, error) {
-	resp, err := svc.RetryDeadJob(ctx, *req)
+	pbResp, err := svc.RetryDeadJob(ctx, &adminpb.RetryDeadJobRequest{JobId: req.JobID})
 	if err != nil {
 		return nil, err
 	}
+	resp := &RetryDeadJobResponse{JobID: pbResp.GetJobId()}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err

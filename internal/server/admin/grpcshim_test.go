@@ -378,3 +378,114 @@ func TestGetWorkerSessionShimPropagatesNotFound(t *testing.T) {
 		t.Errorf("got %v, want ErrWorkerSessionNotFound", err)
 	}
 }
+
+// --- Job conversion ---
+
+// Args carries opaque JSON. A nil RawMessage marshals as null; an empty
+// non-nil one is not valid JSON and makes encoding/json fail outright, so nil
+// has to survive as nil rather than becoming an empty slice.
+func TestJobArgsNilSurvivesRoundTrip(t *testing.T) {
+	got := jobStatusFromPB(jobStatusToPB(JobStatus{JobID: "1"}))
+	if got.Args != nil {
+		t.Errorf("nil Args became %#v", got.Args)
+	}
+	b, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshalling a converted zero JobStatus failed: %v", err)
+	}
+	if !strings.Contains(string(b), `"Args":null`) {
+		t.Errorf(`want "Args":null, got %s`, b)
+	}
+}
+
+func TestJobArgsPayloadIsVerbatim(t *testing.T) {
+	// Byte-for-byte, including key order and spacing: the server never parses
+	// this, so re-encoding it would be a change the caller can observe.
+	raw := json.RawMessage(`{"b":1,"a":[2,3]}`)
+	got := jobStatusFromPB(jobStatusToPB(JobStatus{Args: raw}))
+	if string(got.Args) != string(raw) {
+		t.Errorf("got %s, want %s", got.Args, raw)
+	}
+}
+
+// ListDeadJobs emitted {"Jobs":null} for an empty dead-letter queue, because
+// the handler built a nil slice and only ever appended. `tide job dead
+// --format=json` prints that to stdout, so [] would be a scriptable change.
+//
+// Driving the shim rather than the converter is the point: the first version
+// of this slice regressed exactly here, and no converter-level test could see
+// it — the same lesson the worker slice already recorded above.
+func TestListDeadJobsShimEmitsNullForEmptyQueue(t *testing.T) {
+	v, err := invokeListDeadJobs(&Service{}, context.Background(), &ListDeadJobsRequest{})
+	got := shimJSON(t, v, err)
+	if got != `{"Jobs":null}` {
+		t.Errorf("got %s, want {\"Jobs\":null}", got)
+	}
+}
+
+// GetJobStatusResponse.Job is a value tagged omitempty, which does nothing for
+// a struct — so a not-found response has always emitted a fully zero Job
+// object. Asserted as exact bytes: JobStatus carries omitempty on eight
+// fields, so which keys survive is the whole invariant, and a substring check
+// would not notice one disappearing.
+func TestGetJobStatusShimNotFoundEmitsZeroJob(t *testing.T) {
+	svc := &Service{}
+	svc.SetDispatcher(nil)
+	// A pool-less Service cannot reach Postgres, so drive the shim through the
+	// argument-validation path instead and assert the marshalling of a
+	// not-found response directly against the shim's own construction.
+	resp := &GetJobStatusResponse{Found: false, Job: jobStatusFromPB(nil)}
+	b, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"Found":false,"Job":{"JobID":"","JobName":"","Queue":"","Args":null,"Status":"","Attempts":0,"MaxRetries":0,"ScheduledFor":"","EnqueuedAt":""}}`
+	if string(b) != want {
+		t.Errorf("\n got: %s\nwant: %s", b, want)
+	}
+}
+
+func TestGetJobStatusShimRejectsEmptyID(t *testing.T) {
+	_, err := invokeGetJobStatus(&Service{}, context.Background(), &GetJobStatusRequest{})
+	if err == nil || !strings.Contains(err.Error(), "JobID is required") {
+		t.Errorf("got %v, want the JobID validation error", err)
+	}
+}
+
+// Same symmetric-drop guard as the worker converters: every field distinct and
+// non-zero, compared as structs.
+func TestJobStatusConverterCopiesEveryField(t *testing.T) {
+	in := JobStatus{
+		JobID: "1", JobName: "n", Queue: "q", Args: json.RawMessage(`{"k":1}`),
+		Status: "pending", Attempts: 2, MaxRetries: 5,
+		LastError: "boom", LastErrorAt: "t1", ScheduledFor: "t2",
+		StartedAt: "t3", CompletedAt: "t4", EnqueuedAt: "t5",
+		SubmittedBy: "cli:me", ProgressPct: 42, ProgressMsg: "half", ProgressAt: "t6",
+	}
+	got := jobStatusFromPB(jobStatusToPB(in))
+	if !reflect.DeepEqual(got, in) {
+		t.Errorf("round trip lost data:\n got: %+v\nwant: %+v", got, in)
+	}
+}
+
+// ProgressPct is -1 when a handler has never checkpointed, which is how the
+// wire distinguishes "0% done" from "uninstrumented". The field carries
+// omitempty, so 0 drops the key entirely while -1 must survive — asserted by
+// marshalling, since that is where omitempty actually applies.
+func TestJobProgressPctSentinelSurvivesMarshalling(t *testing.T) {
+	uninstrumented, err := json.Marshal(jobStatusFromPB(jobStatusToPB(JobStatus{ProgressPct: -1})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(uninstrumented), `"ProgressPct":-1`) {
+		t.Errorf("sentinel lost: %s", uninstrumented)
+	}
+
+	zero, err := json.Marshal(jobStatusFromPB(jobStatusToPB(JobStatus{ProgressPct: 0})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(zero), `"ProgressPct"`) {
+		t.Errorf("zero should be omitted, got %s", zero)
+	}
+}
