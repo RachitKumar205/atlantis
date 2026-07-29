@@ -62,8 +62,8 @@ type AdminServer interface {
 	ApplyMigration(context.Context, ApplyRequest) (*ApplyResponse, error)
 	GetMergedSchema(context.Context, GetMergedSchemaRequest) (*GetMergedSchemaResponse, error)
 	GetCanonicalIR(context.Context, GetCanonicalIRRequest) (*GetCanonicalIRResponse, error)
-	BeginBackfillPlan(context.Context, BeginBackfillPlanRequest) (*BeginBackfillPlanResponse, error)
-	GetBackfillStatus(context.Context, GetBackfillStatusRequest) (*GetBackfillStatusResponse, error)
+	BeginBackfillPlan(context.Context, *adminpb.BeginBackfillPlanRequest) (*adminpb.BeginBackfillPlanResponse, error)
+	GetBackfillStatus(context.Context, *adminpb.GetBackfillStatusRequest) (*adminpb.GetBackfillStatusResponse, error)
 	AdoptBaseline(context.Context, AdoptBaselineRequest) (*AdoptBaselineResponse, error)
 	SubmitJob(context.Context, *adminpb.SubmitJobRequest) (*adminpb.SubmitJobResponse, error)
 	GetJobStatus(context.Context, *adminpb.GetJobStatusRequest) (*adminpb.GetJobStatusResponse, error)
@@ -314,10 +314,34 @@ func handleBeginBackfillPlan(srv any, ctx context.Context, dec func(any) error, 
 	return interceptor(ctx, &req, info, handler)
 }
 
+// beginBackfillRequestToPB drops the four SQL fields and the field list the
+// legacy JSON request still carries, rather than forwarding them. Older tide
+// binaries keep sending them and are unaffected: the server derives every
+// statement from the submitted schema, so the values were only ever a
+// restatement of what the .atl files already say.
+//
+// Extracted so a test can assert the drop. Inline, nothing would fail if a
+// later edit re-added `PreBackfillUpSQL: req.PreBackfillUpSQL`.
+func beginBackfillRequestToPB(req *BeginBackfillPlanRequest) *adminpb.BeginBackfillPlanRequest {
+	return &adminpb.BeginBackfillPlanRequest{
+		Caller: req.Caller,
+		PlanId: req.PlanID,
+		Files:  submittedFilesToPB(req.Files),
+	}
+}
+
+// Migration shim; see the note on invokeGetCallers.
 func invokeBeginBackfillPlan(svc *Service, ctx context.Context, req *BeginBackfillPlanRequest) (any, error) {
-	resp, err := svc.BeginBackfillPlan(ctx, *req)
+	pbResp, err := svc.BeginBackfillPlan(ctx, beginBackfillRequestToPB(req))
 	if err != nil {
 		return nil, err
+	}
+	resp := &BeginBackfillPlanResponse{
+		PlanHash:        pbResp.GetPlanHash(),
+		Accepted:        pbResp.GetAccepted(),
+		AlreadyRunning:  pbResp.GetAlreadyRunning(),
+		AlreadyComplete: pbResp.GetAlreadyComplete(),
+		Message:         pbResp.GetMessage(),
 	}
 	raw, err := json.Marshal(resp)
 	if err != nil {
@@ -347,10 +371,23 @@ func handleGetBackfillStatus(srv any, ctx context.Context, dec func(any) error, 
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeGetBackfillStatus(svc *Service, ctx context.Context, req *GetBackfillStatusRequest) (any, error) {
-	resp, err := svc.GetBackfillStatus(ctx, *req)
+	pbResp, err := svc.GetBackfillStatus(ctx, &adminpb.GetBackfillStatusRequest{
+		PlanHash:        req.PlanHash,
+		LatestForCaller: req.LatestForCaller,
+	})
 	if err != nil {
 		return nil, err
+	}
+	resp := &GetBackfillStatusResponse{
+		PlanHash:    pbResp.GetPlanHash(),
+		Caller:      pbResp.GetCaller(),
+		Status:      pbResp.GetStatus(),
+		ErrorMsg:    pbResp.GetErrorMsg(),
+		StartedAt:   pbResp.GetStartedAt(),
+		CompletedAt: pbResp.GetCompletedAt(),
+		Fields:      backfillFieldStatusFromPB(pbResp.GetFields()),
 	}
 	raw, err := json.Marshal(resp)
 	if err != nil {

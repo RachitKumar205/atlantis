@@ -81,6 +81,8 @@ var migratedRPCs = map[string]bool{
 	"RetryDeadJob":           true,
 	"StartWorkflow":          true,
 	"GetWorkflowStatus":      true,
+	"BeginBackfillPlan":      true,
+	"GetBackfillStatus":      true,
 }
 
 // ---------------------------------------------------------------------------
@@ -154,4 +156,12 @@ func (g *grpcServer) StartWorkflow(ctx context.Context, req *adminpb.StartWorkfl
 
 func (g *grpcServer) GetWorkflowStatus(ctx context.Context, req *adminpb.GetWorkflowStatusRequest) (*adminpb.GetWorkflowStatusResponse, error) {
 	return g.svc.GetWorkflowStatus(ctx, req)
+}
+
+func (g *grpcServer) BeginBackfillPlan(ctx context.Context, req *adminpb.BeginBackfillPlanRequest) (*adminpb.BeginBackfillPlanResponse, error) {
+	return g.svc.BeginBackfillPlan(ctx, req)
+}
+
+func (g *grpcServer) GetBackfillStatus(ctx context.Context, req *adminpb.GetBackfillStatusRequest) (*adminpb.GetBackfillStatusResponse, error) {
+	return g.svc.GetBackfillStatus(ctx, req)
 }

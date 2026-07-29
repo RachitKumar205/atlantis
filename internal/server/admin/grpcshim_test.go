@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protojson"
+
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
 
@@ -602,5 +604,107 @@ func TestSubmitJobRequestMappingCopiesEveryField(t *testing.T) {
 func TestSubmitJobRequestMappingKeepsNilArgs(t *testing.T) {
 	if got := submitJobRequestToPB(&SubmitJobRequest{JobName: "j"}); got.GetArgs() != nil {
 		t.Errorf("Args = %#v, want nil", got.GetArgs())
+	}
+}
+
+// --- Backfill ---
+
+// TestBeginBackfillPlanRequestCarriesNoSQL is the guard for the defect this
+// slice closes. The RPC used to accept four SQL strings and a field list from
+// the caller and execute them, with nothing checking that the statements bore
+// any relation to the submitted schema — which made "may apply schema"
+// indistinguishable from "may run arbitrary SQL as the atlantis role".
+//
+// The server now derives every statement. Keeping that true means the request
+// must have nowhere to put SQL, so this asserts the shape of the message
+// rather than the behaviour of one handler: re-adding such a field to the
+// proto fails here, before anyone can wire it up.
+func TestBeginBackfillPlanRequestCarriesNoSQL(t *testing.T) {
+	md := (&adminpb.BeginBackfillPlanRequest{}).ProtoReflect().Descriptor()
+	for i := 0; i < md.Fields().Len(); i++ {
+		name := string(md.Fields().Get(i).Name())
+		lower := strings.ToLower(name)
+		if strings.Contains(lower, "sql") || strings.Contains(lower, "backfill_field") {
+			t.Errorf("BeginBackfillPlanRequest.%s reintroduces caller-supplied SQL; "+
+				"the server must derive every statement from the submitted files", name)
+		}
+	}
+
+	// And the positive half: the message carries exactly what recomputation
+	// needs, so a field going missing is caught too.
+	want := map[string]bool{"caller": true, "plan_id": true, "files": true}
+	got := map[string]bool{}
+	for i := 0; i < md.Fields().Len(); i++ {
+		got[string(md.Fields().Get(i).Name())] = true
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("fields = %v, want %v", got, want)
+	}
+}
+
+// The JSON request still carries the legacy SQL fields, because older tide
+// binaries send them. The mapping must drop them rather than forward them —
+// asserted against the message the shim actually builds, so re-adding a field
+// to the mapping fails here.
+func TestBeginBackfillRequestMappingDropsLegacySQL(t *testing.T) {
+	req := &BeginBackfillPlanRequest{
+		Caller:                 "svc",
+		PlanID:                 "abc",
+		Files:                  []SubmittedFile{{Path: "a.atl", Content: []byte("entity A in x {}")}},
+		PreBackfillUpSQL:       "DROP TABLE atlantis.caller_identities",
+		PostBackfillUpSQL:      "DROP SCHEMA atlantis CASCADE",
+		PreBackfillIndexesSQL:  "DROP INDEX everything",
+		PostBackfillIndexesSQL: "DROP INDEX everything",
+		BackfillFields:         []BackfillFieldRef{{EntityID: "x.A", Field: "f"}},
+	}
+
+	got := beginBackfillRequestToPB(req)
+
+	// Whatever the request carried, the wire message must contain only the
+	// three inputs recomputation needs. Marshalling and scanning the bytes
+	// catches a value smuggled into any field, named or not.
+	raw, err := protojson.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"DROP TABLE", "DROP SCHEMA", "DROP INDEX", "x.A"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Errorf("mapped request leaked %q: %s", forbidden, raw)
+		}
+	}
+
+	if got.GetCaller() != "svc" || got.GetPlanId() != "abc" || len(got.GetFiles()) != 1 {
+		t.Errorf("mapping dropped a field it needs: %s", raw)
+	}
+}
+
+func TestSubmittedFileRoundTrip(t *testing.T) {
+	in := []SubmittedFile{
+		{Path: "a.atl", Content: []byte("entity A in x {}")},
+		{Path: "b.atl", Content: nil},
+	}
+	got := submittedFilesFromPB(submittedFilesToPB(in))
+	if !reflect.DeepEqual(got, in) {
+		t.Errorf("round trip lost data:\n got: %+v\nwant: %+v", got, in)
+	}
+	if submittedFilesToPB(nil) != nil {
+		t.Error("nil input should map to nil, not an empty slice")
+	}
+}
+
+func TestBackfillFieldStatusRoundTrip(t *testing.T) {
+	in := []BackfillFieldStatus{{
+		EntityID: "x.A", Field: "f", Status: "running",
+		RowsProcessed: 42, LastPK: "1000", ErrorMsg: "",
+	}}
+	pb := []*adminpb.BackfillFieldStatus{{
+		EntityId: "x.A", Field: "f", Status: "running",
+		RowsProcessed: 42, LastPk: "1000",
+	}}
+	if got := backfillFieldStatusFromPB(pb); !reflect.DeepEqual(got, in) {
+		t.Errorf("got %+v, want %+v", got, in)
+	}
+	if backfillFieldStatusFromPB(nil) != nil {
+		t.Error("nil input should map to nil so the field marshals as null")
 	}
 }
