@@ -83,10 +83,10 @@ type AdminServer interface {
 	RevokeCaller(context.Context, *adminpb.RevokeCallerRequest) (*adminpb.RevokeCallerResponse, error)
 	RecordCallerCertExpiry(context.Context, *adminpb.RecordCallerCertExpiryRequest) (*adminpb.RecordCallerCertExpiryResponse, error)
 	GetLogs(context.Context, GetLogsRequest) (*GetLogsResponse, error)
-	ListConnectedWorkers(context.Context, ListConnectedWorkersRequest) (*ListConnectedWorkersResponse, error)
-	GetWorkerSession(context.Context, GetWorkerSessionRequest) (*GetWorkerSessionResponse, error)
-	DrainWorker(context.Context, DrainWorkerRequest) (*DrainWorkerResponse, error)
-	EvictWorker(context.Context, EvictWorkerRequest) (*EvictWorkerResponse, error)
+	ListConnectedWorkers(context.Context, *adminpb.ListConnectedWorkersRequest) (*adminpb.ListConnectedWorkersResponse, error)
+	GetWorkerSession(context.Context, *adminpb.GetWorkerSessionRequest) (*adminpb.GetWorkerSessionResponse, error)
+	DrainWorker(context.Context, *adminpb.DrainWorkerRequest) (*adminpb.DrainWorkerResponse, error)
+	EvictWorker(context.Context, *adminpb.EvictWorkerRequest) (*adminpb.EvictWorkerResponse, error)
 	// Migrated to protobuf types; the JSON handlers above translate. As each
 	// remaining RPC moves, its entry here changes shape too, until the whole
 	// interface and this file are deleted.
@@ -1059,11 +1059,19 @@ func handleListConnectedWorkers(srv any, ctx context.Context, dec func(any) erro
 	return interceptor(ctx, &req, info, handler)
 }
 
-func invokeListConnectedWorkers(svc *Service, ctx context.Context, req *ListConnectedWorkersRequest) (any, error) {
-	resp, err := svc.ListConnectedWorkers(ctx, *req)
+// Migration shim; see the note on invokeGetCallers.
+func invokeListConnectedWorkers(svc *Service, ctx context.Context, _ *ListConnectedWorkersRequest) (any, error) {
+	pbResp, err := svc.ListConnectedWorkers(ctx, &adminpb.ListConnectedWorkersRequest{})
 	if err != nil {
 		return nil, err
 	}
+	// Non-nil so an empty result marshals as [] — see the note on empty
+	// repeated fields in workers.go.
+	sessions := make([]DispatcherSessionSnapshot, 0, len(pbResp.GetSessions()))
+	for _, p := range pbResp.GetSessions() {
+		sessions = append(sessions, sessionSnapshotFromPB(p))
+	}
+	resp := &ListConnectedWorkersResponse{Sessions: sessions}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -1090,11 +1098,13 @@ func handleGetWorkerSession(srv any, ctx context.Context, dec func(any) error, i
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeGetWorkerSession(svc *Service, ctx context.Context, req *GetWorkerSessionRequest) (any, error) {
-	resp, err := svc.GetWorkerSession(ctx, *req)
+	pbResp, err := svc.GetWorkerSession(ctx, &adminpb.GetWorkerSessionRequest{SessionId: req.SessionID})
 	if err != nil {
 		return nil, err
 	}
+	resp := &GetWorkerSessionResponse{Session: sessionDetailFromPB(pbResp.GetSession())}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -1121,11 +1131,12 @@ func handleDrainWorker(srv any, ctx context.Context, dec func(any) error, interc
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeDrainWorker(svc *Service, ctx context.Context, req *DrainWorkerRequest) (any, error) {
-	resp, err := svc.DrainWorker(ctx, *req)
-	if err != nil {
+	if _, err := svc.DrainWorker(ctx, &adminpb.DrainWorkerRequest{SessionId: req.SessionID}); err != nil {
 		return nil, err
 	}
+	resp := &DrainWorkerResponse{}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err
@@ -1152,11 +1163,12 @@ func handleEvictWorker(srv any, ctx context.Context, dec func(any) error, interc
 	return interceptor(ctx, &req, info, handler)
 }
 
+// Migration shim; see the note on invokeGetCallers.
 func invokeEvictWorker(svc *Service, ctx context.Context, req *EvictWorkerRequest) (any, error) {
-	resp, err := svc.EvictWorker(ctx, *req)
-	if err != nil {
+	if _, err := svc.EvictWorker(ctx, &adminpb.EvictWorkerRequest{SessionId: req.SessionID}); err != nil {
 		return nil, err
 	}
+	resp := &EvictWorkerResponse{}
 	raw, err := json.Marshal(resp)
 	if err != nil {
 		return nil, err

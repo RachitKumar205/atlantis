@@ -1,8 +1,13 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
@@ -119,5 +124,257 @@ func TestCallerInfosToJSON_CopiesEveryField(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+// --- Worker session conversion ---
+//
+// Two things can drift silently here. The Go zero time marshals as
+// "0001-01-01T00:00:00Z", but timestamppb maps nil to the Unix epoch, so a
+// careless round trip turns "never connected" into 1970. And
+// DispatcherSessionDetail embeds its snapshot, so encoding/json flattens those
+// fields while the proto nests them — the shim has to un-nest or the console
+// sees a different object.
+
+func TestWorkerTimestampRoundTripPreservesZero(t *testing.T) {
+	if got := timeFromPB(timeToPB(time.Time{})); !got.IsZero() {
+		t.Errorf("zero time round-tripped to %v, want zero", got)
+	}
+	// Guards the specific failure: nil must not become the Unix epoch.
+	if got := timeFromPB(nil); !got.IsZero() {
+		t.Errorf("nil timestamp became %v, want the zero time", got)
+	}
+
+	// And a real instant survives to nanosecond precision, since that is what
+	// the JSON encoding of time.Time carries.
+	when := time.Date(2026, 7, 29, 12, 34, 56, 123456789, time.UTC)
+	if got := timeFromPB(timeToPB(when)); !got.Equal(when) {
+		t.Errorf("round-tripped %v to %v", when, got)
+	}
+}
+
+func TestWorkerSnapshotJSONShapeSurvivesRoundTrip(t *testing.T) {
+	// A never-connected session exercises every omitempty field at once:
+	// pod_id, sdk_version, and drained must all be absent, and the two
+	// timestamps must render as the zero time rather than the epoch.
+	before, err := json.Marshal(DispatcherSessionSnapshot{SessionID: "s1", Caller: "svc", Queue: "q"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := json.Marshal(sessionSnapshotFromPB(sessionSnapshotToPB(
+		DispatcherSessionSnapshot{SessionID: "s1", Caller: "svc", Queue: "q"})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("\nbefore: %s\n after: %s", before, after)
+	}
+	if !strings.Contains(string(after), `"connected_at":"0001-01-01T00:00:00Z"`) {
+		t.Errorf("zero timestamp did not survive: %s", after)
+	}
+}
+
+func TestWorkerSessionDetailFlattensSnapshotInJSON(t *testing.T) {
+	in := DispatcherSessionDetail{
+		DispatcherSessionSnapshot: DispatcherSessionSnapshot{
+			SessionID: "s1", Caller: "svc", Queue: "q", PodID: "pod-1",
+			ConnectedAt: time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC),
+			MaxInFlight: 4, Dispatched: 10,
+		},
+		JobNames: []string{"a"},
+		Inflight: []DispatcherInflightDetail{{JobID: 7, JobName: "a", AckReceived: true}},
+		Events:   []DispatcherEventSnapshot{{Kind: "dispatch", JobID: 7}},
+	}
+
+	before, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := json.Marshal(sessionDetailFromPB(sessionDetailToPB(in)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("\nbefore: %s\n after: %s", before, after)
+	}
+	// The embedded fields must sit at the top level, not under "snapshot" —
+	// that is the whole difference between the two representations.
+	if strings.Contains(string(after), `"snapshot"`) {
+		t.Errorf("snapshot leaked as a nested key: %s", after)
+	}
+	if !strings.Contains(string(after), `"session_id":"s1"`) {
+		t.Errorf("embedded fields did not flatten: %s", after)
+	}
+}
+
+// Every repeated field marshals as [] rather than null — the dispatcher
+// returns non-nil slices deliberately ("a null crashes the session-detail
+// page") and a protobuf round trip cannot represent the distinction anyway.
+func TestWorkerSessionDetailEmitsEmptyArraysNotNull(t *testing.T) {
+	after, err := json.Marshal(sessionDetailFromPB(sessionDetailToPB(DispatcherSessionDetail{})))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"job_names":[]`, `"inflight":[]`, `"events":[]`} {
+		if !strings.Contains(string(after), key) {
+			t.Errorf("want %s in %s", key, after)
+		}
+	}
+}
+
+// TestWorkerTimestampsNormaliseToUTC pins a deliberate behaviour change. The
+// dispatcher stamps with time.Now(), carrying the server's local zone, so
+// responses previously rendered a local offset. A protobuf Timestamp has no
+// zone, and leaking the server's TZ into an API response was never a contract
+// worth keeping — but the change has to be asserted rather than discovered.
+func TestWorkerTimestampsNormaliseToUTC(t *testing.T) {
+	kolkata := time.FixedZone("IST", 5*3600+1800)
+	local := time.Date(2026, 7, 29, 21, 55, 38, 0, kolkata)
+
+	got := timeFromPB(timeToPB(local))
+	if !got.Equal(local) {
+		t.Errorf("instant changed: %v vs %v", got, local)
+	}
+	if got.Location() != time.UTC {
+		t.Errorf("location = %v, want UTC", got.Location())
+	}
+	b, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != `"2026-07-29T16:25:38Z"` {
+		t.Errorf("got %s, want the same instant rendered in UTC", b)
+	}
+}
+
+// TestWorkerConvertersCopyEveryField guards against a field being added to one
+// of these structs and silently left unmapped. A converter that drops a field
+// symmetrically — missing from both directions — produces identical JSON for
+// any input that leaves the field zero, so a round-trip comparison alone
+// cannot see it. Every field is set to a distinct non-zero value.
+func TestWorkerConvertersCopyEveryField(t *testing.T) {
+	in := DispatcherSessionDetail{
+		DispatcherSessionSnapshot: DispatcherSessionSnapshot{
+			SessionID:       "s1",
+			Caller:          "svc",
+			Queue:           "q",
+			PodID:           "pod",
+			SDKVersion:      "1.2.3",
+			ConnectedAt:     time.Date(2026, 7, 29, 1, 0, 0, 0, time.UTC),
+			LastHeartbeatAt: time.Date(2026, 7, 29, 2, 0, 0, 0, time.UTC),
+			MaxInFlight:     4,
+			InflightCount:   3,
+			Dispatched:      10,
+			Completed:       7,
+			Failed:          2,
+			Revoked:         1,
+			Drained:         true,
+		},
+		JobNames: []string{"a", "b"},
+		Inflight: []DispatcherInflightDetail{{
+			JobID: 7, JobName: "a",
+			DispatchedAt: time.Date(2026, 7, 29, 3, 0, 0, 0, time.UTC),
+			AckReceived:  true,
+		}},
+		Events: []DispatcherEventSnapshot{{
+			At:   time.Date(2026, 7, 29, 4, 0, 0, 0, time.UTC),
+			Kind: "dispatch", JobID: 7, JobName: "a", Note: "n",
+		}},
+	}
+
+	got := sessionDetailFromPB(sessionDetailToPB(in))
+	if !reflect.DeepEqual(got, in) {
+		t.Errorf("round trip lost data:\n got: %+v\nwant: %+v", got, in)
+	}
+}
+
+// --- Shim-level tests ---
+//
+// The converters above are only half the path. The regression these catch —
+// an empty session list marshalling as null instead of [] — lived in
+// ListConnectedWorkers and its shim, not in the converters, so no amount of
+// converter testing could see it.
+
+type fakeDispatcher struct {
+	sessions []DispatcherSessionSnapshot
+	detail   DispatcherSessionDetail
+	found    bool
+}
+
+// SnapshotSessions mirrors cmd/server/dispatcher_adapter.go, which builds with
+// make([]T, len(in)) — non-nil even when empty. Reproducing that exactly is
+// the point: the shim has to agree with what production actually hands it.
+func (f *fakeDispatcher) SnapshotSessions() []DispatcherSessionSnapshot {
+	out := make([]DispatcherSessionSnapshot, len(f.sessions))
+	copy(out, f.sessions)
+	return out
+}
+func (f *fakeDispatcher) GetSession(string) (DispatcherSessionDetail, bool) {
+	return f.detail, f.found
+}
+func (f *fakeDispatcher) DrainSession(string) error { return nil }
+func (f *fakeDispatcher) EvictSession(string) error { return nil }
+
+func shimJSON(t *testing.T, v any, err error) string {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("shim returned an error: %v", err)
+	}
+	msg, ok := v.(*jsonMsg)
+	if !ok {
+		t.Fatalf("shim returned %T, want *jsonMsg", v)
+	}
+	return string(msg.Raw)
+}
+
+func TestListConnectedWorkersShimEmitsEmptyArray(t *testing.T) {
+	svc := &Service{}
+	svc.SetDispatcher(&fakeDispatcher{})
+
+	v, err := invokeListConnectedWorkers(svc, context.Background(), &ListConnectedWorkersRequest{})
+	got := shimJSON(t, v, err)
+	if got != `{"sessions":[]}` {
+		t.Errorf("got %s, want {\"sessions\":[]}", got)
+	}
+}
+
+func TestListConnectedWorkersShimWithNoDispatcher(t *testing.T) {
+	v, err := invokeListConnectedWorkers(&Service{}, context.Background(), &ListConnectedWorkersRequest{})
+	got := shimJSON(t, v, err)
+	if got != `{"sessions":[]}` {
+		t.Errorf("got %s, want {\"sessions\":[]}", got)
+	}
+}
+
+func TestGetWorkerSessionShimFlattensSnapshot(t *testing.T) {
+	svc := &Service{}
+	svc.SetDispatcher(&fakeDispatcher{
+		found: true,
+		detail: DispatcherSessionDetail{
+			DispatcherSessionSnapshot: DispatcherSessionSnapshot{SessionID: "s1", Caller: "svc", Queue: "q"},
+			JobNames:                  []string{},
+		},
+	})
+
+	v, err := invokeGetWorkerSession(svc, context.Background(), &GetWorkerSessionRequest{SessionID: "s1"})
+	got := shimJSON(t, v, err)
+	if strings.Contains(got, `"snapshot"`) {
+		t.Errorf("snapshot leaked as a nested key: %s", got)
+	}
+	if !strings.Contains(got, `"session_id":"s1"`) {
+		t.Errorf("embedded fields did not flatten: %s", got)
+	}
+	if !strings.Contains(got, `"job_names":[]`) {
+		t.Errorf("want empty arrays, got %s", got)
+	}
+}
+
+func TestGetWorkerSessionShimPropagatesNotFound(t *testing.T) {
+	svc := &Service{}
+	svc.SetDispatcher(&fakeDispatcher{found: false})
+
+	_, err := invokeGetWorkerSession(svc, context.Background(), &GetWorkerSessionRequest{SessionID: "nope"})
+	if !errors.Is(err, ErrWorkerSessionNotFound) {
+		t.Errorf("got %v, want ErrWorkerSessionNotFound", err)
 	}
 }

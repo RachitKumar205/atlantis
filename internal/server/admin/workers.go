@@ -27,6 +27,10 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
 
 // WorkerDispatcher is the narrow interface the admin Service uses to
@@ -117,7 +121,9 @@ type EvictWorkerResponse struct{}
 
 // ErrWorkerSessionNotFound is returned by GetWorkerSession,
 // DrainWorker, EvictWorker when no session matches the supplied id.
-// The BFF maps this to a 404.
+// The BFF currently surfaces it as a 502 like any other RPC error — it
+// inspects neither the sentinel nor the status code. Mapping it to a 404
+// belongs with the wider error-code work.
 var ErrWorkerSessionNotFound = errors.New("worker session not found")
 
 // SetDispatcher injects the dispatcher into the Service. main.go
@@ -131,25 +137,30 @@ func (s *Service) SetDispatcher(d WorkerDispatcher) {
 
 // ListConnectedWorkers returns every session currently registered
 // with the dispatcher.
-func (s *Service) ListConnectedWorkers(_ context.Context, _ ListConnectedWorkersRequest) (*ListConnectedWorkersResponse, error) {
+func (s *Service) ListConnectedWorkers(_ context.Context, _ *adminpb.ListConnectedWorkersRequest) (*adminpb.ListConnectedWorkersResponse, error) {
 	if s.dispatcher == nil {
-		return &ListConnectedWorkersResponse{}, nil
+		return &adminpb.ListConnectedWorkersResponse{}, nil
 	}
-	return &ListConnectedWorkersResponse{
-		Sessions: s.dispatcher.SnapshotSessions(),
-	}, nil
+	sessions := s.dispatcher.SnapshotSessions()
+	out := &adminpb.ListConnectedWorkersResponse{
+		Sessions: make([]*adminpb.DispatcherSessionSnapshot, 0, len(sessions)),
+	}
+	for _, sess := range sessions {
+		out.Sessions = append(out.Sessions, sessionSnapshotToPB(sess))
+	}
+	return out, nil
 }
 
 // GetWorkerSession returns the per-session detail payload.
-func (s *Service) GetWorkerSession(_ context.Context, req GetWorkerSessionRequest) (*GetWorkerSessionResponse, error) {
+func (s *Service) GetWorkerSession(_ context.Context, req *adminpb.GetWorkerSessionRequest) (*adminpb.GetWorkerSessionResponse, error) {
 	if s.dispatcher == nil {
 		return nil, ErrWorkerSessionNotFound
 	}
-	d, ok := s.dispatcher.GetSession(req.SessionID)
+	d, ok := s.dispatcher.GetSession(req.GetSessionId())
 	if !ok {
 		return nil, ErrWorkerSessionNotFound
 	}
-	return &GetWorkerSessionResponse{Session: d}, nil
+	return &adminpb.GetWorkerSessionResponse{Session: sessionDetailToPB(d)}, nil
 }
 
 // DrainWorker initiates graceful drain on one session. Returns
@@ -159,17 +170,17 @@ func (s *Service) GetWorkerSession(_ context.Context, req GetWorkerSessionReques
 //
 // Operator-allowlist gated — only the console CN may invoke this
 // via gRPC. The BFF layer wraps this with admin-role + sudo.
-func (s *Service) DrainWorker(ctx context.Context, req DrainWorkerRequest) (*DrainWorkerResponse, error) {
+func (s *Service) DrainWorker(ctx context.Context, req *adminpb.DrainWorkerRequest) (*adminpb.DrainWorkerResponse, error) {
 	if err := s.authorizeOperator(ctx); err != nil {
 		return nil, err
 	}
 	if s.dispatcher == nil {
 		return nil, ErrWorkerSessionNotFound
 	}
-	if err := s.dispatcher.DrainSession(req.SessionID); err != nil {
+	if err := s.dispatcher.DrainSession(req.GetSessionId()); err != nil {
 		return nil, err
 	}
-	return &DrainWorkerResponse{}, nil
+	return &adminpb.DrainWorkerResponse{}, nil
 }
 
 // EvictWorker force-closes a session: stop dispatching, send Goodbye
@@ -177,15 +188,170 @@ func (s *Service) DrainWorker(ctx context.Context, req DrainWorkerRequest) (*Dra
 //
 // Operator-allowlist gated. The BFF wraps this with admin-role +
 // sudo.
-func (s *Service) EvictWorker(ctx context.Context, req EvictWorkerRequest) (*EvictWorkerResponse, error) {
+func (s *Service) EvictWorker(ctx context.Context, req *adminpb.EvictWorkerRequest) (*adminpb.EvictWorkerResponse, error) {
 	if err := s.authorizeOperator(ctx); err != nil {
 		return nil, err
 	}
 	if s.dispatcher == nil {
 		return nil, ErrWorkerSessionNotFound
 	}
-	if err := s.dispatcher.EvictSession(req.SessionID); err != nil {
+	if err := s.dispatcher.EvictSession(req.GetSessionId()); err != nil {
 		return nil, err
 	}
-	return &EvictWorkerResponse{}, nil
+	return &adminpb.EvictWorkerResponse{}, nil
+}
+
+// --- Wire conversion ---
+//
+// The dispatcher is a separate subsystem that deals in domain types; this
+// package is the wire boundary, so the translation lives here rather than
+// reshaping the dispatcher's interface.
+//
+// Two asymmetries between the two representations are deliberate and have to
+// be preserved in both directions.
+//
+// DispatcherSessionDetail embeds DispatcherSessionSnapshot, so encoding/json
+// flattens the snapshot's fields into the detail object. The proto nests it
+// under `snapshot` instead, because proto3 has no embedding and a flattened
+// copy would duplicate fourteen fields that then have to be kept in step. The
+// JSON shim therefore un-nests on the way back out.
+//
+// A nil timestamp is not the Unix epoch. timestamppb's AsTime maps nil to
+// 1970-01-01, whereas the Go zero time marshals as "0001-01-01T00:00:00Z" —
+// which is what a never-set ConnectedAt emitted before this migration. The
+// helpers below keep the zero value zero in both directions.
+//
+// Two behaviour changes are deliberate rather than incidental.
+//
+// Timestamps are normalised to UTC. The dispatcher stamps with time.Now(),
+// which carries the server's local zone, so a response previously rendered
+// "2026-07-29T21:55:38+05:30" and now renders the same instant as
+// "...T16:25:38Z". Preserving the offset is not possible — a protobuf
+// Timestamp has no zone — and it was never desirable: an API response that
+// leaks the server's TZ is a latent bug, not a contract. Consumers parse with
+// offset-aware Date(), so the instant is unchanged.
+//
+// Empty repeated fields marshal as [] rather than null. jobsdispatcher goes
+// out of its way to return non-nil slices for exactly this reason (see the
+// comment on GetSession: "a null crashes the session-detail page"), and the
+// adapter in cmd/server then discards that for two of the three. Rather than
+// reproduce an inconsistency that a protobuf round trip cannot represent
+// anyway — the wire has no nil-versus-empty distinction — every repeated
+// field here is non-nil. That also makes this path and the generated one
+// agree once the latter is registered.
+
+func timeToPB(t time.Time) *timestamppb.Timestamp {
+	if t.IsZero() {
+		return nil
+	}
+	return timestamppb.New(t)
+}
+
+func timeFromPB(ts *timestamppb.Timestamp) time.Time {
+	if ts == nil {
+		return time.Time{}
+	}
+	return ts.AsTime()
+}
+
+func sessionSnapshotToPB(s DispatcherSessionSnapshot) *adminpb.DispatcherSessionSnapshot {
+	return &adminpb.DispatcherSessionSnapshot{
+		SessionId:       s.SessionID,
+		Caller:          s.Caller,
+		Queue:           s.Queue,
+		PodId:           s.PodID,
+		SdkVersion:      s.SDKVersion,
+		ConnectedAt:     timeToPB(s.ConnectedAt),
+		LastHeartbeatAt: timeToPB(s.LastHeartbeatAt),
+		// No range check here, unlike callers.go's COUNT(*): jobsdispatcher
+		// clamps max-in-flight to [1, 256] when the session is created, and
+		// the in-flight count is bounded by it, so neither can reach int32.
+		MaxInFlight:   int32(s.MaxInFlight),
+		InflightCount: int32(s.InflightCount),
+		Dispatched:    s.Dispatched,
+		Completed:     s.Completed,
+		Failed:        s.Failed,
+		Revoked:       s.Revoked,
+		Drained:       s.Drained,
+	}
+}
+
+func sessionSnapshotFromPB(p *adminpb.DispatcherSessionSnapshot) DispatcherSessionSnapshot {
+	return DispatcherSessionSnapshot{
+		SessionID:       p.GetSessionId(),
+		Caller:          p.GetCaller(),
+		Queue:           p.GetQueue(),
+		PodID:           p.GetPodId(),
+		SDKVersion:      p.GetSdkVersion(),
+		ConnectedAt:     timeFromPB(p.GetConnectedAt()),
+		LastHeartbeatAt: timeFromPB(p.GetLastHeartbeatAt()),
+		MaxInFlight:     int(p.GetMaxInFlight()),
+		InflightCount:   int(p.GetInflightCount()),
+		Dispatched:      p.GetDispatched(),
+		Completed:       p.GetCompleted(),
+		Failed:          p.GetFailed(),
+		Revoked:         p.GetRevoked(),
+		Drained:         p.GetDrained(),
+	}
+}
+
+func sessionDetailToPB(d DispatcherSessionDetail) *adminpb.DispatcherSessionDetail {
+	out := &adminpb.DispatcherSessionDetail{
+		Snapshot: sessionSnapshotToPB(d.DispatcherSessionSnapshot),
+		JobNames: d.JobNames,
+	}
+	for _, f := range d.Inflight {
+		out.Inflight = append(out.Inflight, &adminpb.DispatcherInflightDetail{
+			JobId:        f.JobID,
+			JobName:      f.JobName,
+			DispatchedAt: timeToPB(f.DispatchedAt),
+			AckReceived:  f.AckReceived,
+		})
+	}
+	for _, e := range d.Events {
+		out.Events = append(out.Events, &adminpb.DispatcherEventSnapshot{
+			At:      timeToPB(e.At),
+			Kind:    e.Kind,
+			JobId:   e.JobID,
+			JobName: e.JobName,
+			Note:    e.Note,
+		})
+	}
+	return out
+}
+
+// sessionDetailFromPB flattens the nested snapshot back into the embedded
+// field, restoring the JSON shape the console reads.
+//
+// All three slices come back non-nil so they marshal as [] — see the note on
+// empty repeated fields above.
+func sessionDetailFromPB(p *adminpb.DispatcherSessionDetail) DispatcherSessionDetail {
+	jobNames := p.GetJobNames()
+	if jobNames == nil {
+		jobNames = []string{}
+	}
+	out := DispatcherSessionDetail{
+		DispatcherSessionSnapshot: sessionSnapshotFromPB(p.GetSnapshot()),
+		JobNames:                  jobNames,
+		Inflight:                  make([]DispatcherInflightDetail, 0, len(p.GetInflight())),
+		Events:                    make([]DispatcherEventSnapshot, 0, len(p.GetEvents())),
+	}
+	for _, f := range p.GetInflight() {
+		out.Inflight = append(out.Inflight, DispatcherInflightDetail{
+			JobID:        f.GetJobId(),
+			JobName:      f.GetJobName(),
+			DispatchedAt: timeFromPB(f.GetDispatchedAt()),
+			AckReceived:  f.GetAckReceived(),
+		})
+	}
+	for _, e := range p.GetEvents() {
+		out.Events = append(out.Events, DispatcherEventSnapshot{
+			At:      timeFromPB(e.GetAt()),
+			Kind:    e.GetKind(),
+			JobID:   e.GetJobId(),
+			JobName: e.GetJobName(),
+			Note:    e.GetNote(),
+		})
+	}
+	return out
 }

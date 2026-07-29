@@ -71,6 +71,10 @@ var migratedRPCs = map[string]bool{
 	"RegisterCaller":         true,
 	"RevokeCaller":           true,
 	"RecordCallerCertExpiry": true,
+	"ListConnectedWorkers":   true,
+	"GetWorkerSession":       true,
+	"DrainWorker":            true,
+	"EvictWorker":            true,
 }
 
 // ---------------------------------------------------------------------------
@@ -104,4 +108,20 @@ func (g *grpcServer) RevokeCaller(ctx context.Context, req *adminpb.RevokeCaller
 
 func (g *grpcServer) RecordCallerCertExpiry(ctx context.Context, req *adminpb.RecordCallerCertExpiryRequest) (*adminpb.RecordCallerCertExpiryResponse, error) {
 	return g.svc.RecordCallerCertExpiry(ctx, req)
+}
+
+func (g *grpcServer) ListConnectedWorkers(ctx context.Context, req *adminpb.ListConnectedWorkersRequest) (*adminpb.ListConnectedWorkersResponse, error) {
+	return g.svc.ListConnectedWorkers(ctx, req)
+}
+
+func (g *grpcServer) GetWorkerSession(ctx context.Context, req *adminpb.GetWorkerSessionRequest) (*adminpb.GetWorkerSessionResponse, error) {
+	return g.svc.GetWorkerSession(ctx, req)
+}
+
+func (g *grpcServer) DrainWorker(ctx context.Context, req *adminpb.DrainWorkerRequest) (*adminpb.DrainWorkerResponse, error) {
+	return g.svc.DrainWorker(ctx, req)
+}
+
+func (g *grpcServer) EvictWorker(ctx context.Context, req *adminpb.EvictWorkerRequest) (*adminpb.EvictWorkerResponse, error) {
+	return g.svc.EvictWorker(ctx, req)
 }
