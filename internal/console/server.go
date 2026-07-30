@@ -25,6 +25,10 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
+	"github.com/rachitkumar205/atlantis/clients/go/adminjson"
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/console/vcs"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/dsl/atlprint"
@@ -32,7 +36,6 @@ import (
 
 const (
 	sessionCookieName = "atl_console_session"
-	adminBase         = "/atlantis.admin.v1.Admin/"
 )
 
 // Server is the atlantis console BFF.
@@ -553,23 +556,26 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 // admin service returns.
 
 func (s *Server) handleGetMergedSchema(w http.ResponseWriter, r *http.Request) {
-	s.proxyRPC(w, r, adminBase+"GetMergedSchema", struct{}{})
+	resp, err := s.atl.GetMergedSchema(r.Context(), &adminpb.GetMergedSchemaRequest{})
+	s.proxyProto(w, "GetMergedSchema", resp, err)
 }
 
 func (s *Server) handleGetCanonicalIR(w http.ResponseWriter, r *http.Request) {
-	s.proxyRPC(w, r, adminBase+"GetCanonicalIR", struct{}{})
+	resp, err := s.atl.GetCanonicalIR(r.Context(), &adminpb.GetCanonicalIRRequest{})
+	s.proxyProto(w, "GetCanonicalIR", resp, err, "ir")
 }
 
 func (s *Server) handleGetSchemaHistory(w http.ResponseWriter, r *http.Request) {
-	req := map[string]any{"limit": intQuery(r, "limit", 50)}
+	req := &adminpb.GetSchemaHistoryRequest{Limit: int32(intQuery(r, "limit", 50))}
 	// `before` and `caller` are server-side filters; forward them when set.
 	if before, ok := int64Query(r, "before"); ok {
-		req["before"] = before
+		req.Before = before
 	}
 	if caller := r.URL.Query().Get("caller"); caller != "" {
-		req["caller"] = caller
+		req.Caller = caller
 	}
-	s.proxyRPC(w, r, adminBase+"GetSchemaHistory", req)
+	resp, err := s.atl.GetSchemaHistory(r.Context(), req)
+	s.proxyProto(w, "GetSchemaHistory", resp, err)
 }
 
 func (s *Server) handleGetSchemaVersion(w http.ResponseWriter, r *http.Request) {
@@ -578,7 +584,8 @@ func (s *Server) handleGetSchemaVersion(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "version must be a positive integer", http.StatusBadRequest)
 		return
 	}
-	s.proxyRPC(w, r, adminBase+"GetSchemaVersion", map[string]any{"version": version})
+	resp, err := s.atl.GetSchemaVersion(r.Context(), &adminpb.GetSchemaVersionRequest{Version: version})
+	s.proxyProto(w, "GetSchemaVersion", resp, err, "diff", "ir_snapshot")
 }
 
 func (s *Server) handleDiffSchemaVersions(w http.ResponseWriter, r *http.Request) {
@@ -588,23 +595,25 @@ func (s *Server) handleDiffSchemaVersions(w http.ResponseWriter, r *http.Request
 		jsonError(w, "from and to are required positive integers", http.StatusBadRequest)
 		return
 	}
-	// Server-side field names are from_version / to_version (history.go:179).
-	s.proxyRPC(w, r, adminBase+"DiffSchemaVersions", map[string]any{
-		"from_version": from,
-		"to_version":   to,
+	resp, err := s.atl.DiffSchemaVersions(r.Context(), &adminpb.DiffSchemaVersionsRequest{
+		FromVersion: from,
+		ToVersion:   to,
 	})
+	s.proxyProto(w, "DiffSchemaVersions", resp, err, "diff", "from_ir", "to_ir")
 }
 
 func (s *Server) handleGetEntityLineage(w http.ResponseWriter, r *http.Request) {
 	// Admin RPC expects {"entity_id": "..."}.
 	entity := r.PathValue("entity")
-	s.proxyRPC(w, r, adminBase+"GetEntityLineage", map[string]any{"entity_id": entity})
+	resp, err := s.atl.GetEntityLineage(r.Context(), &adminpb.GetEntityLineageRequest{EntityId: entity})
+	s.proxyProto(w, "GetEntityLineage", resp, err)
 }
 
 // handleGetEntityOwners returns all entity→caller ownership.
 // GetEntityOwners takes no arguments — it always returns the full set.
 func (s *Server) handleGetEntityOwners(w http.ResponseWriter, r *http.Request) {
-	s.proxyRPC(w, r, adminBase+"GetEntityOwners", struct{}{})
+	resp, err := s.atl.GetEntityOwners(r.Context(), &adminpb.GetEntityOwnersRequest{})
+	s.proxyProto(w, "GetEntityOwners", resp, err)
 }
 
 // handleHealth proxies atlantis's HTTP health endpoints, not an admin RPC.
@@ -926,22 +935,16 @@ type callerFile struct {
 // all files (not just the edited one).
 func (s *Server) resolveEntitySource(ctx context.Context, namespace, entity string) (*resolvedSource, error) {
 	// GetEntityOwners returns all ownership; filter client-side.
-	type ownersResp struct {
-		Owners []struct {
-			EntityID     string `json:"entity_id"`
-			IntroducedBy string `json:"introduced_by"`
-		} `json:"owners"`
-	}
-	var owners ownersResp
-	if err := s.atl.invoke(ctx, adminBase+"GetEntityOwners", struct{}{}, &owners); err != nil {
+	owners, err := s.atl.GetEntityOwners(ctx, &adminpb.GetEntityOwnersRequest{})
+	if err != nil {
 		return nil, fmt.Errorf("GetEntityOwners: %w", err)
 	}
 
 	entityID := namespace + "." + entity
 	var caller string
-	for _, o := range owners.Owners {
-		if o.EntityID == entityID {
-			caller = o.IntroducedBy
+	for _, o := range owners.GetOwners() {
+		if o.GetEntityId() == entityID {
+			caller = o.GetIntroducedBy()
 			break
 		}
 	}
@@ -950,23 +953,17 @@ func (s *Server) resolveEntitySource(ctx context.Context, namespace, entity stri
 	}
 
 	// Fetch all of this caller's files.
-	type callerFilesResp struct {
-		Files []struct {
-			Path    string `json:"path"`
-			Content string `json:"content"`
-		} `json:"files"`
-	}
-	var cf callerFilesResp
-	if err := s.atl.invoke(ctx, adminBase+"GetCallerFiles", map[string]string{"caller": caller}, &cf); err != nil {
+	cf, err := s.atl.GetCallerFiles(ctx, &adminpb.GetCallerFilesRequest{Caller: caller})
+	if err != nil {
 		return nil, fmt.Errorf("GetCallerFiles: %w", err)
 	}
-	if len(cf.Files) == 0 {
+	if len(cf.GetFiles()) == 0 {
 		return nil, fmt.Errorf("caller %s has no registered files", caller)
 	}
 
-	files := make([]callerFile, len(cf.Files))
-	for i, f := range cf.Files {
-		files[i] = callerFile{path: f.Path, content: []byte(f.Content)}
+	files := make([]callerFile, len(cf.GetFiles()))
+	for i, f := range cf.GetFiles() {
+		files[i] = callerFile{path: f.GetPath(), content: []byte(f.GetContent())}
 	}
 
 	// Parse each file to find the one declaring this entity.
@@ -1041,48 +1038,48 @@ func (s *Server) handleEditPreview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build the full file set for PlanSchema, swapping the edited file.
-	type submittedFile struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
-	}
-	planFiles := make([]submittedFile, len(src.files))
+	planFiles := make([]*adminpb.SubmittedFile, len(src.files))
 	for i, f := range src.files {
-		planFiles[i] = submittedFile{Path: f.path, Content: string(f.content)}
+		planFiles[i] = &adminpb.SubmittedFile{Path: f.path, Content: f.content}
 	}
-	planFiles[src.ownerIdx].Content = string(newContent)
+	planFiles[src.ownerIdx].Content = newContent
 
 	// Call PlanSchema read-only.
-	type planResp struct {
-		Class          string   `json:"class"`
-		UpSQL          string   `json:"up_sql"`
-		DownSQL        string   `json:"down_sql"`
-		ImpactReport   any      `json:"impact_report"`
-		BreakingDetail []string `json:"breaking_detail"`
-		ParseErrors    []string `json:"parse_errors"`
-		CheckpointHash string   `json:"checkpoint_hash"`
-	}
-	var plan planResp
-	if err := s.atl.invoke(r.Context(), adminBase+"PlanSchema", map[string]any{
-		"caller": src.caller,
-		"files":  planFiles,
-	}, &plan); err != nil {
+	plan, err := s.atl.PlanSchema(r.Context(), &adminpb.PlanSchemaRequest{
+		Caller: src.caller,
+		Files:  planFiles,
+	})
+	if err != nil {
 		s.log.Error("PlanSchema", "err", err)
 		jsonError(w, "plan failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 
+	// plan_class is the short form ("additive"), not the enum's wire name.
+	//
+	// This response is assembled here rather than proxied — it mixes plan
+	// output with file contents the BFF holds — so the choice is ours. The
+	// short form is the right one because the SPA reads `plan_class` from two
+	// places: here, and PreviewRollbackResponse, where the proto declares it as
+	// a plain string carrying "additive". Emitting the enum name from one and
+	// the string from the other would give the same field two spellings
+	// depending on which endpoint the page called.
+	//
+	// The asymmetry is in the proto — PlanSchemaResponse.class is an enum while
+	// SchemaVersionSummary.plan_class and PreviewRollbackResponse.plan_class
+	// are strings. Worth reconciling there; not worth papering over here.
 	jsonOK(w, map[string]any{
 		"owner_path":      src.ownerPath,
 		"caller":          src.caller,
 		"old_content":     string(oldContent),
 		"new_content":     string(newContent),
-		"plan_class":      plan.Class,
-		"up_sql":          plan.UpSQL,
-		"down_sql":        plan.DownSQL,
-		"impact":          plan.ImpactReport,
-		"breaking":        plan.BreakingDetail,
-		"parse_errors":    plan.ParseErrors,
-		"checkpoint_hash": plan.CheckpointHash,
+		"plan_class":      shortPlanClass(plan.GetClass()),
+		"up_sql":          plan.GetUpSql(),
+		"down_sql":        plan.GetDownSql(),
+		"impact":          plan.GetImpactReport(),
+		"breaking":        plan.GetBreakingDetail(),
+		"parse_errors":    plan.GetParseErrors(),
+		"checkpoint_hash": plan.GetCheckpointHash(),
 	})
 }
 
@@ -1502,34 +1499,23 @@ func (s *Server) handleRevokeAllCallers(w http.ResponseWriter, r *http.Request) 
 	actor := r.Context().Value(ctxUser).(*User)
 
 	// List all known callers via the existing admin RPC; iterate revokes.
-	listRaw, err := s.atl.invokeRaw(r.Context(), adminBase+"GetCallers", map[string]any{})
+	list, err := s.atl.GetCallers(r.Context(), &adminpb.GetCallersRequest{})
 	if err != nil {
 		s.log.Error("RevokeAll: GetCallers", "err", err)
 		jsonError(w, "GetCallers: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	var listBody struct {
-		Callers []struct {
-			Caller string `json:"caller"`
-		} `json:"callers"`
-	}
-	if err := json.Unmarshal(listRaw, &listBody); err != nil {
-		s.log.Error("RevokeAll: parse callers", "err", err)
-		jsonError(w, "invalid GetCallers response", http.StatusBadGateway)
-		return
-	}
 
 	revoked := 0
 	failures := []string{}
-	for _, c := range listBody.Callers {
-		if c.Caller == "" {
+	for _, c := range list.GetCallers() {
+		if c.GetCaller() == "" {
 			continue
 		}
-		if _, err := s.atl.invokeRaw(r.Context(), adminBase+"RevokeCaller", map[string]string{
-			"caller": c.Caller,
-		}); err != nil {
-			s.log.Warn("RevokeAll: revoke caller", "caller", c.Caller, "err", err)
-			failures = append(failures, c.Caller)
+		if _, err := s.atl.RevokeCaller(r.Context(),
+			&adminpb.RevokeCallerRequest{Caller: c.GetCaller()}); err != nil {
+			s.log.Warn("RevokeAll: revoke caller", "caller", c.GetCaller(), "err", err)
+			failures = append(failures, c.GetCaller())
 			continue
 		}
 		revoked++
@@ -1549,7 +1535,8 @@ func (s *Server) handleRevokeAllCallers(w http.ResponseWriter, r *http.Request) 
 // ── Caller management ─────────────────────────────────────────────────
 
 func (s *Server) handleGetCallers(w http.ResponseWriter, r *http.Request) {
-	s.proxyRPC(w, r, adminBase+"GetCallers", struct{}{})
+	resp, err := s.atl.GetCallers(r.Context(), &adminpb.GetCallersRequest{})
+	s.proxyProto(w, "GetCallers", resp, err)
 }
 
 func (s *Server) handleRegisterCaller(w http.ResponseWriter, r *http.Request) {
@@ -1567,10 +1554,10 @@ func (s *Server) handleRegisterCaller(w http.ResponseWriter, r *http.Request) {
 	}
 
 	actor := r.Context().Value(ctxUser).(*User)
-	raw, err := s.atl.invokeRaw(r.Context(), adminBase+"RegisterCaller", map[string]any{
-		"caller":     body.Caller,
-		"can_mutate": body.CanMutate,
-		"created_by": actor.Email,
+	resp, err := s.atl.RegisterCaller(r.Context(), &adminpb.RegisterCallerRequest{
+		Caller:    body.Caller,
+		CanMutate: body.CanMutate,
+		CreatedBy: actor.Email,
 	})
 	if err != nil {
 		s.log.Error("RegisterCaller", "caller", body.Caller, "err", err)
@@ -1582,10 +1569,7 @@ func (s *Server) handleRegisterCaller(w http.ResponseWriter, r *http.Request) {
 		"caller":     body.Caller,
 		"can_mutate": body.CanMutate,
 	})
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(raw)
+	s.proxyProto(w, "RegisterCaller", resp, nil)
 }
 
 // handleGetCallerAliases proxies the GetCallerAliases admin RPC. Read-
@@ -1597,7 +1581,8 @@ func (s *Server) handleGetCallerAliases(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "caller is required", http.StatusBadRequest)
 		return
 	}
-	s.proxyRPC(w, r, adminBase+"GetCallerAliases", map[string]string{"caller": caller})
+	resp, err := s.atl.GetCallerAliases(r.Context(), &adminpb.GetCallerAliasesRequest{Caller: caller})
+	s.proxyProto(w, "GetCallerAliases", resp, err)
 }
 
 // handleSetCallerAliases proxies the SetCallerAliases admin RPC.
@@ -1617,9 +1602,9 @@ func (s *Server) handleSetCallerAliases(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	raw, err := s.atl.invokeRaw(r.Context(), adminBase+"SetCallerAliases", map[string]any{
-		"caller":  caller,
-		"aliases": body.Aliases,
+	resp, err := s.atl.SetCallerAliases(r.Context(), &adminpb.SetCallerAliasesRequest{
+		Caller:  caller,
+		Aliases: body.Aliases,
 	})
 	if err != nil {
 		s.log.Error("SetCallerAliases", "caller", caller, "err", err)
@@ -1631,9 +1616,7 @@ func (s *Server) handleSetCallerAliases(w http.ResponseWriter, r *http.Request) 
 		"caller":  caller,
 		"aliases": body.Aliases,
 	})
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(raw)
+	s.proxyProto(w, "SetCallerAliases", resp, nil)
 }
 
 func (s *Server) handleRevokeCaller(w http.ResponseWriter, r *http.Request) {
@@ -1643,7 +1626,7 @@ func (s *Server) handleRevokeCaller(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	raw, err := s.atl.invokeRaw(r.Context(), adminBase+"RevokeCaller", map[string]string{"caller": caller})
+	resp, err := s.atl.RevokeCaller(r.Context(), &adminpb.RevokeCallerRequest{Caller: caller})
 	if err != nil {
 		s.log.Error("RevokeCaller", "caller", caller, "err", err)
 		jsonError(w, err.Error(), http.StatusBadGateway)
@@ -1653,9 +1636,7 @@ func (s *Server) handleRevokeCaller(w http.ResponseWriter, r *http.Request) {
 	u := r.Context().Value(ctxUser).(*User)
 	s.db.logAction(r.Context(), u.ID, "revoke_caller", map[string]any{"caller": caller})
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(raw)
+	s.proxyProto(w, "admin", resp, nil)
 }
 
 // ── Schema rollback ───────────────────────────────────────────────────
@@ -1683,9 +1664,9 @@ func (s *Server) handleRollbackSchema(w http.ResponseWriter, r *http.Request) {
 	u := r.Context().Value(ctxUser).(*User)
 	caller := "console:" + u.Email
 
-	raw, err := s.atl.invokeRaw(r.Context(), adminBase+"RollbackSchema", map[string]any{
-		"to_version": body.ToVersion,
-		"caller":     caller,
+	resp, err := s.atl.RollbackSchema(r.Context(), &adminpb.RollbackSchemaRequest{
+		ToVersion: body.ToVersion,
+		Caller:    caller,
 	})
 	if err != nil {
 		s.log.Error("RollbackSchema", "to_version", body.ToVersion, "err", err)
@@ -1698,9 +1679,7 @@ func (s *Server) handleRollbackSchema(w http.ResponseWriter, r *http.Request) {
 		"caller":     caller,
 	})
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(raw)
+	s.proxyProto(w, "admin", resp, nil)
 }
 
 // handlePreviewRollback proxies to the read-only PreviewRollback admin RPC.
@@ -1720,17 +1699,15 @@ func (s *Server) handlePreviewRollback(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "to_version is required", http.StatusBadRequest)
 		return
 	}
-	raw, err := s.atl.invokeRaw(r.Context(), adminBase+"PreviewRollback", map[string]any{
-		"to_version": body.ToVersion,
+	resp, err := s.atl.PreviewRollback(r.Context(), &adminpb.PreviewRollbackRequest{
+		ToVersion: body.ToVersion,
 	})
 	if err != nil {
 		s.log.Error("PreviewRollback", "to_version", body.ToVersion, "err", err)
 		jsonError(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(raw)
+	s.proxyProto(w, "admin", resp, nil)
 }
 
 // ── Job queue management ─────────────────────────────────────────────
@@ -1738,15 +1715,17 @@ func (s *Server) handlePreviewRollback(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListDeadJobs(w http.ResponseWriter, r *http.Request) {
 	limit := intQuery(r, "limit", 50)
 	jobName := r.URL.Query().Get("job_name")
-	s.proxyRPC(w, r, adminBase+"ListDeadJobs", map[string]any{
-		"limit":    limit,
-		"job_name": jobName,
+	resp, err := s.atl.ListDeadJobs(r.Context(), &adminpb.ListDeadJobsRequest{
+		Limit:   int32(limit),
+		JobName: jobName,
 	})
+	s.proxyProto(w, "ListDeadJobs", resp, err, "args")
 }
 
 func (s *Server) handleGetJobStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	s.proxyRPC(w, r, adminBase+"GetJobStatus", map[string]string{"job_id": id})
+	resp, err := s.atl.GetJobStatus(r.Context(), &adminpb.GetJobStatusRequest{JobId: id})
+	s.proxyProto(w, "GetJobStatus", resp, err, "args")
 }
 
 func (s *Server) handleRetryDeadJob(w http.ResponseWriter, r *http.Request) {
@@ -1756,7 +1735,7 @@ func (s *Server) handleRetryDeadJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	raw, err := s.atl.invokeRaw(r.Context(), adminBase+"RetryDeadJob", map[string]string{"job_id": id})
+	resp, err := s.atl.RetryDeadJob(r.Context(), &adminpb.RetryDeadJobRequest{JobId: id})
 	if err != nil {
 		s.log.Error("RetryDeadJob", "job_id", id, "err", err)
 		jsonError(w, err.Error(), http.StatusBadGateway)
@@ -1766,15 +1745,14 @@ func (s *Server) handleRetryDeadJob(w http.ResponseWriter, r *http.Request) {
 	u := r.Context().Value(ctxUser).(*User)
 	s.db.logAction(r.Context(), u.ID, "retry_dead_job", map[string]any{"job_id": id})
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(raw)
+	s.proxyProto(w, "admin", resp, nil)
 }
 
 // ── Worker dispatcher ────────────────────────────────────────────────
 
 func (s *Server) handleListConnectedWorkers(w http.ResponseWriter, r *http.Request) {
-	s.proxyRPC(w, r, adminBase+"ListConnectedWorkers", map[string]any{})
+	resp, err := s.atl.ListConnectedWorkers(r.Context(), &adminpb.ListConnectedWorkersRequest{})
+	s.proxyProto(w, "ListConnectedWorkers", resp, err)
 }
 
 func (s *Server) handleGetWorkerSession(w http.ResponseWriter, r *http.Request) {
@@ -1783,7 +1761,8 @@ func (s *Server) handleGetWorkerSession(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "id is required", http.StatusBadRequest)
 		return
 	}
-	s.proxyRPC(w, r, adminBase+"GetWorkerSession", map[string]string{"session_id": id})
+	resp, err := s.atl.GetWorkerSession(r.Context(), &adminpb.GetWorkerSessionRequest{SessionId: id})
+	s.proxyProto(w, "GetWorkerSession", resp, err)
 }
 
 func (s *Server) handleDrainWorker(w http.ResponseWriter, r *http.Request) {
@@ -1792,7 +1771,7 @@ func (s *Server) handleDrainWorker(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "id is required", http.StatusBadRequest)
 		return
 	}
-	raw, err := s.atl.invokeRaw(r.Context(), adminBase+"DrainWorker", map[string]string{"session_id": id})
+	resp, err := s.atl.DrainWorker(r.Context(), &adminpb.DrainWorkerRequest{SessionId: id})
 	if err != nil {
 		s.log.Error("DrainWorker", "session_id", id, "err", err)
 		jsonError(w, err.Error(), http.StatusBadGateway)
@@ -1800,9 +1779,7 @@ func (s *Server) handleDrainWorker(w http.ResponseWriter, r *http.Request) {
 	}
 	u := r.Context().Value(ctxUser).(*User)
 	s.db.logAction(r.Context(), u.ID, "worker_drained", map[string]any{"session_id": id})
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(raw)
+	s.proxyProto(w, "admin", resp, nil)
 }
 
 func (s *Server) handleEvictWorker(w http.ResponseWriter, r *http.Request) {
@@ -1811,7 +1788,7 @@ func (s *Server) handleEvictWorker(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "id is required", http.StatusBadRequest)
 		return
 	}
-	raw, err := s.atl.invokeRaw(r.Context(), adminBase+"EvictWorker", map[string]string{"session_id": id})
+	resp, err := s.atl.EvictWorker(r.Context(), &adminpb.EvictWorkerRequest{SessionId: id})
 	if err != nil {
 		s.log.Error("EvictWorker", "session_id", id, "err", err)
 		jsonError(w, err.Error(), http.StatusBadGateway)
@@ -1819,9 +1796,7 @@ func (s *Server) handleEvictWorker(w http.ResponseWriter, r *http.Request) {
 	}
 	u := r.Context().Value(ctxUser).(*User)
 	s.db.logAction(r.Context(), u.ID, "worker_evicted", map[string]any{"session_id": id})
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(raw)
+	s.proxyProto(w, "admin", resp, nil)
 }
 
 // ── Cert issuance ────────────────────────────────────────────────────
@@ -1936,10 +1911,10 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 	// load-bearing — if it fails, the old cert keeps authenticating
 	// until natural expiry, so surface the error to the operator rather
 	// than swallowing it like the pre-binding implementation did.
-	if _, err := s.atl.invokeRaw(r.Context(), adminBase+"RecordCallerCertExpiry", map[string]string{
-		"caller":      caller,
-		"expires_at":  signerRespBody.ExpiresAt,
-		"fingerprint": fingerprintHex,
+	if _, err := s.atl.RecordCallerCertExpiry(r.Context(), &adminpb.RecordCallerCertExpiryRequest{
+		Caller:      caller,
+		ExpiresAt:   signerRespBody.ExpiresAt,
+		Fingerprint: fingerprintHex,
 	}); err != nil {
 		s.log.Error("RecordCallerCertExpiry", "caller", caller, "err", err)
 		jsonError(w, "cert minted but binding write failed; the previous cert still authenticates — retry to rotate", http.StatusBadGateway)
@@ -2003,17 +1978,11 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	since, _ := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64)
 	limit := intQuery(r, "limit", 0)
 
-	raw, err := s.atl.invokeRaw(r.Context(), adminBase+"GetLogs", map[string]any{
-		"since": since,
-		"limit": limit,
+	resp, err := s.atl.GetLogs(r.Context(), &adminpb.GetLogsRequest{
+		Since: since,
+		Limit: int32(limit),
 	})
-	if err != nil {
-		s.log.Error("GetLogs", "err", err)
-		jsonError(w, "GetLogs: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(raw)
+	s.proxyProto(w, "GetLogs", resp, err)
 }
 
 // ── SPA handler ───────────────────────────────────────────────────────────────
@@ -2054,17 +2023,44 @@ func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-// proxyRPC calls an admin RPC and writes the raw JSON response to w.
-func (s *Server) proxyRPC(w http.ResponseWriter, r *http.Request, method string, req any) {
-	raw, err := s.atl.invokeRaw(r.Context(), method, req)
+// proxyProto writes an admin RPC response to w as canonical proto JSON.
+//
+// It replaces a generic proxyRPC that took a method name and forwarded the
+// server's JSON bytes untouched. Method names are no longer strings — each RPC
+// is a typed call on the generated client — so the shared part is what happens
+// to the result, not what is invoked.
+//
+// The dialect is clients/go/adminjson, the same one tide and tidectl emit.
+// Empty lists arrive as [] rather than null (protobuf cannot distinguish empty
+// from absent, and a browser that iterates the field should not have to), while
+// proto3 `optional` fields left unset stay absent so "not set" remains
+// distinguishable from "set to zero".
+//
+// inlineJSONBytes names `bytes` fields on this response that hold a JSON
+// document rather than opaque octets; without it they render as base64. See
+// adminjson.MarshalIndentInlining.
+func (s *Server) proxyProto(w http.ResponseWriter, name string, resp proto.Message, err error, inlineJSONBytes ...string) {
 	if err != nil {
-		s.log.Error("admin rpc", "method", method, "err", err)
+		s.log.Error("admin rpc", "method", name, "err", err)
 		jsonError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	b, merr := adminjson.MarshalIndentInlining(resp, inlineJSONBytes...)
+	if merr != nil {
+		s.log.Error("admin rpc: marshal response", "method", name, "err", merr)
+		jsonError(w, merr.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(raw)
+	_, _ = w.Write(b)
+}
+
+// shortPlanClass renders a PlanClass without the enum prefix the wire carries.
+// "PLAN_CLASS_BACKFILL_REQUIRED" is right on the wire and wrong in a browser
+// that is comparing against "backfill_required".
+func shortPlanClass(c adminpb.PlanClass) string {
+	return strings.ToLower(strings.TrimPrefix(c.String(), "PLAN_CLASS_"))
 }
 
 func jsonOK(w http.ResponseWriter, v any) {

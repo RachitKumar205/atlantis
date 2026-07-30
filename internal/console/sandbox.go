@@ -32,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/runtime/sandbox"
 )
@@ -390,16 +391,16 @@ func (s *Server) handleSandboxBoot(w http.ResponseWriter, r *http.Request) {
 // admin.go; we forward both into sandbox.Options + the meta map's
 // schemaVersion field.
 func (s *Server) bootResolveIR(ctx context.Context, ir *dsl.IR, hash *string) error {
-	var resp struct {
-		IR          json.RawMessage `json:"ir"`
-		ContentHash string          `json:"content_hash"`
-	}
-	if err := s.atl.invoke(ctx, "/atlantis.admin.v1.Admin/GetCanonicalIR", struct{}{}, &resp); err != nil {
+	resp, err := s.atl.GetCanonicalIR(ctx, &adminpb.GetCanonicalIRRequest{})
+	if err != nil {
 		return err
 	}
 	// dsl.DecodeJSONIR is the canonical decoder; it handles the
-	// field-name casing differences across producers.
-	decoded, err := dsl.DecodeJSONIR(resp.IR)
+	// field-name casing differences across producers. The IR travels as
+	// opaque bytes rather than a structured message because it is a
+	// content-hash input — a structured encoding would reorder keys and
+	// change the hash for a schema nobody edited.
+	decoded, err := dsl.DecodeJSONIR(resp.GetIr())
 	if err != nil {
 		return fmt.Errorf("decode IR: %w", err)
 	}
