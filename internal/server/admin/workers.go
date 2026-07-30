@@ -11,11 +11,11 @@
 // Authorization:
 //
 //   - ListConnectedWorkers / GetWorkerSession: admin role at the
-//     console BFF layer. Read-only; no operator allowlist check at
-//     the gRPC layer.
+//     console BFF layer, plus CAPABILITY_WORKERS_READ at the gRPC
+//     layer. Read-only.
 //   - DrainWorker / EvictWorker: admin role + sudo at the BFF, plus
-//     the existing operatorAllowed check (Service.authorizeOperator)
-//     so only the console CN can call these via gRPC.
+//     CAPABILITY_OPERATOR at the gRPC layer — they act on a worker
+//     that belongs to some other caller.
 //
 // The BFF also writes audit-log rows on Drain / Evict; the gRPC
 // layer doesn't (auditing the BFF layer is where the operator's
@@ -168,10 +168,10 @@ func (s *Service) GetWorkerSession(_ context.Context, req *adminpb.GetWorkerSess
 // asynchronously when in-flight reaches zero (or after the
 // dispatcher's internal drain cap, whichever first).
 //
-// Operator-allowlist gated — only the console CN may invoke this
-// via gRPC. The BFF layer wraps this with admin-role + sudo.
+// Requires CAPABILITY_OPERATOR — the session belongs to some other
+// caller. The BFF layer wraps this with admin-role + sudo.
 func (s *Service) DrainWorker(ctx context.Context, req *adminpb.DrainWorkerRequest) (*adminpb.DrainWorkerResponse, error) {
-	if err := s.authorizeOperator(ctx); err != nil {
+	if err := s.guardOperatorTransport(ctx); err != nil {
 		return nil, err
 	}
 	if s.dispatcher == nil {
@@ -186,10 +186,10 @@ func (s *Service) DrainWorker(ctx context.Context, req *adminpb.DrainWorkerReque
 // EvictWorker force-closes a session: stop dispatching, send Goodbye
 // + Revoke for every in-flight row, release rows back to pending.
 //
-// Operator-allowlist gated. The BFF wraps this with admin-role +
+// Requires CAPABILITY_OPERATOR. The BFF wraps this with admin-role +
 // sudo.
 func (s *Service) EvictWorker(ctx context.Context, req *adminpb.EvictWorkerRequest) (*adminpb.EvictWorkerResponse, error) {
-	if err := s.authorizeOperator(ctx); err != nil {
+	if err := s.guardOperatorTransport(ctx); err != nil {
 		return nil, err
 	}
 	if s.dispatcher == nil {

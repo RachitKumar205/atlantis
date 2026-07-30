@@ -80,21 +80,13 @@ func main() {
 		log.Error("refusing to start: admin authorization policy is incomplete", "err", err)
 		os.Exit(2)
 	}
-	// Enforcement is not live yet: the policy is keyed by the generated
-	// service path (atlantis.admin.v1.AdminService), while the hand-rolled
-	// descriptor still serves at atlantis.admin.v1.Admin. Installing the
-	// interceptor now would match nothing and read as authorization that
-	// isn't happening, so it goes in with the migration that moves the
-	// service. Validating the declarations is useful on its own in the
-	// meantime — a method added without one still cannot ship.
-	log.Info("admin authorization policy validated",
-		"methods", len(adminPolicy.Methods()), "enforcing", false)
+	log.Info("admin authorization policy validated", "methods", len(adminPolicy.Methods()))
 
 	// Top-level context cancels on SIGINT / SIGTERM.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if err := run(ctx, cfg, log, logRing); err != nil && !errors.Is(err, context.Canceled) {
+	if err := run(ctx, cfg, log, logRing, adminPolicy); err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("server exited with error", "err", err)
 		os.Exit(1)
 	}
@@ -104,7 +96,7 @@ func main() {
 // dependency order so each Close-defer runs LIFO at the end: pool is
 // created first so the invalidation worker (which acquires a connection)
 // can register cleanup before its Run starts.
-func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing) error {
+func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing, adminPolicy *authz.Policy) error {
 	if cfg.AutoMigrate {
 		if err := runAutoMigrate(cfg.PGURL, cfg.MigrationsDir, log); err != nil {
 			return err
@@ -245,17 +237,24 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	})
 
 	log.Debug("init: grpc.NewServer")
-	// One AuthChecker → two interceptors (Unary + Stream) that share
-	// the same allowlist + exempt-prefix set. Admin RPCs are exempt so
-	// a new caller can register schema before they appear in the
-	// entity-RPC allowlist; health + reflection are infrastructure
-	// probes.
+	// One AuthChecker → two interceptors (Unary + Stream) that share the same
+	// allowlist + exempt-prefix set.
+	//
+	// The admin prefix used to be exempt, so that a caller could apply schema —
+	// which is what writes its caller_registrations row — before appearing in
+	// the allowlist that row feeds. Self-registration on first apply was the
+	// bootstrap, and the exemption was also the reason an admin RPC whose
+	// author forgot to write an authz call was reachable by anyone. Both end
+	// here: registration is an operator act through RegisterCaller, seeded for
+	// a fresh install by migration 0019, and the capability interceptor below
+	// governs the admin plane on both the generated and legacy service paths.
+	//
+	// Health and reflection stay exempt: they are infrastructure probes.
 	authChecker := interceptors.NewAuthChecker(interceptors.AuthConfig{
 		Allowlist:         authAllowlist,
 		Enforce:           cfg.TLSCertFile != "",
 		CallerFromContext: callerFromContext,
 		ExemptPrefixes: []string{
-			"/atlantis.admin.v1.Admin/",
 			"/grpc.health.v1.Health/",
 			"/grpc.reflection.",
 		},
@@ -265,11 +264,9 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// interceptor needs its LookupCallerCertBinding method. Register on
 	// the gRPC server happens after server construction below.
 	adminSvc := admin.New(pool.Raw(), admin.Config{
-		MirrorDir:              cfg.AdminMirrorDir,
-		MirrorEnabled:          cfg.AdminMirrorSchema,
-		AllowApplyMutation:     cfg.AdminAllowApplyMutation,
-		MutationAllowedCallers: cfg.AdminMutationAllowedCallers,
-		OperatorAllowedCallers: cfg.AdminOperatorAllowedCallers,
+		MirrorDir:          cfg.AdminMirrorDir,
+		MirrorEnabled:      cfg.AdminMirrorSchema,
+		AllowApplyMutation: cfg.AdminAllowApplyMutation,
 		// Share the cert-CN extractor with the auth + rate-limit
 		// interceptors so every layer agrees on caller identity for the
 		// same request — a divergence here would let a CN authorized
@@ -310,13 +307,45 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		Log:               log,
 	})
 
-	// Stream chain mirrors the unary chain order for everything that
-	// applies on a per-stream basis. Rate limiting is intentionally
-	// excluded — it's an RPCs/sec concept and a long-lived stream
-	// (one per worker pod, hours long) doesn't fit. Cert binding +
-	// allowlist are reapplied at stream open via the same shared
-	// check helpers, so revoked certs and unregistered callers can't
-	// bypass via the streaming surface.
+	// Capability enforcement for the admin plane. Grants come from
+	// atlantis.caller_capabilities, keyed by the same cert CN the auth,
+	// cert-binding and rate-limit layers resolve, and cached on the same 5s TTL
+	// as the cert-binding checker so a revocation takes effect at one
+	// consistent horizon rather than two.
+	adminGrants, err := authz.NewPostgresGrants(authz.PostgresGrantsConfig{
+		DB:                authz.Pool(pool.Raw()),
+		CallerFromContext: callerFromContext,
+		Logger:            log,
+	})
+	if err != nil {
+		return fmt.Errorf("build admin grants: %w", err)
+	}
+
+	unary := []grpc.UnaryServerInterceptor{
+		recoveryInterceptor(log),
+		interceptors.NewMetrics(),
+		resolveCallerInterceptor(fwdAuth),
+		certBindingChecker.Unary(),
+		authChecker.Unary(),
+	}
+	// Capability enforcement goes after identity is resolved and the cert is
+	// bound, and before any work happens.
+	//
+	// It turns on with the same condition as the auth and cert-binding
+	// checkers, because all three answer questions about an identity and only
+	// mTLS produces one. Without a listener cert the caller name comes from an
+	// x-caller header the client writes itself, so a capability check against
+	// it would deny whoever is honest and pass whoever types a different
+	// string — an appearance of authorization rather than authorization. The
+	// three turning on together also means an operator reading the config sees
+	// one answer to "is this deployment authenticated", not three.
+	if identityEnforced := cfg.TLSCertFile != ""; identityEnforced {
+		unary = append(unary, adminPolicy.UnaryInterceptor(adminGrants))
+	} else {
+		log.Warn("admin capability enforcement is OFF: no TLS_CERT_FILE, so caller identity is a self-asserted header. Every admin RPC is reachable by any client that can open a connection. Development only.")
+	}
+	unary = append(unary, rateLimit, loggingInterceptor(log))
+
 	srv := grpc.NewServer(
 		grpc.Creds(creds),
 		// Match the SDK's 64 MiB client receive default (atltransport):
@@ -324,15 +353,17 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		// (e.g. a page of catalog rows) overflow the 4 MiB gRPC default.
 		grpc.MaxRecvMsgSize(64<<20),
 		grpc.MaxSendMsgSize(64<<20),
-		grpc.ChainUnaryInterceptor(
-			recoveryInterceptor(log),
-			interceptors.NewMetrics(),
-			resolveCallerInterceptor(fwdAuth),
-			certBindingChecker.Unary(),
-			authChecker.Unary(),
-			rateLimit,
-			loggingInterceptor(log),
-		),
+		grpc.ChainUnaryInterceptor(unary...),
+		// Stream chain mirrors the unary chain order for everything that
+		// applies on a per-stream basis. Rate limiting is intentionally
+		// excluded — it's an RPCs/sec concept and a long-lived stream
+		// (one per worker pod, hours long) doesn't fit. Cert binding +
+		// allowlist are reapplied at stream open via the same shared
+		// check helpers, so revoked certs and unregistered callers can't
+		// bypass via the streaming surface. The capability policy has no
+		// stream form because the Admin service declares no streaming RPC —
+		// an invariant held by TestAdminServiceDeclaresNoStreamingRPC, since
+		// nothing about adding one would fail to compile.
 		grpc.ChainStreamInterceptor(
 			recoveryStreamInterceptor(log),
 			interceptors.NewMetricsStream(),
@@ -351,15 +382,10 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 
 	log.Debug("init: register admin service")
 	admin.Register(srv, adminSvc)
-	// admin.RegisterGenerated is deliberately not called yet. The protobuf
-	// service exists and is exercised by tests, but serving it here would
-	// expose a path that no interceptor guards: AuthChecker's exempt list
-	// covers "/atlantis.admin.v1.Admin/", which does not prefix-match
-	// "/atlantis.admin.v1.AdminService/", and the capability interceptor is
-	// not installed. Adding the new prefix to the exempt list would ship an
-	// endpoint whose only gate is the wildcard-defaulting authorizeOperator —
-	// the exact hole the capability work exists to close. It is registered in
-	// the change that installs the interceptor.
+	// Both paths are served while clients migrate; the capability interceptor
+	// governs each. admin.Register goes away with grpc.go once tide, tidectl
+	// and the console speak protobuf.
+	admin.RegisterGenerated(srv, adminSvc)
 
 	// Backfill worker — gated by ATL_BACKFILL_WORKER_ENABLED. Shares
 	// workerCtx with the invalidate worker so SIGTERM stops both, and

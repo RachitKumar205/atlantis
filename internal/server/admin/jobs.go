@@ -160,8 +160,9 @@ func (s *Service) SubmitJob(ctx context.Context, req *adminpb.SubmitJobRequest) 
 	// $USER — so this gate is advisory, not a security boundary: any
 	// authenticated caller can name whatever identity the job declares. The
 	// server does resolve a real caller (callerFromContext, used by
-	// authorizeOperator and authorizeSelfApply); wiring it in here belongs
-	// with the capability work rather than with a type migration.
+	// bindCallerIdentity); using it here instead would make the gate real,
+	// and is tracked separately — it changes who may submit which job, not
+	// just where the check reads its input.
 	if spec.visibleTo != "" && spec.visibleTo != "*" {
 		submitter := req.GetSubmittedBy()
 		if len(submitter) > 4 && submitter[:4] == "cli:" {

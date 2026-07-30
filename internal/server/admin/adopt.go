@@ -98,7 +98,7 @@ type AdoptBaselineResponse struct {
 // FK refs that cross caller namespaces resolve naturally because the
 // IR lowering sees the full set.
 func (s *Service) AdoptBaseline(ctx context.Context, req *adminpb.AdoptBaselineRequest) (*adminpb.AdoptBaselineResponse, error) {
-	if err := s.authorizeOperator(ctx); err != nil {
+	if err := s.guardOperatorTransport(ctx); err != nil {
 		return nil, err
 	}
 	subs := callerSubmissionsFromPB(req.GetSubmissions())
@@ -472,7 +472,7 @@ func adoptDriftFromPB(in []*adminpb.AdoptDriftItem) []AdoptDriftItem {
 // the shim is unfalsifiable. Dropping AllowDrift from it would silently
 // disable --allow-drift and write a false value into adopt_history, and no
 // test could fail, because the shim itself cannot be driven without a pool —
-// authorizeOperator rejects a zero Service before anything else runs.
+// AdoptBaseline dereferences it before anything observable happens.
 func adoptBaselineRequestToPB(req *AdoptBaselineRequest) *adminpb.AdoptBaselineRequest {
 	return &adminpb.AdoptBaselineRequest{
 		Submissions: callerSubmissionsToPB(req.Submissions),

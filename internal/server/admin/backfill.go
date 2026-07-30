@@ -95,8 +95,11 @@ func (s *Service) BeginBackfillPlan(ctx context.Context, req *adminpb.BeginBackf
 	if req.GetCaller() == "" {
 		return nil, errors.New("admin: caller identity is required")
 	}
-	// Mutation gate + same-CN binding (see ApplyMigration for details).
-	if err := s.authorizeSelfApply(ctx, req.GetCaller()); err != nil {
+	if err := s.requireMutablePlane("backfill plan"); err != nil {
+		return nil, err
+	}
+	// Same-CN binding (see ApplyMigration for details).
+	if err := s.bindCallerIdentity(ctx, req.GetCaller()); err != nil {
 		return nil, err
 	}
 	if !s.backfillEnabled {

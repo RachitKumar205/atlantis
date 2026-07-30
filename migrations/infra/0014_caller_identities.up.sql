@@ -17,8 +17,10 @@
 -- CI cert CNs) from "registered, read-only" (typically app-server
 -- runtime CNs that only need a typed client connection).
 --
--- The legacy ATL_MUTATION_ALLOWED_CALLERS env var continues to work
--- alongside this table — the two are UNIONed at the gate.
+-- (Historical note: this described a UNION with the ATL_MUTATION_ALLOWED_CALLERS
+-- env var. That variable was retired in 0018/0019 — the server now refuses to
+-- start if it is set — and can_mutate became an input to the capability grants
+-- in atlantis.caller_capabilities rather than a gate read at apply time.)
 --
 -- cert_fingerprint binds the row to a single active leaf cert (SHA-256
 -- of the DER). Every authenticated RPC verifies that the presented

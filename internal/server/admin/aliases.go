@@ -9,7 +9,7 @@
 // See migrations/infra/0017_caller_aliases.up.sql for the column +
 // index. Wire shape mirrors the existing GetCallers / RegisterCaller
 // pattern: typed Request/Response + a Service method with the same
-// authz contract (mutations gated by authorizeOperator).
+// authz contract (mutations require CAPABILITY_OPERATOR).
 
 package admin
 
@@ -68,9 +68,8 @@ type SetCallerAliasesResponse struct {
 
 // SetCallerAliases replaces the alias set for an existing caller.
 //
-// Operator-allowlist gated: only the console CN (or any other CN in
-// ATL_OPERATOR_ALLOWED_CALLERS) can invoke this via gRPC. The console
-// BFF wraps this with admin role + sudo gating.
+// Requires CAPABILITY_OPERATOR, enforced by the interceptor before this
+// runs. The console BFF wraps it with admin role + sudo gating.
 //
 // Validation:
 //   - The caller must already exist in caller_identities. Aliases
@@ -87,7 +86,7 @@ type SetCallerAliasesResponse struct {
 //   - Reserved names ("atlantis", "atlantis-console", etc.) are
 //     rejected the same way they are in RegisterCaller.
 func (s *Service) SetCallerAliases(ctx context.Context, req *adminpb.SetCallerAliasesRequest) (*adminpb.SetCallerAliasesResponse, error) {
-	if err := s.authorizeOperator(ctx); err != nil {
+	if err := s.guardOperatorTransport(ctx); err != nil {
 		return nil, err
 	}
 	if req.GetCaller() == "" {

@@ -86,17 +86,60 @@ Set `AUTO_MIGRATE=false` in production. Boot-time migrations race rolling restar
 
 `ATL_ALLOW_APPLY_MUTATION` selects the schema-change flow. Default (`true`) is the per-caller-CI flow: callers run `tide apply` against the server and the server runs the DDL + IR write under an advisory lock. Set to `false` only when a regulator requires literal SQL review on a deployment-repo PR before any database change (SOX, HIPAA, PCI). The plan and pull RPCs remain available regardless. See [schema flow](../architecture/schema-flow.md) for the two flows in full.
 
-Three independent gates grant mutation permission:
-
-- `ATL_ALLOW_APPLY_MUTATION=true` — wildcard grant for any authenticated caller.
-- `ATL_MUTATION_ALLOWED_CALLERS` — per-CN allowlist, comma-separated. Use it in regulated deployments to scope mutations to specific CI cert CNs.
-- `caller_identities.can_mutate=true` — runtime per-caller flag (set via the console) so operators can grant mutation permission without an env-var change.
+`ATL_ALLOW_APPLY_MUTATION` is a switch, not a permission. It decides whether the mutating admin plane is open at all; it says nothing about who may use it.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `ATL_ALLOW_APPLY_MUTATION` | `true` | Gates the `ApplyMigration` RPC. Default flow accepts mutations from any authenticated caller; the diff classifier and per-caller cert identity stop one caller from breaking another. Set to `false` for the regulated opt-in. |
-| `ATL_MUTATION_ALLOWED_CALLERS` | (empty) | Comma-separated CN allowlist. Empty = no per-CN exceptions. |
-| `ATL_OPERATOR_ALLOWED_CALLERS` | (empty) | Operator-only RPCs (`RevokeCaller`, `RollbackSchema`, `AdoptBaseline`). Empty falls back to `ATL_ALLOW_APPLY_MUTATION`. The self-host compose bundle defaults this to `atlantis-console` so operator actions from the console work without an extra env step. |
+| `ATL_ALLOW_APPLY_MUTATION` | `true` | Gates the `ApplyMigration` RPC and job/workflow submission for the whole deployment. Set to `false` for the regulated opt-in, or to close the plane during an incident. |
+
+### Who may do what: capabilities
+
+Every admin RPC declares the capability it requires, in `atlantis/admin/v1/admin.proto`. The server reads those declarations from the compiled descriptor at boot and **refuses to start if any method declares none** — an unauthorized endpoint is not something a deployment can be configured into. A single interceptor enforces them, so no RPC depends on its author having remembered a check.
+
+Grants are rows in `atlantis.caller_capabilities`, one per capability:
+
+```sql
+-- caller_capabilities.caller references caller_identities, so the caller must
+-- be registered first. Registering through the console does both.
+INSERT INTO atlantis.caller_identities (caller, can_mutate, created_by)
+VALUES ('ci-backend', true, 'you@example.com') ON CONFLICT DO NOTHING;
+
+INSERT INTO atlantis.caller_capabilities (caller, capability, granted_by)
+VALUES ('ci-backend', 'CAPABILITY_SCHEMA_APPLY', 'you@example.com')
+ON CONFLICT DO NOTHING;
+```
+
+| Capability | Covers |
+|---|---|
+| `CAPABILITY_SCHEMA_READ` | plan-time reads: merged schema, history, drift |
+| `CAPABILITY_SCHEMA_PLAN` | `PlanSchema` |
+| `CAPABILITY_SCHEMA_APPLY` | `ApplyMigration`, backfill plans |
+| `CAPABILITY_JOBS_READ` / `CAPABILITY_JOBS_WRITE` | job inspection / submission and retry |
+| `CAPABILITY_WORKERS_READ` | worker session listing |
+| `CAPABILITY_LOGS_READ` | `GetLogs`. Separate from `SCHEMA_READ` on purpose: the log ring carries driver error text, and Postgres renders a unique violation as `DETAIL: Key (email)=(alice@example.com)` |
+| `CAPABILITY_OPERATOR` | RPCs whose blast radius lands on other callers: `RollbackSchema`, `AdoptBaseline`, `RegisterCaller`, `RevokeCaller`, `SetCallerAliases`, `DrainWorker`, `EvictWorker` |
+
+There is **no hierarchy**. `SCHEMA_APPLY` does not imply `SCHEMA_READ`, and `OPERATOR` implies nothing at all — a grant confers exactly what it names.
+
+That separation is what lets a PR-time credential compute a migration without being able to run one: grant the plan caller `SCHEMA_PLAN` and nothing else, and the apply caller `SCHEMA_APPLY`. See the [CI examples](../examples/).
+
+Registering a caller through the console grants a bundle derived from its `can_mutate` flag: read capabilities always, plus plan/apply/jobs-write when the flag is set. Clearing the flag revokes those again. `OPERATOR` and `LOGS_READ` are never part of that bundle and survive re-registration, so an operator can grant them by hand without a later registration silently taking them back. The console itself is seeded as an operator by migration `0019_console_identity`.
+
+Two things bound a grant regardless of what it says. A caller may only mutate **its own** namespace — `req.caller` must match the connecting certificate's CN — and operator RPCs refuse to arrive over a trusted front proxy unless `ATL_TRUSTED_PROXY_MAY_OPERATE=true`.
+
+> **Removed.** `ATL_MUTATION_ALLOWED_CALLERS` and `ATL_OPERATOR_ALLOWED_CALLERS` are no longer read, and the server **refuses to start** if either is set. They expressed authorization as process configuration, which meant a grant could not be audited or revoked without a restart — and because the operator list fell back to a global wildcard when unset, which was the shipped default, every caller able to apply schema was also able to roll back the shared checkpoint for everyone.
+>
+> **Two upgrades need action, including one where you configured nothing.**
+>
+> Migration `0018_caller_capabilities` converts existing `can_mutate` flags into grants, so `tide plan` and `tide apply` keep working for callers that already had the flag. Anything you had configured through the two removed variables must be granted explicitly.
+>
+> But the wildcard also meant `tidectl adopt` and `tidectl rollback` worked for *any* certificate whenever `ATL_OPERATOR_ALLOWED_CALLERS` was unset — the default. Those are now `CAPABILITY_OPERATOR`, which 0018 grants only to `atlantis-console`. If you run `tidectl` against this server, grant its CN:
+>
+> ```sql
+> INSERT INTO atlantis.caller_capabilities (caller, capability, granted_by)
+> VALUES ('<your-tidectl-cn>', 'CAPABILITY_OPERATOR', 'you@example.com')
+> ON CONFLICT DO NOTHING;
+> ```
 
 ## Schema drift
 
@@ -213,5 +256,11 @@ For SOX, HIPAA, or PCI workloads that require literal SQL review before any data
 ```
 # ...same as above, except:
 ATL_ALLOW_APPLY_MUTATION=false
-ATL_MUTATION_ALLOWED_CALLERS=ci.deploy.internal   # optional: tighten further
+```
+
+To scope mutation to a single CI identity, grant it and no one else:
+
+```sql
+INSERT INTO atlantis.caller_capabilities (caller, capability, granted_by)
+VALUES ('ci.deploy.internal', 'CAPABILITY_SCHEMA_APPLY', 'you@example.com');
 ```

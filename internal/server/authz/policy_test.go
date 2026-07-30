@@ -98,7 +98,7 @@ func TestGetLogsIsNotSchemaRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := policy.Methods()["/atlantis.admin.v1.AdminService/GetLogs"]
+	got := policy.Methods()["GetLogs"]
 	if got != adminpb.Capability_CAPABILITY_LOGS_READ {
 		t.Errorf("GetLogs requires %s, want CAPABILITY_LOGS_READ", got)
 	}
@@ -118,8 +118,7 @@ func TestCrossCallerMethodsRequireOperator(t *testing.T) {
 		"RollbackSchema", "AdoptBaseline", "RegisterCaller", "RevokeCaller",
 		"RecordCallerCertExpiry", "SetCallerAliases", "DrainWorker", "EvictWorker",
 	} {
-		full := "/atlantis.admin.v1.AdminService/" + name
-		if got := methods[full]; got != adminpb.Capability_CAPABILITY_OPERATOR {
+		if got := methods[name]; got != adminpb.Capability_CAPABILITY_OPERATOR {
 			t.Errorf("%s requires %s, want CAPABILITY_OPERATOR", name, got)
 		}
 	}
@@ -228,4 +227,33 @@ func TestInterceptor(t *testing.T) {
 
 func staticGrants(s Set) Grants {
 	return GrantsFunc(func(context.Context) (Set, error) { return s, nil })
+}
+
+// The policy governs both service paths. Enforcing only the generated one
+// would leave the path production actually uses ungoverned — the same shape as
+// the allowlist exemption this replaces.
+func TestLegacyAdminPathIsGoverned(t *testing.T) {
+	policy, err := AdminPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := func(ctx context.Context, req any) (any, error) { return "ok", nil }
+
+	for _, prefix := range []string{"/atlantis.admin.v1.AdminService/", LegacyAdminPrefix} {
+		t.Run(prefix, func(t *testing.T) {
+			interceptor := policy.UnaryInterceptor(staticGrants(NewSet(adminpb.Capability_CAPABILITY_SCHEMA_READ)))
+
+			// A read capability satisfies a read method on either path.
+			if _, err := interceptor(context.Background(), nil,
+				&grpc.UnaryServerInfo{FullMethod: prefix + "GetMergedSchema"}, handler); err != nil {
+				t.Errorf("read denied on %s: %v", prefix, err)
+			}
+			// And is refused for an operator method on either path.
+			_, err := interceptor(context.Background(), nil,
+				&grpc.UnaryServerInfo{FullMethod: prefix + "RollbackSchema"}, handler)
+			if status.Code(err) != codes.PermissionDenied {
+				t.Errorf("operator method allowed on %s with only SCHEMA_READ: %v", prefix, err)
+			}
+		})
+	}
 }

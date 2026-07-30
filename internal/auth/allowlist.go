@@ -11,7 +11,7 @@
 // A caller becomes callable within one refresh interval of landing in
 // either table. This gate only decides whether a caller may open the
 // gRPC surface at all; mutation is gated separately
-// (caller_identities.can_mutate ∪ ATL_MUTATION_ALLOWED_CALLERS).
+// (a CAPABILITY_SCHEMA_APPLY grant in caller_capabilities).
 package auth
 
 import (

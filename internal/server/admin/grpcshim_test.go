@@ -715,8 +715,8 @@ func TestBackfillFieldStatusRoundTrip(t *testing.T) {
 // AdoptBaselineRequest has two ways to say the same thing: a submissions list,
 // or a single caller plus files. The server falls back to the second only when
 // the first is empty, so both halves have to survive the mapping — and neither
-// can be reached through invokeAdoptBaseline, since authorizeOperator rejects a
-// pool-less Service first. Asserting the mapper directly is the only coverage
+// can be reached through invokeAdoptBaseline, since AdoptBaseline dereferences
+// a pool-less Service first. Asserting the mapper directly is the only coverage
 // available, and without it dropping AllowDrift silently disables --allow-drift.
 func TestAdoptBaselineRequestMappingCarriesEveryField(t *testing.T) {
 	req := &AdoptBaselineRequest{

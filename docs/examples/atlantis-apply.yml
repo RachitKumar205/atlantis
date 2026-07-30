@@ -14,12 +14,19 @@
 # Required repository variable:
 #   TIDE_VERSION       — pin a release tag (e.g. v0.4.0)
 #
-# IMPORTANT: the cert configured here MUST be one whose CN is in
-# atlantis's ATL_MUTATION_ALLOWED_CALLERS env var OR has
-# caller_identities.can_mutate=true. The plan workflow can use a read-only
-# cert; this one needs the can-mutate bit. Issue a SEPARATE cert with
-# `can_mutate=true` from the console for this purpose and use it ONLY in
-# this workflow — never on engineers' laptops.
+# IMPORTANT: the caller whose cert is configured here must hold
+# CAPABILITY_SCHEMA_APPLY. Registering it through the console with
+# `can_mutate` on grants that, along with SCHEMA_PLAN and JOBS_WRITE.
+#
+# Issue a SEPARATE cert for this workflow and use it ONLY here — never on
+# engineers' laptops. The plan workflow should use a different caller holding
+# SCHEMA_PLAN but not SCHEMA_APPLY, so a compromised PR-time credential can
+# compute a migration but not run one:
+#
+#   INSERT INTO atlantis.caller_identities (caller, can_mutate, created_by)
+#   VALUES ('ci-plan', false, 'you@example.com');
+#   INSERT INTO atlantis.caller_capabilities (caller, capability, granted_by)
+#   VALUES ('ci-plan', 'CAPABILITY_SCHEMA_PLAN', 'you@example.com');
 
 name: atlantis schema apply
 

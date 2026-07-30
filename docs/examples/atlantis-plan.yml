@@ -12,6 +12,16 @@
 #   TIDE_TLS_KEY_PEM   — the caller's private key PEM
 #   TIDE_TLS_CA_PEM    — the atlantis CA cert PEM (same `ca.crt` the console ships)
 #
+# The caller behind this cert needs CAPABILITY_SCHEMA_PLAN. Registering it with
+# `can_mutate` off does NOT grant that — plan is a separate capability so a
+# PR-time credential can compute a migration without being able to run one.
+# Grant it explicitly:
+#
+#   INSERT INTO atlantis.caller_capabilities (caller, capability, granted_by)
+#   VALUES ('ci-plan', 'CAPABILITY_SCHEMA_PLAN', 'you@example.com');
+#
+# Use a different caller here than in atlantis-apply.yml.
+#
 # Required repository variable:
 #   TIDE_VERSION       — the tide release tag to install (e.g. v0.4.0).
 #                        Pin a version; don't track 'latest' — a future

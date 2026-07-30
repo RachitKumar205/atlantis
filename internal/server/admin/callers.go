@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/server/authz"
 )
 
 // ---------------------------------------------------------------------------
@@ -22,10 +23,11 @@ import (
 //
 // Registered carries the operator-recorded intent: true means the caller
 // exists in caller_identities (either pre-registered by an operator or
-// implicitly back-filled from the first apply). CanMutate reflects the
-// caller's mutation permission as recorded in caller_identities; this is
-// UNIONed with the static ATL_MUTATION_ALLOWED_CALLERS env var at the
-// apply-time gate.
+// implicitly back-filled from the first apply). CanMutate reports the
+// caller_identities flag, which is the input RegisterCaller translates into
+// capability grants — it is not itself read at apply time. The authoritative
+// answer to "may this caller apply" is a CAPABILITY_SCHEMA_APPLY row in
+// caller_capabilities, which an operator can grant or revoke independently.
 type CallerInfo struct {
 	Caller        string `json:"caller"`
 	FileCount     int    `json:"file_count"`
@@ -161,9 +163,18 @@ func validCallerName(s string) bool {
 // audit record; mutation-bit toggles after the fact are captured in the
 // console's audit_log instead.
 //
+// Registration also reconciles the caller's default capability grants, in the
+// same transaction as the identity row. Before caller_capabilities existed,
+// can_mutate was read directly by the gates, so writing the row was the whole
+// of registration. Now the gates read grants, and an identity with no grants
+// can authenticate and do nothing — so a registration that wrote only the
+// identity would produce a caller that looks correct in GetCallers and is
+// refused by every RPC. See authz.DefaultCapabilities for the mapping and
+// authz.ManagedCapabilities for what this deliberately does not touch.
+//
 // Operator-only.
 func (s *Service) RegisterCaller(ctx context.Context, req *adminpb.RegisterCallerRequest) (*adminpb.RegisterCallerResponse, error) {
-	if err := s.authorizeOperator(ctx); err != nil {
+	if err := s.guardOperatorTransport(ctx); err != nil {
 		return nil, err
 	}
 	if !validCallerName(req.GetCaller()) {
@@ -175,36 +186,65 @@ func (s *Service) RegisterCaller(ctx context.Context, req *adminpb.RegisterCalle
 		return nil, fmt.Errorf("admin: %q is reserved", req.GetCaller())
 	}
 
-	_, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("begin register tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	if _, err := tx.Exec(ctx, `
 INSERT INTO atlantis.caller_identities (caller, can_mutate, created_by)
 VALUES ($1, $2, $3)
 ON CONFLICT (caller) DO UPDATE SET can_mutate = EXCLUDED.can_mutate`,
-		req.GetCaller(), req.GetCanMutate(), req.GetCreatedBy())
-	if err != nil {
+		req.GetCaller(), req.GetCanMutate(), req.GetCreatedBy()); err != nil {
 		return nil, fmt.Errorf("register caller: %w", err)
+	}
+
+	if err := syncDefaultCapabilities(ctx, tx, req.GetCaller(), req.GetCanMutate(), req.GetCreatedBy()); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit register: %w", err)
 	}
 	return &adminpb.RegisterCallerResponse{Caller: req.GetCaller(), CanMutate: req.GetCanMutate()}, nil
 }
 
-// isRegisteredCaller reports whether the named caller exists in
-// caller_identities along with its can_mutate flag, so an operator can
-// grant mutation permission without an env-var change and atlantis
-// restart. A nil pool reports "not registered" without erroring — keeps
-// the static gate branches exercisable in unit tests that don't stand
-// up a Postgres.
-func (s *Service) isRegisteredCaller(ctx context.Context, caller string) (registered, canMutate bool, err error) {
-	if s.pool == nil {
-		return false, false, nil
+// syncDefaultCapabilities reconciles the managed grant bundle for one caller.
+//
+// Revoke-then-grant, not grant-only: flipping can_mutate from true to false has
+// to actually remove SCHEMA_APPLY, or demotion would be cosmetic. The DELETE is
+// scoped to the managed set so an out-of-band CAPABILITY_OPERATOR survives
+// re-registration — an operator correcting a typo in created_by should not
+// silently strip authority they granted on purpose.
+//
+// The INSERT uses ON CONFLICT DO NOTHING rather than an upsert so granted_at
+// keeps recording when the caller first received the capability. Re-registering
+// is not a new grant, and rewriting the timestamp would erase the only record
+// of when the authority actually began.
+func syncDefaultCapabilities(ctx context.Context, tx pgx.Tx, caller string, canMutate bool, grantedBy string) error {
+	granted := authz.Names(authz.DefaultCapabilities(canMutate))
+
+	if _, err := tx.Exec(ctx, `
+DELETE FROM atlantis.caller_capabilities
+ WHERE caller = $1
+   AND capability = ANY($2)
+   AND capability <> ALL($3)`,
+		caller, authz.Names(authz.ManagedCapabilities()), granted); err != nil {
+		return fmt.Errorf("revoke stale capabilities for %q: %w", caller, err)
 	}
-	err = s.pool.QueryRow(ctx, `
-SELECT can_mutate FROM atlantis.caller_identities WHERE caller = $1`, caller).Scan(&canMutate)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, false, nil
+
+	if grantedBy == "" {
+		grantedBy = "<register-caller>"
 	}
-	if err != nil {
-		return false, false, fmt.Errorf("lookup caller_identities: %w", err)
+	if _, err := tx.Exec(ctx, `
+INSERT INTO atlantis.caller_capabilities (caller, capability, granted_by)
+SELECT $1, capability, $3 FROM unnest($2::text[]) AS capability
+ON CONFLICT DO NOTHING`,
+		caller, granted, grantedBy); err != nil {
+		return fmt.Errorf("grant default capabilities to %q: %w", caller, err)
 	}
-	return true, canMutate, nil
+	return nil
 }
 
 // LookupCallerCertBinding returns the cert-binding state for a caller:
@@ -268,7 +308,7 @@ type RecordCallerCertExpiryResponse struct {
 // with the old cert until a successful re-record (operationally we
 // surface the BFF error and the operator retries).
 func (s *Service) RecordCallerCertExpiry(ctx context.Context, req *adminpb.RecordCallerCertExpiryRequest) (*adminpb.RecordCallerCertExpiryResponse, error) {
-	if err := s.authorizeOperator(ctx); err != nil {
+	if err := s.guardOperatorTransport(ctx); err != nil {
 		return nil, err
 	}
 	if !validCallerName(req.GetCaller()) {
@@ -338,7 +378,7 @@ type RevokeCallerResponse struct {
 // TTL (~5s). This is the revocation mechanism — no CRL, no OCSP, just
 // the row going away.
 func (s *Service) RevokeCaller(ctx context.Context, req *adminpb.RevokeCallerRequest) (*adminpb.RevokeCallerResponse, error) {
-	if err := s.authorizeOperator(ctx); err != nil {
+	if err := s.guardOperatorTransport(ctx); err != nil {
 		return nil, err
 	}
 	if req.GetCaller() == "" {

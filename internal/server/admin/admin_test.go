@@ -5,130 +5,119 @@ import (
 	"strings"
 	"testing"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
-// fakeService builds a Service with just the mutation-gate fields wired —
-// enough to exercise authorizeSelfApply without touching pgx.
-func fakeService(allowAll bool, allowed []string, cn string) *Service {
-	set := map[string]bool{}
-	for _, c := range allowed {
-		set[c] = true
-	}
+// The per-CN mutation and operator allowlists these tests used to cover are
+// gone: authorization is now a capability grant checked by the interceptor in
+// internal/server/authz, before any method body runs. What remains in the
+// handlers is what an interceptor structurally cannot do — bind req.Caller to
+// the connection's identity, and restrict how a request arrived. Those are the
+// properties tested here.
+
+// identityService wires only the fields the two guards read.
+func identityService(cn string) *Service {
+	return &Service{callerFromContext: func(context.Context) string { return cn }}
+}
+
+// proxiedService reports every request as arriving over a trusted front proxy.
+func proxiedService(cn string, mayApply, mayOperate bool) *Service {
 	return &Service{
-		allowApplyMutation: allowAll,
-		mutationAllowed:    set,
-		callerFromContext:  func(context.Context) string { return cn },
+		callerFromContext:      func(context.Context) string { return cn },
+		proxyForwarded:         func(context.Context) bool { return true },
+		trustedProxyMayApply:   mayApply,
+		trustedProxyMayOperate: mayOperate,
 	}
 }
 
-func TestAuthorizeSelfApply_AllowWildcardGrantsAll(t *testing.T) {
-	s := fakeService(true, nil, "backend")
-	if err := s.authorizeSelfApply(context.Background(), "backend"); err != nil {
-		t.Fatalf("wildcard should permit own caller: %v", err)
+func TestBindCallerIdentityAcceptsOwnNamespace(t *testing.T) {
+	s := identityService("backend")
+	if err := s.bindCallerIdentity(context.Background(), "backend"); err != nil {
+		t.Fatalf("a caller writing to its own namespace should be permitted: %v", err)
 	}
 }
 
-func TestAuthorizeSelfApply_RejectsCrossCallerEvenWithWildcard(t *testing.T) {
-	// Wildcard allows mutation, but req.Caller must still match the CN.
-	// A leaked backend cert can't push to "vendor" even when the global
-	// wildcard is on.
-	s := fakeService(true, nil, "backend")
-	err := s.authorizeSelfApply(context.Background(), "vendor")
+// The escalation this guard exists to stop. CAPABILITY_SCHEMA_APPLY says the
+// caller may apply; without this check it would say the caller may apply to
+// *anyone's* schema, because the interceptor that granted it never saw the
+// request body naming the target.
+func TestBindCallerIdentityRejectsCrossCaller(t *testing.T) {
+	s := identityService("backend")
+	err := s.bindCallerIdentity(context.Background(), "vendor")
 	if err == nil {
-		t.Fatal("expected error when req.Caller does not match CN")
+		t.Fatal("a caller must not be able to apply to another caller's namespace")
 	}
 	if !strings.Contains(err.Error(), "does not match") {
-		t.Errorf("expected same-CN mismatch error, got %v", err)
+		t.Errorf("expected a same-CN mismatch error, got %v", err)
 	}
 }
 
-func TestAuthorizeSelfApply_PerCNAllowlist(t *testing.T) {
-	s := fakeService(false, []string{"ci-backend", "ci-vendor"}, "ci-backend")
-	if err := s.authorizeSelfApply(context.Background(), "ci-backend"); err != nil {
-		t.Fatalf("ci-backend should be allowed: %v", err)
+// In insecure dev mode there is no cert identity to bind against, so the check
+// has nothing to compare and is skipped. The capability requirement is what
+// governs the RPC in that configuration — or rather, would, except that
+// cmd/server does not install the interceptor without TLS either, for the same
+// reason: a self-asserted header is not an identity.
+func TestBindCallerIdentitySkipsWithoutAnIdentity(t *testing.T) {
+	for _, cn := range []string{"", "anonymous"} {
+		if err := identityService(cn).bindCallerIdentity(context.Background(), "anything"); err != nil {
+			t.Errorf("cn=%q: no identity to bind against, want skip, got %v", cn, err)
+		}
 	}
 }
 
-func TestAuthorizeSelfApply_RejectsCNNotOnAllowlist(t *testing.T) {
-	s := fakeService(false, []string{"ci-backend"}, "backend")
-	err := s.authorizeSelfApply(context.Background(), "backend")
+func TestBindCallerIdentityHonoursNilExtractor(t *testing.T) {
+	s := &Service{}
+	if err := s.bindCallerIdentity(context.Background(), "anything"); err != nil {
+		t.Fatalf("a Service with no extractor has no identity to bind: %v", err)
+	}
+}
+
+// Transport restrictions are orthogonal to capability: an edge-terminated
+// connection is held to a different standard than direct mTLS no matter what
+// the caller was granted.
+func TestGuardOperatorTransportRejectsProxyByDefault(t *testing.T) {
+	err := proxiedService("atlantis-console", true, false).guardOperatorTransport(context.Background())
 	if err == nil {
-		t.Fatal("expected error: backend not on allowlist")
+		t.Fatal("operator RPCs must not arrive over a trusted proxy unless opted in")
 	}
-	if !strings.Contains(err.Error(), "not permitted to mutate") {
-		t.Errorf("expected not-permitted error, got %v", err)
-	}
-}
-
-func TestAuthorizeSelfApply_InsecureDevModeWildcardPermits(t *testing.T) {
-	// No CN identity (insecure dev) + wildcard on → permit.
-	s := &Service{
-		allowApplyMutation: true,
-		mutationAllowed:    map[string]bool{},
-		callerFromContext:  func(context.Context) string { return "" },
-	}
-	if err := s.authorizeSelfApply(context.Background(), "anything"); err != nil {
-		t.Fatalf("dev mode + wildcard should permit: %v", err)
+	if !strings.Contains(err.Error(), "ATL_TRUSTED_PROXY_MAY_OPERATE") {
+		t.Errorf("error should name the opt-in, got %v", err)
 	}
 }
 
-func TestAuthorizeOperator_AllowlistPermitsConsole(t *testing.T) {
-	s := &Service{
-		operatorAllowed:   map[string]bool{"atlantis-console": true},
-		callerFromContext: func(context.Context) string { return "atlantis-console" },
-	}
-	if err := s.authorizeOperator(context.Background()); err != nil {
-		t.Fatalf("console should be permitted: %v", err)
+func TestGuardOperatorTransportAcceptsProxyWhenOptedIn(t *testing.T) {
+	if err := proxiedService("atlantis-console", false, true).guardOperatorTransport(context.Background()); err != nil {
+		t.Fatalf("opted-in proxy operator RPC should be permitted: %v", err)
 	}
 }
 
-func TestAuthorizeOperator_AllowlistRejectsOtherCN(t *testing.T) {
-	// Even a caller on the apply allowlist isn't an operator unless
-	// they're separately on the operator list.
-	s := &Service{
-		mutationAllowed:   map[string]bool{"ci-backend": true},
-		operatorAllowed:   map[string]bool{"atlantis-console": true},
-		callerFromContext: func(context.Context) string { return "ci-backend" },
+func TestGuardOperatorTransportAcceptsDirectMTLS(t *testing.T) {
+	if err := identityService("atlantis-console").guardOperatorTransport(context.Background()); err != nil {
+		t.Fatalf("direct mTLS is the unrestricted path: %v", err)
 	}
-	err := s.authorizeOperator(context.Background())
+}
+
+// The two flags are independent: a deployment that lets the edge carry a
+// caller's own applies must not thereby let it carry operator RPCs.
+func TestProxyApplyAndOperateAreSeparateGrants(t *testing.T) {
+	s := proxiedService("backend", true, false)
+	if err := s.bindCallerIdentity(context.Background(), "backend"); err != nil {
+		t.Fatalf("MAY_APPLY should permit a proxied self-apply: %v", err)
+	}
+	if err := s.guardOperatorTransport(context.Background()); err == nil {
+		t.Fatal("MAY_APPLY must not confer MAY_OPERATE")
+	}
+}
+
+func TestBindCallerIdentityRejectsProxiedApplyWhenNotOptedIn(t *testing.T) {
+	err := proxiedService("backend", false, false).bindCallerIdentity(context.Background(), "backend")
 	if err == nil {
-		t.Fatal("apply-allowed CN should not be an operator")
+		t.Fatal("a proxied apply must be refused when MAY_APPLY is off")
 	}
-}
-
-func TestAuthorizeOperator_EmptyAllowlistFallsBackToWildcard(t *testing.T) {
-	// Backward compat: empty operatorAllowed + wildcard on → permit.
-	s := &Service{
-		allowApplyMutation: true,
-		callerFromContext:  func(context.Context) string { return "anything" },
-	}
-	if err := s.authorizeOperator(context.Background()); err != nil {
-		t.Fatalf("legacy wildcard should still permit: %v", err)
-	}
-}
-
-func TestAuthorizeOperator_EmptyAllowlistAndNoWildcardRejects(t *testing.T) {
-	s := &Service{
-		callerFromContext: func(context.Context) string { return "anything" },
-	}
-	err := s.authorizeOperator(context.Background())
-	if err == nil {
-		t.Fatal("expected reject: nothing grants operator permission")
-	}
-}
-
-func TestAuthorizeSelfApply_InsecureDevModeWithoutWildcardRejects(t *testing.T) {
-	// No CN identity + no wildcard + empty allowlist → reject.
-	s := &Service{
-		allowApplyMutation: false,
-		mutationAllowed:    map[string]bool{},
-		callerFromContext:  func(context.Context) string { return "" },
-	}
-	err := s.authorizeSelfApply(context.Background(), "anything")
-	if err == nil {
-		t.Fatal("expected reject when nothing grants mutation permission")
+	if !strings.Contains(err.Error(), "ATL_TRUSTED_PROXY_MAY_APPLY") {
+		t.Errorf("error should name the opt-in, got %v", err)
 	}
 }
 
@@ -529,5 +518,60 @@ query Mine for Cart {
 	}
 	if msgs := validateCustomSQL(ir, "consumer"); len(msgs) == 0 {
 		t.Fatal("when consumer submits, its own stale ref should be caught")
+	}
+}
+
+// TestMutatingPlaneSwitchRefusesApply covers the deployment-wide switch that
+// capability enforcement is easy to mistake for a replacement of.
+//
+// ATL_ALLOW_APPLY_MUTATION=false is the regulated posture: SQL is reviewed on a
+// deployment-repo PR and applied by tidectl, and no grant may route around it.
+// It regressed once already — the check used to live inside the same helper as
+// the per-CN allowlist, and removing the allowlist took the switch with it,
+// which nothing caught because nothing asserted on it. The nil pool is
+// deliberate: reaching Postgres would mean the guard let the request through.
+func TestMutatingPlaneSwitchRefusesApply(t *testing.T) {
+	s := New(nil, Config{
+		AllowApplyMutation: false,
+		BackfillEnabled:    true,
+		CallerFromContext:  func(context.Context) string { return "backend" },
+	})
+	ctx := context.Background()
+
+	_, err := s.ApplyMigration(ctx, &adminpb.ApplyMigrationRequest{Caller: "backend", PlanId: "p1"})
+	if err == nil {
+		t.Fatal("ApplyMigration proceeded with the mutating plane switched off")
+	}
+	if !strings.Contains(err.Error(), "ATL_ALLOW_APPLY_MUTATION") {
+		t.Errorf("error should name the switch so an operator can act on it, got %v", err)
+	}
+
+	_, err = s.BeginBackfillPlan(ctx, &adminpb.BeginBackfillPlanRequest{Caller: "backend", PlanId: "p1"})
+	if err == nil {
+		t.Fatal("BeginBackfillPlan proceeded with the mutating plane switched off")
+	}
+	if !strings.Contains(err.Error(), "ATL_ALLOW_APPLY_MUTATION") {
+		t.Errorf("error should name the switch, got %v", err)
+	}
+}
+
+// And the switch is one-directional: it can close the plane, never narrow who
+// may use an open one. Asserting this separately keeps it from drifting into a
+// second authorization layer, where "who may apply" would have two answers that
+// could disagree.
+func TestMutatingPlaneSwitchIsNotAuthorization(t *testing.T) {
+	open := New(nil, Config{AllowApplyMutation: true})
+	if err := open.requireMutablePlane("schema apply"); err != nil {
+		t.Errorf("an open plane refused: %v", err)
+	}
+	// It reads no identity, so it cannot express a per-caller decision even by
+	// accident — there is nothing for one to be derived from.
+	if open.callerFromContext != nil {
+		t.Fatal("test setup: this Service should have no identity extractor")
+	}
+
+	closed := New(nil, Config{AllowApplyMutation: false})
+	if err := closed.requireMutablePlane("schema apply"); err == nil {
+		t.Error("a closed plane permitted a mutation")
 	}
 }

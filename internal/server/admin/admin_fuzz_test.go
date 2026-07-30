@@ -96,153 +96,119 @@ func FuzzValidCallerName(f *testing.F) {
 	})
 }
 
-// FuzzAuthorizeSelfApply hammers the per-CN authorization gate that
-// stands between an authenticated caller and ApplyMigration /
-// BeginBackfillPlan. Two safety invariants matter:
+// FuzzBindCallerIdentity hammers the one authorization decision that stayed in
+// the handlers after capabilities moved to the interceptor.
 //
-//  1. **Same-CN binding.** When the cert CN is set (non-empty,
-//     non-"anonymous") AND req.Caller doesn't match it, authorize MUST
-//     return an error containing "does not match". Bypass here is a
-//     direct privilege-escalation — a backend cert could push schema as
-//     vendor.
-//  2. **Mutation gate.** When neither AllowApplyMutation nor the per-CN
-//     allowlist grants permission, authorize MUST return an error.
-//     Bypass here defeats the entire mutation-control surface.
+// The invariant: when the cert CN is a real identity (non-empty,
+// non-"anonymous") and req.Caller does not match it, the guard MUST return an
+// error naming the mismatch. A bypass is direct privilege escalation — a
+// caller holding CAPABILITY_SCHEMA_APPLY for its own namespace could push
+// schema into someone else's. The interceptor cannot catch this: it sees the
+// method and the connection, never the request body that names the target.
 //
-// We construct a Service by hand (no pool needed; isRegisteredCaller
-// short-circuits on nil pool) and vary the inputs.
-func FuzzAuthorizeSelfApply(f *testing.F) {
+// The converse is deliberately weaker. A matching CN, or no CN at all, means
+// this guard has nothing to say; whether the RPC proceeds is then the
+// capability check's business, and that lives elsewhere.
+func FuzzBindCallerIdentity(f *testing.F) {
 	seeds := []struct {
 		cn, reqCaller string
-		wildcard      bool
-		allowed       string // comma-separated
+		proxied       bool
+		mayApply      bool
 	}{
-		{"", "", false, ""},
-		{"backend", "backend", false, ""},
-		{"backend", "vendor", true, ""},
-		{"backend", "backend", true, ""},
-		{"backend", "backend", false, "backend"},
-		{"backend", "backend", false, "ci-backend"},
-		{"anonymous", "backend", true, ""},
-		{"", "backend", true, ""},
-		{strings.Repeat("a", 1000), strings.Repeat("a", 1000), true, ""},
+		{"", "", false, false},
+		{"backend", "backend", false, false},
+		{"backend", "vendor", false, false},
+		{"anonymous", "backend", false, false},
+		{"", "backend", false, false},
+		{"backend", "backend", true, true},
+		{"backend", "backend", true, false},
+		{"backend", "vendor", true, true},
+		{strings.Repeat("a", 1000), strings.Repeat("a", 1000), false, false},
 	}
 	for _, s := range seeds {
-		f.Add(s.cn, s.reqCaller, s.wildcard, s.allowed)
+		f.Add(s.cn, s.reqCaller, s.proxied, s.mayApply)
 	}
 
-	f.Fuzz(func(t *testing.T, cn, reqCaller string, wildcard bool, allowed string) {
-		var allowedList []string
-		if allowed != "" {
-			allowedList = strings.Split(allowed, ",")
-		}
-		set := map[string]bool{}
-		for _, c := range allowedList {
-			if c = strings.TrimSpace(c); c != "" {
-				set[c] = true
-			}
-		}
+	f.Fuzz(func(t *testing.T, cn, reqCaller string, proxied, mayApply bool) {
 		s := &Service{
-			allowApplyMutation: wildcard,
-			mutationAllowed:    set,
-			callerFromContext:  func(context.Context) string { return cn },
+			callerFromContext:    func(context.Context) string { return cn },
+			trustedProxyMayApply: mayApply,
 		}
-		err := s.authorizeSelfApply(context.Background(), reqCaller)
+		if proxied {
+			s.proxyForwarded = func(context.Context) bool { return true }
+		}
+		err := s.bindCallerIdentity(context.Background(), reqCaller)
 
-		// (1) Same-CN binding: when a real CN is present, mismatch MUST
-		// error regardless of allowlist contents.
-		if cn != "" && cn != "anonymous" && reqCaller != cn {
+		// A proxied request without the opt-in is refused before identity is
+		// even considered, so the mismatch invariant does not apply to it.
+		if proxied && !mayApply {
 			if err == nil {
-				t.Fatalf("CN=%q reqCaller=%q mismatch was accepted (wildcard=%v allowed=%v)",
-					cn, reqCaller, wildcard, set)
-			}
-			if !strings.Contains(err.Error(), "does not match") {
-				t.Fatalf("expected 'does not match' error, got %v", err)
+				t.Fatalf("proxied apply accepted with MAY_APPLY off (cn=%q reqCaller=%q)", cn, reqCaller)
 			}
 			return
 		}
 
-		// (2) Mutation gate: with no wildcard AND no allowlist entry
-		// AND the (effective) CN absent or not on the list, error MUST
-		// fire. When CN is empty/anonymous in dev mode and wildcard is
-		// off, gate must reject.
-		grants := wildcard || (cn != "" && cn != "anonymous" && set[cn])
-		if !grants {
+		hasIdentity := cn != "" && cn != "anonymous"
+		if hasIdentity && reqCaller != cn {
 			if err == nil {
-				t.Fatalf("CN=%q reqCaller=%q got nil error with no grant (wildcard=%v allowed=%v)",
-					cn, reqCaller, wildcard, set)
+				t.Fatalf("cn=%q reqCaller=%q mismatch was accepted", cn, reqCaller)
 			}
+			if !strings.Contains(err.Error(), "does not match") {
+				t.Fatalf("expected a 'does not match' error, got %v", err)
+			}
+			return
+		}
+		if err != nil {
+			t.Fatalf("cn=%q reqCaller=%q should bind cleanly, got %v", cn, reqCaller, err)
 		}
 	})
 }
 
-// FuzzAuthorizeOperator stresses the per-CN operator allowlist that
-// gates every operator-mutating RPC (revoke, rollback, adopt, register).
-// The safety contract: when operatorAllowed is non-empty ONLY those CNs
-// proceed, regardless of the wildcard. Wildcard fallback applies only
-// when the operator set is empty — adding ANY entry must disable the
-// legacy global gate, otherwise tightening the policy weakens it.
-func FuzzAuthorizeOperator(f *testing.F) {
+// FuzzGuardOperatorTransport pins the remaining half of the old operator gate:
+// not who may operate — that is CAPABILITY_OPERATOR, checked by the
+// interceptor — but whether an operator RPC may arrive over an edge-terminated
+// connection at all.
+//
+// The invariant is a conjunction, and the failure that matters is it becoming
+// a disjunction: a forwarded request is refused unless
+// ATL_TRUSTED_PROXY_MAY_OPERATE is set, and the caller's identity is
+// irrelevant to that decision. The apply flag must not stand in for it.
+func FuzzGuardOperatorTransport(f *testing.F) {
 	seeds := []struct {
-		cn       string
-		wildcard bool
-		allowed  string
+		cn                   string
+		proxied              bool
+		mayApply, mayOperate bool
 	}{
-		{"", false, ""},
-		{"", true, ""},
-		{"atlantis-console", false, "atlantis-console"},
-		{"ci-backend", false, "atlantis-console"},
-		{"atlantis-console", false, ""},
-		{"atlantis-console", true, ""},
-		{"atlantis-console", true, "ci-backend"},
+		{"", false, false, false},
+		{"atlantis-console", false, false, false},
+		{"atlantis-console", true, false, false},
+		{"atlantis-console", true, true, false},
+		{"atlantis-console", true, false, true},
+		{"ci-backend", true, true, true},
 	}
 	for _, s := range seeds {
-		f.Add(s.cn, s.wildcard, s.allowed)
+		f.Add(s.cn, s.proxied, s.mayApply, s.mayOperate)
 	}
 
-	f.Fuzz(func(t *testing.T, cn string, wildcard bool, allowed string) {
-		set := map[string]bool{}
-		if allowed != "" {
-			for _, c := range strings.Split(allowed, ",") {
-				if c = strings.TrimSpace(c); c != "" {
-					set[c] = true
-				}
-			}
-		}
+	f.Fuzz(func(t *testing.T, cn string, proxied, mayApply, mayOperate bool) {
 		s := &Service{
-			allowApplyMutation: wildcard,
-			operatorAllowed:    set,
-			callerFromContext:  func(context.Context) string { return cn },
+			callerFromContext:      func(context.Context) string { return cn },
+			trustedProxyMayApply:   mayApply,
+			trustedProxyMayOperate: mayOperate,
 		}
-		err := s.authorizeOperator(context.Background())
+		if proxied {
+			s.proxyForwarded = func(context.Context) bool { return true }
+		}
+		err := s.guardOperatorTransport(context.Background())
 
-		// Contract: if operatorAllowed is non-empty AND CN is not on
-		// the list, error MUST fire regardless of wildcard. (The
-		// wildcard fallback only applies when operatorAllowed is
-		// empty — defined deliberately so adding ANY operator entry
-		// disables the legacy global gate.)
-		if len(set) > 0 {
-			if set[cn] {
-				if err != nil {
-					t.Fatalf("CN=%q on allowlist was rejected: %v", cn, err)
-				}
-			} else {
-				if err == nil {
-					t.Fatalf("CN=%q not on allowlist was accepted (allowed=%v)", cn, set)
-				}
+		if proxied && !mayOperate {
+			if err == nil {
+				t.Fatalf("cn=%q: forwarded operator RPC accepted with MAY_OPERATE off (may_apply=%v)", cn, mayApply)
 			}
 			return
 		}
-
-		// operatorAllowed empty: fall back to wildcard.
-		if wildcard {
-			if err != nil {
-				t.Fatalf("wildcard fallback should grant, got %v", err)
-			}
-		} else {
-			if err == nil {
-				t.Fatalf("empty operatorAllowed + no wildcard must reject, got nil")
-			}
+		if err != nil {
+			t.Fatalf("cn=%q proxied=%v may_operate=%v: unexpected refusal %v", cn, proxied, mayOperate, err)
 		}
 	})
 }

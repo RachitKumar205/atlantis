@@ -87,20 +87,6 @@ type config struct {
 	AdminMirrorDir          string
 	AdminAllowApplyMutation bool
 
-	// AdminMutationAllowedCallers is the per-CN allowlist for mutating
-	// admin RPCs (ApplyMigration, BeginBackfillPlan). Use it in
-	// regulated deployments (AdminAllowApplyMutation=false) to scope
-	// mutations to specific CI cert CNs, or in default deployments to
-	// tighten the wildcard. Empty = no per-CN exceptions; only
-	// AdminAllowApplyMutation grants permission.
-	AdminMutationAllowedCallers []string
-
-	// AdminOperatorAllowedCallers gates operator-only mutating admin
-	// RPCs (RevokeCaller, RollbackSchema, AdoptBaseline). Typically just
-	// the console's cert CN. Empty = fall back to AdminAllowApplyMutation
-	// for backward compatibility.
-	AdminOperatorAllowedCallers []string
-
 	// CertBindingExemptCallers are CNs that bypass the per-RPC cert
 	// fingerprint check. Reserved for management-plane services whose
 	// trust comes from a higher layer (session cookies + sudo for the
@@ -224,11 +210,9 @@ func loadConfig() (config, error) {
 		AutoMigrate:   envBool("AUTO_MIGRATE", false),
 		MigrationsDir: envStr("MIGRATIONS_DIR", "migrations"),
 
-		AdminMirrorSchema:           envBool("ATL_MIRROR_SCHEMA", false),
-		AdminMirrorDir:              envStr("ATL_MIRROR_DIR", "schema"),
-		AdminAllowApplyMutation:     envBool("ATL_ALLOW_APPLY_MUTATION", true),
-		AdminMutationAllowedCallers: splitCSV(os.Getenv("ATL_MUTATION_ALLOWED_CALLERS")),
-		AdminOperatorAllowedCallers: splitCSV(os.Getenv("ATL_OPERATOR_ALLOWED_CALLERS")),
+		AdminMirrorSchema:       envBool("ATL_MIRROR_SCHEMA", false),
+		AdminMirrorDir:          envStr("ATL_MIRROR_DIR", "schema"),
+		AdminAllowApplyMutation: envBool("ATL_ALLOW_APPLY_MUTATION", true),
 		// Default exempts the console CN so it can keep calling admin
 		// RPCs after the cert-binding rollout without an operator
 		// step. Add more via comma-separated env.
@@ -272,7 +256,41 @@ func loadConfig() (config, error) {
 	if len(c.TrustedProxyCallers) > 0 && !hasAll {
 		return c, fmt.Errorf("ATL_TRUSTED_PROXY_CALLERS requires mTLS (set TLS_CERT_FILE, TLS_KEY_FILE, TLS_CA_FILE)")
 	}
+	if err := rejectRetiredAuthzEnv(); err != nil {
+		return c, err
+	}
 	return c, nil
+}
+
+// rejectRetiredAuthzEnv refuses to start when a deployment still configures
+// authorization through the env vars that used to carry it.
+//
+// Ignoring them would be the dangerous option. An operator who wrote
+// ATL_OPERATOR_ALLOWED_CALLERS=console-ci did so to keep everyone else out;
+// booting with the variable present and inert would leave them believing a
+// restriction is in force that the server no longer reads. The equivalent is
+// now a row per grant in atlantis.caller_capabilities, which is auditable and
+// changeable without a restart — so the error carries the SQL rather than just
+// naming the problem, because the operator hitting this is mid-deploy.
+func rejectRetiredAuthzEnv() error {
+	for _, name := range []string{"ATL_MUTATION_ALLOWED_CALLERS", "ATL_OPERATOR_ALLOWED_CALLERS"} {
+		v := os.Getenv(name)
+		if strings.TrimSpace(v) == "" {
+			continue
+		}
+		capability := "CAPABILITY_SCHEMA_APPLY"
+		if name == "ATL_OPERATOR_ALLOWED_CALLERS" {
+			capability = "CAPABILITY_OPERATOR"
+		}
+		return fmt.Errorf(
+			"%s is set to %q but is no longer read. Per-caller authorization moved from process env to "+
+				"atlantis.caller_capabilities, where a grant is a row that can be audited and revoked without a "+
+				"restart. Grant the equivalent and unset the variable:\n"+
+				"  INSERT INTO atlantis.caller_capabilities (caller, capability, granted_by)\n"+
+				"  VALUES ('<caller>', '%s', '<your-email>') ON CONFLICT DO NOTHING;",
+			name, v, capability)
+	}
+	return nil
 }
 
 func envStr(name, def string) string {

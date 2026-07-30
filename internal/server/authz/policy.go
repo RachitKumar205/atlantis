@@ -32,16 +32,45 @@ import (
 )
 
 // Policy is the extracted requirement for every method of one service, keyed by
-// the full gRPC method name ("/atlantis.admin.v1.AdminService/PlanSchema") so
-// it can be matched against grpc.UnaryServerInfo.FullMethod without allocating.
+// bare method name and resolved against grpc.UnaryServerInfo.FullMethod by
+// trimming whichever governed prefix matches.
 type Policy struct {
-	// prefix is "/<service full name>/". Methods outside it belong to another
-	// service on the same server and are not this policy's business.
-	prefix string
-	byName map[string]adminpb.Capability
+	// prefixes are the "/<service full name>/" strings this policy governs.
+	// There is more than one because the Admin service is mid-migration: the
+	// generated service answers at atlantis.admin.v1.AdminService while the
+	// hand-rolled JSON descriptor still answers at atlantis.admin.v1.Admin,
+	// and production traffic is on the latter. Enforcing only the generated
+	// path would leave the path everyone actually uses ungoverned — which is
+	// the same shape as the allowlist exemption this replaces. The two expose
+	// identical method sets, so one requirement table serves both.
+	prefixes []string
+	byName   map[string]adminpb.Capability
+}
+
+// LegacyAdminPrefix is the hand-rolled JSON service path. It disappears when
+// grpc.go does.
+const LegacyAdminPrefix = "/atlantis.admin.v1.Admin/"
+
+// requirement resolves a full method name against every governed prefix,
+// returning the capability and whether this policy owns the method at all.
+func (p *Policy) requirement(fullMethod string) (adminpb.Capability, bool, bool) {
+	for _, prefix := range p.prefixes {
+		if !strings.HasPrefix(fullMethod, prefix) {
+			continue
+		}
+		c, known := p.byName[strings.TrimPrefix(fullMethod, prefix)]
+		return c, known, true
+	}
+	return adminpb.Capability_CAPABILITY_UNSPECIFIED, false, false
 }
 
 // BuildPolicy reads every method's required_capability from the descriptor.
+//
+// alsoGovern lists additional "/<service>/" prefixes this policy answers for,
+// beyond the descriptor's own. It exists for the Admin service's migration —
+// see AdminPolicy — and is a parameter rather than a constant so that building
+// a policy for some other service does not silently claim a path that service
+// does not serve, denying every call on it.
 //
 // A method that declares nothing is an error, not a default: the zero value of
 // the enum is CAPABILITY_UNSPECIFIED precisely so that omitting the option is
@@ -51,11 +80,11 @@ type Policy struct {
 //
 // The error names every offending method rather than the first, so adding a
 // batch of RPCs surfaces all the missing declarations in one run.
-func BuildPolicy(sd protoreflect.ServiceDescriptor) (*Policy, error) {
+func BuildPolicy(sd protoreflect.ServiceDescriptor, alsoGovern ...string) (*Policy, error) {
 	methods := sd.Methods()
 	p := &Policy{
-		prefix: "/" + string(sd.FullName()) + "/",
-		byName: make(map[string]adminpb.Capability, methods.Len()),
+		prefixes: append([]string{"/" + string(sd.FullName()) + "/"}, alsoGovern...),
+		byName:   make(map[string]adminpb.Capability, methods.Len()),
 	}
 
 	var undeclared []string
@@ -66,7 +95,7 @@ func BuildPolicy(sd protoreflect.ServiceDescriptor) (*Policy, error) {
 			undeclared = append(undeclared, string(m.Name()))
 			continue
 		}
-		p.byName[p.prefix+string(m.Name())] = capability
+		p.byName[string(m.Name())] = capability
 	}
 
 	if len(undeclared) > 0 {
@@ -101,8 +130,8 @@ func declaredCapability(m protoreflect.MethodDescriptor) adminpb.Capability {
 	return capability
 }
 
-// Methods returns the policy as a plain map, for tests and for the startup log
-// line that records what the server will enforce.
+// Methods returns the requirement per bare method name, for tests and for the
+// startup log line recording what the server will enforce.
 func (p *Policy) Methods() map[string]adminpb.Capability {
 	out := make(map[string]adminpb.Capability, len(p.byName))
 	for k, v := range p.byName {
@@ -161,11 +190,10 @@ func (f GrantsFunc) For(ctx context.Context) (Set, error) { return f(ctx) }
 // access.
 func (p *Policy) UnaryInterceptor(grants Grants) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		if !strings.HasPrefix(info.FullMethod, p.prefix) {
+		required, known, governed := p.requirement(info.FullMethod)
+		if !governed {
 			return handler(ctx, req)
 		}
-
-		required, known := p.byName[info.FullMethod]
 		if !known {
 			return nil, status.Errorf(codes.PermissionDenied,
 				"authz: %s is not declared in the service descriptor", info.FullMethod)
@@ -194,5 +222,8 @@ func AdminPolicy() (*Policy, error) {
 	if sd == nil {
 		return nil, fmt.Errorf("authz: AdminService not found in the compiled descriptor")
 	}
-	return BuildPolicy(sd)
+	// LegacyAdminPrefix is governed too: the hand-rolled JSON descriptor is
+	// still what production clients dial, and a policy covering only the
+	// generated path would enforce nothing where it matters.
+	return BuildPolicy(sd, LegacyAdminPrefix)
 }

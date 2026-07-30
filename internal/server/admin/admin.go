@@ -2,8 +2,12 @@
 // lifecycle (plan, apply, adopt, rollback, history, lineage), caller
 // identity management (register, revoke, cert-expiry tracking),
 // declarative jobs and workflows (submit, status, dead/retry), and
-// operational telemetry (entity owners, in-process log ring). All
-// RPCs use a JSON envelope codec — see grpc.go.
+// operational telemetry (entity owners, in-process log ring).
+//
+// Every RPC is served twice while clients migrate: over protobuf at
+// atlantis.admin.v1.AdminService (grpcgen.go) and over the older JSON envelope
+// codec at atlantis.admin.v1.Admin (grpc.go). Both paths run the same method
+// bodies and both are governed by the capability interceptor.
 package admin
 
 import (
@@ -33,26 +37,31 @@ import (
 
 // Service is safe for concurrent use; one instance per process.
 //
-// Mutation gating layers (defense in depth):
+// Mutation gating, in the order a request meets it:
 //
-//  1. `allowApplyMutation` — a global wildcard. true means any
-//     authenticated caller may mutate (dev only).
-//  2. `mutationAllowed` — a per-CN allowlist. The intended prod posture:
-//     `allowApplyMutation=false` and only CI's caller CNs in this set,
-//     so a leaked app-server cert can't push schema.
-//  3. `req.GetCaller() == cert CN` on apply/backfill — a caller may only
-//     mutate its OWN schema. Even if a CN is on the mutation allowlist,
-//     it can't impersonate a different caller in the request body.
+//  1. The capability interceptor (internal/server/authz) checks the caller's
+//     grants against the requirement the method declares in admin.proto. This
+//     is the authorization decision, and it is the only one; it happens before
+//     any method body runs, so no handler can forget it.
+//  2. `allowApplyMutation` — the deployment-wide off switch for the mutating
+//     plane. Not per-caller and not authorization: an operator turning the
+//     whole plane off during an incident.
+//  3. `bindCallerIdentity` — `req.Caller` must equal the authenticated cert CN
+//     on apply and backfill. This one has to live in the handler because an
+//     interceptor cannot see request bodies, and without it CAPABILITY_SCHEMA_
+//     APPLY would mean "may write to anyone's schema" rather than "may write to
+//     mine".
 //
-// (1) is unioned with (2). (3) is independent and always enforced when
-// the server runs in TLS mode (a cert CN is available).
+// The per-CN allowlists that used to sit between (1) and (2) are gone. They
+// expressed authorization as process configuration, which meant a grant could
+// not be audited, could not be changed without a restart, and — because the
+// operator list fell back to a global wildcard when unset, the shipped default
+// — silently made every mutation-capable caller an operator.
 type Service struct {
 	pool               *pgxpool.Pool
 	mirrorDir          string
 	mirrorEnabled      bool
 	allowApplyMutation bool
-	mutationAllowed    map[string]bool
-	operatorAllowed    map[string]bool
 	callerFromContext  func(context.Context) string
 	backfillEnabled    bool
 	logRing            *obs.LogRing
@@ -79,25 +88,14 @@ type Config struct {
 	// MirrorEnabled, when true, mirrors applied files to MirrorDir.
 	MirrorEnabled bool
 
-	// AllowApplyMutation is the legacy wildcard gate. When true any
-	// authenticated caller may invoke mutating RPCs (kept for dev; in
-	// production prefer MutationAllowedCallers so a leaked cert is
-	// contained).
+	// AllowApplyMutation is the deployment-wide switch for the mutating
+	// admin plane: job submission, retry, and workflow start refuse when it
+	// is false. It is not authorization — who may mutate is a per-caller
+	// capability read from atlantis.caller_capabilities and enforced by the
+	// interceptor in internal/server/authz. This is the operator's off
+	// switch for the whole plane, which a per-caller grant cannot express
+	// and which stays useful during an incident.
 	AllowApplyMutation bool
-
-	// MutationAllowedCallers is the per-CN allowlist of identities
-	// permitted to invoke schema-mutating RPCs (ApplyMigration,
-	// BeginBackfillPlan). Empty means no per-CN exceptions — only
-	// AllowApplyMutation grants permission. Independent of (and in
-	// addition to) the req.GetCaller()-matches-CN check.
-	MutationAllowedCallers []string
-
-	// OperatorAllowedCallers is the per-CN allowlist of identities
-	// permitted to invoke operator-only mutating RPCs (RevokeCaller,
-	// RollbackSchema, AdoptBaseline). Typically a single entry: the
-	// console's cert CN. Empty means fall back to AllowApplyMutation
-	// for backward compatibility.
-	OperatorAllowedCallers []string
 
 	// CallerFromContext extracts the authenticated cert CN from the
 	// request context. The admin service uses it to enforce that
@@ -140,22 +138,11 @@ type Config struct {
 
 // New returns a Service backed by pool.
 func New(pool *pgxpool.Pool, cfg Config) *Service {
-	toSet := func(in []string) map[string]bool {
-		out := make(map[string]bool, len(in))
-		for _, cn := range in {
-			if cn = strings.TrimSpace(cn); cn != "" {
-				out[cn] = true
-			}
-		}
-		return out
-	}
 	return &Service{
 		pool:               pool,
 		mirrorDir:          cfg.MirrorDir,
 		mirrorEnabled:      cfg.MirrorEnabled,
 		allowApplyMutation: cfg.AllowApplyMutation,
-		mutationAllowed:    toSet(cfg.MutationAllowedCallers),
-		operatorAllowed:    toSet(cfg.OperatorAllowedCallers),
 		callerFromContext:  cfg.CallerFromContext,
 		backfillEnabled:    cfg.BackfillEnabled,
 		logRing:            cfg.LogRing,
@@ -178,54 +165,57 @@ func (s *Service) forwardedDenied(ctx context.Context, allowed bool, plane, envV
 	return fmt.Errorf("admin: %s is not permitted over a trusted front proxy; use a direct mTLS connection (or set %s=true)", plane, envVar)
 }
 
-// canMutate reports whether the given cert CN is permitted to invoke
-// schema-mutating RPCs. The wildcard (AllowApplyMutation) and the per-CN
-// allowlist (MutationAllowedCallers) are unioned: either grants permission.
-func (s *Service) canMutate(cn string) bool {
+// guardOperatorTransport rejects an operator RPC that arrived over a trusted
+// front proxy, unless the deployment opted in.
+//
+// The capability half of what this function used to do — "is this CN an
+// operator" — now lives in internal/server/authz, enforced by an interceptor
+// against the requirement each method declares in the proto. What remains is
+// orthogonal: a restriction on how the request arrived, not on who sent it. An
+// edge-terminated connection cannot be held to the same standard as direct
+// mTLS, and that is true regardless of the caller's grants.
+func (s *Service) guardOperatorTransport(ctx context.Context) error {
+	return s.forwardedDenied(ctx, s.trustedProxyMayOperate, "operator mutation", "ATL_TRUSTED_PROXY_MAY_OPERATE")
+}
+
+// requireMutablePlane enforces the deployment-wide switch.
+//
+// This is not authorization and does not overlap with the capability check: it
+// is one operator decision about whether this atlantis accepts schema change
+// over the wire at all. ATL_ALLOW_APPLY_MUTATION=false is the regulated posture
+// documented in docs/architecture/schema-flow.md — SQL is reviewed on a
+// deployment-repo PR and applied by tidectl, and no grant, however broad, may
+// route around that. It is also the switch to reach for during an incident,
+// which a per-caller grant cannot express because it would have to be revoked
+// caller by caller and restored the same way.
+//
+// It lives in the handler rather than the interceptor because it is not a
+// property of the caller or the method — it is one bit of server state, and
+// three RPCs in jobs.go and workflows.go already read it directly.
+func (s *Service) requireMutablePlane(what string) error {
 	if s.allowApplyMutation {
-		return true
+		return nil
 	}
-	return s.mutationAllowed[cn]
+	return fmt.Errorf("admin: %s is disabled on this server (ATL_ALLOW_APPLY_MUTATION=false); "+
+		"schema changes route through tidectl plan + approve against the deployment repo", what)
 }
 
-// authorizeOperator enforces the operator-mutation gate for RPCs that
-// administrate other callers' state (revoke, rollback, adopt). Unlike
-// self-apply there is no req.GetCaller()-matches-CN check — the operator
-// (typically the console) acts ON BEHALF OF a human admin and req.GetCaller()
-// names the TARGET caller, not the actor. When the OperatorAllowedCallers
-// set is empty we fall back to the legacy global wildcard so existing
-// deployments keep working.
-func (s *Service) authorizeOperator(ctx context.Context) error {
-	if err := s.forwardedDenied(ctx, s.trustedProxyMayOperate, "operator mutation", "ATL_TRUSTED_PROXY_MAY_OPERATE"); err != nil {
-		return err
-	}
-	var cn string
-	if s.callerFromContext != nil {
-		cn = s.callerFromContext(ctx)
-	}
-	if len(s.operatorAllowed) == 0 {
-		if s.allowApplyMutation {
-			return nil
-		}
-		return fmt.Errorf("admin: operator mutation is disabled on this server (set ATL_OPERATOR_ALLOWED_CALLERS=<console-cn> or ATL_ALLOW_APPLY_MUTATION=true)")
-	}
-	if !s.operatorAllowed[cn] {
-		return fmt.Errorf("admin: caller %q is not an operator (set ATL_OPERATOR_ALLOWED_CALLERS to permit)", cn)
-	}
-	return nil
-}
-
-// authorizeSelfApply enforces both mutation gates for RPCs that mutate
-// the calling caller's OWN schema (apply, backfill). Returns nil iff:
+// bindCallerIdentity ties a mutating request to the connection that carried it:
+// req.Caller must name the authenticated cert CN, so a caller permitted to
+// mutate can only mutate its own namespace.
 //
-//   - the connecting cert CN is allowed to mutate (via wildcard, env-var
-//     allowlist, OR caller_identities.can_mutate=true), AND
-//   - req.GetCaller() matches the connecting cert CN (so a CN allowed to
-//     mutate can only mutate its own namespace, not someone else's).
+// This deliberately did NOT move to the interceptor along with the capability
+// check. An interceptor sees the method name and the connection; it does not
+// see request bodies. Deleting this in the name of "no handler does its own
+// authz" would leave SCHEMA_APPLY meaning "may write to any caller's schema"
+// rather than "may write to mine" — a privilege escalation dressed as cleanup.
 //
-// In insecure dev mode (no TLS, no CallerFromContext) the same-CN check
-// is skipped but the mutation gate still applies.
-func (s *Service) authorizeSelfApply(ctx context.Context, reqCaller string) error {
+// In insecure dev mode there is no cert identity to bind to, so the check is
+// skipped. Nothing else covers it there either — cmd/server does not install
+// the capability interceptor without TLS, for the same reason: a self-asserted
+// header is not an identity. The admin plane is unprotected in that
+// configuration by design, and the server says so at boot.
+func (s *Service) bindCallerIdentity(ctx context.Context, reqCaller string) error {
 	if err := s.forwardedDenied(ctx, s.trustedProxyMayApply, "schema apply", "ATL_TRUSTED_PROXY_MAY_APPLY"); err != nil {
 		return err
 	}
@@ -233,29 +223,10 @@ func (s *Service) authorizeSelfApply(ctx context.Context, reqCaller string) erro
 	if s.callerFromContext != nil {
 		cn = s.callerFromContext(ctx)
 	}
-	// Skip the same-CN check when no cert identity is available (dev),
-	// but always evaluate the mutation gate.
 	if cn != "" && cn != "anonymous" && reqCaller != cn {
 		return fmt.Errorf("admin: req.caller %q does not match authenticated identity %q", reqCaller, cn)
 	}
-	// Cheap static gates first; only fall through to a DB round-trip
-	// when neither the global wildcard nor the env-var allowlist
-	// grants. The DB gate lets operators grant mutation permission at
-	// runtime without an env-var edit + atlantis restart; only a real
-	// CN is worth a lookup.
-	if s.canMutate(cn) {
-		return nil
-	}
-	if cn != "" && cn != "anonymous" {
-		_, canMutate, err := s.isRegisteredCaller(ctx, cn)
-		if err != nil {
-			return fmt.Errorf("admin: identity lookup failed: %w", err)
-		}
-		if canMutate {
-			return nil
-		}
-	}
-	return fmt.Errorf("admin: caller %q is not permitted to mutate schema (register via console with 'allow apply' on, add to ATL_MUTATION_ALLOWED_CALLERS, or set ATL_ALLOW_APPLY_MUTATION=true for dev)", cn)
+	return nil
 }
 
 // SubmittedFile is one .atl file submitted by a caller; Path is repo-relative.
@@ -671,10 +642,13 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 	if req.GetCaller() == "" {
 		return nil, errors.New("admin: caller identity is required")
 	}
-	// Enforce per-CN mutation allowlist + that req.GetCaller() matches the
-	// connecting cert CN. A leaked cert can therefore only push schema
-	// for ITS OWN caller namespace, not anyone else's.
-	if err := s.authorizeSelfApply(ctx, req.GetCaller()); err != nil {
+	if err := s.requireMutablePlane("schema apply"); err != nil {
+		return nil, err
+	}
+	// req.GetCaller() must match the connecting cert CN, so a leaked cert can
+	// only push schema for ITS OWN namespace. Whether this caller may apply at
+	// all is CAPABILITY_SCHEMA_APPLY, already checked by the interceptor.
+	if err := s.bindCallerIdentity(ctx, req.GetCaller()); err != nil {
 		return nil, err
 	}
 	if req.GetPlanId() == "" {

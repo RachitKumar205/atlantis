@@ -363,7 +363,7 @@ type RollbackSchemaResponse struct {
 }
 
 func (s *Service) RollbackSchema(ctx context.Context, req *adminpb.RollbackSchemaRequest) (*adminpb.RollbackSchemaResponse, error) {
-	if err := s.authorizeOperator(ctx); err != nil {
+	if err := s.guardOperatorTransport(ctx); err != nil {
 		return nil, err
 	}
 	if req.GetToVersion() <= 0 {
@@ -479,7 +479,7 @@ type PreviewRollbackResponse struct {
 // from a fresh consistent snapshot inside its own transaction. The
 // preview is informational; the executing call is authoritative.
 func (s *Service) PreviewRollback(ctx context.Context, req *adminpb.PreviewRollbackRequest) (*adminpb.PreviewRollbackResponse, error) {
-	if err := s.authorizeOperator(ctx); err != nil {
+	if err := s.guardOperatorTransport(ctx); err != nil {
 		return nil, err
 	}
 	if req.GetToVersion() <= 0 {

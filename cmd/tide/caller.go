@@ -6,7 +6,7 @@
 //
 // Aliases let a cert's CN satisfy `visible_to` predicates declared for
 // other identity names — PostgreSQL-roles / AD-SID / DNS-CNAME pattern.
-// Operator-only RPCs gated by ATL_OPERATOR_ALLOWED_CALLERS at the gRPC
+// Operator-only RPCs gated by CAPABILITY_OPERATOR at the gRPC
 // layer; the CLI delegates to the same admin service the console uses.
 
 package main

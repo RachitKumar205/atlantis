@@ -8,8 +8,8 @@ import (
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
 
-// The generated Admin service. Built and tested, but not yet served in
-// production — see RegisterGenerated.
+// The generated Admin service. Served alongside the hand-rolled JSON
+// descriptor in grpc.go while clients migrate — see RegisterGenerated.
 //
 // The wire format moves from a JSON envelope to protobuf and the service path
 // moves with it, so the two cannot be swapped in one change without breaking
@@ -48,15 +48,15 @@ type grpcServer struct {
 
 // RegisterGenerated binds the protobuf Admin service to a gRPC server.
 //
-// cmd/server does not call this yet, and the omission is deliberate rather
-// than pending cleanup. AuthChecker's exempt list covers
-// "/atlantis.admin.v1.Admin/", which does not prefix-match
-// "/atlantis.admin.v1.AdminService/", and the capability interceptor is not
-// installed. Serving this path today would mean an endpoint gated only by
-// authorizeOperator, which returns nil for every caller when
-// ATL_OPERATOR_ALLOWED_CALLERS is unset — the shipped default, and the exact
-// hole internal/server/authz exists to close. Registration lands with the
-// interceptor. Tests call this directly.
+// Both this and Register (the hand-rolled JSON descriptor) are served while
+// clients migrate. The capability interceptor governs both paths — its policy
+// carries the legacy prefix alongside the generated one precisely so that
+// serving two descriptors does not mean enforcing on one of them.
+//
+// Anything added here must be unary. The capability interceptor has no stream
+// form, so the first streaming admin RPC would be served by cmd/server's stream
+// chain and authorized by nothing. Nothing here would fail to compile, which is
+// why authz.TestAdminServiceDeclaresNoStreamingRPC exists.
 func RegisterGenerated(srv *grpc.Server, svc *Service) {
 	adminpb.RegisterAdminServiceServer(srv, &grpcServer{svc: svc})
 }

@@ -99,14 +99,26 @@ services:
       # in .env to run migrations manually via tidectl migrate-up.
       AUTO_MIGRATE: "${SELF_HOST_AUTO_MIGRATE:-true}"
       MIGRATIONS_DIR: /app/migrations
-      # Schema mutation gates. Default flow: caller CI runs `tide apply`
-      # against this server. Set ATL_ALLOW_APPLY_MUTATION=false in .env
-      # for the regulated opt-in. ATL_MUTATION_ALLOWED_CALLERS scopes the
-      # wildcard to a CN allowlist; ATL_OPERATOR_ALLOWED_CALLERS gates
-      # RevokeCaller / RollbackSchema / AdoptBaseline.
+      # Deployment-wide switch for the mutating admin plane. Default flow:
+      # caller CI runs `tide apply` against this server. Set to "false" in
+      # .env for the regulated opt-in, where schema changes route through a
+      # deployment-repo PR instead.
+      #
+      # Who may mutate is a separate question, answered per caller by
+      # atlantis.caller_capabilities rather than by env. The former
+      # ATL_MUTATION_ALLOWED_CALLERS / ATL_OPERATOR_ALLOWED_CALLERS variables
+      # are no longer read and the server refuses to start if they are set;
+      # grant CAPABILITY_SCHEMA_APPLY or CAPABILITY_OPERATOR instead. The
+      # console is seeded as an operator by migration 0019.
       ATL_ALLOW_APPLY_MUTATION: "${ATL_ALLOW_APPLY_MUTATION:-true}"
+      # Forwarded solely so the server can refuse to start when either is still
+      # set. This service takes no env_file, so without these mappings a
+      # retired variable in .env would be dropped at the compose boundary and
+      # the operator would be left believing an allowlist is in force that
+      # nothing reads — exactly what the refusal exists to prevent. Empty is
+      # the skip case. Remove these a release after the retirement.
       ATL_MUTATION_ALLOWED_CALLERS: "${ATL_MUTATION_ALLOWED_CALLERS:-}"
-      ATL_OPERATOR_ALLOWED_CALLERS: "${ATL_OPERATOR_ALLOWED_CALLERS:-atlantis-console}"
+      ATL_OPERATOR_ALLOWED_CALLERS: "${ATL_OPERATOR_ALLOWED_CALLERS:-}"
       ATL_MIRROR_SCHEMA: "${ATL_MIRROR_SCHEMA:-false}"
       # mTLS: every caller and the console must present a client cert
       # signed by ca.crt. The console's CN is "atlantis-console".
