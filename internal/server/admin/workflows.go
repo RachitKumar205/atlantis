@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -67,56 +68,81 @@ func (s *Service) StartWorkflow(ctx context.Context, req *adminpb.StartWorkflowR
 		return nil, errors.New("admin: no IR checkpoint applied")
 	}
 
-	var found bool
-	for _, wf := range ir.Workflows {
-		if wf.ID() == req.GetWorkflowName() {
-			found = true
+	var target *dsl.Workflow
+	for i := range ir.Workflows {
+		if ir.Workflows[i].ID() == req.GetWorkflowName() {
+			target = &ir.Workflows[i]
 			break
 		}
 	}
-	if !found {
+	if target == nil {
 		return nil, fmt.Errorf("admin: unknown workflow %q", req.GetWorkflowName())
 	}
+	// A stepless workflow used to be accepted: the instance row was written and
+	// the enqueue loop skipped it, leaving a row that could never advance and a
+	// caller holding an id that would never complete. Refusing is the honest
+	// answer — there is nothing to start.
+	if len(target.Steps) == 0 {
+		return nil, fmt.Errorf("admin: workflow %q declares no steps", req.GetWorkflowName())
+	}
 
+	// Absent and explicitly-null state both mean "no state". json.RawMessage
+	// does not decode `null` to an empty slice — it keeps the four bytes — so
+	// without the second test the literal string "null" reaches the state
+	// column, and buildWorkflowStepArgs then unmarshals it to a nil map and
+	// yields nil for every ExprArg. The step runs with every argument silently
+	// empty rather than failing.
 	state := json.RawMessage(req.GetState())
-	if len(state) == 0 {
+	if len(state) == 0 || string(state) == "null" {
 		state = json.RawMessage("{}")
 	}
 
-	var id int64
-	err = s.pool.QueryRow(ctx, `
-INSERT INTO atlantis.workflow_instances (workflow_name, state, submitted_by)
-VALUES ($1, $2, $3)
-RETURNING id`, req.GetWorkflowName(), []byte(state), req.GetSubmittedBy()).Scan(&id)
+	step := target.Steps[0]
+	argsJSON, err := buildWorkflowStepArgs(step, state)
 	if err != nil {
+		return nil, fmt.Errorf("build first step args: %w", err)
+	}
+
+	// Instance row, first job, and current_step in one transaction.
+	//
+	// These were three separate statements, and the last one discarded its
+	// error. The failure that produces is specific and bad: the job for step 0
+	// is enqueued while current_step stays NULL, so when it completes
+	// advanceWorkflow reads COALESCE(current_step,'') -> "" -> next index 0
+	// (jobs/workflow.go:110-112) and enqueues step 0 again — duplicate
+	// execution, potentially looping.
+	//
+	// Checking the error instead of ignoring it would not have been enough:
+	// the job is already visible to the dispatcher by then, so there is a
+	// window no error handling can close. Atomicity is the fix; the error check
+	// is a consequence of it.
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("begin start-workflow tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	var id int64
+	if err := tx.QueryRow(ctx, `
+INSERT INTO atlantis.workflow_instances (workflow_name, state, submitted_by, current_step)
+VALUES ($1, $2, $3, $4)
+RETURNING id`, req.GetWorkflowName(), []byte(state), req.GetSubmittedBy(), step.Name).Scan(&id); err != nil {
 		return nil, fmt.Errorf("insert workflow: %w", err)
 	}
 
-	// Enqueue the first step inline so the workflow starts immediately.
-	// There is no post-insert hook to rely on: this package cannot import
-	// internal/jobs without an import cycle, so the engine never learns about
-	// the instance until a job for it exists.
-	for _, wf := range ir.Workflows {
-		if wf.ID() != req.GetWorkflowName() || len(wf.Steps) == 0 {
-			continue
-		}
-		step := wf.Steps[0]
-		argsJSON, merr := buildWorkflowStepArgs(step, state)
-		if merr != nil {
-			return nil, fmt.Errorf("build first step args: %w", merr)
-		}
-		_, err = s.pool.Exec(ctx, `
+	// Enqueued inline because there is no post-insert hook to rely on: this
+	// package cannot import internal/jobs without an import cycle, so the
+	// engine never learns about the instance until a job for it exists.
+	if _, err := tx.Exec(ctx, `
 INSERT INTO atlantis.jobs (job_name, queue, args, max_retries, timeout_ms, submitted_by, workflow_id, workflow_step)
 VALUES ($1, 'default', $2, 3, 1800000, $3, $4, $5)`,
-			step.TargetJobID, argsJSON, "workflow:"+req.GetWorkflowName(), id, step.Name)
-		if err != nil {
-			return nil, fmt.Errorf("enqueue first step: %w", err)
-		}
-		_, _ = s.pool.Exec(ctx,
-			`UPDATE atlantis.workflow_instances SET current_step=$1 WHERE id=$2`, step.Name, id)
-		break
+		step.TargetJobID, argsJSON, "workflow:"+req.GetWorkflowName(), id, step.Name); err != nil {
+		return nil, fmt.Errorf("enqueue first step: %w", err)
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit start-workflow: %w", err)
+	}
 	return &adminpb.StartWorkflowResponse{WorkflowId: fmt.Sprintf("%d", id)}, nil
 }
 
@@ -149,6 +175,14 @@ func (s *Service) GetWorkflowStatus(ctx context.Context, req *adminpb.GetWorkflo
 	if req.GetWorkflowId() == "" {
 		return nil, errors.New("admin: WorkflowID is required")
 	}
+	// The column is bigint, so binding a non-numeric string surfaces
+	// "invalid input syntax for type bigint" — a driver message about our
+	// schema, for what is simply a workflow that does not exist. Parse first
+	// and answer the question that was asked.
+	wfID, perr := strconv.ParseInt(req.GetWorkflowId(), 10, 64)
+	if perr != nil {
+		return &adminpb.GetWorkflowStatusResponse{Found: false}, nil
+	}
 	var (
 		ws          WorkflowStatus
 		id          int64
@@ -158,7 +192,7 @@ func (s *Service) GetWorkflowStatus(ctx context.Context, req *adminpb.GetWorkflo
 	err := s.pool.QueryRow(ctx, `
 SELECT id, workflow_name, status, COALESCE(current_step, ''), started_at, completed_at,
        COALESCE(error_msg, ''), COALESCE(submitted_by, '')
-FROM atlantis.workflow_instances WHERE id = $1`, req.GetWorkflowId()).Scan(
+FROM atlantis.workflow_instances WHERE id = $1`, wfID).Scan(
 		&id, &ws.WorkflowName, &ws.Status, &ws.CurrentStep,
 		&startedAt, &completedAt, &ws.ErrorMsg, &ws.SubmittedBy)
 	if err != nil {
