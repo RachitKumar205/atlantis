@@ -36,20 +36,16 @@ import (
 // trimming whichever governed prefix matches.
 type Policy struct {
 	// prefixes are the "/<service full name>/" strings this policy governs.
-	// There is more than one because the Admin service is mid-migration: the
-	// generated service answers at atlantis.admin.v1.AdminService while the
-	// hand-rolled JSON descriptor still answers at atlantis.admin.v1.Admin,
-	// and production traffic is on the latter. Enforcing only the generated
-	// path would leave the path everyone actually uses ungoverned — which is
-	// the same shape as the allowlist exemption this replaces. The two expose
-	// identical method sets, so one requirement table serves both.
+	//
+	// It stays a slice although only one entry is used today. During the proto
+	// migration the Admin service answered on two paths at once and both had to
+	// be governed — enforcing on only the path that was not in production would
+	// have been authorization theatre. That is the shape a future dual-serve
+	// window would take again, and BuildPolicy's alsoGovern parameter is how it
+	// gets expressed.
 	prefixes []string
 	byName   map[string]adminpb.Capability
 }
-
-// LegacyAdminPrefix is the hand-rolled JSON service path. It disappears when
-// grpc.go does.
-const LegacyAdminPrefix = "/atlantis.admin.v1.Admin/"
 
 // requirement resolves a full method name against every governed prefix,
 // returning the capability and whether this policy owns the method at all.
@@ -128,6 +124,12 @@ func declaredCapability(m protoreflect.MethodDescriptor) adminpb.Capability {
 		return adminpb.Capability_CAPABILITY_UNSPECIFIED
 	}
 	return capability
+}
+
+// Prefixes returns the service paths this policy governs, so a test can drive
+// every one of them rather than a list it maintains separately.
+func (p *Policy) Prefixes() []string {
+	return append([]string(nil), p.prefixes...)
 }
 
 // Methods returns the requirement per bare method name, for tests and for the
@@ -222,8 +224,5 @@ func AdminPolicy() (*Policy, error) {
 	if sd == nil {
 		return nil, fmt.Errorf("authz: AdminService not found in the compiled descriptor")
 	}
-	// LegacyAdminPrefix is governed too: the hand-rolled JSON descriptor is
-	// still what production clients dial, and a policy covering only the
-	// generated path would enforce nothing where it matters.
-	return BuildPolicy(sd, LegacyAdminPrefix)
+	return BuildPolicy(sd)
 }

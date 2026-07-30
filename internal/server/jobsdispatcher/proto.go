@@ -2,10 +2,8 @@
 //
 // Worker → server envelopes (WorkerEnvelope) and server → worker
 // envelopes (DispatchEnvelope) are tagged unions: exactly one of the
-// nested pointer fields is non-nil per envelope. JSON-codec friendly
-// — the admin gRPC server's JSON envelope (internal/server/admin/grpc.go)
-// uses the same shape, and we register against the same `jsonMsg`
-// codec so atlantis's existing wire conventions extend cleanly.
+// nested pointer fields is non-nil per envelope, which the package's own
+// `atl-json-dispatch` codec encodes directly.
 //
 // Why a tagged union instead of separate RPCs per message type? A
 // single bidi stream is the cleanest way to multiplex (a) server-

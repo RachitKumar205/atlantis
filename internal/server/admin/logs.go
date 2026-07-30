@@ -34,11 +34,6 @@ type LogEntry struct {
 	Attrs map[string]string `json:"attrs"`
 }
 
-type GetLogsResponse struct {
-	Records []LogEntry `json:"records"`
-	LastSeq uint64     `json:"last_seq"`
-}
-
 // GetLogs returns log records produced by the atlantis server since the
 // caller's cursor. Reads from a fixed-size in-process ring (see
 // internal/obs/logring.go); the writer side is lock-free so this read
@@ -87,31 +82,4 @@ func slogLevelName(l slog.Level) string {
 	default:
 		return "debug"
 	}
-}
-
-// logEntriesFromPB rebuilds the JSON shape. Records is non-omitempty, and the
-// handler has two empty paths that emitted different JSON:
-//
-//	logRing == nil          -> early return, nil slice  -> "records":null
-//	ring configured, empty  -> make(..., 0)             -> "records":[]
-//
-// So the guard tests nil rather than length. Using len(in)==0 collapses both
-// onto null and breaks the second; dropping the guard collapses both onto []
-// and breaks the first. An earlier draft did the latter, and the test written
-// alongside it asserted the wrong branch, certifying the drift.
-func logEntriesFromPB(in []*adminpb.LogEntry) []LogEntry {
-	if in == nil {
-		return nil
-	}
-	out := make([]LogEntry, 0, len(in))
-	for _, r := range in {
-		out = append(out, LogEntry{
-			Seq:   r.GetSeq(),
-			Time:  r.GetTime(),
-			Level: r.GetLevel(),
-			Msg:   r.GetMsg(),
-			Attrs: r.GetAttrs(),
-		})
-	}
-	return out
 }

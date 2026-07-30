@@ -93,14 +93,8 @@ type DispatcherEventSnapshot struct {
 
 // Wire request/response types for the 4 RPCs.
 
-type ListConnectedWorkersRequest struct{}
-
 type ListConnectedWorkersResponse struct {
 	Sessions []DispatcherSessionSnapshot `json:"sessions"`
-}
-
-type GetWorkerSessionRequest struct {
-	SessionID string `json:"session_id"`
 }
 
 type GetWorkerSessionResponse struct {
@@ -247,13 +241,6 @@ func timeToPB(t time.Time) *timestamppb.Timestamp {
 	return timestamppb.New(t)
 }
 
-func timeFromPB(ts *timestamppb.Timestamp) time.Time {
-	if ts == nil {
-		return time.Time{}
-	}
-	return ts.AsTime()
-}
-
 func sessionSnapshotToPB(s DispatcherSessionSnapshot) *adminpb.DispatcherSessionSnapshot {
 	return &adminpb.DispatcherSessionSnapshot{
 		SessionId:       s.SessionID,
@@ -273,25 +260,6 @@ func sessionSnapshotToPB(s DispatcherSessionSnapshot) *adminpb.DispatcherSession
 		Failed:        s.Failed,
 		Revoked:       s.Revoked,
 		Drained:       s.Drained,
-	}
-}
-
-func sessionSnapshotFromPB(p *adminpb.DispatcherSessionSnapshot) DispatcherSessionSnapshot {
-	return DispatcherSessionSnapshot{
-		SessionID:       p.GetSessionId(),
-		Caller:          p.GetCaller(),
-		Queue:           p.GetQueue(),
-		PodID:           p.GetPodId(),
-		SDKVersion:      p.GetSdkVersion(),
-		ConnectedAt:     timeFromPB(p.GetConnectedAt()),
-		LastHeartbeatAt: timeFromPB(p.GetLastHeartbeatAt()),
-		MaxInFlight:     int(p.GetMaxInFlight()),
-		InflightCount:   int(p.GetInflightCount()),
-		Dispatched:      p.GetDispatched(),
-		Completed:       p.GetCompleted(),
-		Failed:          p.GetFailed(),
-		Revoked:         p.GetRevoked(),
-		Drained:         p.GetDrained(),
 	}
 }
 
@@ -315,42 +283,6 @@ func sessionDetailToPB(d DispatcherSessionDetail) *adminpb.DispatcherSessionDeta
 			JobId:   e.JobID,
 			JobName: e.JobName,
 			Note:    e.Note,
-		})
-	}
-	return out
-}
-
-// sessionDetailFromPB flattens the nested snapshot back into the embedded
-// field, restoring the JSON shape the console reads.
-//
-// All three slices come back non-nil so they marshal as [] — see the note on
-// empty repeated fields above.
-func sessionDetailFromPB(p *adminpb.DispatcherSessionDetail) DispatcherSessionDetail {
-	jobNames := p.GetJobNames()
-	if jobNames == nil {
-		jobNames = []string{}
-	}
-	out := DispatcherSessionDetail{
-		DispatcherSessionSnapshot: sessionSnapshotFromPB(p.GetSnapshot()),
-		JobNames:                  jobNames,
-		Inflight:                  make([]DispatcherInflightDetail, 0, len(p.GetInflight())),
-		Events:                    make([]DispatcherEventSnapshot, 0, len(p.GetEvents())),
-	}
-	for _, f := range p.GetInflight() {
-		out.Inflight = append(out.Inflight, DispatcherInflightDetail{
-			JobID:        f.GetJobId(),
-			JobName:      f.GetJobName(),
-			DispatchedAt: timeFromPB(f.GetDispatchedAt()),
-			AckReceived:  f.GetAckReceived(),
-		})
-	}
-	for _, e := range p.GetEvents() {
-		out.Events = append(out.Events, DispatcherEventSnapshot{
-			At:      timeFromPB(e.GetAt()),
-			Kind:    e.GetKind(),
-			JobID:   e.GetJobId(),
-			JobName: e.GetJobName(),
-			Note:    e.GetNote(),
 		})
 	}
 	return out

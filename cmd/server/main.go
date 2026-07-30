@@ -247,7 +247,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// author forgot to write an authz call was reachable by anyone. Both end
 	// here: registration is an operator act through RegisterCaller, seeded for
 	// a fresh install by migration 0019, and the capability interceptor below
-	// governs the admin plane on both the generated and legacy service paths.
+	// governs the admin plane.
 	//
 	// Health and reflection stay exempt: they are infrastructure probes.
 	authChecker := interceptors.NewAuthChecker(interceptors.AuthConfig{
@@ -381,10 +381,9 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	reflection.Register(srv)
 
 	log.Debug("init: register admin service")
-	admin.Register(srv, adminSvc)
-	// Both paths are served while clients migrate; the capability interceptor
-	// governs each. admin.Register goes away with grpc.go once tide, tidectl
-	// and the console speak protobuf.
+	// One service, one wire format. The hand-rolled JSON descriptor that used
+	// to be registered alongside this is gone: tide, tidectl and the console
+	// all speak protobuf now, so nothing dialled it.
 	admin.RegisterGenerated(srv, adminSvc)
 
 	// Backfill worker — gated by ATL_BACKFILL_WORKER_ENABLED. Shares

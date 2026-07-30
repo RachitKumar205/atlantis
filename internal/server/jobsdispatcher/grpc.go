@@ -1,8 +1,10 @@
 // gRPC wiring for the WorkerDispatch service.
 //
-// One bidi streaming RPC: WorkerSession. JSON envelopes via the
-// `jsonMsg` codec atlantis already registers from
-// internal/server/admin/grpc.go's init — no second codec needed.
+// One bidi streaming RPC: WorkerSession, carrying JSON envelopes over the
+// `atl-json-dispatch` codec this package registers itself (see init below).
+// It used to describe itself as reusing a codec the admin service registered;
+// that was already inaccurate when written, and the admin service has since
+// moved to protobuf entirely.
 //
 // The HandlerType (`(*WorkerDispatchServer)(nil)`) is the conformance
 // interface gRPC's RegisterService uses for reflection-style runtime
@@ -62,8 +64,7 @@ func (dispatchJSONCodec) Name() string { return dispatchCodecName }
 func init() { encoding.RegisterCodecV2(dispatchJSONCodec{}) }
 
 // WorkerDispatchServer is the typed interface gRPC.RegisterService
-// uses for runtime conformance checking. Mirrors the AdminServer
-// pattern in internal/server/admin/grpc.go. The handler signature
+// uses for runtime conformance checking. The handler signature
 // matches grpc.ServiceDesc's Streams.Handler — a raw ServerStream
 // that we adapt via RecvMsg / SendMsg with the jsonMsg envelope.
 type WorkerDispatchServer interface {
@@ -342,7 +343,6 @@ func recvEnvelope(stream grpc.ServerStream) (*WorkerEnvelope, error) {
 	return &env, nil
 }
 
-// The JSON envelope codec used on this stream is the one registered
-// at internal/server/admin/grpc.go's init — single shared codec named
-// "json" across atlantis's gRPC surface. The dispatcher's grpc.go
-// reuses it via the jsonMsg type defined above.
+// The JSON envelope codec used on this stream is `atl-json-dispatch`,
+// registered by this package's own init. It is not shared with anything else:
+// the admin surface is protobuf and the entity services are protobuf.

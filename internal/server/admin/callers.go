@@ -40,10 +40,6 @@ type CallerInfo struct {
 
 type GetCallersRequest struct{}
 
-type GetCallersResponse struct {
-	Callers []CallerInfo `json:"callers"`
-}
-
 // GetCallers lists every known caller — the UNION of caller_identities
 // (operator-registered) and caller_registrations (anyone who has ever
 // `tide apply`'d). A caller may appear with 0 file_count if they were

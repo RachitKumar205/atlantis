@@ -4,10 +4,8 @@
 // declarative jobs and workflows (submit, status, dead/retry), and
 // operational telemetry (entity owners, in-process log ring).
 //
-// Every RPC is served twice while clients migrate: over protobuf at
-// atlantis.admin.v1.AdminService (grpcgen.go) and over the older JSON envelope
-// codec at atlantis.admin.v1.Admin (grpc.go). Both paths run the same method
-// bodies and both are governed by the capability interceptor.
+// RPCs are served over protobuf at atlantis.admin.v1.AdminService (grpcgen.go),
+// governed by the capability interceptor in internal/server/authz.
 package admin
 
 import (

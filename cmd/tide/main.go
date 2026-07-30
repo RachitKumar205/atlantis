@@ -23,10 +23,8 @@
 // against the freshest merged schema. Suppress with --no-pull when the
 // network is unavailable or the cache is known-current.
 //
-// Network transport is hand-rolled JSON-over-gRPC; mTLS material is loaded
-// from TIDE_TLS_* env vars or tide.yaml. The server side
-// (internal/server/admin/grpc.go) speaks the same JSON envelope; this keeps
-// tide independent of buf-generated stubs.
+// Network transport is protobuf over gRPC via the generated admin stubs in
+// clients/go; mTLS material is loaded from TIDE_TLS_* env vars or tide.yaml.
 package main
 
 import (

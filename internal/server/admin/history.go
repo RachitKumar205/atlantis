@@ -551,21 +551,6 @@ func schemaVersionSummariesToPB(in []SchemaVersionSummary) []*adminpb.SchemaVers
 	return out
 }
 
-func schemaVersionSummariesFromPB(in []*adminpb.SchemaVersionSummary) []SchemaVersionSummary {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]SchemaVersionSummary, 0, len(in))
-	for _, v := range in {
-		out = append(out, SchemaVersionSummary{
-			Version: v.GetVersion(), Caller: v.GetCaller(), PlanClass: v.GetPlanClass(),
-			EventType: v.GetEventType(), ChangeCount: int(v.GetChangeCount()),
-			CreatedAt: v.GetCreatedAt(), IRHash: v.GetIrHash(),
-		})
-	}
-	return out
-}
-
 func schemaVersionToPB(v *GetSchemaVersionResponse) *adminpb.GetSchemaVersionResponse {
 	out := &adminpb.GetSchemaVersionResponse{
 		Version: v.Version, Caller: v.Caller, PlanClass: v.PlanClass,
@@ -577,20 +562,6 @@ func schemaVersionToPB(v *GetSchemaVersionResponse) *adminpb.GetSchemaVersionRes
 	if v.ParentVer != nil {
 		pv := *v.ParentVer
 		out.ParentVersion = &pv
-	}
-	return out
-}
-
-func schemaVersionFromPB(p *adminpb.GetSchemaVersionResponse) *GetSchemaVersionResponse {
-	out := &GetSchemaVersionResponse{
-		Version: p.GetVersion(), Caller: p.GetCaller(), PlanClass: p.GetPlanClass(),
-		EventType: p.GetEventType(), Diff: p.GetDiff(), UpSQL: p.GetUpSql(),
-		DownSQL: p.GetDownSql(), IRSnapshot: p.GetIrSnapshot(),
-		CreatedAt: p.GetCreatedAt(), IRHash: p.GetIrHash(),
-	}
-	if p.ParentVersion != nil {
-		v := p.GetParentVersion()
-		out.ParentVer = &v
 	}
 	return out
 }
@@ -615,26 +586,6 @@ func lineageToPB(in []EntityLineageEntry) []*adminpb.EntityLineageEntry {
 	return out
 }
 
-func lineageFromPB(in []*adminpb.EntityLineageEntry) []EntityLineageEntry {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]EntityLineageEntry, 0, len(in))
-	for _, e := range in {
-		entry := EntityLineageEntry{
-			EntityID: e.GetEntityId(), FieldName: e.GetFieldName(),
-			IntroducedBy: e.GetIntroducedBy(), IntroducedAt: e.GetIntroducedAt(),
-			LastModifiedBy: e.GetLastModifiedBy(), LastModifiedAt: e.GetLastModifiedAt(),
-		}
-		if e.RemovedAt != nil {
-			v := e.GetRemovedAt()
-			entry.RemovedAt = &v
-		}
-		out = append(out, entry)
-	}
-	return out
-}
-
 func ownersToPB(in []EntityOwnerEntry) []*adminpb.EntityOwnerEntry {
 	if len(in) == 0 {
 		return nil
@@ -644,20 +595,6 @@ func ownersToPB(in []EntityOwnerEntry) []*adminpb.EntityOwnerEntry {
 		out = append(out, &adminpb.EntityOwnerEntry{
 			EntityId: o.EntityID, IntroducedBy: o.IntroducedBy,
 			IntroducedAt: o.IntroducedAt, FieldCount: int32(o.FieldCount),
-		})
-	}
-	return out
-}
-
-func ownersFromPB(in []*adminpb.EntityOwnerEntry) []EntityOwnerEntry {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]EntityOwnerEntry, 0, len(in))
-	for _, o := range in {
-		out = append(out, EntityOwnerEntry{
-			EntityID: o.GetEntityId(), IntroducedBy: o.GetIntroducedBy(),
-			IntroducedAt: o.GetIntroducedAt(), FieldCount: int(o.GetFieldCount()),
 		})
 	}
 	return out

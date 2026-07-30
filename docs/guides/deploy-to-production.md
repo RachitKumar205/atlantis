@@ -159,7 +159,7 @@ After the server starts, confirm it's serving:
 
 ```
 grpcurl -cacert ca.crt -cert client.crt -key client.key \
-  atlantis.internal:9090 atlantis.admin.v1.Admin/GetMergedSchema
+  atlantis.internal:9090 atlantis.admin.v1.AdminService/GetMergedSchema
 ```
 
 A success response returns the current merged schema as JSON. Anything else (TLS handshake failure, no response) indicates a problem; check the server logs.

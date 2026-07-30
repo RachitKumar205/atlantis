@@ -422,11 +422,9 @@ func formatNullable(t *time.Time) string {
 // as INT (int4), and progress_pct is scanned through an int16. Unlike
 // callers.go COUNT(*), none of these can exceed the wire type.
 //
-// GetJobStatusResponse.Job is a value, tagged omitempty — which does nothing
-// for a struct, so a not-found response still emits a fully zero Job object.
-// The proto models it as a message pointer, nil when absent. jobStatusFromPB
-// therefore maps nil to the zero value rather than propagating nil, or the
-// key would disappear from a response that has always contained it.
+// The proto models Job as a message pointer, nil when the job is not found.
+// What a consumer sees for that nil is decided at the JSON boundary by
+// clients/go/adminjson, not here — see its EmitDefaultValues note.
 
 func jobStatusToPB(j JobStatus) *adminpb.JobStatus {
 	return &adminpb.JobStatus{
@@ -447,32 +445,5 @@ func jobStatusToPB(j JobStatus) *adminpb.JobStatus {
 		ProgressPct:  int32(j.ProgressPct),
 		ProgressMsg:  j.ProgressMsg,
 		ProgressAt:   j.ProgressAt,
-	}
-}
-
-func jobStatusFromPB(p *adminpb.JobStatus) JobStatus {
-	// A nil message becomes the zero value, not a zero-value-with-nil-Args
-	// distinction the JSON side cannot express anyway.
-	if p == nil {
-		return JobStatus{}
-	}
-	return JobStatus{
-		JobID:        p.GetJobId(),
-		JobName:      p.GetJobName(),
-		Queue:        p.GetQueue(),
-		Args:         p.GetArgs(),
-		Status:       p.GetStatus(),
-		Attempts:     int(p.GetAttempts()),
-		MaxRetries:   int(p.GetMaxRetries()),
-		LastError:    p.GetLastError(),
-		LastErrorAt:  p.GetLastErrorAt(),
-		ScheduledFor: p.GetScheduledFor(),
-		StartedAt:    p.GetStartedAt(),
-		CompletedAt:  p.GetCompletedAt(),
-		EnqueuedAt:   p.GetEnqueuedAt(),
-		SubmittedBy:  p.GetSubmittedBy(),
-		ProgressPct:  int(p.GetProgressPct()),
-		ProgressMsg:  p.GetProgressMsg(),
-		ProgressAt:   p.GetProgressAt(),
 	}
 }

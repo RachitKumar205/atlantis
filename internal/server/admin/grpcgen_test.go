@@ -81,11 +81,10 @@ func TestMigratedRPCsAreTracked(t *testing.T) {
 	t.Logf("%d/%d RPCs migrated; pending: %v", len(migrated), sd.Methods().Len(), pending)
 
 	if len(pending) == 0 {
-		t.Log("all RPCs migrated. grpcServer can collapse into *Service and " +
-			"migratedRPCs can go, but grpc.go and the legacy structs cannot be " +
-			"deleted until the clients move off the JSON path — and four handlers " +
-			"in history.go still scan rows into those structs rather than into " +
-			"protobuf, which is why their *ToPB converters exist")
+		t.Log("all RPCs implemented. grpcServer could collapse into *Service and " +
+			"migratedRPCs could go; what keeps them is that several handlers scan " +
+			"rows into hand-written structs and convert via *ToPB, so the structs " +
+			"outlive the wire format that named them")
 	}
 }
 

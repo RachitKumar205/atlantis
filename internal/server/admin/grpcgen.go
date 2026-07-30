@@ -8,41 +8,26 @@ import (
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
 
-// The generated Admin service. Served alongside the hand-rolled JSON
-// descriptor in grpc.go while clients migrate — see RegisterGenerated.
+// The generated Admin service.
 //
-// The wire format moves from a JSON envelope to protobuf and the service path
-// moves with it, so the two cannot be swapped in one change without breaking
-// every deployed tide at the moment the server restarts. RPCs are reshaped on
-// *Service a slice at a time, with the handlers in grpc.go converting for as
-// long as the JSON path survives, and this type accumulating the migrated ones.
+// The migration that produced this file is finished: all 32 RPCs take and
+// return generated types, and the hand-rolled JSON descriptor that served them
+// alongside has been deleted.
 //
-// Two constraints on that plan are worth stating, because both were assumed
-// away in an earlier draft of this comment.
+// One constraint from that migration is worth keeping, because it is what a
+// future dual-serve window would run into again. Server-side migration can be
+// incremental; client-side migration cannot. A client dialing with
+// grpc.ForceCodecV2 sets the codec as a *connection*-wide default, and grpc-go
+// derives the content-subtype from it for every call on that connection — so a
+// client cannot move one RPC at a time over an existing dial. Each client moves
+// wholesale, on its own dial, which is also how a released binary is deployed.
 //
-// Server-side migration is incremental; client-side migration is not. A client
-// dialing with grpc.ForceCodecV2(jsonCodec{}) sets that as a *connection*-wide
-// default, and grpc-go derives the content-subtype from the forced codec's name
-// for every call on that connection. A client that switched one RPC to a
-// generated stub over its existing connection would send content-subtype
-// "json", the server would select the globally registered jsonCodec for a
-// protobuf handler, and the call would fail Internal. Each client therefore
-// moves wholesale, on its own dial — which is also how a released binary is
-// deployed anyway.
-//
-// tide and tidectl have moved. internal/console/client.go is the last one still
-// forcing the JSON codec, and grpc.go stays registered until it follows.
-//
-// UnimplementedAdminServiceServer supplies the not-yet-migrated methods so
-// this type satisfies the interface throughout rather than only at the end.
-// That convenience costs the compile-time check the hand-rolled AdminServer
-// interface provided: forgetting to add a method here is a runtime
-// Unimplemented, not a build failure. TestMigratedRPCsAreTracked replaces the
-// guarantee — it enumerates the descriptor and fails on any method that is
-// neither migrated nor explicitly listed as pending.
-//
-// When the last RPC lands, grpc.go and the hand-written request/response
-// structs are deleted and this type collapses into *Service.
+// UnimplementedAdminServiceServer is still embedded, and it still costs the
+// compile-time check the deleted hand-rolled AdminServer interface provided:
+// adding an RPC to the proto and forgetting to implement it here is a runtime
+// Unimplemented, not a build failure. TestMigratedRPCsAreTracked is the
+// replacement — it enumerates the descriptor and fails on any method that is
+// neither implemented nor explicitly listed as pending.
 type grpcServer struct {
 	adminpb.UnimplementedAdminServiceServer
 	svc *Service
@@ -50,10 +35,9 @@ type grpcServer struct {
 
 // RegisterGenerated binds the protobuf Admin service to a gRPC server.
 //
-// Both this and Register (the hand-rolled JSON descriptor) are served while
-// clients migrate. The capability interceptor governs both paths — its policy
-// carries the legacy prefix alongside the generated one precisely so that
-// serving two descriptors does not mean enforcing on one of them.
+// This is the only admin registration. A hand-rolled JSON descriptor was served
+// alongside it during the client migration; it is gone, along with the policy
+// prefix that governed it.
 //
 // Anything added here must be unary. The capability interceptor has no stream
 // form, so the first streaming admin RPC would be served by cmd/server's stream

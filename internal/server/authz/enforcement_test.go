@@ -22,9 +22,11 @@ import (
 // capability does. The second half is what catches an accidental hierarchy —
 // if someone makes OPERATOR imply everything, this fails on every method.
 //
-// Both service prefixes are exercised, because production traffic is still on
-// the legacy one and a policy that only governed the generated path would pass
-// every other test in this package while enforcing nothing.
+// Every governed prefix is exercised. There is one today; during the proto
+// migration there were two, and a policy that governed only the path not in
+// production would have passed every other test here while enforcing nothing.
+// Driving whatever Policy actually claims to govern keeps that true if a second
+// path is ever added again.
 func TestEveryMethodIsDeniedWithoutItsGrant(t *testing.T) {
 	policy, err := AdminPolicy()
 	if err != nil {
@@ -47,7 +49,12 @@ func TestEveryMethodIsDeniedWithoutItsGrant(t *testing.T) {
 		t.Fatal("policy covers no methods; the rest of this test would vacuously pass")
 	}
 
-	for _, prefix := range []string{"/atlantis.admin.v1.AdminService/", LegacyAdminPrefix} {
+	prefixes := policy.Prefixes()
+	if len(prefixes) == 0 {
+		t.Fatal("policy governs no prefix; every sub-test below would be skipped " +
+			"and this test would pass having asserted nothing")
+	}
+	for _, prefix := range prefixes {
 		for name, required := range methods {
 			fullMethod := prefix + name
 

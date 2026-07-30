@@ -229,26 +229,31 @@ func staticGrants(s Set) Grants {
 	return GrantsFunc(func(context.Context) (Set, error) { return s, nil })
 }
 
-// The policy governs both service paths. Enforcing only the generated one
-// would leave the path production actually uses ungoverned — the same shape as
-// the allowlist exemption this replaces.
-func TestLegacyAdminPathIsGoverned(t *testing.T) {
+// TestPolicyGovernsEveryPrefixItClaims drives the interceptor over whatever
+// Policy reports governing, rather than a hardcoded list.
+//
+// The list was two entries during the proto migration and is one now. Pinning
+// it literally would mean this test kept passing while a newly-added prefix
+// went unenforced — which is the exact failure the two-prefix period existed to
+// avoid.
+func TestPolicyGovernsEveryPrefixItClaims(t *testing.T) {
 	policy, err := AdminPolicy()
 	if err != nil {
 		t.Fatal(err)
 	}
+	prefixes := policy.Prefixes()
+	if len(prefixes) == 0 {
+		t.Fatal("policy governs no prefix; the interceptor would pass everything through")
+	}
 	handler := func(ctx context.Context, req any) (any, error) { return "ok", nil }
 
-	for _, prefix := range []string{"/atlantis.admin.v1.AdminService/", LegacyAdminPrefix} {
+	for _, prefix := range prefixes {
 		t.Run(prefix, func(t *testing.T) {
 			interceptor := policy.UnaryInterceptor(staticGrants(NewSet(adminpb.Capability_CAPABILITY_SCHEMA_READ)))
-
-			// A read capability satisfies a read method on either path.
 			if _, err := interceptor(context.Background(), nil,
 				&grpc.UnaryServerInfo{FullMethod: prefix + "GetMergedSchema"}, handler); err != nil {
 				t.Errorf("read denied on %s: %v", prefix, err)
 			}
-			// And is refused for an operator method on either path.
 			_, err := interceptor(context.Background(), nil,
 				&grpc.UnaryServerInfo{FullMethod: prefix + "RollbackSchema"}, handler)
 			if status.Code(err) != codes.PermissionDenied {

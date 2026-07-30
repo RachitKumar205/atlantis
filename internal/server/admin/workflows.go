@@ -30,10 +30,6 @@ type StartWorkflowResponse struct {
 	WorkflowID string `json:"WorkflowID"`
 }
 
-type GetWorkflowStatusRequest struct {
-	WorkflowID string `json:"WorkflowID"`
-}
-
 type WorkflowStatus struct {
 	WorkflowID   string `json:"WorkflowID"`
 	WorkflowName string `json:"WorkflowName"`
@@ -209,10 +205,9 @@ FROM atlantis.workflow_instances WHERE id = $1`, wfID).Scan(
 
 // --- Wire conversion ---
 //
-// GetWorkflowStatusResponse.Workflow is a value tagged omitempty, which does
-// nothing for a struct, so a not-found response has always emitted a fully
-// zero Workflow object. The proto models it as a nil message; workflowStatusFromPB
-// maps nil back to the zero value so the key does not disappear.
+// The proto models Workflow as a nil message when the instance is not found.
+// What a consumer sees for that nil is decided at the JSON boundary by
+// clients/go/adminjson, not here.
 
 func workflowStatusToPB(w WorkflowStatus) *adminpb.WorkflowStatus {
 	return &adminpb.WorkflowStatus{
@@ -224,21 +219,5 @@ func workflowStatusToPB(w WorkflowStatus) *adminpb.WorkflowStatus {
 		CompletedAt:  w.CompletedAt,
 		ErrorMsg:     w.ErrorMsg,
 		SubmittedBy:  w.SubmittedBy,
-	}
-}
-
-func workflowStatusFromPB(p *adminpb.WorkflowStatus) WorkflowStatus {
-	if p == nil {
-		return WorkflowStatus{}
-	}
-	return WorkflowStatus{
-		WorkflowID:   p.GetWorkflowId(),
-		WorkflowName: p.GetWorkflowName(),
-		Status:       p.GetStatus(),
-		CurrentStep:  p.GetCurrentStep(),
-		StartedAt:    p.GetStartedAt(),
-		CompletedAt:  p.GetCompletedAt(),
-		ErrorMsg:     p.GetErrorMsg(),
-		SubmittedBy:  p.GetSubmittedBy(),
 	}
 }

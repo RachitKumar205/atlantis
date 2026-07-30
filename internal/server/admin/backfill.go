@@ -568,21 +568,3 @@ func submittedFilesToPB(in []SubmittedFile) []*adminpb.SubmittedFile {
 	}
 	return out
 }
-
-func backfillFieldStatusFromPB(in []*adminpb.BackfillFieldStatus) []BackfillFieldStatus {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]BackfillFieldStatus, 0, len(in))
-	for _, f := range in {
-		out = append(out, BackfillFieldStatus{
-			EntityID:      f.GetEntityId(),
-			Field:         f.GetField(),
-			Status:        f.GetStatus(),
-			RowsProcessed: f.GetRowsProcessed(),
-			LastPK:        f.GetLastPk(),
-			ErrorMsg:      f.GetErrorMsg(),
-		})
-	}
-	return out
-}

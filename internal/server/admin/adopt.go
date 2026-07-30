@@ -411,20 +411,6 @@ func callerSubmissionsFromPB(in []*adminpb.CallerSubmission) []CallerSubmission 
 	return out
 }
 
-func callerSubmissionsToPB(in []CallerSubmission) []*adminpb.CallerSubmission {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]*adminpb.CallerSubmission, 0, len(in))
-	for _, sub := range in {
-		out = append(out, &adminpb.CallerSubmission{
-			Caller: sub.Caller,
-			Files:  submittedFilesToPB(sub.Files),
-		})
-	}
-	return out
-}
-
 func adoptDriftToPB(in []AdoptDriftItem) []*adminpb.AdoptDriftItem {
 	if len(in) == 0 {
 		return nil
@@ -440,54 +426,4 @@ func adoptDriftToPB(in []AdoptDriftItem) []*adminpb.AdoptDriftItem {
 		})
 	}
 	return out
-}
-
-// adoptDriftFromPB keeps nil as nil so the field marshals as null, which is
-// what the pre-migration handler emitted — both when the drift check found
-// nothing and on the already-adopted path, where it never runs.
-//
-// Collapsing empty to nil is only safe because translateDrift cannot produce
-// an empty non-nil slice: it short-circuits on Diff.IsEmpty and otherwise
-// appends to a nil slice. Change that to a make() and the JSON silently flips
-// from [] to null here.
-func adoptDriftFromPB(in []*adminpb.AdoptDriftItem) []AdoptDriftItem {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]AdoptDriftItem, 0, len(in))
-	for _, d := range in {
-		out = append(out, AdoptDriftItem{
-			EntityID: d.GetEntityId(),
-			Field:    d.GetField(),
-			Kind:     d.GetKind(),
-			Severity: d.GetSeverity(),
-			Detail:   d.GetDetail(),
-		})
-	}
-	return out
-}
-
-// adoptBaselineRequestToPB and adoptBaselineResponseFromPB are extracted for
-// the reason the other mappings in this migration are: an inline literal in
-// the shim is unfalsifiable. Dropping AllowDrift from it would silently
-// disable --allow-drift and write a false value into adopt_history, and no
-// test could fail, because the shim itself cannot be driven without a pool —
-// AdoptBaseline dereferences it before anything observable happens.
-func adoptBaselineRequestToPB(req *AdoptBaselineRequest) *adminpb.AdoptBaselineRequest {
-	return &adminpb.AdoptBaselineRequest{
-		Submissions: callerSubmissionsToPB(req.Submissions),
-		Caller:      req.Caller,
-		Files:       submittedFilesToPB(req.Files),
-		AllowDrift:  req.AllowDrift,
-		AdoptedBy:   req.AdoptedBy,
-	}
-}
-
-func adoptBaselineResponseFromPB(p *adminpb.AdoptBaselineResponse) *AdoptBaselineResponse {
-	return &AdoptBaselineResponse{
-		CheckpointWritten: p.GetCheckpointWritten(),
-		AlreadyAdopted:    p.GetAlreadyAdopted(),
-		Drift:             adoptDriftFromPB(p.GetDrift()),
-		Warnings:          p.GetWarnings(),
-	}
 }
