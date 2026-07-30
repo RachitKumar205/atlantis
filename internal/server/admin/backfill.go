@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -14,7 +15,44 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/backfill"
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/dsl/sqlvalidate"
 )
+
+// validateBackfillExpressions purity-checks each field's backfill expression
+// against the entity that owns it.
+//
+// allowedCols is the owning entity's column set. sqlvalidate rejects a
+// reference to anything outside it, which catches typos and stale references
+// that would otherwise fail at 3am inside a chunked UPDATE loop rather than at
+// plan time.
+func validateBackfillExpressions(ir *dsl.IR, fields []codegen.BackfillField) []string {
+	cols := map[string]map[string]bool{}
+	for i := range ir.Entities {
+		e := &ir.Entities[i]
+		set := make(map[string]bool, len(e.Fields))
+		for j := range e.Fields {
+			set[e.Fields[j].Name] = true
+		}
+		cols[e.Namespace+"."+e.Name] = set
+	}
+
+	var msgs []string
+	for _, f := range fields {
+		allowed, ok := cols[f.EntityID]
+		if !ok {
+			// The differ produced a field for an entity the IR does not
+			// contain. Refusing beats validating against an empty column set,
+			// which would reject every expression with a misleading message.
+			msgs = append(msgs, fmt.Sprintf("%s.%s: entity %q is not in the submitted schema",
+				f.EntityID, f.Field, f.EntityID))
+			continue
+		}
+		if err := sqlvalidate.ValidateBackfillExpression(f.Expression, allowed, f.Field); err != nil {
+			msgs = append(msgs, fmt.Sprintf("%s.%s: %v", f.EntityID, f.Field, err))
+		}
+	}
+	return msgs
+}
 
 // BeginBackfillPlanRequest is the input for kicking off a phase-split apply.
 // The caller has already run PlanSchema; the request re-submits the plan id and
@@ -230,6 +268,30 @@ func (s *Service) BeginBackfillPlan(ctx context.Context, req *adminpb.BeginBackf
 				"Split the field into a single-PK entity or backfill it manually")
 		}
 		return nil, errors.New("admin: this plan requires no backfill — run `tide apply` without --backfill")
+	}
+
+	// Purity-check every expression before a single one is persisted.
+	//
+	// This is the only gate. The expression is author-supplied SQL that the
+	// backfill worker later splices verbatim into `SET <col> = <expr>` against
+	// the live table (internal/backfill/splicer.go), so an unchecked one is an
+	// arbitrary-expression primitive over the caller's own data: a subquery
+	// reads any table the server's role can read, and a comma restructures the
+	// SET list to write columns the plan never mentioned.
+	//
+	// It runs here rather than at execution time because a rejected expression
+	// must never reach storage. `internal/backfill` reads its expressions back
+	// out of a table, and a row in a table is something an operator with a psql
+	// prompt can edit between write and execute — validating on the read side
+	// would be checking a value the attacker controls after the check.
+	//
+	// Three comments in the tree (internal/dsl/ir.go, internal/dsl/ast.go,
+	// internal/backfill/splicer.go) have asserted since this field was
+	// introduced that validation happens at plan time. It did not: the function
+	// had no caller at all. They now point here.
+	if msgs := validateBackfillExpressions(newIR, scripts.BackfillFields); len(msgs) > 0 {
+		return nil, fmt.Errorf("admin: rejected backfill expression(s):\n  %s",
+			strings.Join(msgs, "\n  "))
 	}
 
 	// Capture ir_checkpoint hash NOW so Phase 3 can detect drift.

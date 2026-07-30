@@ -442,10 +442,13 @@ type Field struct {
 	Unique   bool   `json:"unique,omitempty"`
 	Check    string `json:"check,omitempty"` // verbatim CHECK expression
 	// Backfill is the SQL expression `tide apply --backfill` splices into
-	// a chunked UPDATE to populate this column on existing rows. The raw
-	// string is parsed and purity-checked by
-	// sqlvalidate.ValidateBackfillExpression at admin.PlanSchema time —
-	// keeping the dsl package CGO-free.
+	// a chunked UPDATE to populate this column on existing rows.
+	//
+	// The raw string is stored here unvalidated; the dsl package stays
+	// CGO-free and pg_query_go is not. Purity-checking happens server-side in
+	// admin.BeginBackfillPlan, before any expression is persisted — see
+	// validateBackfillExpressions there. Nothing between here and that gate
+	// may execute this string.
 	Backfill string   `json:"backfill,omitempty"`
 	Default  *Default `json:"default,omitempty"`
 	Ref      *Ref     `json:"ref,omitempty"`

@@ -170,3 +170,53 @@ func TestMutatingRPCsBindTheCaller(t *testing.T) {
 		}
 	}
 }
+
+// mustValidateBackfill names the RPC that persists caller-authored SQL
+// expressions. It has to purity-check them first, or the backfill worker later
+// splices an unchecked expression verbatim into `SET <col> = <expr>` against
+// the live table.
+var mustValidateBackfill = []string{"BeginBackfillPlan"}
+
+// TestBackfillPlanValidatesExpressions pins the call site, not just the
+// existence of a validator.
+//
+// sqlvalidate's own guard checks that ValidateBackfillExpression is called from
+// somewhere. That is not enough: orphaning the wrapper in this package while
+// leaving the wrapper's own call intact keeps that test green — verified. The
+// property that matters is that *this RPC* validates before it writes, so it is
+// asserted here, on this function's body.
+func TestBackfillPlanValidatesExpressions(t *testing.T) {
+	_, files := parsePackageSources(t)
+
+	found := map[string]bool{}
+	declared := map[string]bool{}
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || fn.Body == nil || !contains(mustValidateBackfill, fn.Name.Name) {
+				continue
+			}
+			declared[fn.Name.Name] = true
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "validateBackfillExpressions" {
+					found[fn.Name.Name] = true
+				}
+				return true
+			})
+		}
+	}
+	for _, name := range mustValidateBackfill {
+		if !declared[name] {
+			t.Fatalf("mustValidateBackfill names %s, which this package does not declare", name)
+		}
+		if !found[name] {
+			t.Errorf("%s does not call validateBackfillExpressions. Caller-authored SQL "+
+				"expressions would be persisted unchecked, and internal/backfill splices "+
+				"them verbatim into an UPDATE against the live table.", name)
+		}
+	}
+}

@@ -160,9 +160,10 @@ func (m *ModCheckDecl) Position() Position       { return m.Pos }
 
 // ModBackfillDecl carries the SQL expression that `tide apply --backfill`
 // splices into a chunked UPDATE to populate this column on existing rows.
-// The expression is parsed and purity-checked (no subqueries, no
-// non-whitelisted functions, refs must be entity columns) by
-// sqlvalidate.ValidateBackfillExpression; the raw string lives here.
+// The raw string lives here unchecked. It is parsed and purity-checked (no
+// subqueries, no non-whitelisted functions, refs must be entity columns) by
+// sqlvalidate.ValidateBackfillExpression, called from
+// admin.BeginBackfillPlan before any expression is persisted.
 type ModBackfillDecl struct {
 	Pos  Position
 	Expr string

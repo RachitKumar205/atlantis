@@ -16,7 +16,10 @@ import (
 //	$1 — last_pk (bigint; 0 for the initial chunk)
 //	$2 — chunk size (int)
 //
-// The expression is embedded verbatim; sqlvalidate.ValidateBackfillExpression
+// The expression is embedded verbatim. It was purity-checked by
+// admin.BeginBackfillPlan before being written to backfill_field_state, which
+// is the only gate — nothing revalidates on the way out of the table.
+// sqlvalidate.ValidateBackfillExpression
 // at PlanSchema time has already rejected subqueries, non-whitelisted
 // function calls, and unknown column refs, so the only injection surface
 // is fields the operator legitimately owns.
