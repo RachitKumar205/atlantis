@@ -32,7 +32,6 @@ package sandbox
 // []byte → base64, vectors → JSON arrays).
 
 import (
-	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -299,7 +298,11 @@ func (ss *serverSandbox) handleSQLExec(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "decode: %v", err)
 		return
 	}
-	tag, err := ss.sb.Pool().Exec(context.Background(), req.SQL, coerceArgs(req.Args)...)
+	// r.Context(), not context.Background(): a caller-supplied statement must
+	// die when the caller hangs up. With Background it outlives the request and
+	// nothing can cancel it — the role's statement_timeout is then the only
+	// bound, and that is a backstop rather than a control.
+	tag, err := ss.sb.Pool().Exec(r.Context(), req.SQL, coerceArgs(req.Args)...)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "exec: %v", err)
 		return
@@ -322,7 +325,7 @@ func (ss *serverSandbox) handleSQLQuery(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "decode: %v", err)
 		return
 	}
-	rows, err := ss.sb.Pool().Query(context.Background(), req.SQL, coerceArgs(req.Args)...)
+	rows, err := ss.sb.Pool().Query(r.Context(), req.SQL, coerceArgs(req.Args)...)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "query: %v", err)
 		return
@@ -706,7 +709,7 @@ func (ss *serverSandbox) handleFixturesBulk(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "decode: %v", err)
 		return
 	}
-	n, err := ss.sb.Fixtures().Bulk(context.Background(), req.Qualified, req.N, BulkOptions{
+	n, err := ss.sb.Fixtures().Bulk(r.Context(), req.Qualified, req.N, BulkOptions{
 		Seed:    req.Seed,
 		PKStart: req.PKStart,
 	})

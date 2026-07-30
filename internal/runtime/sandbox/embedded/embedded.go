@@ -46,6 +46,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"sync"
 	"time"
 
@@ -164,8 +165,20 @@ func New(ctx context.Context, ir *dsl.IR, opts Options) (*Backend, error) {
 		return nil, fmt.Errorf("sandbox embedded: start: %w", err)
 	}
 
-	url := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", port)
-	pool, err := newLocalPool(ctx, url)
+	// Two connections, in this order, and the order is the security property.
+	//
+	// The bootstrap connection is a superuser and exists only long enough to
+	// create the schema and the unprivileged role. It is closed before anything
+	// outside this function can reach the database. The pool the Backend keeps
+	// — the one that runs caller SQL — is not a superuser.
+	//
+	// This matters because the sandbox executes arbitrary caller SQL by design
+	// (Pool().Exec, reachable from cmd/tide and from the console's
+	// /api/sandbox/{id}/sql/exec route). A superuser connection there is
+	// `COPY ... FROM PROGRAM`, which is remote code execution on whatever host
+	// the sandbox runs on, for anyone who can reach that route.
+	bootstrapURL := fmt.Sprintf("postgres://postgres:postgres@localhost:%d/postgres?sslmode=disable", port)
+	bootstrap, err := newLocalPool(ctx, bootstrapURL)
 	if err != nil {
 		_ = pgInstance.Stop()
 		return nil, fmt.Errorf("sandbox embedded: connect: %w", err)
@@ -173,18 +186,94 @@ func New(ctx context.Context, ir *dsl.IR, opts Options) (*Backend, error) {
 
 	b := &Backend{
 		pg:         pgInstance,
-		pool:       pool,
+		pool:       bootstrap,
 		port:       port,
 		started:    true,
 		dataDir:    dataDir,
 		runtimeDir: runtimeDir,
 	}
 
+	// Schema DDL runs privileged, on a database no caller has touched yet.
+	// A CVE-2018-1058 search_path hijack needs the attacker to have planted an
+	// object first; here there is no attacker and no prior connection.
 	if err := applySchema(ctx, b, ir); err != nil {
 		_ = b.Close()
 		return nil, err
 	}
+
+	password, err := randomPassword()
+	if err != nil {
+		_ = b.Close()
+		return nil, fmt.Errorf("sandbox embedded: %w", err)
+	}
+	if err := grantSandboxRole(ctx, bootstrap, password, ir); err != nil {
+		_ = b.Close()
+		return nil, err
+	}
+
+	userURL := fmt.Sprintf("postgres://%s:%s@localhost:%d/postgres?sslmode=disable",
+		sandboxRole, password, port)
+	userPool, err := newLocalPool(ctx, userURL)
+	if err != nil {
+		_ = b.Close()
+		return nil, fmt.Errorf("sandbox embedded: connect as %s: %w", sandboxRole, err)
+	}
+	b.pool = userPool
+	bootstrap.Close()
 	return b, nil
+}
+
+// sandboxRole is the unprivileged identity every caller-facing sandbox
+// connection uses. Named rather than generated so it is greppable and so the
+// test asserting `rolsuper = false` has something to assert against.
+const sandboxRole = "atlantis_sandbox"
+
+// randomPassword returns a password nobody needs to know. The role is only
+// reachable over loopback on a kernel-assigned port, so the password is not the
+// boundary — the role's lack of privilege is. It is random anyway so that a
+// second process on the same host cannot connect by guessing.
+func randomPassword() (string, error) {
+	var b [24]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate password: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// grantSandboxRole creates the unprivileged role and gives it exactly the
+// access a sandbox needs: read and write the tables the schema just created,
+// and nothing else.
+//
+// Deliberately withheld: SUPERUSER (COPY ... FROM PROGRAM, pg_read_file,
+// lo_import), CREATEDB, CREATEROLE, and CREATE on the schema holding the
+// generated tables. The role can change rows; it cannot change the shape of the
+// world it runs in.
+//
+// statement_timeout is set on the role rather than per-connection so it applies
+// to every session regardless of which code path opened it. Thirty seconds is
+// far beyond any legitimate sandbox query and well short of a wedged one.
+func grantSandboxRole(ctx context.Context, pool *localPool, password string, ir *dsl.IR) error {
+	stmts := []string{
+		fmt.Sprintf(`CREATE ROLE %s LOGIN PASSWORD '%s' NOSUPERUSER NOCREATEDB NOCREATEROLE`,
+			sandboxRole, password),
+		fmt.Sprintf(`ALTER ROLE %s SET statement_timeout = '30s'`, sandboxRole),
+		fmt.Sprintf(`ALTER ROLE %s SET idle_in_transaction_session_timeout = '60s'`, sandboxRole),
+	}
+	for _, sch := range irSchemas(ir) {
+		stmts = append(stmts,
+			fmt.Sprintf(`GRANT USAGE ON SCHEMA %q TO %s`, sch, sandboxRole),
+			fmt.Sprintf(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %q TO %s`,
+				sch, sandboxRole),
+			fmt.Sprintf(`GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA %q TO %s`,
+				sch, sandboxRole),
+		)
+	}
+	for _, q := range stmts {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			return fmt.Errorf("sandbox embedded: grant %s: %w", sandboxRole, err)
+		}
+	}
+	return nil
 }
 
 // Pool returns the runtime.Pool implementation. Generated handlers can
@@ -304,6 +393,21 @@ func schemaPreamble(ir *dsl.IR) string {
 	// each entity's CREATE TRIGGER then references that function. So
 	// the atlantis schema must exist even when no entity table is
 	// declared inside it — bootstrap it unconditionally.
+	var out string
+	for _, s := range irSchemas(ir) {
+		out += fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %q;\n", s)
+	}
+	return out
+}
+
+// irSchemas returns every distinct schema name the IR places objects in,
+// sorted so callers emitting DDL or grants produce stable output.
+//
+// Shared by schemaPreamble and grantSandboxRole: the set of schemas that get
+// created is exactly the set the sandbox role must be able to use, and deriving
+// both from one function is what stops a schema being created that the role
+// then cannot reach.
+func irSchemas(ir *dsl.IR) []string {
 	seen := map[string]struct{}{"atlantis": {}}
 	for i := range ir.Entities {
 		e := &ir.Entities[i]
@@ -320,10 +424,11 @@ func schemaPreamble(ir *dsl.IR) string {
 		}
 		seen[schema] = struct{}{}
 	}
-	var out string
+	out := make([]string, 0, len(seen))
 	for s := range seen {
-		out += fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %q;\n", s)
+		out = append(out, s)
 	}
+	sort.Strings(out)
 	return out
 }
 
