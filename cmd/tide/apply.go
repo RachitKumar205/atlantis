@@ -10,140 +10,15 @@ import (
 	"strings"
 	"time"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
-// SubmittedFile mirrors internal/server/admin.SubmittedFile. We don't
-// import the server package because the CLI must stay a leaf module (no
-// transitive deps on pgx, etc.). The JSON envelope is shared on the wire.
-type SubmittedFile struct {
-	Path    string `json:"Path"`
-	Content []byte `json:"Content"`
-}
-
-type planRequest struct {
-	Caller string          `json:"Caller"`
-	Files  []SubmittedFile `json:"Files"`
-}
-
-type impactEntry struct {
-	Caller   string `json:"caller"`
-	Affected bool   `json:"affected"`
-	Detail   string `json:"detail"`
-}
-
-type planResponse struct {
-	PlanID         string        `json:"plan_id"`
-	Class          string        `json:"class"`
-	UpSQL          string        `json:"up_sql"`
-	DownSQL        string        `json:"down_sql"`
-	ImpactReport   []impactEntry `json:"impact_report"`
-	ParseErrors    []string      `json:"parse_errors"`
-	BreakingDetail []string      `json:"breaking_detail"`
-	CheckpointHash string        `json:"checkpoint_hash,omitempty"`
-
-	// CustomSQLErrors surface failures from the server-side pg_query_go
-	// validator. Server returns class="unparseable" when this list is
-	// non-empty; without surfacing the messages, "unparseable" gives the
-	// operator nothing to act on.
-	CustomSQLErrors []string `json:"custom_sql_errors,omitempty"`
-
-	PreBackfillUpSQL       string             `json:"pre_backfill_up_sql,omitempty"`
-	PreBackfillIndexesSQL  string             `json:"pre_backfill_indexes_sql,omitempty"`
-	PostBackfillUpSQL      string             `json:"post_backfill_up_sql,omitempty"`
-	PostBackfillIndexesSQL string             `json:"post_backfill_indexes_sql,omitempty"`
-	BackfillFields         []backfillFieldRef `json:"backfill_fields,omitempty"`
-
-	Extensions []extensionStatus `json:"extensions,omitempty"`
-
-	IndexDrift      []indexDriftItem `json:"index_drift,omitempty"`
-	IndexDriftNotes []string         `json:"index_drift_notes,omitempty"`
-	IndexDriftError string           `json:"index_drift_error,omitempty"`
-
-	CheckDrift      []checkDriftItem `json:"check_drift,omitempty"`
-	CheckDriftNotes []string         `json:"check_drift_notes,omitempty"`
-	CheckDriftError string           `json:"check_drift_error,omitempty"`
-
-	ColumnDrift      []columnDriftItem `json:"column_drift,omitempty"`
-	ColumnDriftNotes []string          `json:"column_drift_notes,omitempty"`
-	ColumnDriftError string            `json:"column_drift_error,omitempty"`
-}
-
-// indexDriftItem mirrors introspect.UniqueIndexDrift over the JSON wire.
-type indexDriftItem struct {
-	Schema    string   `json:"schema"`
-	Table     string   `json:"table"`
-	IndexName string   `json:"index_name"`
-	Columns   []string `json:"columns"`
-	Partial   bool     `json:"partial,omitempty"`
-	Predicate string   `json:"predicate,omitempty"`
-}
-
-// checkDriftItem mirrors introspect.CheckConstraintDrift over the JSON wire.
-type checkDriftItem struct {
-	Kind           string `json:"kind"` // declared_not_enforced | live_not_declared
-	Schema         string `json:"schema"`
-	Table          string `json:"table"`
-	ConstraintName string `json:"constraint_name,omitempty"`
-	Declared       string `json:"declared,omitempty"`
-	Definition     string `json:"definition"`
-}
-
-// columnDriftItem mirrors introspect.ColumnTypeDrift over the JSON wire.
-type columnDriftItem struct {
-	Schema   string `json:"schema"`
-	Table    string `json:"table"`
-	Column   string `json:"column"`
-	Declared string `json:"declared"`
-	Live     string `json:"live"`
-}
-
-type extensionStatus struct {
-	Name        string `json:"name"`
-	Trigger     string `json:"trigger"`
-	Action      string `json:"action"` // ok | enable | missing
-	InstallHint string `json:"install_hint,omitempty"`
-}
-
-type backfillFieldRef struct {
-	EntityID   string `json:"EntityID"`
-	Field      string `json:"Field"`
-	Expression string `json:"Expression"`
-	PKColumn   string `json:"PKColumn"`
-	TableName  string `json:"TableName"`
-}
-
-type beginBackfillRequest struct {
-	Caller                 string             `json:"Caller"`
-	PlanID                 string             `json:"PlanID"`
-	Files                  []SubmittedFile    `json:"Files"`
-	PreBackfillUpSQL       string             `json:"PreBackfillUpSQL"`
-	PreBackfillIndexesSQL  string             `json:"PreBackfillIndexesSQL"`
-	PostBackfillUpSQL      string             `json:"PostBackfillUpSQL"`
-	PostBackfillIndexesSQL string             `json:"PostBackfillIndexesSQL"`
-	BackfillFields         []backfillFieldRef `json:"BackfillFields"`
-}
-
-type beginBackfillResponse struct {
-	PlanHash        string `json:"PlanHash"`
-	Accepted        bool   `json:"Accepted"`
-	AlreadyRunning  bool   `json:"AlreadyRunning"`
-	AlreadyComplete bool   `json:"AlreadyComplete"`
-	Message         string `json:"Message"`
-}
-
-type applyRequest struct {
-	Caller         string          `json:"Caller"`
-	PlanID         string          `json:"PlanID"`
-	UpSQL          string          `json:"UpSQL"`
-	Files          []SubmittedFile `json:"Files"`
-	CheckpointHash string          `json:"CheckpointHash,omitempty"`
-}
-
-type applyResponse struct {
-	AppliedAt   string `json:"applied_at"`
-	Version     int64  `json:"version,omitempty"`
-	ContentHash string `json:"content_hash,omitempty"`
+// planClassName renders a PlanClass for humans, stripping the enum prefix the
+// wire carries. "PLAN_CLASS_BACKFILL_REQUIRED" is the right thing on the wire
+// and the wrong thing in a terminal.
+func planClassName(c adminpb.PlanClass) string {
+	return strings.ToLower(strings.TrimPrefix(c.String(), "PLAN_CLASS_"))
 }
 
 // Exit codes:
@@ -201,9 +76,9 @@ func cmdApply(args []string) int {
 	}
 	defer func() { _ = client.Close() }()
 
-	var planResp planResponse
-	err = client.invoke(ctx, "/atlantis.admin.v1.Admin/PlanSchema",
-		planRequest{Caller: cfg.Caller, Files: files}, &planResp)
+	planResp, err := client.PlanSchema(ctx, &adminpb.PlanSchemaRequest{
+		Caller: cfg.Caller, Files: files,
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide plan:", err)
 		return 3
@@ -228,21 +103,21 @@ func cmdApply(args []string) int {
 
 	printImpactReport(planResp)
 
-	switch planResp.Class {
-	case "additive":
+	switch planResp.GetClass() {
+	case adminpb.PlanClass_PLAN_CLASS_ADDITIVE:
 		if *dryRun {
 			fmt.Println("tide: additive plan; would apply (--dry-run set)")
 			return 0
 		}
 		return doApply(ctx, client, cfg, planResp, files)
 
-	case "backfill_required":
+	case adminpb.PlanClass_PLAN_CLASS_BACKFILL_REQUIRED:
 		if !*backfill {
 			fmt.Fprintln(os.Stderr, "tide: this change is backfill-required.")
-			if len(planResp.BackfillFields) > 0 {
+			if len(planResp.GetBackfillFields()) > 0 {
 				fmt.Fprintln(os.Stderr, "    Declared backfills:")
-				for _, f := range planResp.BackfillFields {
-					fmt.Fprintf(os.Stderr, "      %s.%s ← %s\n", f.EntityID, f.Field, f.Expression)
+				for _, f := range planResp.GetBackfillFields() {
+					fmt.Fprintf(os.Stderr, "      %s.%s ← %s\n", f.GetEntityId(), f.GetField(), f.GetExpression())
 				}
 				fmt.Fprintln(os.Stderr, "    Re-run with --backfill to kick off the chunked backfill.")
 			} else {
@@ -253,23 +128,23 @@ func cmdApply(args []string) int {
 		}
 		return doBeginBackfill(ctx, client, cfg, planResp, files)
 
-	case "cross_caller_breaking":
+	case adminpb.PlanClass_PLAN_CLASS_CROSS_CALLER_BREAKING:
 		fmt.Fprintln(os.Stderr, "tide: this change is breaking other callers:")
-		for _, d := range planResp.BreakingDetail {
+		for _, d := range planResp.GetBreakingDetail() {
 			fmt.Fprintln(os.Stderr, "  ", d)
 		}
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "tide: open a PR in the atlantis repo to coordinate the change.")
 		return 2
 
-	case "unparseable":
+	case adminpb.PlanClass_PLAN_CLASS_UNPARSEABLE:
 		// Server marks the plan unparseable when pg_query_go validation on
 		// any custom-query SQL body fails. Surface the actual failures so
 		// the operator can fix the .atl file without spelunking the server logs.
 		fmt.Fprintln(os.Stderr, "tide: plan is unparseable — custom-query SQL validation failed.")
-		if len(planResp.CustomSQLErrors) > 0 {
+		if len(planResp.GetCustomSqlErrors()) > 0 {
 			fmt.Fprintln(os.Stderr, "")
-			for _, e := range planResp.CustomSQLErrors {
+			for _, e := range planResp.GetCustomSqlErrors() {
 				fmt.Fprintln(os.Stderr, "  ", e)
 			}
 		}
@@ -282,7 +157,12 @@ func cmdApply(args []string) int {
 		return 3
 
 	default:
-		fmt.Fprintf(os.Stderr, "tide: unknown plan class %q\n", planResp.Class)
+		// A class this binary does not know means the server is newer. Exiting
+		// 3 rather than guessing is deliberate: the alternative is treating an
+		// unrecognized class as benign and applying something whose risk this
+		// tide cannot assess.
+		fmt.Fprintf(os.Stderr, "tide: unknown plan class %q — upgrade tide to match this server\n",
+			planResp.GetClass())
 		return 3
 	}
 }
@@ -293,41 +173,46 @@ func cmdApply(args []string) int {
 // backfill_field_state rows, and returns immediately. The background
 // worker picks up the field rows and runs the chunked UPDATE loop;
 // operators monitor with `tide backfill status`.
-func doBeginBackfill(ctx context.Context, client *adminClient, cfg *tideConfig, plan planResponse, files []SubmittedFile) int {
+func doBeginBackfill(ctx context.Context, client *adminClient, cfg *tideConfig, plan *adminpb.PlanSchemaResponse, files []*adminpb.SubmittedFile) int {
 	if len(plan.BackfillFields) == 0 {
 		fmt.Fprintln(os.Stderr, "tide: --backfill set but no fields declare `backfill \"<expr>\"`.")
 		fmt.Fprintln(os.Stderr, "    Add the modifier in your .atl files (see docs), re-plan, then re-run.")
 		return 1
 	}
-	req := beginBackfillRequest{
-		Caller:                 cfg.Caller,
-		PlanID:                 plan.PlanID,
-		Files:                  files,
-		PreBackfillUpSQL:       plan.PreBackfillUpSQL,
-		PreBackfillIndexesSQL:  plan.PreBackfillIndexesSQL,
-		PostBackfillUpSQL:      plan.PostBackfillUpSQL,
-		PostBackfillIndexesSQL: plan.PostBackfillIndexesSQL,
-		BackfillFields:         plan.BackfillFields,
-	}
-	var resp beginBackfillResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/BeginBackfillPlan", req, &resp); err != nil {
+	// Only the plan id and the files. The SQL the plan computed is not sent:
+	// BeginBackfillPlanRequest has no field for it, and that absence is the fix
+	// for an audit finding — the server used to execute req.PreBackfillUpSQL
+	// verbatim, which made "may apply schema" mean "may run arbitrary SQL".
+	//
+	// What executes is now codegen's output for the submitted .atl files. That
+	// is a real narrowing — from any SQL to SQL the emitter will produce — but
+	// it is not a guarantee about the files themselves. The plan id is a
+	// staleness check, not an integrity one: computePlanID hashes file paths,
+	// not contents. The property that holds is that the request has no channel
+	// for raw SQL at all.
+	resp, err := client.BeginBackfillPlan(ctx, &adminpb.BeginBackfillPlanRequest{
+		Caller: cfg.Caller,
+		PlanId: plan.GetPlanId(),
+		Files:  files,
+	})
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide backfill:", err)
 		return 3
 	}
 	switch {
-	case resp.AlreadyComplete:
-		cliout.Successf("backfill already complete (plan-hash=%s)", cliout.Bold(resp.PlanHash))
+	case resp.GetAlreadyComplete():
+		cliout.Successf("backfill already complete (plan-hash=%s)", cliout.Bold(resp.GetPlanHash()))
 		return 0
-	case resp.AlreadyRunning:
-		cliout.Infof("backfill already in flight (plan-hash=%s)", cliout.Bold(resp.PlanHash))
-		fmt.Printf("      monitor with: %s %s\n", cliout.Bold("tide backfill status"), resp.PlanHash)
+	case resp.GetAlreadyRunning():
+		cliout.Infof("backfill already in flight (plan-hash=%s)", cliout.Bold(resp.GetPlanHash()))
+		fmt.Printf("      monitor with: %s %s\n", cliout.Bold("tide backfill status"), resp.GetPlanHash())
 		return 0
-	case resp.Accepted:
-		cliout.Successf("backfill accepted (plan-hash=%s)", cliout.Bold(resp.PlanHash))
-		if resp.Message != "" {
-			fmt.Printf("      %s\n", cliout.Grey(resp.Message))
+	case resp.GetAccepted():
+		cliout.Successf("backfill accepted (plan-hash=%s)", cliout.Bold(resp.GetPlanHash()))
+		if msg := resp.GetMessage(); msg != "" {
+			fmt.Printf("      %s\n", cliout.Grey(msg))
 		}
-		fmt.Printf("      monitor with: %s %s\n", cliout.Bold("tide backfill status"), resp.PlanHash)
+		fmt.Printf("      monitor with: %s %s\n", cliout.Bold("tide backfill status"), resp.GetPlanHash())
 		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "tide backfill: unexpected response: %+v\n", resp)
@@ -335,23 +220,25 @@ func doBeginBackfill(ctx context.Context, client *adminClient, cfg *tideConfig, 
 	}
 }
 
-func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan planResponse, files []SubmittedFile) int {
-	var applyResp applyResponse
-	err := client.invoke(ctx, "/atlantis.admin.v1.Admin/ApplyMigration",
-		applyRequest{
-			Caller:         cfg.Caller,
-			PlanID:         plan.PlanID,
-			UpSQL:          plan.UpSQL,
-			Files:          files,
-			CheckpointHash: plan.CheckpointHash,
-		}, &applyResp)
+func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan *adminpb.PlanSchemaResponse, files []*adminpb.SubmittedFile) int {
+	// No UpSQL. The plan's SQL was always documented as a drift check the server
+	// never read, and ApplyMigrationRequest now has no field for it. The server
+	// re-emits the DDL from these files against the checkpoint the hash pins,
+	// so the statements that run are codegen's output for the submitted schema
+	// rather than a string the client chose.
+	applyResp, err := client.ApplyMigration(ctx, &adminpb.ApplyMigrationRequest{
+		Caller:         cfg.Caller,
+		PlanId:         plan.GetPlanId(),
+		Files:          files,
+		CheckpointHash: plan.GetCheckpointHash(),
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide apply:", err)
 		return 3
 	}
-	cliout.Successf("applied at %s", applyResp.AppliedAt)
-	if applyResp.ContentHash != "" {
-		cliout.Field(os.Stdout, "content", applyResp.ContentHash[:12])
+	cliout.Successf("applied at %s", applyResp.GetAppliedAt())
+	if h := applyResp.GetContentHash(); h != "" {
+		cliout.Field(os.Stdout, "content", h[:12])
 	}
 	if cfg.OutputDir != "" {
 		cliout.Infof("regenerate the typed client under %s with `tide generate`", cfg.OutputDir)
@@ -359,7 +246,7 @@ func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan pla
 	return 0
 }
 
-func printImpactReport(p planResponse) {
+func printImpactReport(p *adminpb.PlanSchemaResponse) {
 	if len(p.ImpactReport) > 0 {
 		cliout.Header(os.Stdout, "impact")
 		for _, e := range p.ImpactReport {
@@ -382,7 +269,7 @@ func printImpactReport(p planResponse) {
 
 // printColumnDrift surfaces columns whose live type/width differs from the
 // declaration. `tide apply` refuses on them unless ATLANTIS_ALLOW_COLUMN_DRIFT=1.
-func printColumnDrift(p planResponse) {
+func printColumnDrift(p *adminpb.PlanSchemaResponse) {
 	if p.ColumnDriftError != "" {
 		cliout.Header(os.Stdout, "column drift")
 		cliout.Row(os.Stdout, "warn", "check skipped", p.ColumnDriftError)
@@ -406,7 +293,7 @@ func printColumnDrift(p planResponse) {
 // printCheckDrift surfaces CHECK constraints that diverge between the .atl
 // and the live table. Like index drift, these don't change the plan class,
 // but `tide apply` refuses on them unless ATLANTIS_ALLOW_CHECK_DRIFT=1.
-func printCheckDrift(p planResponse) {
+func printCheckDrift(p *adminpb.PlanSchemaResponse) {
 	if p.CheckDriftError != "" {
 		cliout.Header(os.Stdout, "check drift")
 		cliout.Row(os.Stdout, "warn", "check skipped", p.CheckDriftError)
@@ -418,7 +305,7 @@ func printCheckDrift(p planResponse) {
 	}
 	cliout.Header(os.Stdout, "check drift")
 	for _, d := range p.CheckDrift {
-		if d.Kind == "live_not_declared" {
+		if d.GetKind() == adminpb.CheckDriftKind_CHECK_DRIFT_KIND_LIVE_NOT_DECLARED {
 			cliout.Row(os.Stdout, "coral", d.Schema+"."+d.Table, "undeclared CHECK "+d.ConstraintName)
 			cliout.SubRow(os.Stdout, "live: "+d.Definition)
 		} else {
@@ -437,7 +324,7 @@ func printCheckDrift(p planResponse) {
 // These don't change the plan class, but `tide apply` will refuse on them
 // unless ATLANTIS_ALLOW_INDEX_DRIFT=1 — so the warning is the operator's
 // heads-up before they commit to applying.
-func printIndexDrift(p planResponse) {
+func printIndexDrift(p *adminpb.PlanSchemaResponse) {
 	if p.IndexDriftError != "" {
 		cliout.Header(os.Stdout, "index drift")
 		cliout.Row(os.Stdout, "warn", "check skipped", p.IndexDriftError)
@@ -465,8 +352,8 @@ func printIndexDrift(p planResponse) {
 // collectPCFiles walks every schema path and reads every .atl file. Paths
 // are stored relative to the caller's repo root so the server's error
 // messages are useful in the caller's context.
-func collectPCFiles(paths []string) ([]SubmittedFile, error) {
-	var out []SubmittedFile
+func collectPCFiles(paths []string) ([]*adminpb.SubmittedFile, error) {
+	var out []*adminpb.SubmittedFile
 	for _, root := range paths {
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -479,7 +366,7 @@ func collectPCFiles(paths []string) ([]SubmittedFile, error) {
 			if err != nil {
 				return err
 			}
-			out = append(out, SubmittedFile{Path: path, Content: data})
+			out = append(out, &adminpb.SubmittedFile{Path: path, Content: data})
 			return nil
 		})
 		if err != nil {

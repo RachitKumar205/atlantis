@@ -10,21 +10,9 @@ import (
 	"strings"
 	"time"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
-
-type diffSchemaVersionsRequest struct {
-	FromVersion int64 `json:"from_version"`
-	ToVersion   int64 `json:"to_version"`
-}
-
-type diffSchemaVersionsResponse struct {
-	FromVersion int64           `json:"from_version"`
-	ToVersion   int64           `json:"to_version"`
-	Diff        json.RawMessage `json:"diff"`
-	FromIR      json.RawMessage `json:"from_ir,omitempty"`
-	ToIR        json.RawMessage `json:"to_ir,omitempty"`
-}
 
 // cmdDiff — `tide diff <from-version> <to-version>`
 //
@@ -69,16 +57,17 @@ func cmdDiff(args []string) int {
 	}
 	defer func() { _ = client.Close() }()
 
-	var resp diffSchemaVersionsResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/DiffSchemaVersions",
-		diffSchemaVersionsRequest{FromVersion: from, ToVersion: to}, &resp); err != nil {
+	resp, err := client.DiffSchemaVersions(ctx, &adminpb.DiffSchemaVersionsRequest{
+		FromVersion: from, ToVersion: to,
+	})
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide diff:", err)
 		return 3
 	}
 
 	switch *format {
 	case "json":
-		if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		if err := emitJSON(resp, "diff", "from_ir", "to_ir"); err != nil {
 			fmt.Fprintln(os.Stderr, "tide diff:", err)
 			return 3
 		}
@@ -159,20 +148,24 @@ func renderFieldLine(f irField) string {
 	return fmt.Sprintf("%-26s %s%s", f.Name, typStr, mods)
 }
 
-func printDiffResult(resp diffSchemaVersionsResponse) {
+func printDiffResult(resp *adminpb.DiffSchemaVersionsResponse) {
 	fmt.Printf("%s %s %s %s\n\n",
 		cliout.Bold("diff"),
-		cliout.Red(fmt.Sprintf("v%d", resp.FromVersion)),
+		cliout.Red(fmt.Sprintf("v%d", resp.GetFromVersion())),
 		cliout.Grey("→"),
-		cliout.Green(fmt.Sprintf("v%d", resp.ToVersion)))
+		cliout.Green(fmt.Sprintf("v%d", resp.GetToVersion())))
 
 	var d struct {
 		Additive         []diffChange `json:"additive"`
 		BackfillRequired []diffChange `json:"backfill_required"`
 		Breaking         []diffChange `json:"breaking"`
 	}
-	if err := json.Unmarshal(resp.Diff, &d); err != nil {
-		fmt.Println(string(resp.Diff))
+	// The diff and the two IRs travel as opaque bytes rather than structured
+	// messages: they are content-hash inputs, and a structured encoding would
+	// reorder keys and change a hash for a schema nobody edited. Decoding them
+	// here is the client's business.
+	if err := json.Unmarshal(resp.GetDiff(), &d); err != nil {
+		fmt.Println(string(resp.GetDiff()))
 		return
 	}
 
@@ -183,8 +176,8 @@ func printDiffResult(resp diffSchemaVersionsResponse) {
 	}
 
 	var fromIR, toIR irSchema
-	_ = json.Unmarshal(resp.FromIR, &fromIR)
-	_ = json.Unmarshal(resp.ToIR, &toIR)
+	_ = json.Unmarshal(resp.GetFromIr(), &fromIR)
+	_ = json.Unmarshal(resp.GetToIr(), &toIR)
 
 	fromEntities := map[string]*irEntity{}
 	for i := range fromIR.Entities {

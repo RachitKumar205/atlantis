@@ -6,18 +6,9 @@ import (
 	"os"
 	"time"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
-
-type rollbackSchemaRequest struct {
-	ToVersion int64  `json:"to_version"`
-	Caller    string `json:"caller"`
-}
-
-type rollbackSchemaResponse struct {
-	NewVersion int64  `json:"new_version"`
-	UpSQL      string `json:"up_sql"`
-}
 
 // cmdRollback — `tidectl rollback --to=<version> [--caller X] [--yes]`
 func cmdRollback(args []string) int {
@@ -59,22 +50,21 @@ func cmdRollback(args []string) int {
 	}
 	defer func() { _ = client.Close() }()
 
-	var resp rollbackSchemaResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/RollbackSchema",
-		rollbackSchemaRequest{
-			ToVersion: *toVersion,
-			Caller:    *caller,
-		}, &resp); err != nil {
+	resp, err := client.RollbackSchema(ctx, &adminpb.RollbackSchemaRequest{
+		ToVersion: *toVersion,
+		Caller:    *caller,
+	})
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tidectl rollback:", err)
 		return 3
 	}
 
 	cliout.Successf("rolled back to version %d. New version: %s",
-		*toVersion, cliout.Bold(fmt.Sprintf("%d", resp.NewVersion)))
-	if resp.UpSQL != "" {
+		*toVersion, cliout.Bold(fmt.Sprintf("%d", resp.GetNewVersion())))
+	if sql := resp.GetUpSql(); sql != "" {
 		fmt.Println()
 		fmt.Println(cliout.Grey("Applied SQL:"))
-		fmt.Println(resp.UpSQL)
+		fmt.Println(sql)
 	}
 	return 0
 }

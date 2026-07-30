@@ -16,12 +16,14 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
-// BeginBackfillPlanRequest is the input for kicking off a phase-split
-// apply. The caller has already run PlanSchema and received the
-// PreBackfill / PostBackfill scripts + the BackfillFields list; the
-// request just re-submits those (and the original ApplyMigration shape)
-// so the server can validate drift + atomically write the plan/field-
-// state rows.
+// BeginBackfillPlanRequest is the input for kicking off a phase-split apply.
+// The caller has already run PlanSchema; the request re-submits the plan id and
+// the .atl files so the server can validate drift and atomically write the
+// plan/field-state rows.
+//
+// It carries no SQL. The scripts and the field list are re-emitted server-side
+// from the submitted files, which is what stops "may apply schema" from also
+// meaning "may run arbitrary SQL".
 type BeginBackfillPlanRequest struct {
 	Caller string
 	PlanID string

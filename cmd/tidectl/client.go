@@ -1,26 +1,32 @@
 package main
 
 import (
-	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"fmt"
 	"os"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/mem"
+
+	"google.golang.org/protobuf/proto"
+
+	"github.com/rachitkumar205/atlantis/clients/go/adminjson"
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
 
-// adminClient is tidectl's hand-rolled gRPC client for the admin
-// service's JSON-envelope RPCs. Mirrors cmd/tide/client.go — the wire
-// shape is identical so both CLIs can talk to the same server. We
-// duplicate rather than share a package because keeping the CLI
-// binaries lean (no transitive on internal/server) is worth the 60-line
-// copy.
+// adminClient wraps the generated AdminServiceClient with the connection it
+// owns, so callers get one thing to defer Close on.
+//
+// The request and response types are the ones generated from
+// atlantis/admin/v1/admin.proto and published in the clients/go module. Before
+// that proto existed, this file carried a hand-rolled JSON-envelope codec and
+// every subcommand redeclared the message it sent — the same shapes tide, the
+// console, and the server each maintained their own copy of. A field added to
+// one and forgotten in another was a silent wire mismatch that compiled.
 type adminClient struct {
+	adminpb.AdminServiceClient
 	conn *grpc.ClientConn
 }
 
@@ -46,30 +52,20 @@ func dialAdmin(cfg adminDialConfig) (*adminClient, error) {
 		fmt.Fprintln(os.Stderr, "tidectl: TLS not configured — using insecure transport (dev only)")
 		creds = insecure.NewCredentials()
 	}
+	// No ForceCodecV2: the default proto codec applies. That option set the
+	// content-subtype for the whole connection, which is why the JSON and
+	// protobuf paths could never be mixed per-RPC and the cutover had to move
+	// a whole client at once.
 	conn, err := grpc.NewClient(cfg.Endpoint,
 		grpc.WithTransportCredentials(creds),
-		grpc.WithDefaultCallOptions(grpc.ForceCodecV2(jsonCodec{})),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", cfg.Endpoint, err)
 	}
-	return &adminClient{conn: conn}, nil
+	return &adminClient{AdminServiceClient: adminpb.NewAdminServiceClient(conn), conn: conn}, nil
 }
 
 func (c *adminClient) Close() error { return c.conn.Close() }
-
-func (c *adminClient) invoke(ctx context.Context, method string, req, reply any) error {
-	rawReq, err := json.Marshal(req)
-	if err != nil {
-		return err
-	}
-	in := jsonMsg{Raw: rawReq}
-	var out jsonMsg
-	if err := c.conn.Invoke(ctx, method, &in, &out); err != nil {
-		return err
-	}
-	return json.Unmarshal(out.Raw, reply)
-}
 
 func buildTLS(cfg adminDialConfig) (credentials.TransportCredentials, error) {
 	cert, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
@@ -91,25 +87,21 @@ func buildTLS(cfg adminDialConfig) (credentials.TransportCredentials, error) {
 	}), nil
 }
 
-type jsonMsg struct{ Raw []byte }
-
-type jsonCodec struct{}
-
-func (jsonCodec) Marshal(v any) (mem.BufferSlice, error) {
-	m, ok := v.(*jsonMsg)
-	if !ok {
-		return nil, fmt.Errorf("jsonCodec: cannot marshal %T", v)
+// emitJSON writes a response to stdout in the admin JSON dialect.
+//
+// Every --format=json path goes through here rather than through
+// encoding/json, so tidectl and tide cannot drift apart on what their output
+// looks like. See clients/go/adminjson for what the dialect is and why 64-bit
+// integers are quoted.
+//
+// inlineJSONBytes names the `bytes` fields on this response that hold a JSON
+// document rather than opaque octets. They would otherwise render as base64,
+// which is correct by the spec and useless in a pipeline.
+func emitJSON(m proto.Message, inlineJSONBytes ...string) error {
+	b, err := adminjson.MarshalIndentInlining(m, inlineJSONBytes...)
+	if err != nil {
+		return err
 	}
-	return mem.BufferSlice{mem.SliceBuffer(m.Raw)}, nil
+	_, err = fmt.Fprintln(os.Stdout, string(b))
+	return err
 }
-
-func (jsonCodec) Unmarshal(data mem.BufferSlice, v any) error {
-	m, ok := v.(*jsonMsg)
-	if !ok {
-		return fmt.Errorf("jsonCodec: cannot unmarshal into %T", v)
-	}
-	m.Raw = append(m.Raw[:0], data.Materialize()...)
-	return nil
-}
-
-func (jsonCodec) Name() string { return "json" }

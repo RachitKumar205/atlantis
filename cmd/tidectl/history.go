@@ -2,33 +2,13 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"time"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
-
-type getSchemaHistoryRequest struct {
-	Limit  int32  `json:"limit,omitempty"`
-	Before int64  `json:"before,omitempty"`
-	Caller string `json:"caller,omitempty"`
-}
-
-type schemaVersionSummary struct {
-	Version     int64  `json:"version"`
-	Caller      string `json:"caller"`
-	PlanClass   string `json:"plan_class"`
-	EventType   string `json:"event_type"`
-	ChangeCount int    `json:"change_count"`
-	CreatedAt   string `json:"created_at"`
-}
-
-type getSchemaHistoryResponse struct {
-	Versions []schemaVersionSummary `json:"versions"`
-	HasMore  bool                   `json:"has_more"`
-}
 
 // cmdHistory — `tidectl history [--limit N] [--caller X]`
 func cmdHistory(args []string) int {
@@ -56,16 +36,17 @@ func cmdHistory(args []string) int {
 	}
 	defer func() { _ = client.Close() }()
 
-	var resp getSchemaHistoryResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/GetSchemaHistory",
-		getSchemaHistoryRequest{Limit: int32(*limit), Caller: *caller}, &resp); err != nil {
+	resp, err := client.GetSchemaHistory(ctx, &adminpb.GetSchemaHistoryRequest{
+		Limit: int32(*limit), Caller: *caller,
+	})
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tidectl history:", err)
 		return 3
 	}
 
 	switch *format {
 	case "json":
-		if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		if err := emitJSON(resp, "diff", "ir_snapshot"); err != nil {
 			fmt.Fprintln(os.Stderr, "tidectl history:", err)
 			return 3
 		}
@@ -78,8 +59,8 @@ func cmdHistory(args []string) int {
 	return 0
 }
 
-func printHistoryTable(resp getSchemaHistoryResponse) {
-	if len(resp.Versions) == 0 {
+func printHistoryTable(resp *adminpb.GetSchemaHistoryResponse) {
+	if len(resp.GetVersions()) == 0 {
 		fmt.Println(cliout.Grey("(no schema versions)"))
 		return
 	}
@@ -87,12 +68,13 @@ func printHistoryTable(resp getSchemaHistoryResponse) {
 		cliout.Bold("VERSION"), cliout.Bold("CALLER"),
 		cliout.Bold("CLASS"), cliout.Bold("EVENT"),
 		cliout.Bold("CHANGES"), cliout.Bold("CREATED"))
-	for _, v := range resp.Versions {
-		event := colorEventType(v.EventType)
+	for _, v := range resp.GetVersions() {
+		event := colorEventType(v.GetEventType())
 		fmt.Printf("%-8d %-16s %-14s %-10s %-8d %s\n",
-			v.Version, v.Caller, v.PlanClass, event, v.ChangeCount, cliout.Grey(v.CreatedAt))
+			v.GetVersion(), v.GetCaller(), v.GetPlanClass(), event,
+			v.GetChangeCount(), cliout.Grey(v.GetCreatedAt()))
 	}
-	if resp.HasMore {
+	if resp.GetHasMore() {
 		fmt.Println(cliout.Grey("(more rows available — use --limit or rerun with cursor)"))
 	}
 }

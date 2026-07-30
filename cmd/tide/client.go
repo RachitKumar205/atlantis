@@ -1,34 +1,31 @@
 package main
 
 import (
-	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"fmt"
 	"os"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/mem"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/rachitkumar205/atlantis/clients/go/adminjson"
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
 
-// adminClient is a hand-rolled gRPC client for the JSON-envelope Admin
-// service. The entity proto codegen produces typed buf-generated stubs,
-// but bootstrapping that for the Admin service itself would require
-// generating proto from proto, so we ship a JSON envelope here.
+// adminClient wraps the generated AdminServiceClient with the connection it
+// owns, so callers get one thing to defer Close on.
 //
-// Wire shape (mirrored from internal/server/admin/grpc.go):
-//
-//	Method:   /atlantis.admin.v1.Admin/{PlanSchema,ApplyMigration}
-//	Codec:    grpc Codec returning raw JSON bytes
-//	Request:  json.Marshal(go struct) -> raw bytes
-//	Reply:    raw bytes -> json.Unmarshal -> go struct
-//
-// We use grpc.Invoke directly with a custom CallOption to inject the JSON
-// codec, avoiding any generated stub.
+// This used to be a hand-rolled JSON-envelope client with a custom codec, and
+// each subcommand redeclared the message it sent. The shapes lived in four
+// places — here, tidectl, the console, and the server — with nothing checking
+// that they agreed. Now they are generated from
+// atlantis/admin/v1/admin.proto, and a field the server adds is a field this
+// client has.
 type adminClient struct {
+	adminpb.AdminServiceClient
 	conn *grpc.ClientConn
 }
 
@@ -44,31 +41,37 @@ func dial(cfg *tideConfig) (*adminClient, error) {
 		fmt.Fprintln(os.Stderr, "tide: TLS not configured — using insecure transport (dev only)")
 		creds = insecure.NewCredentials()
 	}
+	// No ForceCodecV2: the default proto codec applies. That option set the
+	// content-subtype connection-wide, which is why the JSON and protobuf
+	// paths could never be mixed per-RPC and a client had to move all at once.
 	conn, err := grpc.NewClient(cfg.Endpoint,
 		grpc.WithTransportCredentials(creds),
-		grpc.WithDefaultCallOptions(grpc.ForceCodecV2(jsonCodec{})),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", cfg.Endpoint, err)
 	}
-	return &adminClient{conn: conn}, nil
+	return &adminClient{AdminServiceClient: adminpb.NewAdminServiceClient(conn), conn: conn}, nil
 }
 
 func (c *adminClient) Close() error { return c.conn.Close() }
 
-// invoke runs a unary call with a JSON request and decodes a JSON reply.
-// The server side reads / writes the same JSON shape.
-func (c *adminClient) invoke(ctx context.Context, method string, req, reply any) error {
-	rawReq, err := json.Marshal(req)
+// emitJSON writes a response to stdout in the admin JSON dialect.
+//
+// Every --format=json path goes through here rather than through
+// encoding/json, so tide and tidectl cannot drift apart on what their output
+// looks like. See clients/go/adminjson for what the dialect is and why 64-bit
+// integers are quoted.
+//
+// inlineJSONBytes names the `bytes` fields on this response that hold a JSON
+// document rather than opaque octets. They would otherwise render as base64,
+// which is correct by the spec and useless in a pipeline.
+func emitJSON(m proto.Message, inlineJSONBytes ...string) error {
+	b, err := adminjson.MarshalIndentInlining(m, inlineJSONBytes...)
 	if err != nil {
 		return err
 	}
-	in := jsonMsg{Raw: rawReq}
-	var out jsonMsg
-	if err := c.conn.Invoke(ctx, method, &in, &out); err != nil {
-		return err
-	}
-	return json.Unmarshal(out.Raw, reply)
+	_, err = fmt.Fprintln(os.Stdout, string(b))
+	return err
 }
 
 func buildTLS(cfg *tideConfig) (credentials.TransportCredentials, error) {
@@ -115,33 +118,3 @@ func buildTLS(cfg *tideConfig) (credentials.TransportCredentials, error) {
 		MinVersion:   tls.VersionTLS13,
 	}), nil
 }
-
-// jsonMsg / jsonCodec are mirrors of internal/server/admin/grpc.go. The
-// codec returns the raw bytes; gRPC's transport-layer length-prefixing
-// handles framing.
-//
-// gRPC's modern Codec is CodecV2 which uses BufferSlice for zero-copy
-// hand-off. We satisfy that here; the older Codec interface (plain []byte)
-// is no longer accepted by ForceCodecV2.
-type jsonMsg struct{ Raw []byte }
-
-type jsonCodec struct{}
-
-func (jsonCodec) Marshal(v any) (mem.BufferSlice, error) {
-	m, ok := v.(*jsonMsg)
-	if !ok {
-		return nil, fmt.Errorf("jsonCodec: cannot marshal %T", v)
-	}
-	return mem.BufferSlice{mem.SliceBuffer(m.Raw)}, nil
-}
-
-func (jsonCodec) Unmarshal(data mem.BufferSlice, v any) error {
-	m, ok := v.(*jsonMsg)
-	if !ok {
-		return fmt.Errorf("jsonCodec: cannot unmarshal into %T", v)
-	}
-	m.Raw = append(m.Raw[:0], data.Materialize()...)
-	return nil
-}
-
-func (jsonCodec) Name() string { return "json" }

@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"time"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
@@ -71,16 +71,17 @@ func cmdPlan(args []string) int {
 	}
 	defer func() { _ = client.Close() }()
 
-	var resp planResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/PlanSchema",
-		planRequest{Caller: cfg.Caller, Files: files}, &resp); err != nil {
+	resp, err := client.PlanSchema(ctx, &adminpb.PlanSchemaRequest{
+		Caller: cfg.Caller, Files: files,
+	})
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide plan:", err)
 		return 3
 	}
 
 	switch *format {
 	case "json":
-		if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		if err := emitJSON(resp); err != nil {
 			fmt.Fprintln(os.Stderr, "tide plan:", err)
 			return 3
 		}
@@ -91,18 +92,36 @@ func cmdPlan(args []string) int {
 		return 3
 	}
 
-	if len(resp.ParseErrors) > 0 {
+	if len(resp.GetParseErrors()) > 0 {
 		return 3
 	}
-	switch resp.Class {
-	case "additive":
+	code := exitCodeForClass(resp.GetClass())
+	if code == 3 {
+		fmt.Fprintf(os.Stderr, "tide plan: cannot act on plan class %q\n", resp.GetClass())
+	}
+	return code
+}
+
+// exitCodeForClass maps a plan class to tide's exit code.
+//
+// This is the contract CI branches on — docs/guides/set-up-caller-ci.md tells
+// readers to gate merges on it — so the mapping is stated once and tested,
+// rather than written inline where a mechanical edit could renumber a case
+// without anything noticing.
+//
+// An unparseable plan shares the default arm with a class this binary does not
+// recognize. Both mean "do not proceed", and both are operational failures
+// rather than plan outcomes: exiting 0 or 2 on a class whose risk this tide
+// cannot assess would be guessing.
+func exitCodeForClass(c adminpb.PlanClass) int {
+	switch c {
+	case adminpb.PlanClass_PLAN_CLASS_ADDITIVE:
 		return 0
-	case "backfill_required":
+	case adminpb.PlanClass_PLAN_CLASS_BACKFILL_REQUIRED:
 		return 1
-	case "cross_caller_breaking":
+	case adminpb.PlanClass_PLAN_CLASS_CROSS_CALLER_BREAKING:
 		return 2
 	default:
-		fmt.Fprintf(os.Stderr, "tide plan: unknown plan class %q\n", resp.Class)
 		return 3
 	}
 }
@@ -111,38 +130,38 @@ func cmdPlan(args []string) int {
 // comments and human review. Order: parse errors first (any other field
 // is meaningless if the schema didn't parse), then class, impact, and
 // breaking detail.
-func printPlanReport(resp planResponse) {
-	if len(resp.ParseErrors) > 0 {
+func printPlanReport(resp *adminpb.PlanSchemaResponse) {
+	if len(resp.GetParseErrors()) > 0 {
 		cliout.Errorf("schema validation failed:")
-		for _, e := range resp.ParseErrors {
+		for _, e := range resp.GetParseErrors() {
 			fmt.Printf("  %s %s\n", cliout.Coral(cliout.GlyphCross), e)
 		}
 		return
 	}
 	cliout.Header(os.Stdout, "plan")
-	cliout.Field(os.Stdout, "plan_id", resp.PlanID)
-	cliout.Field(os.Stdout, "class", colorClass(resp.Class))
-	if len(resp.ImpactReport) > 0 {
+	cliout.Field(os.Stdout, "plan_id", resp.GetPlanId())
+	cliout.Field(os.Stdout, "class", colorClass(resp.GetClass()))
+	if len(resp.GetImpactReport()) > 0 {
 		fmt.Println()
 		cliout.Header(os.Stdout, "impact")
-		for _, e := range resp.ImpactReport {
-			if e.Affected {
-				cliout.Row(os.Stdout, "warn", cliout.Bold(e.Caller), e.Detail)
+		for _, e := range resp.GetImpactReport() {
+			if e.GetAffected() {
+				cliout.Row(os.Stdout, "warn", cliout.Bold(e.GetCaller()), e.GetDetail())
 			} else {
-				cliout.Row(os.Stdout, "muted", cliout.Faint(e.Caller), e.Detail)
+				cliout.Row(os.Stdout, "muted", cliout.Faint(e.GetCaller()), e.GetDetail())
 			}
 		}
 	}
-	if len(resp.BreakingDetail) > 0 {
+	if len(resp.GetBreakingDetail()) > 0 {
 		fmt.Println()
 		cliout.Header(os.Stdout, "breaking")
-		for _, d := range resp.BreakingDetail {
+		for _, d := range resp.GetBreakingDetail() {
 			fmt.Printf("  %s  %s\n", cliout.Coral(cliout.GlyphCross), d)
 		}
 	}
-	if len(resp.Extensions) > 0 {
+	if len(resp.GetExtensions()) > 0 {
 		fmt.Println()
-		printExtensions(resp.Extensions)
+		printExtensions(resp.GetExtensions())
 	}
 }
 
@@ -150,12 +169,12 @@ func printPlanReport(resp planResponse) {
 // in PlanResponse.Extensions. Three actions: ok (already enabled),
 // enable (atlantis will CREATE EXTENSION inside the apply tx), missing
 // (operator must install at OS level — apply will refuse).
-func printExtensions(exts []extensionStatus) {
+func printExtensions(exts []*adminpb.ExtensionStatus) {
 	cliout.Header(os.Stdout, "extensions")
 	for _, e := range exts {
-		switch e.Action {
+		switch e.GetAction() {
 		case "ok":
-			cliout.Row(os.Stdout, "muted", e.Name, "already enabled")
+			cliout.Row(os.Stdout, "muted", e.GetName(), "already enabled")
 		case "enable":
 			cliout.Row(os.Stdout, "brass", e.Name, "will be auto-enabled")
 			if e.Trigger != "" {
@@ -166,8 +185,8 @@ func printExtensions(exts []extensionStatus) {
 			if e.Trigger != "" {
 				cliout.SubRow(os.Stdout, e.Trigger)
 			}
-			if e.InstallHint != "" {
-				cliout.SubRow(os.Stdout, e.InstallHint)
+			if e.GetInstallHint() != "" {
+				cliout.SubRow(os.Stdout, e.GetInstallHint())
 			}
 		}
 	}
@@ -176,16 +195,17 @@ func printExtensions(exts []extensionStatus) {
 // colorClass paints the plan-class string by severity. Used in both
 // `tide plan` and the apply impact report so the eye picks up the
 // risk profile at a glance.
-func colorClass(class string) string {
+func colorClass(class adminpb.PlanClass) string {
+	name := planClassName(class)
 	switch class {
-	case "additive":
-		return cliout.Sage(class)
-	case "backfill_required":
-		return cliout.Brass(class)
-	case "cross_caller_breaking":
-		return cliout.Coral(cliout.Bold(class))
-	case "unparseable":
-		return cliout.Coral(class)
+	case adminpb.PlanClass_PLAN_CLASS_ADDITIVE:
+		return cliout.Sage(name)
+	case adminpb.PlanClass_PLAN_CLASS_BACKFILL_REQUIRED:
+		return cliout.Brass(name)
+	case adminpb.PlanClass_PLAN_CLASS_CROSS_CALLER_BREAKING:
+		return cliout.Coral(cliout.Bold(name))
+	case adminpb.PlanClass_PLAN_CLASS_UNPARSEABLE:
+		return cliout.Coral(name)
 	}
-	return class
+	return name
 }

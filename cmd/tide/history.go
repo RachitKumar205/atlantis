@@ -2,34 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"time"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
-
-type getSchemaHistoryRequest struct {
-	Limit  int32  `json:"limit,omitempty"`
-	Before int64  `json:"before,omitempty"`
-	Caller string `json:"caller,omitempty"`
-}
-
-type schemaVersionSummary struct {
-	Version     int64  `json:"version"`
-	Caller      string `json:"caller"`
-	PlanClass   string `json:"plan_class"`
-	EventType   string `json:"event_type"`
-	ChangeCount int    `json:"change_count"`
-	CreatedAt   string `json:"created_at"`
-}
-
-type getSchemaHistoryResponse struct {
-	Versions []schemaVersionSummary `json:"versions"`
-	HasMore  bool                   `json:"has_more"`
-}
 
 // cmdHistory — `tide history [--limit N] [--caller X] [--format json]`
 //
@@ -61,19 +41,18 @@ func cmdHistory(args []string) int {
 	}
 	defer func() { _ = client.Close() }()
 
-	var resp getSchemaHistoryResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/GetSchemaHistory",
-		getSchemaHistoryRequest{
-			Limit:  int32(*limit),
-			Caller: *caller,
-		}, &resp); err != nil {
+	resp, err := client.GetSchemaHistory(ctx, &adminpb.GetSchemaHistoryRequest{
+		Limit:  int32(*limit),
+		Caller: *caller,
+	})
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide history:", err)
 		return 3
 	}
 
 	switch *format {
 	case "json":
-		if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		if err := emitJSON(resp, "diff", "ir_snapshot"); err != nil {
 			fmt.Fprintln(os.Stderr, "tide history:", err)
 			return 3
 		}
@@ -86,8 +65,8 @@ func cmdHistory(args []string) int {
 	return 0
 }
 
-func printHistoryTable(resp getSchemaHistoryResponse) {
-	if len(resp.Versions) == 0 {
+func printHistoryTable(resp *adminpb.GetSchemaHistoryResponse) {
+	if len(resp.GetVersions()) == 0 {
 		fmt.Println(cliout.Grey("  (no schema versions)"))
 		return
 	}
@@ -96,28 +75,28 @@ func printHistoryTable(resp getSchemaHistoryResponse) {
 	fmt.Printf("  %s\n", cliout.Bold("Schema History"))
 	fmt.Println()
 
-	for i, v := range resp.Versions {
-		isLast := i == len(resp.Versions)-1
+	for i, v := range resp.GetVersions() {
+		isLast := i == len(resp.GetVersions())-1
 
 		// Version dot + connector
 		dot := cliout.Cyan("●")
-		if v.EventType == "seed" {
+		if v.GetEventType() == "seed" {
 			dot = cliout.Grey("◌")
-		} else if v.EventType == "rollback" {
+		} else if v.GetEventType() == "rollback" {
 			dot = cliout.Yellow("●")
 		}
 
 		// Version label
-		vLabel := cliout.Bold(cliout.Cyan(fmt.Sprintf("v%d", v.Version)))
+		vLabel := cliout.Bold(cliout.Cyan(fmt.Sprintf("v%d", v.GetVersion())))
 
 		// Event badge
-		event := eventBadge(v.EventType)
+		event := eventBadge(v.GetEventType())
 
 		// Caller
-		caller := cliout.Bold(v.Caller)
+		caller := cliout.Bold(v.GetCaller())
 
 		// Timestamp
-		ts := cliout.Grey(formatTimestamp(v.CreatedAt))
+		ts := cliout.Grey(formatTimestamp(v.GetCreatedAt()))
 
 		fmt.Printf("  %s %s  %s  %s  %s\n", dot, vLabel, event, caller, ts)
 
@@ -127,8 +106,8 @@ func printHistoryTable(resp getSchemaHistoryResponse) {
 			connector = " "
 		}
 
-		if v.ChangeCount > 0 {
-			fmt.Printf("  %s      %s\n", connector, cliout.Green(fmt.Sprintf("+%d change(s)", v.ChangeCount)))
+		if v.GetChangeCount() > 0 {
+			fmt.Printf("  %s      %s\n", connector, cliout.Green(fmt.Sprintf("+%d change(s)", v.GetChangeCount())))
 		} else {
 			fmt.Printf("  %s      %s\n", connector, cliout.Grey("no changes"))
 		}
@@ -139,7 +118,7 @@ func printHistoryTable(resp getSchemaHistoryResponse) {
 	}
 
 	fmt.Println()
-	if resp.HasMore {
+	if resp.GetHasMore() {
 		fmt.Printf("  %s\n\n", cliout.Grey("… more versions available — use --limit"))
 	}
 }

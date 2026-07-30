@@ -290,3 +290,26 @@ tide version
 ## Output
 
 Diagnostic and progress messages are prefixed `tide:` on stderr and stdout.
+
+### `--format=json`
+
+JSON output is the [proto3 canonical JSON mapping](https://protobuf.dev/programming-guides/json/) of the admin API messages defined in `atlantis/admin/v1/admin.proto`. `tidectl` uses the same encoding.
+
+Four properties are worth knowing before you parse it:
+
+- **64-bit integers are strings.** `"version": "7"`, not `"version": 7`. JSON numbers are IEEE-754 doubles and lose precision above 2^53; every 64-bit field here — schema versions, timestamps, row counts — is one you may compare for equality, so the mapping quotes them.
+- **Enums are their full names.** A plan class is `"PLAN_CLASS_ADDITIVE"`, not `"additive"`; a check-drift kind is `"CHECK_DRIFT_KIND_LIVE_NOT_DECLARED"`. The human-readable table output still prints the short form.
+- **Empty lists and maps are `[]` and `{}`**, never `null` or an absent key, so a consumer can iterate without a nil check. Fields declared `optional` in the proto are still omitted when unset, which is how "not set" stays distinguishable from "set to empty".
+- **Field names are `snake_case`** — the proto field names, matching the `.atl` grammar and the SQL columns rather than protojson's default `lowerCamelCase`.
+
+Whitespace is not stable. The encoder varies it between builds on purpose; compare parsed values, never bytes.
+
+Fields that carry a JSON document — `args`, `state`, `diff`, `from_ir`, `to_ir`, `ir_snapshot` — are inlined as JSON, not base64. They are `bytes` on the wire because they are content-hash inputs and must stay byte-exact, but rendering them base64 in a terminal would make `tide diff --format=json | jq '.diff.additive'` useless. A payload that is not valid JSON is left as the base64 string rather than silently nulled.
+
+> **Changed.** Before the admin API was defined in protobuf, each command marshalled a hand-written struct. Three things moved:
+>
+> - 64-bit integers were bare numbers; a script reading `version` as a number needs updating.
+> - Plan classes were bare words; `"class": "additive"` is now `"class": "PLAN_CLASS_ADDITIVE"`, and `check_drift[].kind` changed the same way.
+> - `tide backfill status`, `tide job status`, `tide job dead`, `tide workflow status`, and `tidectl adopt` used **PascalCase** keys (`PlanHash`, `JobID`, `Jobs`, `WorkflowID`, `CheckpointWritten`). They are now snake_case like every other command. A `jq '.PlanHash'` returns null; use `.plan_hash`.
+>
+> `tide plan --format=json` keeps its key names — it was already snake_case — and gains `entity_id` on each `index_drift` entry.

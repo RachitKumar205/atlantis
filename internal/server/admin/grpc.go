@@ -13,7 +13,10 @@ import (
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
 
-// jsonCodec mirrors the codec the `tide` CLI installs on the client side.
+// jsonCodec mirrors the codec the console BFF installs on the client side.
+// tide and tidectl no longer use it — they speak protobuf against the
+// generated service — so this exists for internal/console alone and goes away
+// with it.
 // Registering here means a `tide` invocation can use
 // `ForceCodecV2(jsonCodec{})` and the server will negotiate to JSON.
 //

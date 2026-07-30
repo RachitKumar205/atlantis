@@ -8,38 +8,9 @@ import (
 	"os"
 	"time"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
-
-type startWorkflowRequest struct {
-	WorkflowName string          `json:"WorkflowName"`
-	State        json.RawMessage `json:"State,omitempty"`
-	SubmittedBy  string          `json:"SubmittedBy,omitempty"`
-}
-
-type startWorkflowResponse struct {
-	WorkflowID string `json:"WorkflowID"`
-}
-
-type getWorkflowStatusRequest struct {
-	WorkflowID string `json:"WorkflowID"`
-}
-
-type workflowStatus struct {
-	WorkflowID   string `json:"WorkflowID"`
-	WorkflowName string `json:"WorkflowName"`
-	Status       string `json:"Status"`
-	CurrentStep  string `json:"CurrentStep,omitempty"`
-	StartedAt    string `json:"StartedAt"`
-	CompletedAt  string `json:"CompletedAt,omitempty"`
-	ErrorMsg     string `json:"ErrorMsg,omitempty"`
-	SubmittedBy  string `json:"SubmittedBy,omitempty"`
-}
-
-type getWorkflowStatusResponse struct {
-	Found    bool           `json:"Found"`
-	Workflow workflowStatus `json:"Workflow,omitempty"`
-}
 
 func cmdWorkflow(args []string) int {
 	if len(args) < 1 {
@@ -96,18 +67,26 @@ func cmdWorkflowStart(args []string) int {
 	if principal == "" {
 		principal = "tide"
 	}
-	var resp startWorkflowResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/StartWorkflow",
-		startWorkflowRequest{
-			WorkflowName: wfName,
-			State:        json.RawMessage(*stateJSON),
-			SubmittedBy:  "cli:" + principal,
-		}, &resp); err != nil {
+	// Validate locally before the round trip. The old client typed this
+	// json.RawMessage, and encoding/json refused to marshal invalid JSON, so a
+	// typo failed here with a parse error. Sending the bytes raw would turn
+	// that into a JSONB error from the database, several layers away from the
+	// flag that caused it. cmdJobSubmit validates --args the same way.
+	if !json.Valid([]byte(*stateJSON)) {
+		fmt.Fprintf(os.Stderr, "tide workflow start: --state is not valid JSON: %s\n", *stateJSON)
+		return 3
+	}
+	resp, err := client.StartWorkflow(ctx, &adminpb.StartWorkflowRequest{
+		WorkflowName: wfName,
+		State:        []byte(*stateJSON),
+		SubmittedBy:  "cli:" + principal,
+	})
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide workflow start:", err)
 		return 3
 	}
-	cliout.Successf("started %s as workflow %s", cliout.Bold(wfName), cliout.Bold(resp.WorkflowID))
-	fmt.Printf("       monitor with: %s\n", cliout.Bold("tide workflow status "+resp.WorkflowID))
+	cliout.Successf("started %s as workflow %s", cliout.Bold(wfName), cliout.Bold(resp.GetWorkflowId()))
+	fmt.Printf("       monitor with: %s\n", cliout.Bold("tide workflow status "+resp.GetWorkflowId()))
 	return 0
 }
 
@@ -140,44 +119,43 @@ func cmdWorkflowStatus(args []string) int {
 	}
 	defer func() { _ = client.Close() }()
 
-	var resp getWorkflowStatusResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/GetWorkflowStatus",
-		getWorkflowStatusRequest{WorkflowID: wfID}, &resp); err != nil {
+	resp, err := client.GetWorkflowStatus(ctx, &adminpb.GetWorkflowStatusRequest{WorkflowId: wfID})
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide workflow status:", err)
 		return 3
 	}
-	if !resp.Found {
+	if !resp.GetFound() {
 		cliout.Errorf("workflow %s not found", wfID)
 		return 1
 	}
 	switch *format {
 	case "json":
-		if err := json.NewEncoder(os.Stdout).Encode(resp.Workflow); err != nil {
+		if err := emitJSON(resp.GetWorkflow(), "state"); err != nil {
 			fmt.Fprintln(os.Stderr, "tide workflow status:", err)
 			return 3
 		}
 	case "table":
-		printWorkflowStatusRow(resp.Workflow)
+		printWorkflowStatusRow(resp.GetWorkflow())
 	}
-	if resp.Workflow.Status == "failed" {
+	if resp.GetWorkflow().GetStatus() == "failed" {
 		return 1
 	}
 	return 0
 }
 
-func printWorkflowStatusRow(w workflowStatus) {
-	fmt.Printf("%s       %s\n", cliout.Grey("workflow-id"), cliout.Bold(w.WorkflowID))
-	fmt.Printf("%s     %s\n", cliout.Grey("workflow-name"), w.WorkflowName)
-	fmt.Printf("%s           %s\n", cliout.Grey("status"), colorWorkflowStatus(w.Status))
-	if w.CurrentStep != "" {
-		fmt.Printf("%s     %s\n", cliout.Grey("current-step"), cliout.Cyan(w.CurrentStep))
+func printWorkflowStatusRow(w *adminpb.WorkflowStatus) {
+	fmt.Printf("%s       %s\n", cliout.Grey("workflow-id"), cliout.Bold(w.GetWorkflowId()))
+	fmt.Printf("%s     %s\n", cliout.Grey("workflow-name"), w.GetWorkflowName())
+	fmt.Printf("%s           %s\n", cliout.Grey("status"), colorWorkflowStatus(w.GetStatus()))
+	if w.GetCurrentStep() != "" {
+		fmt.Printf("%s     %s\n", cliout.Grey("current-step"), cliout.Cyan(w.GetCurrentStep()))
 	}
-	fmt.Printf("%s          %s\n", cliout.Grey("started"), w.StartedAt)
-	if w.CompletedAt != "" {
-		fmt.Printf("%s        %s\n", cliout.Grey("completed"), w.CompletedAt)
+	fmt.Printf("%s          %s\n", cliout.Grey("started"), w.GetStartedAt())
+	if w.GetCompletedAt() != "" {
+		fmt.Printf("%s        %s\n", cliout.Grey("completed"), w.GetCompletedAt())
 	}
-	if w.ErrorMsg != "" {
-		fmt.Printf("%s            %s\n", cliout.Red("error"), cliout.Red(w.ErrorMsg))
+	if w.GetErrorMsg() != "" {
+		fmt.Printf("%s            %s\n", cliout.Red("error"), cliout.Red(w.GetErrorMsg()))
 	}
 }
 

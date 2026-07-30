@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
 
 // pull / list / show wrap AdminService.GetMergedSchema. The merged-schema
@@ -34,15 +36,6 @@ const (
 	pcSchemaDir   = "schema"
 	pcVersionFile = "version.json"
 )
-
-type getMergedSchemaRequest struct {
-	SinceVersion string `json:"SinceVersion"`
-}
-
-type getMergedSchemaResponse struct {
-	Version string          `json:"Version"`
-	Files   []SubmittedFile `json:"Files"`
-}
 
 type pullCachedVersion struct {
 	Version string `json:"version"`
@@ -81,8 +74,8 @@ func cmdPull(args []string) int {
 		return 3
 	}
 
-	if len(resp.Files) == 0 && since == resp.Version {
-		fmt.Printf("tide: already up to date (version %s)\n", resp.Version)
+	if len(resp.GetFiles()) == 0 && since == resp.GetVersion() {
+		fmt.Printf("tide: already up to date (version %s)\n", resp.GetVersion())
 		return 0
 	}
 
@@ -90,7 +83,7 @@ func cmdPull(args []string) int {
 		fmt.Fprintln(os.Stderr, "tide pull:", err)
 		return 3
 	}
-	fmt.Printf("tide: ✓ pulled %d file(s) (version %s)\n", len(resp.Files), resp.Version)
+	fmt.Printf("tide: ✓ pulled %d file(s) (version %s)\n", len(resp.GetFiles()), resp.GetVersion())
 	return 0
 }
 
@@ -120,9 +113,9 @@ func cmdList(args []string) int {
 		return 3
 	}
 
-	paths := make([]string, len(resp.Files))
-	for i, f := range resp.Files {
-		paths[i] = f.Path
+	paths := make([]string, len(resp.GetFiles()))
+	for i, f := range resp.GetFiles() {
+		paths[i] = f.GetPath()
 	}
 	sort.Strings(paths)
 	for _, p := range paths {
@@ -164,9 +157,9 @@ func cmdShow(args []string) int {
 		return 3
 	}
 
-	var hits []SubmittedFile
-	for _, f := range resp.Files {
-		if strings.Contains(f.Path, needle) {
+	var hits []*adminpb.SubmittedFile
+	for _, f := range resp.GetFiles() {
+		if strings.Contains(f.GetPath(), needle) {
 			hits = append(hits, f)
 		}
 	}
@@ -175,8 +168,8 @@ func cmdShow(args []string) int {
 		return 3
 	}
 	for _, f := range hits {
-		fmt.Printf("--- %s ---\n", f.Path)
-		fmt.Println(string(f.Content))
+		fmt.Printf("--- %s ---\n", f.GetPath())
+		fmt.Println(string(f.GetContent()))
 	}
 	return 0
 }
@@ -184,41 +177,37 @@ func cmdShow(args []string) int {
 // callGetMergedSchema dials the server and invokes the RPC. Shared between
 // pull / list / show so credentials, codec, and method-string formatting
 // live in one place.
-func callGetMergedSchema(ctx context.Context, cfg *tideConfig, sinceVersion string) (*getMergedSchemaResponse, error) {
+func callGetMergedSchema(ctx context.Context, cfg *tideConfig, sinceVersion string) (*adminpb.GetMergedSchemaResponse, error) {
 	client, err := dial(cfg)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = client.Close() }()
 
-	var resp getMergedSchemaResponse
-	err = client.invoke(ctx, "/atlantis.admin.v1.Admin/GetMergedSchema",
-		getMergedSchemaRequest{SinceVersion: sinceVersion}, &resp)
-	if err != nil {
-		return nil, err
-	}
-	return &resp, nil
+	return client.GetMergedSchema(ctx, &adminpb.GetMergedSchemaRequest{
+		SinceVersion: sinceVersion,
+	})
 }
 
 // writeMergedSchema replaces the contents of .tide-cache/schema with the
 // server's reply, then records the new version so subsequent pulls can
 // short-circuit. Stale files are removed first so a deletion on the server
 // is reflected locally.
-func writeMergedSchema(resp *getMergedSchemaResponse) error {
+func writeMergedSchema(resp *adminpb.GetMergedSchemaResponse) error {
 	schemaDir := filepath.Join(tideCacheDir, pcSchemaDir)
 	if err := os.RemoveAll(schemaDir); err != nil {
 		return fmt.Errorf("clear cache: %w", err)
 	}
-	for _, f := range resp.Files {
-		dst := filepath.Join(schemaDir, f.Path)
+	for _, f := range resp.GetFiles() {
+		dst := filepath.Join(schemaDir, f.GetPath())
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", filepath.Dir(dst), err)
 		}
-		if err := os.WriteFile(dst, f.Content, 0o644); err != nil {
+		if err := os.WriteFile(dst, f.GetContent(), 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", dst, err)
 		}
 	}
-	v, err := json.Marshal(pullCachedVersion{Version: resp.Version})
+	v, err := json.Marshal(pullCachedVersion{Version: resp.GetVersion()})
 	if err != nil {
 		return err
 	}
@@ -253,7 +242,7 @@ func pullBeforeApply(ctx context.Context, cfg *tideConfig) {
 		fmt.Fprintln(os.Stderr, "tide: pre-apply pull failed (continuing):", err)
 		return
 	}
-	if len(resp.Files) == 0 {
+	if len(resp.GetFiles()) == 0 {
 		return
 	}
 	if err := writeMergedSchema(resp); err != nil {

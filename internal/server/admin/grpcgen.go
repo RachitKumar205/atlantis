@@ -20,16 +20,18 @@ import (
 // Two constraints on that plan are worth stating, because both were assumed
 // away in an earlier draft of this comment.
 //
-// Server-side migration is incremental; client-side migration is not. Every
-// client dials with grpc.ForceCodecV2(jsonCodec{}) as a *connection*-wide
-// default option (cmd/tide/client.go, cmd/tidectl/client.go,
-// internal/console/client.go), and grpc-go derives the content-subtype from
-// the forced codec's name for every call on that connection. A client that
-// switched one RPC to a generated stub over its existing connection would send
-// content-subtype "json", the server would select the globally registered
-// jsonCodec for a protobuf handler, and the call would fail Internal. Each
-// client therefore moves wholesale, on its own dial, once the server side is
-// complete — which is also how a released binary is deployed anyway.
+// Server-side migration is incremental; client-side migration is not. A client
+// dialing with grpc.ForceCodecV2(jsonCodec{}) sets that as a *connection*-wide
+// default, and grpc-go derives the content-subtype from the forced codec's name
+// for every call on that connection. A client that switched one RPC to a
+// generated stub over its existing connection would send content-subtype
+// "json", the server would select the globally registered jsonCodec for a
+// protobuf handler, and the call would fail Internal. Each client therefore
+// moves wholesale, on its own dial — which is also how a released binary is
+// deployed anyway.
+//
+// tide and tidectl have moved. internal/console/client.go is the last one still
+// forcing the JSON codec, and grpc.go stays registered until it follows.
 //
 // UnimplementedAdminServiceServer supplies the not-yet-migrated methods so
 // this type satisfies the interface throughout rather than only at the end.

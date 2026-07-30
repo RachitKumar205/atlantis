@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -13,14 +12,10 @@ import (
 	"time"
 
 	atlantiscommon "github.com/rachitkumar205/atlantis/atlantis/common"
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
-
-type getCanonicalIRResponse struct {
-	IR          json.RawMessage `json:"IR"`
-	ContentHash string          `json:"ContentHash"`
-}
 
 // cmdGenerate is `tide generate`: fetch the canonical IR from the server,
 // scope it to the namespaces this caller consumes, and emit a typed Go
@@ -88,15 +83,17 @@ func fetchCanonicalIR(ctx context.Context, cfg *tideConfig) (*dsl.IR, error) {
 	}
 	defer func() { _ = client.Close() }()
 
-	var resp getCanonicalIRResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/GetCanonicalIR",
-		struct{}{}, &resp); err != nil {
+	resp, err := client.GetCanonicalIR(ctx, &adminpb.GetCanonicalIRRequest{})
+	if err != nil {
 		return nil, err
 	}
-	if len(resp.IR) == 0 || string(resp.IR) == "null" {
+	// The IR travels as opaque bytes, not as a structured proto message: it is
+	// the input to a content hash, and google.protobuf.Struct would reorder
+	// keys and change that hash for a schema nobody edited.
+	if len(resp.GetIr()) == 0 || string(resp.GetIr()) == "null" {
 		return nil, fmt.Errorf("server has no schema yet — run `tide apply` first")
 	}
-	return dsl.DecodeJSONIR(resp.IR)
+	return dsl.DecodeJSONIR(resp.GetIr())
 }
 
 // generateSDK writes proto sources + typed Go client wrappers into outDir,

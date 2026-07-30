@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/user"
@@ -10,42 +9,10 @@ import (
 	"sort"
 	"time"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 	"github.com/rachitkumar205/atlantis/internal/workspace"
 )
-
-// SubmittedFile mirrors internal/server/admin.SubmittedFile on the wire.
-type SubmittedFile struct {
-	Path    string `json:"Path"`
-	Content []byte `json:"Content"`
-}
-
-// callerSubmission mirrors internal/server/admin.CallerSubmission.
-type callerSubmission struct {
-	Caller string          `json:"Caller"`
-	Files  []SubmittedFile `json:"Files"`
-}
-
-type adoptBaselineRequest struct {
-	Submissions []callerSubmission `json:"Submissions"`
-	AllowDrift  bool               `json:"AllowDrift"`
-	AdoptedBy   string             `json:"AdoptedBy"`
-}
-
-type adoptDriftItem struct {
-	EntityID string `json:"entity_id"`
-	Field    string `json:"field,omitempty"`
-	Kind     string `json:"kind"`
-	Severity string `json:"severity"`
-	Detail   string `json:"detail,omitempty"`
-}
-
-type adoptBaselineResponse struct {
-	CheckpointWritten bool             `json:"CheckpointWritten"`
-	AlreadyAdopted    bool             `json:"AlreadyAdopted"`
-	Drift             []adoptDriftItem `json:"Drift,omitempty"`
-	Warnings          []string         `json:"Warnings,omitempty"`
-}
 
 // cmdAdopt — exit codes:
 //
@@ -94,9 +61,9 @@ func cmdAdopt(args []string) int {
 		return 3
 	}
 
-	var subs []callerSubmission
+	var subs []*adminpb.CallerSubmission
 	for _, rc := range resolved {
-		var files []SubmittedFile
+		var files []*adminpb.SubmittedFile
 		for _, abs := range rc.Files {
 			data, err := os.ReadFile(abs)
 			if err != nil {
@@ -104,9 +71,9 @@ func cmdAdopt(args []string) int {
 				return 3
 			}
 			rel, _ := filepath.Rel(rc.CloneRoot, abs)
-			files = append(files, SubmittedFile{Path: rel, Content: data})
+			files = append(files, &adminpb.SubmittedFile{Path: rel, Content: data})
 		}
-		subs = append(subs, callerSubmission{Caller: rc.Name, Files: files})
+		subs = append(subs, &adminpb.CallerSubmission{Caller: rc.Name, Files: files})
 	}
 
 	principal := os.Getenv("USER")
@@ -129,19 +96,18 @@ func cmdAdopt(args []string) int {
 	}
 	defer func() { _ = client.Close() }()
 
-	req := adoptBaselineRequest{
+	resp, err := client.AdoptBaseline(ctx, &adminpb.AdoptBaselineRequest{
 		Submissions: subs,
 		AllowDrift:  *allowDrift,
 		AdoptedBy:   principal,
-	}
-	var resp adoptBaselineResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/AdoptBaseline", req, &resp); err != nil {
+	})
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tidectl adopt:", err)
 		return 3
 	}
 
 	if *format == "json" {
-		if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		if err := emitJSON(resp); err != nil {
 			fmt.Fprintln(os.Stderr, "tidectl adopt:", err)
 			return 3
 		}
@@ -150,7 +116,7 @@ func cmdAdopt(args []string) int {
 	}
 
 	switch {
-	case resp.AlreadyAdopted, resp.CheckpointWritten:
+	case resp.GetAlreadyAdopted(), resp.GetCheckpointWritten():
 		return 0
 	default:
 		return 1
@@ -164,24 +130,24 @@ func envDefault(key, fallback string) string {
 	return fallback
 }
 
-func printAdoptReport(resp adoptBaselineResponse, allowDrift bool, subs []callerSubmission) {
+func printAdoptReport(resp *adminpb.AdoptBaselineResponse, allowDrift bool, subs []*adminpb.CallerSubmission) {
 	callers := make([]string, 0, len(subs))
 	for _, s := range subs {
-		callers = append(callers, s.Caller)
+		callers = append(callers, s.GetCaller())
 	}
 	sort.Strings(callers)
 	callerList := cliout.Bold(fmt.Sprintf("%v", callers))
 
-	additions, removals, mismatches := bucketDrift(resp.Drift)
+	additions, removals, mismatches := bucketDrift(resp.GetDrift())
 
 	switch {
-	case resp.AlreadyAdopted:
+	case resp.GetAlreadyAdopted():
 		cliout.Successf("already baselined with this exact set of files for callers %s. No changes.", callerList)
-	case resp.CheckpointWritten && len(resp.Drift) == 0:
+	case resp.GetCheckpointWritten() && len(resp.GetDrift()) == 0:
 		cliout.Successf("declared schema matches live DB. Checkpoint recorded for callers %s.", callerList)
-	case resp.CheckpointWritten && len(mismatches) > 0:
+	case resp.GetCheckpointWritten() && len(mismatches) > 0:
 		cliout.Warnf("baseline recorded for callers %s %s — review the disagreements below.", callerList, cliout.Yellow("WITH ACCEPTED DRIFT"))
-	case resp.CheckpointWritten:
+	case resp.GetCheckpointWritten():
 		cliout.Successf("baseline recorded for callers %s. %d outstanding migration(s) below.", callerList, len(additions)+len(removals))
 	default:
 		cliout.Errorf("schema disagreement found across callers %s — refusing to baseline.", callerList)
@@ -225,10 +191,10 @@ func printAdoptReport(resp adoptBaselineResponse, allowDrift bool, subs []caller
 		fmt.Printf("  %s re-run with %s to baseline anyway (recorded in %s)\n", cliout.Cyan("→"), cliout.Bold("--allow-drift"), cliout.Grey("atlantis.adopt_history"))
 	}
 
-	if len(resp.Warnings) > 0 {
+	if len(resp.GetWarnings()) > 0 {
 		fmt.Println()
 		fmt.Printf("%s %s\n", cliout.Yellow("Advisory warnings"), cliout.Grey("(not blocking):"))
-		for _, w := range resp.Warnings {
+		for _, w := range resp.GetWarnings() {
 			fmt.Printf("  %s %s\n", cliout.Grey("·"), w)
 		}
 	}
@@ -237,9 +203,9 @@ func printAdoptReport(resp adoptBaselineResponse, allowDrift bool, subs []caller
 // bucketDrift partitions the wire-side drift slice into the three
 // severity buckets the renderer treats differently. Inputs are
 // already-severity-stamped by the server.
-func bucketDrift(drift []adoptDriftItem) (additions, removals, mismatches []adoptDriftItem) {
+func bucketDrift(drift []*adminpb.AdoptDriftItem) (additions, removals, mismatches []*adminpb.AdoptDriftItem) {
 	for _, d := range drift {
-		switch d.Severity {
+		switch d.GetSeverity() {
 		case "addition":
 			additions = append(additions, d)
 		case "removal":
@@ -251,10 +217,10 @@ func bucketDrift(drift []adoptDriftItem) (additions, removals, mismatches []adop
 	return
 }
 
-func printDriftSection(items []adoptDriftItem, bullet string) {
-	byEntity := make(map[string][]adoptDriftItem)
+func printDriftSection(items []*adminpb.AdoptDriftItem, bullet string) {
+	byEntity := make(map[string][]*adminpb.AdoptDriftItem)
 	for _, d := range items {
-		byEntity[d.EntityID] = append(byEntity[d.EntityID], d)
+		byEntity[d.GetEntityId()] = append(byEntity[d.GetEntityId()], d)
 	}
 	entities := make([]string, 0, len(byEntity))
 	for e := range byEntity {
@@ -264,12 +230,12 @@ func printDriftSection(items []adoptDriftItem, bullet string) {
 	for _, e := range entities {
 		fmt.Printf("  %s\n", cliout.Bold(e))
 		for _, d := range byEntity[e] {
-			label := cliout.Yellow(d.Kind)
-			if d.Field != "" {
-				label = fmt.Sprintf("%s/%s", cliout.Cyan(d.Field), cliout.Yellow(d.Kind))
+			label := cliout.Yellow(d.GetKind())
+			if d.GetField() != "" {
+				label = fmt.Sprintf("%s/%s", cliout.Cyan(d.GetField()), cliout.Yellow(d.GetKind()))
 			}
-			if d.Detail != "" {
-				fmt.Printf("    %s %-40s %s\n", bullet, label, cliout.Grey(d.Detail))
+			if d.GetDetail() != "" {
+				fmt.Printf("    %s %-40s %s\n", bullet, label, cliout.Grey(d.GetDetail()))
 			} else {
 				fmt.Printf("    %s %s\n", bullet, label)
 			}

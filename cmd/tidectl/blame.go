@@ -2,31 +2,13 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"time"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
-
-type getEntityLineageRequest struct {
-	EntityID string `json:"entity_id"`
-}
-
-type entityLineageEntry struct {
-	EntityID       string `json:"entity_id"`
-	FieldName      string `json:"field_name"`
-	IntroducedBy   string `json:"introduced_by"`
-	IntroducedAt   int64  `json:"introduced_at"`
-	LastModifiedBy string `json:"last_modified_by"`
-	LastModifiedAt int64  `json:"last_modified_at"`
-	RemovedAt      *int64 `json:"removed_at,omitempty"`
-}
-
-type getEntityLineageResponse struct {
-	Entries []entityLineageEntry `json:"entries"`
-}
 
 // cmdBlame — `tidectl blame <entity-id>`
 func cmdBlame(args []string) int {
@@ -57,16 +39,15 @@ func cmdBlame(args []string) int {
 	}
 	defer func() { _ = client.Close() }()
 
-	var resp getEntityLineageResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/GetEntityLineage",
-		getEntityLineageRequest{EntityID: entityID}, &resp); err != nil {
+	resp, err := client.GetEntityLineage(ctx, &adminpb.GetEntityLineageRequest{EntityId: entityID})
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tidectl blame:", err)
 		return 3
 	}
 
 	switch *format {
 	case "json":
-		if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		if err := emitJSON(resp); err != nil {
 			fmt.Fprintln(os.Stderr, "tidectl blame:", err)
 			return 3
 		}
@@ -79,8 +60,8 @@ func cmdBlame(args []string) int {
 	return 0
 }
 
-func printBlameTable(entityID string, resp getEntityLineageResponse) {
-	if len(resp.Entries) == 0 {
+func printBlameTable(entityID string, resp *adminpb.GetEntityLineageResponse) {
+	if len(resp.GetEntries()) == 0 {
 		cliout.Errorf("no lineage found for %s", entityID)
 		return
 	}
@@ -89,17 +70,17 @@ func printBlameTable(entityID string, resp getEntityLineageResponse) {
 		cliout.Bold("FIELD"), cliout.Bold("INTRODUCED BY"),
 		cliout.Bold("AT"), cliout.Bold("MODIFIED BY"),
 		cliout.Bold("AT"), cliout.Bold("STATUS"))
-	for _, e := range resp.Entries {
-		field := e.FieldName
+	for _, e := range resp.GetEntries() {
+		field := e.GetFieldName()
 		if field == "" {
 			field = cliout.Grey("(entity)")
 		}
 		status := cliout.Green("active")
 		if e.RemovedAt != nil {
-			status = cliout.Red(fmt.Sprintf("removed@v%d", *e.RemovedAt))
+			status = cliout.Red(fmt.Sprintf("removed@v%d", e.GetRemovedAt()))
 		}
 		fmt.Printf("%-24s %-16s %-8d %-16s %-8d %s\n",
-			field, e.IntroducedBy, e.IntroducedAt,
-			e.LastModifiedBy, e.LastModifiedAt, status)
+			field, e.GetIntroducedBy(), e.GetIntroducedAt(),
+			e.GetLastModifiedBy(), e.GetLastModifiedAt(), status)
 	}
 }

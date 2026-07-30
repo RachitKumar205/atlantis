@@ -18,21 +18,9 @@ import (
 	"os"
 	"sort"
 	"time"
+
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
-
-type getCallerAliasesRequest struct {
-	Caller string `json:"caller"`
-}
-
-type setCallerAliasesRequest struct {
-	Caller  string   `json:"caller"`
-	Aliases []string `json:"aliases"`
-}
-
-type callerAliasesResponse struct {
-	Caller  string   `json:"caller"`
-	Aliases []string `json:"aliases"`
-}
 
 func cmdCaller(args []string) int {
 	if len(args) < 1 {
@@ -103,19 +91,18 @@ func cmdCallerAliasList(args []string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	var resp callerAliasesResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/GetCallerAliases",
-		getCallerAliasesRequest{Caller: caller}, &resp); err != nil {
+	resp, err := client.GetCallerAliases(ctx, &adminpb.GetCallerAliasesRequest{Caller: caller})
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "tide: %v\n", err)
 		return 1
 	}
 
-	if len(resp.Aliases) == 0 {
-		fmt.Printf("%s: no aliases\n", resp.Caller)
+	if len(resp.GetAliases()) == 0 {
+		fmt.Printf("%s: no aliases\n", resp.GetCaller())
 		return 0
 	}
-	fmt.Printf("%s aliases:\n", resp.Caller)
-	for _, a := range resp.Aliases {
+	fmt.Printf("%s aliases:\n", resp.GetCaller())
+	for _, a := range resp.GetAliases() {
 		fmt.Printf("  %s\n", a)
 	}
 	return 0
@@ -195,29 +182,29 @@ func cmdCallerAliasMutate(configPath string, timeout time.Duration, caller strin
 	defer cancel()
 
 	// Fetch current.
-	var cur callerAliasesResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/GetCallerAliases",
-		getCallerAliasesRequest{Caller: caller}, &cur); err != nil {
+	cur, err := client.GetCallerAliases(ctx, &adminpb.GetCallerAliasesRequest{Caller: caller})
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "tide: %v\n", err)
 		return 1
 	}
 
-	updated := transform(cur.Aliases)
+	updated := transform(cur.GetAliases())
 
 	// Send the updated set.
-	var resp callerAliasesResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/SetCallerAliases",
-		setCallerAliasesRequest{Caller: caller, Aliases: updated}, &resp); err != nil {
+	resp, err := client.SetCallerAliases(ctx, &adminpb.SetCallerAliasesRequest{
+		Caller: caller, Aliases: updated,
+	})
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "tide: %v\n", err)
 		return 1
 	}
 
-	if len(resp.Aliases) == 0 {
-		fmt.Printf("%s: aliases cleared\n", resp.Caller)
+	if len(resp.GetAliases()) == 0 {
+		fmt.Printf("%s: aliases cleared\n", resp.GetCaller())
 		return 0
 	}
-	fmt.Printf("%s aliases (after update):\n", resp.Caller)
-	for _, a := range resp.Aliases {
+	fmt.Printf("%s aliases (after update):\n", resp.GetCaller())
+	for _, a := range resp.GetAliases() {
 		fmt.Printf("  %s\n", a)
 	}
 	return 0

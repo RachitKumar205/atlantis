@@ -56,6 +56,8 @@ jobs:
 
 Replace `atlantis-staging.internal:9090` with your endpoint. Drop `--format=json` for human-readable output in the workflow log.
 
+The JSON is the proto3 canonical mapping — 64-bit integers are quoted and a plan class reads `"PLAN_CLASS_ADDITIVE"`. See [`--format=json`](../reference/cli-tide.md#--formatjson) before writing a parser against it.
+
 The job fails on any non-zero exit. `tide plan` returns 1 for backfill-required and 2 for cross-caller breaking; both should block the PR.
 
 Adding a composite `unique by a, b` to an existing entity now classifies backfill-required, so that PR exits 1 where earlier versions treated it as a no-op. That's intentional — the constraint can fail on existing duplicate tuples — so let the check block until someone confirms the data is clean.

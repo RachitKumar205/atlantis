@@ -2,38 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"time"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
-
-type backfillStatusRequest struct {
-	PlanHash        string `json:"PlanHash,omitempty"`
-	LatestForCaller string `json:"LatestForCaller,omitempty"`
-}
-
-type backfillFieldStatus struct {
-	EntityID      string `json:"EntityID"`
-	Field         string `json:"Field"`
-	Status        string `json:"Status"`
-	RowsProcessed int64  `json:"RowsProcessed"`
-	LastPK        string `json:"LastPK"`
-	ErrorMsg      string `json:"ErrorMsg"`
-}
-
-type backfillStatusResponse struct {
-	PlanHash    string                `json:"PlanHash"`
-	Caller      string                `json:"Caller"`
-	Status      string                `json:"Status"`
-	ErrorMsg    string                `json:"ErrorMsg"`
-	StartedAt   string                `json:"StartedAt"`
-	CompletedAt string                `json:"CompletedAt"`
-	Fields      []backfillFieldStatus `json:"Fields"`
-}
 
 // cmdBackfill is the top-level `tide backfill` dispatcher.
 //
@@ -75,7 +51,7 @@ func cmdBackfillStatus(args []string) int {
 		return 3
 	}
 
-	req := backfillStatusRequest{}
+	req := &adminpb.GetBackfillStatusRequest{}
 	if fs.NArg() == 0 {
 		req.LatestForCaller = cfg.Caller
 	} else {
@@ -92,15 +68,15 @@ func cmdBackfillStatus(args []string) int {
 	}
 	defer func() { _ = client.Close() }()
 
-	var resp backfillStatusResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/GetBackfillStatus", req, &resp); err != nil {
+	resp, err := client.GetBackfillStatus(ctx, req)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide backfill status:", err)
 		return 3
 	}
 
 	switch *format {
 	case "json":
-		if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		if err := emitJSON(resp); err != nil {
 			fmt.Fprintln(os.Stderr, "tide backfill status:", err)
 			return 3
 		}
@@ -111,43 +87,43 @@ func cmdBackfillStatus(args []string) int {
 		return 3
 	}
 
-	if resp.Status == "failed" {
+	if resp.GetStatus() == "failed" {
 		return 1
 	}
 	return 0
 }
 
-func printBackfillStatus(s backfillStatusResponse) {
-	fmt.Printf("%s %s\n", cliout.Grey("plan-hash:"), cliout.Bold(s.PlanHash))
-	fmt.Printf("%s    %s\n", cliout.Grey("caller:"), s.Caller)
-	fmt.Printf("%s    %s\n", cliout.Grey("status:"), colorBackfillStatus(s.Status))
-	fmt.Printf("%s   %s\n", cliout.Grey("started:"), s.StartedAt)
-	if s.CompletedAt != "" {
-		fmt.Printf("%s %s\n", cliout.Grey("completed:"), s.CompletedAt)
+func printBackfillStatus(s *adminpb.GetBackfillStatusResponse) {
+	fmt.Printf("%s %s\n", cliout.Grey("plan-hash:"), cliout.Bold(s.GetPlanHash()))
+	fmt.Printf("%s    %s\n", cliout.Grey("caller:"), s.GetCaller())
+	fmt.Printf("%s    %s\n", cliout.Grey("status:"), colorBackfillStatus(s.GetStatus()))
+	fmt.Printf("%s   %s\n", cliout.Grey("started:"), s.GetStartedAt())
+	if s.GetCompletedAt() != "" {
+		fmt.Printf("%s %s\n", cliout.Grey("completed:"), s.GetCompletedAt())
 	}
-	if s.ErrorMsg != "" {
-		fmt.Printf("%s     %s\n", cliout.Red("error:"), s.ErrorMsg)
+	if s.GetErrorMsg() != "" {
+		fmt.Printf("%s     %s\n", cliout.Red("error:"), s.GetErrorMsg())
 	}
 	fmt.Println()
 
-	if len(s.Fields) == 0 {
+	if len(s.GetFields()) == 0 {
 		fmt.Println(cliout.Grey("(no fields declared)"))
 		return
 	}
 	fmt.Println(cliout.Bold("fields:"))
-	for _, f := range s.Fields {
-		name := fmt.Sprintf("%s.%s", f.EntityID, cliout.Cyan(f.Field))
+	for _, f := range s.GetFields() {
+		name := fmt.Sprintf("%s.%s", f.GetEntityId(), cliout.Cyan(f.GetField()))
 		extra := ""
-		if f.LastPK != "" && f.LastPK != "0" {
-			extra = cliout.Grey(fmt.Sprintf("   last_pk=%s", f.LastPK))
+		if pk := f.GetLastPk(); pk != "" && pk != "0" {
+			extra = cliout.Grey(fmt.Sprintf("   last_pk=%s", pk))
 		}
 		errInfo := ""
-		if f.ErrorMsg != "" {
-			errInfo = "   " + cliout.Red("err="+f.ErrorMsg)
+		if f.GetErrorMsg() != "" {
+			errInfo = "   " + cliout.Red("err="+f.GetErrorMsg())
 		}
-		fmt.Printf("  %-50s  %-20s  rows=%d%s%s\n", name, colorBackfillStatus(f.Status), f.RowsProcessed, extra, errInfo)
+		fmt.Printf("  %-50s  %-20s  rows=%d%s%s\n", name, colorBackfillStatus(f.GetStatus()), f.GetRowsProcessed(), extra, errInfo)
 	}
-	if s.Status == "phase2_running" {
+	if s.GetStatus() == "phase2_running" {
 		fmt.Println()
 		fmt.Println(cliout.Grey("phase 3 (SET NOT NULL + DROP INDEX) runs automatically when every field is complete."))
 	}

@@ -9,65 +9,9 @@ import (
 	"sort"
 	"time"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
-
-type submitJobRequest struct {
-	JobName     string          `json:"JobName"`
-	Args        json.RawMessage `json:"Args,omitempty"`
-	ScheduledAt string          `json:"ScheduledAt,omitempty"`
-	SubmittedBy string          `json:"SubmittedBy,omitempty"`
-}
-
-type submitJobResponse struct {
-	JobID string `json:"JobID"`
-}
-
-type getJobStatusRequest struct {
-	JobID string `json:"JobID"`
-}
-
-type jobStatus struct {
-	JobID        string          `json:"JobID"`
-	JobName      string          `json:"JobName"`
-	Queue        string          `json:"Queue"`
-	Args         json.RawMessage `json:"Args"`
-	Status       string          `json:"Status"`
-	Attempts     int             `json:"Attempts"`
-	MaxRetries   int             `json:"MaxRetries"`
-	LastError    string          `json:"LastError,omitempty"`
-	LastErrorAt  string          `json:"LastErrorAt,omitempty"`
-	ScheduledFor string          `json:"ScheduledFor"`
-	StartedAt    string          `json:"StartedAt,omitempty"`
-	CompletedAt  string          `json:"CompletedAt,omitempty"`
-	EnqueuedAt   string          `json:"EnqueuedAt"`
-	SubmittedBy  string          `json:"SubmittedBy,omitempty"`
-	ProgressPct  int             `json:"ProgressPct,omitempty"`
-	ProgressMsg  string          `json:"ProgressMsg,omitempty"`
-	ProgressAt   string          `json:"ProgressAt,omitempty"`
-}
-
-type getJobStatusResponse struct {
-	Found bool      `json:"Found"`
-	Job   jobStatus `json:"Job,omitempty"`
-}
-
-type listDeadJobsRequest struct {
-	JobName string `json:"JobName,omitempty"`
-	Limit   int    `json:"Limit,omitempty"`
-}
-
-type listDeadJobsResponse struct {
-	Jobs []jobStatus `json:"Jobs"`
-}
-
-type retryDeadJobRequest struct {
-	JobID string `json:"JobID"`
-}
-
-type retryDeadJobResponse struct {
-	JobID string `json:"JobID"`
-}
 
 // cmdJob is the operator escape hatch for the declarative-job runtime.
 // The 95% submission path is the typed Go SDK (a generated
@@ -148,19 +92,18 @@ func cmdJobSubmit(args []string) int {
 	if principal == "" {
 		principal = "tide"
 	}
-	var resp submitJobResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/SubmitJob",
-		submitJobRequest{
-			JobName:     jobName,
-			Args:        probe,
-			ScheduledAt: *scheduledAt,
-			SubmittedBy: "cli:" + principal,
-		}, &resp); err != nil {
+	resp, err := client.SubmitJob(ctx, &adminpb.SubmitJobRequest{
+		JobName:     jobName,
+		Args:        probe,
+		ScheduledAt: *scheduledAt,
+		SubmittedBy: "cli:" + principal,
+	})
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide job submit:", err)
 		return 3
 	}
-	cliout.Successf("submitted %s as job %s", cliout.Bold(jobName), cliout.Bold(resp.JobID))
-	fmt.Printf("       monitor with: %s\n", cliout.Bold("tide job status "+resp.JobID))
+	cliout.Successf("submitted %s as job %s", cliout.Bold(jobName), cliout.Bold(resp.GetJobId()))
+	fmt.Printf("       monitor with: %s\n", cliout.Bold("tide job status "+resp.GetJobId()))
 	return 0
 }
 
@@ -193,19 +136,18 @@ func cmdJobStatus(args []string) int {
 	}
 	defer func() { _ = client.Close() }()
 
-	var resp getJobStatusResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/GetJobStatus",
-		getJobStatusRequest{JobID: jobID}, &resp); err != nil {
+	resp, err := client.GetJobStatus(ctx, &adminpb.GetJobStatusRequest{JobId: jobID})
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide job status:", err)
 		return 3
 	}
-	if !resp.Found {
+	if !resp.GetFound() {
 		cliout.Errorf("job %s not found", jobID)
 		return 1
 	}
 	switch *format {
 	case "json":
-		if err := json.NewEncoder(os.Stdout).Encode(resp.Job); err != nil {
+		if err := emitJSON(resp.GetJob(), "args"); err != nil {
 			fmt.Fprintln(os.Stderr, "tide job status:", err)
 			return 3
 		}
@@ -215,7 +157,10 @@ func cmdJobStatus(args []string) int {
 		fmt.Fprintf(os.Stderr, "tide job status: unknown --format %q\n", *format)
 		return 3
 	}
-	if resp.Job.Status == "failed" {
+	// GetJob() rather than resp.Job: a response with found=true and no job
+	// submessage is wire-valid, and a nil deref here would crash the CLI on a
+	// server that sent one.
+	if resp.GetJob().GetStatus() == "failed" {
 		return 1
 	}
 	return 0
@@ -247,20 +192,21 @@ func cmdJobDead(args []string) int {
 	}
 	defer func() { _ = client.Close() }()
 
-	var resp listDeadJobsResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/ListDeadJobs",
-		listDeadJobsRequest{JobName: *jobName, Limit: *limit}, &resp); err != nil {
+	resp, err := client.ListDeadJobs(ctx, &adminpb.ListDeadJobsRequest{
+		JobName: *jobName, Limit: int32(*limit),
+	})
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide job dead:", err)
 		return 3
 	}
 	switch *format {
 	case "json":
-		if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+		if err := emitJSON(resp, "args"); err != nil {
 			fmt.Fprintln(os.Stderr, "tide job dead:", err)
 			return 3
 		}
 	case "table":
-		printDeadJobs(resp.Jobs)
+		printDeadJobs(resp.GetJobs())
 	default:
 		fmt.Fprintf(os.Stderr, "tide job dead: unknown --format %q\n", *format)
 		return 3
@@ -296,14 +242,13 @@ func cmdJobRetry(args []string) int {
 	}
 	defer func() { _ = client.Close() }()
 
-	var resp retryDeadJobResponse
-	if err := client.invoke(ctx, "/atlantis.admin.v1.Admin/RetryDeadJob",
-		retryDeadJobRequest{JobID: jobID}, &resp); err != nil {
+	resp, err := client.RetryDeadJob(ctx, &adminpb.RetryDeadJobRequest{JobId: jobID})
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide job retry:", err)
 		return 3
 	}
-	cliout.Successf("requeued dead job %s -> %s", cliout.Bold(jobID), cliout.Bold(resp.JobID))
-	fmt.Printf("       monitor with: %s\n", cliout.Bold("tide job status "+resp.JobID))
+	cliout.Successf("requeued dead job %s -> %s", cliout.Bold(jobID), cliout.Bold(resp.GetJobId()))
+	fmt.Printf("       monitor with: %s\n", cliout.Bold("tide job status "+resp.GetJobId()))
 	return 0
 }
 
@@ -311,46 +256,46 @@ func cmdJobRetry(args []string) int {
 // status / dead listings. Status colors mirror the backfill
 // convention: green for terminal-good, yellow for in-flight, red
 // for failure.
-func printJobStatusRow(j jobStatus) {
-	fmt.Printf("%s     %s\n", cliout.Grey("job-id"), cliout.Bold(j.JobID))
-	fmt.Printf("%s   %s\n", cliout.Grey("job-name"), j.JobName)
-	fmt.Printf("%s      %s\n", cliout.Grey("queue"), j.Queue)
-	fmt.Printf("%s     %s\n", cliout.Grey("status"), colorJobStatus(j.Status))
-	fmt.Printf("%s   %d / %d\n", cliout.Grey("attempts"), j.Attempts, j.MaxRetries)
-	fmt.Printf("%s   %s\n", cliout.Grey("enqueued"), j.EnqueuedAt)
-	if j.ScheduledFor != "" {
-		fmt.Printf("%s  %s\n", cliout.Grey("scheduled"), j.ScheduledFor)
+func printJobStatusRow(j *adminpb.JobStatus) {
+	fmt.Printf("%s     %s\n", cliout.Grey("job-id"), cliout.Bold(j.GetJobId()))
+	fmt.Printf("%s   %s\n", cliout.Grey("job-name"), j.GetJobName())
+	fmt.Printf("%s      %s\n", cliout.Grey("queue"), j.GetQueue())
+	fmt.Printf("%s     %s\n", cliout.Grey("status"), colorJobStatus(j.GetStatus()))
+	fmt.Printf("%s   %d / %d\n", cliout.Grey("attempts"), j.GetAttempts(), j.GetMaxRetries())
+	fmt.Printf("%s   %s\n", cliout.Grey("enqueued"), j.GetEnqueuedAt())
+	if j.GetScheduledFor() != "" {
+		fmt.Printf("%s  %s\n", cliout.Grey("scheduled"), j.GetScheduledFor())
 	}
-	if j.StartedAt != "" {
-		fmt.Printf("%s    %s\n", cliout.Grey("started"), j.StartedAt)
+	if j.GetStartedAt() != "" {
+		fmt.Printf("%s    %s\n", cliout.Grey("started"), j.GetStartedAt())
 	}
-	if j.CompletedAt != "" {
-		fmt.Printf("%s  %s\n", cliout.Grey("completed"), j.CompletedAt)
+	if j.GetCompletedAt() != "" {
+		fmt.Printf("%s  %s\n", cliout.Grey("completed"), j.GetCompletedAt())
 	}
-	if j.SubmittedBy != "" {
-		fmt.Printf("%s     %s\n", cliout.Grey("submitter"), j.SubmittedBy)
+	if j.GetSubmittedBy() != "" {
+		fmt.Printf("%s     %s\n", cliout.Grey("submitter"), j.GetSubmittedBy())
 	}
-	if j.LastError != "" {
-		fmt.Printf("%s     %s %s\n", cliout.Red("error"), cliout.Grey("(at "+j.LastErrorAt+")"), cliout.Red(j.LastError))
+	if j.GetLastError() != "" {
+		fmt.Printf("%s     %s %s\n", cliout.Red("error"), cliout.Grey("(at "+j.GetLastErrorAt()+")"), cliout.Red(j.GetLastError()))
 	}
-	if j.ProgressPct >= 0 && (j.ProgressPct > 0 || j.ProgressMsg != "") {
+	if j.GetProgressPct() >= 0 && (j.GetProgressPct() > 0 || j.GetProgressMsg() != "") {
 		// ProgressPct=-1 means the handler hasn't reported. We render
 		// anything else (including a deliberate 0% with a message)
 		// so a long-running job's last-known state is visible.
-		msg := j.ProgressMsg
+		msg := j.GetProgressMsg()
 		if msg == "" {
 			msg = cliout.Grey("(no message)")
 		}
-		fmt.Printf("%s   %s%% %s %s\n", cliout.Grey("progress"), cliout.Yellow(fmt.Sprintf("%d", j.ProgressPct)), msg, cliout.Grey("(at "+j.ProgressAt+")"))
+		fmt.Printf("%s   %s%% %s %s\n", cliout.Grey("progress"), cliout.Yellow(fmt.Sprintf("%d", j.GetProgressPct())), msg, cliout.Grey("(at "+j.GetProgressAt()+")"))
 	}
-	if len(j.Args) > 0 && string(j.Args) != "{}" {
-		fmt.Printf("%s       %s\n", cliout.Grey("args"), string(j.Args))
+	if len(j.GetArgs()) > 0 && string(j.GetArgs()) != "{}" {
+		fmt.Printf("%s       %s\n", cliout.Grey("args"), string(j.GetArgs()))
 	}
 }
 
 // printDeadJobs renders the DLQ list as a compact summary, sorted by
 // the inherited moved-at order (the RPC returns DESC).
-func printDeadJobs(rows []jobStatus) {
+func printDeadJobs(rows []*adminpb.JobStatus) {
 	if len(rows) == 0 {
 		fmt.Println(cliout.Grey("(no dead jobs)"))
 		return
@@ -363,13 +308,13 @@ func printDeadJobs(rows []jobStatus) {
 	for _, j := range rows {
 		fmt.Printf("  %s %s %s\n",
 			cliout.Red("✖"),
-			cliout.Bold(j.JobID),
-			cliout.Cyan(j.JobName))
+			cliout.Bold(j.GetJobId()),
+			cliout.Cyan(j.GetJobName()))
 		fmt.Printf("    %s  attempts=%d/%d  %s\n",
-			cliout.Grey(j.CompletedAt),
-			j.Attempts,
-			j.MaxRetries,
-			cliout.Red(j.LastError))
+			cliout.Grey(j.GetCompletedAt()),
+			j.GetAttempts(),
+			j.GetMaxRetries(),
+			cliout.Red(j.GetLastError()))
 	}
 }
 
