@@ -1,0 +1,122 @@
+# Changelog
+
+Notable changes to atlantis, newest first.
+
+This file exists mainly for **breaking changes**. atlantis generates the DDL
+that migrates production databases, so a change to how something is named or
+enforced can alter what a later migration does to data that already exists. Those
+are called out explicitly, with what to check and what to do about it.
+
+Unreleased entries describe work on `main` that has not been tagged.
+
+## Unreleased
+
+### Breaking
+
+#### Unnamed entity-level CHECK constraints are named differently
+
+A `check "..."` written at entity level without `as <name>` used to be named
+positionally:
+
+```
+<table>_check_1, <table>_check_2, ...
+```
+
+It is now derived from the predicate:
+
+```
+<table>_check_<first 4 bytes of sha256(expression)>
+```
+
+**Why.** Positional naming renames constraints when they are reordered. Moving
+one unnamed check above another changed both names, so the differ had to either
+emit `DROP CONSTRAINT` + `ADD CONSTRAINT` — revalidating the whole table under
+an `ACCESS EXCLUSIVE` lock for a schema that had not changed — or stay silent and
+let a migrated database end up with different constraint names than a freshly
+created one. Deriving the name from the predicate makes reordering the no-op it
+actually is.
+
+**Who is affected.** Only databases that already contain an unnamed
+**entity-level** check. Two common cases are *not* affected:
+
+- `check "..." as my_name` — an explicit name is used verbatim and is untouched.
+- A `check` written as a field modifier — named `<table>_<column>_check`, unchanged.
+
+**What goes wrong if you are affected.** Nothing immediately: the migration
+diff compares schema to schema, so an unchanged schema produces no DDL. The
+problem appears the first time you *remove* or *edit* that check. atlantis emits
+`DROP CONSTRAINT IF EXISTS` against the new name, the old name is still what the
+database holds, and `IF EXISTS` turns the miss into a silent success. The plan
+reports the constraint gone; the database goes on enforcing it.
+
+**How to check.** Grep will not answer this reliably — `.atl` files live in
+caller repositories and may be excluded by `.gitignore`, and lowering files one
+at a time fails because they cross-reference each other. Parse them all together
+and inspect the IR:
+
+```go
+// Pass EVERY .atl file to a single Lower() call — they cross-reference each
+// other, and lowering them individually fails with "references unknown entity"
+// while silently reporting whatever the self-contained files happened to hold.
+ir, err := dsl.Lower(files)
+for i := range ir.Entities {
+    e := &ir.Entities[i]
+    for _, c := range e.Checks {   // Entity.Checks, not the cache block
+        if c.Name == "" {
+            // affected: an unnamed entity-level check
+        }
+    }
+}
+```
+
+This repository's own schemas were checked this way: four entity-level checks,
+all four explicitly named, none affected.
+
+**What to do if you find one.** Either is fine:
+
+1. **Name it** — `check "..." as the_name_already_in_your_database`. An explicit
+   name is used verbatim, so this pins the existing constraint permanently and
+   needs no DDL.
+2. Drop the old constraint by hand during a maintenance window and let atlantis
+   create the new one.
+
+Option 1 is the durable fix, and worth preferring generally: a named constraint
+is outside the generated-name scheme entirely.
+
+### Added
+
+- `chunk_time_interval` on hypertables. It was documented three times and
+  implemented zero times; it now reaches `create_hypertable`, and changing it
+  emits `set_chunk_time_interval` rather than silently doing nothing.
+- Cross-entity cache invalidation. `invalidate_on: write(Child where fk =
+  self.id)` now invalidates the parent when a child is written, including both
+  parents when a child is reparented.
+- `Get` is served through the read cache, which was previously built, wired into
+  the invalidation worker, and never read from.
+- Startup reports which TimescaleDB build the database runs.
+  `ATL_REQUIRE_APACHE_TIMESCALE=true` refuses to start on the Community (TSL)
+  build, which a hosted deployment needs and a self-hoster does not.
+
+### Fixed
+
+- CHECK constraints are now diffed at all. Adding one previously produced an
+  empty diff and DDL containing no CHECK.
+- `partition by` no longer claims tenant isolation it does not provide. It is
+  enforced by Postgres row-level security, in the database rather than in each
+  generated read.
+- No-rows errors from the Postgres adapter are visible to `runtime.IsNoRows`
+  again, so a `Get` for a missing row returns NotFound rather than a raw driver
+  error.
+- Entities written by a custom procedure are no longer served from the read
+  cache. A procedure cannot invalidate the row bodies it changes, so caching
+  them served stale rows.
+
+### Changed
+
+- Whether a `check` binds to the preceding field or to the entity is now decided
+  by indentation rather than by what happens to precede it. A `check` at or left
+  of its field's column is an entity-level constraint; indented past it, it is
+  that field's. Every schema in this repository parsed identically before and
+  after.
+- A field may declare only one `check`. A second was previously accepted and
+  silently discarded.
