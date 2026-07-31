@@ -8,6 +8,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
@@ -85,13 +86,50 @@ func (s *Server) handleGet(ctx context.Context, meta *entityMeta, dec func(any) 
 		pkArgs = append(pkArgs, goValueFromProto(req, fd, cm))
 	}
 
-	row := s.pool.QueryRow(ctx, meta.sqlGet, pkArgs...)
-	entity, err := scanRow(meta, row)
-	if err != nil {
-		if runtime.IsNoRows(err) {
-			return nil, runtime.ErrNotFound
+	// Read through the cache when one is configured. The Reader owns tier-0
+	// LRU, versioned-key indirection over memcached, singleflight per miss and
+	// XFetch early refresh; all this path supplies is a loader and the codec.
+	//
+	// Nil reader means caching is off, which is what the sandbox and most tests
+	// want, and the loader below is then the whole of the read.
+	loadRow := func(ctx context.Context) (*dynamicpb.Message, error) {
+		row := s.pool.QueryRow(ctx, meta.sqlGet, pkArgs...)
+		e, err := scanRow(meta, row)
+		if err != nil {
+			if runtime.IsNoRows(err) {
+				return nil, runtime.ErrNotFound
+			}
+			return nil, err
 		}
-		return nil, err
+		return e, nil
+	}
+
+	var entity *dynamicpb.Message
+	if s.reader == nil {
+		var err error
+		if entity, err = loadRow(ctx); err != nil {
+			return nil, err
+		}
+	} else {
+		cacheID := runtime.CompositeID(pkArgs...)
+		body, err := s.reader.Get(ctx, meta.entityID, cacheID, func(ctx context.Context) ([]byte, error) {
+			e, lerr := loadRow(ctx)
+			if lerr != nil {
+				return nil, lerr
+			}
+			return proto.Marshal(e)
+		})
+		if err != nil {
+			// ErrNotFound travels up from the loader unchanged. Caching a
+			// negative result would need a tombstone the invalidation path
+			// knows how to clear, and it does not, so a missing row simply is
+			// not cached.
+			return nil, err
+		}
+		entity = dynamicpb.NewMessage(meta.msgDesc)
+		if err := proto.Unmarshal(body, entity); err != nil {
+			return nil, fmt.Errorf("Get%s: decode cached body: %w", meta.entity.Name, err)
+		}
 	}
 
 	resp := dynamicpb.NewMessage(meta.getResponseDesc)

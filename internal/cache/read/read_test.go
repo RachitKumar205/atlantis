@@ -118,9 +118,42 @@ func TestReader_CacheMiss_FallsThroughToLoader(t *testing.T) {
 	if loaderCalls.Load() != 1 {
 		t.Errorf("loader calls: %d want 1", loaderCalls.Load())
 	}
-	// After the miss, the body should be cached (single Set on miss).
+	// No version pointer exists for this row, so the body must NOT be written
+	// to tier 1.
+	//
+	// This assertion is inverted from what it was, and the inversion is the
+	// fix. Writing the body under an invented version 1 looked like caching and
+	// was the opposite: tier1Lookup treats version 0 as a miss, so nothing
+	// could read that key until the pointer reached exactly 1 — which is what
+	// the first write produces (the write path enqueues CurrentVersion()+1, and
+	// CurrentVersion is 0). The one moment the entry became reachable was the
+	// moment it went stale, so the first write after a first read served the
+	// pre-write row.
+	if c.setCalls.Load() != 0 {
+		t.Errorf("wrote %d tier-1 entries for a row with no version pointer; that "+
+			"key is unreachable until a write makes it stale", c.setCalls.Load())
+	}
+}
+
+// With a pointer in place, the body IS written to tier 1 — otherwise the fix
+// above would have quietly disabled the cache rather than corrected it.
+func TestReader_CacheMiss_WritesTier1WhenAPointerExists(t *testing.T) {
+	c := newFakeCache()
+	c.versions["x.A:1"] = 4
+	r, _ := New(c, DefaultConfig())
+
+	if _, err := r.Get(context.Background(), "x.A", "1", func(context.Context) ([]byte, error) {
+		return []byte("fresh"), nil
+	}); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
 	if c.setCalls.Load() < 1 {
-		t.Errorf("expected at least one Set after miss")
+		t.Error("no tier-1 write for a row that has a version pointer; the cache " +
+			"would never serve a cross-process hit")
+	}
+	if _, ok := c.bodies[runtime.CacheKey("x.A", "1", 4)]; !ok {
+		t.Errorf("body not stored under the pointer's own version; a later read "+
+			"resolves the pointer to 4 and would miss. keys=%v", c.bodies)
 	}
 }
 

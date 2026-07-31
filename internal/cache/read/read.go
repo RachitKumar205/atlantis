@@ -167,12 +167,27 @@ func (r *Reader) Get(ctx context.Context, entity, id string, loader Loader) ([]b
 		// Best-effort refill. If the cache is down, we still return the
 		// freshly-loaded body to the caller — staleness is acceptable; data
 		// loss is not.
+		// A row with no version pointer is NOT written to tier 1.
+		//
+		// The previous code invented version 1 for it. That body was never
+		// legitimately readable: tier1Lookup treats version 0 as a miss, so
+		// nothing could find it until the pointer reached exactly 1 — which is
+		// what the first write produces, since the write path enqueues
+		// CurrentVersion()+1 and CurrentVersion is 0. So the single moment the
+		// body became reachable was the moment it went stale, and the first
+		// write after a first read served the pre-write row.
+		//
+		// Skipping the write costs nothing, because that key had no reachable
+		// state to lose. Tier 0 still caches the row in-process, and once
+		// anything writes the row the pointer exists and tier 1 works normally.
+		//
+		// Establishing the pointer from the read path would be the richer fix,
+		// but PointerCache cannot set it and doing so races with concurrent
+		// writers computing CurrentVersion()+1.
 		newVer, _ := r.cache.CurrentVersion(loadCtx, entity, id)
-		if newVer == 0 {
-			newVer = 1
+		if newVer > 0 {
+			_ = r.cache.Set(loadCtx, runtime.CacheKey(entity, id, newVer), fresh, r.cfg.DefaultTTL)
 		}
-		bk := runtime.CacheKey(entity, id, newVer)
-		_ = r.cache.Set(loadCtx, bk, fresh, r.cfg.DefaultTTL)
 		// Bound the in-memory size of cached bodies. Very large
 		// bodies bypass tier-0 entirely so a 100MB payload can't OOM the pod
 		// just by being read once.

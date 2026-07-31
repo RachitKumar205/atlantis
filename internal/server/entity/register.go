@@ -7,6 +7,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/rachitkumar205/atlantis/internal/cache/queryresult"
+	"github.com/rachitkumar205/atlantis/internal/cache/read"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/runtime"
 )
@@ -20,16 +21,26 @@ type Server struct {
 	cache      runtime.Cache
 	outbox     runtime.Outbox
 	queryCache *queryresult.Cache
-	snapshot   atomic.Pointer[entitySnapshot]
+	// reader is the read-through cache path. Nil disables caching entirely,
+	// which is what the sandbox and most tests want.
+	//
+	// It is a constructor argument rather than a settable field, but that is
+	// not what keeps it wired: queryCache has been a required argument since
+	// this server was written and was never once read. Only a test that
+	// asserts a second Get does not reach Postgres can keep this honest —
+	// see TestGetIsServedFromCacheOnSecondCall.
+	reader   *read.Reader
+	snapshot atomic.Pointer[entitySnapshot]
 }
 
 // NewServer constructs a dynamic entity server.
-func NewServer(pool runtime.Pool, cache runtime.Cache, outbox runtime.Outbox, qc *queryresult.Cache) *Server {
+func NewServer(pool runtime.Pool, cache runtime.Cache, outbox runtime.Outbox, qc *queryresult.Cache, reader *read.Reader) *Server {
 	s := &Server{
 		pool:       pool,
 		cache:      cache,
 		outbox:     outbox,
 		queryCache: qc,
+		reader:     reader,
 	}
 	s.snapshot.Store(&entitySnapshot{
 		entities:   make(map[string]*entityMeta),

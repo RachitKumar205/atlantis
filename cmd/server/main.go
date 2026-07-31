@@ -513,7 +513,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	}
 
 	log.Debug("init: register entity services")
-	dynServer := entity.NewServer(pool, mc, invalidate.NewOutbox(), queryCache)
+	dynServer := entity.NewServer(pool, mc, invalidate.NewOutbox(), queryCache, reader)
 	if err := dynServer.Register(srv, ir); err != nil {
 		return fmt.Errorf("register entity services: %w", err)
 	}

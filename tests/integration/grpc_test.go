@@ -35,7 +35,7 @@ func startGRPCServer(t *testing.T, h *Harness) *grpc.ClientConn {
 	}
 	srv := grpc.NewServer()
 
-	dynServer := entity.NewServer(h.Pool, h.Cache, h.Outbox, h.QueryCache)
+	dynServer := entity.NewServer(h.Pool, h.Cache, h.Outbox, h.QueryCache, nil)
 	if err := dynServer.Register(srv, ir); err != nil {
 		t.Fatalf("dynServer.Register: %v", err)
 	}
