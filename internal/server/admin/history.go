@@ -119,18 +119,20 @@ LIMIT $1`, fetchLimit)
 	}, nil
 }
 
-// countDiffChanges unmarshals the diff JSON just enough to count
-// total changes. Tolerant of malformed JSON — returns 0.
+// countDiffChanges unmarshals a STORED diff just enough to count its changes.
+// Tolerant of malformed JSON — returns 0.
+//
+// This decodes into codegen.Diff rather than a local struct listing the buckets
+// by name. The local struct is how a bucket gets missed: adding Destructive left
+// it silently counting three of four, so a stored plan would report fewer
+// changes than it held and the omitted kind would be the one that destroys data.
+// Decoding into the real type means a new bucket is counted the day it exists.
 func countDiffChanges(raw []byte) int {
-	var d struct {
-		Additive         []json.RawMessage `json:"additive"`
-		BackfillRequired []json.RawMessage `json:"backfill_required"`
-		Breaking         []json.RawMessage `json:"breaking"`
-	}
+	var d codegen.Diff
 	if json.Unmarshal(raw, &d) != nil {
 		return 0
 	}
-	return len(d.Additive) + len(d.BackfillRequired) + len(d.Breaking)
+	return d.Len()
 }
 
 // ---------------------------------------------------------------------------
@@ -524,7 +526,7 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.GetToV
 		CurrentVersion: currentVersion,
 		UpSql:          scripts.Up,
 		PlanClass:      d.HighestClass().String(),
-		ChangeCount:    int32(len(d.Additive) + len(d.BackfillRequired) + len(d.Breaking)),
+		ChangeCount:    int32(d.Len()),
 	}, nil
 }
 

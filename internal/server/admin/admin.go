@@ -565,6 +565,14 @@ func (s *Service) PlanSchema(ctx context.Context, req *adminpb.PlanSchemaRequest
 		resp.BreakingDetail = append(resp.BreakingDetail,
 			fmt.Sprintf("%s/%s: %s", ch.EntityID, ch.Field, ch.Detail))
 	}
+	// Destructive changes are listed here too. They are parked rather than
+	// dropped and so are recoverable, but a plan that says nothing about the
+	// rows it is about to move is a plan the reviewer cannot assess.
+	for _, ch := range d.Destructive {
+		resp.BreakingDetail = append(resp.BreakingDetail,
+			fmt.Sprintf("%s/%s: %s (parked, reaped after the retention window)",
+				ch.EntityID, ch.Field, ch.Detail))
+	}
 	// Custom-SQL failures mark the plan unparseable; nothing can apply until fixed.
 	if len(customSQLErrs) > 0 {
 		resp.Class = adminpb.PlanClass_PLAN_CLASS_UNPARSEABLE
@@ -1233,6 +1241,10 @@ func buildImpactReport(planCaller string, others []*dsl.File, d *codegen.Diff, _
 		count++
 	}
 	for _, ch := range d.BackfillRequired {
+		touched[ch.EntityID] = true
+		count++
+	}
+	for _, ch := range d.Destructive {
 		touched[ch.EntityID] = true
 		count++
 	}

@@ -149,6 +149,9 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 	}{
 		{"ADDITIVE", d.Additive},
 		{"BACKFILL REQUIRED", d.BackfillRequired},
+		// Destructive before breaking: a parked object must be out of the way
+		// before anything that might recreate a name it still holds.
+		{"DESTRUCTIVE — PARKED, REAPED AFTER THE RETENTION WINDOW", d.Destructive},
 		{"BREAKING — REVIEW CAREFULLY", d.Breaking},
 	} {
 		gd := &sqlBuilder{}
@@ -536,11 +539,15 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 	case KindEntityAdded:
 		e := newByID[ch.EntityID]
 		emitEntityCreate(up, e)
+		// A real drop, not a park. This undoes a table THIS migration created,
+		// so the only rows it can lose are ones written since it ran, and
+		// parking would leave a tombstone behind for something the schema never
+		// deliberately removed. Parking is for an author deleting a declaration.
 		emitEntityDrop(down, e)
 	case KindEntityRemoved:
 		e := oldByID[ch.EntityID]
-		emitEntityDrop(up, e)
-		emitEntityCreate(down, e)
+		emitEntityPark(up, e)
+		emitEntityUnpark(down, e)
 	case KindFieldAdded:
 		e := newByID[ch.EntityID]
 		f := e.FindField(ch.Field)
@@ -549,8 +556,11 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 	case KindFieldRemoved:
 		oldE := oldByID[ch.EntityID]
 		f := oldE.FindField(ch.Field)
-		emitFieldDrop(up, oldE, f.Name)
-		emitFieldAdd(down, oldE, f)
+		emitFieldPark(up, oldE, f.Name)
+		// The down of a park is a rename back, not a recreate: recreating the
+		// column would produce an empty one and discard exactly the data the
+		// park exists to preserve.
+		emitFieldUnpark(down, oldE, f.Name, f)
 	case KindFieldNotNullTightened:
 		e := newByID[ch.EntityID]
 		emitNotNull(up, e, ch.Field, true)
@@ -864,15 +874,86 @@ func emitEntityCreate(b *sqlBuilder, e *dsl.Entity) {
 	emitTouchTrigger(b, e)
 }
 
+// emitEntityDrop parks a table instead of dropping it.
+//
+// The table is moved into the tombstone schema, where the application cannot
+// reach it — every generated statement names atlantis.<table> explicitly — and
+// left intact. A scheduled reaper drops it once the retention window has
+// passed. Until then the change is undone by moving it back, with the rows
+// still in it.
+//
+// This replaces DROP TABLE ... CASCADE, which was two problems in one line. The
+// drop itself was irreversible: the documentation already conceded that a
+// migration losing data is not reversible and that point-in-time restore of the
+// entire database is the recovery path, which is not a recovery path for one
+// mistaken line in a schema file. And CASCADE silently removed dependent
+// objects — views, foreign keys from tables that were not part of this change —
+// so the blast radius exceeded what the plan showed.
+//
+// Parking is deliberately not CASCADE-equivalent: if another object still
+// depends on this table, the move fails and the migration stops. That is the
+// point. A dependency nobody accounted for should surface as an error at apply
+// time, not as a silent deletion.
 func emitEntityDrop(b *sqlBuilder, e *dsl.Entity) {
-	b.linef("DROP TABLE IF EXISTS %s CASCADE;", qualifiedTable(e))
+	// No CASCADE. It removed dependent objects — views, foreign keys from
+	// tables outside this change — that the plan never showed, so the blast
+	// radius exceeded what was reviewed. Without it, an unaccounted dependency
+	// fails the migration instead, which is the outcome worth having.
+	b.linef("DROP TABLE IF EXISTS %s;", qualifiedTable(e))
 	if e.TouchOnUpdateField != "" {
-		// CASCADE on the table drops the trigger itself; the function
-		// survives and must be dropped explicitly so the down migration
-		// is a true inverse of up.
+		// The trigger goes with the table; the function is separate and must be
+		// dropped explicitly so the down migration is a true inverse of up.
 		fnName := triggerName(e, "touch_fn")
 		b.linef(`DROP FUNCTION IF EXISTS "atlantis".%s();`, quoteIdent(fnName))
 	}
+}
+
+// emitEntityPark moves a table out of reach instead of dropping it.
+//
+// The table goes to the tombstone schema, where nothing can reach it — every
+// generated statement names atlantis.<table> explicitly — and stays intact. A
+// reaper drops it once the retention window passes; until then the change is
+// undone by moving it back, rows and all.
+//
+// This is what replaces DROP TABLE for a removal the author asked for. The
+// documentation already conceded that a migration losing data is irreversible
+// and that point-in-time restore of the whole database is the recovery path,
+// which is no recovery path at all for one mistaken line in a schema file.
+func emitEntityPark(b *sqlBuilder, e *dsl.Entity) {
+	b.linef("CREATE SCHEMA IF NOT EXISTS %s;", quoteIdent(TombstoneSchema))
+	b.linef("ALTER TABLE IF EXISTS %s SET SCHEMA %s;", qualifiedTable(e), quoteIdent(TombstoneSchema))
+	b.linef("ALTER TABLE IF EXISTS %s.%s RENAME TO %s;",
+		quoteIdent(TombstoneSchema), quoteIdent(tableName(e)), quoteIdent(parkedName(tableName(e))))
+}
+
+// emitEntityUnpark is the inverse: bring the table back with its rows.
+//
+// Not emitEntityCreate. Recreating the table would produce an empty one and
+// discard precisely what parking preserved.
+func emitEntityUnpark(b *sqlBuilder, e *dsl.Entity) {
+	b.linef("ALTER TABLE IF EXISTS %s.%s RENAME TO %s;",
+		quoteIdent(TombstoneSchema), quoteIdent(parkedName(tableName(e))), quoteIdent(tableName(e)))
+	b.linef("ALTER TABLE IF EXISTS %s.%s SET SCHEMA \"atlantis\";",
+		quoteIdent(TombstoneSchema), quoteIdent(tableName(e)))
+}
+
+// TombstoneSchema holds parked objects awaiting the retention window.
+//
+// A separate schema rather than a naming convention inside atlantis: a parked
+// table must be unreachable by anything that enumerates the live schema —
+// introspection, drift detection, a caller's own query — and a schema boundary
+// does that without every one of those paths having to remember a prefix rule.
+const TombstoneSchema = "atlantis_tombstone"
+
+// parkedName is the name a parked object takes.
+//
+// The suffix carries the plan that parked it rather than a timestamp: two drops
+// of the same table in one retention window would otherwise collide on the
+// second, and a collision here means the migration fails rather than the older
+// tombstone being overwritten — but a name that says which plan did it is what
+// makes the reaper's retention decision and any manual restore legible.
+func parkedName(base string) string {
+	return truncateIdent(base + "__parked")
 }
 
 func emitFieldAdd(b *sqlBuilder, e *dsl.Entity, f *dsl.Field) {
@@ -882,8 +963,51 @@ func emitFieldAdd(b *sqlBuilder, e *dsl.Entity, f *dsl.Field) {
 	}
 }
 
+// emitFieldDrop parks a column instead of dropping it.
+//
+// A column cannot be moved to another schema, so it is renamed. That is enough
+// to make it invisible: every generated statement names its columns explicitly,
+// so a renamed column is absent from reads, writes and the entity's proto
+// surface, while the data stays exactly where it was. Undoing it is a rename
+// back.
+//
+// The cost is that the column still occupies its space and still enforces any
+// NOT NULL it carried, so a parked NOT NULL column would block inserts. Its
+// constraint is dropped for that reason — the column is retained for its data,
+// not its rules.
 func emitFieldDrop(b *sqlBuilder, e *dsl.Entity, name string) {
 	b.linef("ALTER TABLE %s DROP COLUMN %s;", qualifiedTable(e), quoteIdent(name))
+}
+
+// emitFieldPark renames a column out of the way instead of dropping it.
+//
+// A column cannot move to another schema, so it is renamed — which is enough:
+// every generated statement names its columns, so a renamed column is absent
+// from reads, writes and the proto surface while its data stays put.
+//
+// Its NOT NULL is dropped because the column is being retained for its data,
+// not its rules, and a parked NOT NULL column would reject inserts that touch
+// only the live ones.
+func emitFieldPark(b *sqlBuilder, e *dsl.Entity, name string) {
+	parked := parkedName(name)
+	b.linef("ALTER TABLE %s RENAME COLUMN %s TO %s;",
+		qualifiedTable(e), quoteIdent(name), quoteIdent(parked))
+	b.linef("ALTER TABLE %s ALTER COLUMN %s DROP NOT NULL;",
+		qualifiedTable(e), quoteIdent(parked))
+}
+
+// emitFieldUnpark renames the column back and restores the NOT NULL the park
+// removed. Restoring it can fail if rows were written while the column was
+// parked, which is correct: those rows have no value for it, and silently
+// leaving the column nullable would return a different schema than the one
+// being rolled back to.
+func emitFieldUnpark(b *sqlBuilder, e *dsl.Entity, name string, f *dsl.Field) {
+	b.linef("ALTER TABLE %s RENAME COLUMN %s TO %s;",
+		qualifiedTable(e), quoteIdent(parkedName(name)), quoteIdent(name))
+	if f != nil && f.NotNull && !f.Primary {
+		b.linef("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL;",
+			qualifiedTable(e), quoteIdent(name))
+	}
 }
 
 func emitNotNull(b *sqlBuilder, e *dsl.Entity, field string, on bool) {

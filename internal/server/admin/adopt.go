@@ -342,9 +342,9 @@ func translateDrift(d *codegen.Diff) []AdoptDriftItem {
 			})
 		}
 	}
-	add(d.Additive)
-	add(d.BackfillRequired)
-	add(d.Breaking)
+	// Every bucket, via All(), so a new class cannot go unreported. Drift that
+	// is not listed is drift the operator does not know about.
+	add(d.All())
 	return out
 }
 

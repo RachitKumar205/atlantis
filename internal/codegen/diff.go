@@ -35,6 +35,23 @@ const (
 	// service composes that knowledge with this classification to decide
 	// whether to auto-apply or escalate.
 	ClassCrossCallerBreaking
+
+	// ClassDestructive removes something that may hold data: a column, a
+	// table. Distinct from CrossCallerBreaking, which is about who else reads
+	// it — a caller can be the sole owner of an entity and still be destroying
+	// its own production data.
+	//
+	// Before this existed, dropping a column you owned classified as ADDITIVE
+	// and `tide apply` applied it unattended: one deleted line in a .atl, one
+	// ALTER TABLE ... DROP COLUMN, and the only recovery was point-in-time
+	// restore of the whole database.
+	//
+	// The classification is deliberately not derived from reference analysis.
+	// "Nobody reads this column" is a statement about code, not about data, and
+	// it is defeated by decomposition: drop the foreign key in one PR, the
+	// column in the next, and each step looks unreferenced. Removal of anything
+	// that can hold rows is destructive regardless of who reads it.
+	ClassDestructive
 )
 
 // String returns the human-readable label for the class.
@@ -46,6 +63,8 @@ func (c ChangeClass) String() string {
 		return "backfill-required"
 	case ClassCrossCallerBreaking:
 		return "cross-caller-breaking"
+	case ClassDestructive:
+		return "destructive"
 	}
 	return "unknown"
 }
@@ -171,18 +190,54 @@ type Diff struct {
 	Additive         []Change `json:"additive,omitempty"`
 	BackfillRequired []Change `json:"backfill_required,omitempty"`
 	Breaking         []Change `json:"breaking,omitempty"`
+	// Destructive removes something that may hold data. Separate from Breaking
+	// because the two ask different questions: Breaking is "does this break
+	// somebody else", Destructive is "does this destroy rows", and a caller
+	// that owns an entity outright can do the second without the first.
+	Destructive []Change `json:"destructive,omitempty"`
 }
 
 // IsEmpty reports whether the diff has no changes.
 func (d *Diff) IsEmpty() bool {
-	return len(d.Additive)+len(d.BackfillRequired)+len(d.Breaking) == 0
+	return len(d.Additive)+len(d.BackfillRequired)+len(d.Breaking)+len(d.Destructive) == 0
 }
 
 // HighestClass returns the most-restrictive class present, which drives
 // whether `tide apply` can auto-apply, requires backfill, or escalates to a PR.
+// All returns every change in the diff, in class order.
+//
+// Use this rather than enumerating the buckets by hand. Adding Destructive
+// found six places that listed the three existing buckets literally — change
+// counts, lineage, plan reporting — every one of which would have dropped
+// destructive changes silently: the plan would report fewer changes than it
+// contained, and the one kind that destroys data would be the kind omitted.
+//
+// TestDiffAllCoversEveryBucket asserts this stays exhaustive by reflection, so
+// a future bucket cannot repeat it.
+func (d *Diff) All() []Change {
+	out := make([]Change, 0, len(d.Additive)+len(d.BackfillRequired)+len(d.Destructive)+len(d.Breaking))
+	out = append(out, d.Additive...)
+	out = append(out, d.BackfillRequired...)
+	out = append(out, d.Destructive...)
+	out = append(out, d.Breaking...)
+	return out
+}
+
+// Len is the total number of changes.
+func (d *Diff) Len() int { return len(d.All()) }
+
+// HighestClass returns the most-restrictive class present.
+//
+// Breaking outranks Destructive deliberately. A destructive change is parked
+// rather than dropped, so it is recoverable for the retention window by whoever
+// made it; a cross-caller break needs somebody from another team, which is the
+// slower gate and therefore the one that should decide.
 func (d *Diff) HighestClass() ChangeClass {
 	if len(d.Breaking) > 0 {
 		return ClassCrossCallerBreaking
+	}
+	if len(d.Destructive) > 0 {
+		return ClassDestructive
 	}
 	if len(d.BackfillRequired) > 0 {
 		return ClassBackfillRequired
@@ -218,6 +273,19 @@ func WithCallerContext(caller string, ownership map[string]string, refs map[stri
 // entity and no other caller references the given key (entityID or
 // entityID.field). Falls back to ClassCrossCallerBreaking when context is
 // absent or conditions aren't met.
+// classifyRemoval decides how removing a column or entity is gated.
+//
+// The floor is ClassDestructive, not ClassAdditive. Owning the thing you are
+// deleting says nothing about whether the deletion loses data: before this, a
+// caller dropping its own column produced an ADDITIVE plan that `tide apply`
+// applied unattended, and the only recovery was a point-in-time restore of the
+// entire database.
+//
+// Reference analysis still runs, and still escalates to cross-caller-breaking
+// when somebody else reads the thing. What it must never do is de-escalate
+// below destructive, because "no other caller references this" is a claim about
+// code and the rows are still there. It is also defeated by decomposition: drop
+// the foreign key in one PR and the column in the next, and each step passes.
 func (ctx *diffCtx) classifyRemoval(entityID, refKey string) ChangeClass {
 	if ctx.submittingCaller == "" {
 		return ClassCrossCallerBreaking
@@ -229,7 +297,7 @@ func (ctx *diffCtx) classifyRemoval(entityID, refKey string) ChangeClass {
 	if ctx.crossCallerRefs[refKey] {
 		return ClassCrossCallerBreaking
 	}
-	return ClassAdditive
+	return ClassDestructive
 }
 
 // ComputeDiff diffs old → new. Either IR may be nil; nil means "no schema yet".
@@ -1152,6 +1220,8 @@ func (d *Diff) append(c Change) {
 		d.BackfillRequired = append(d.BackfillRequired, c)
 	case ClassCrossCallerBreaking:
 		d.Breaking = append(d.Breaking, c)
+	case ClassDestructive:
+		d.Destructive = append(d.Destructive, c)
 	default:
 		d.Breaking = append(d.Breaking, c)
 	}

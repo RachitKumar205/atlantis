@@ -349,3 +349,60 @@ func TestUncoveredAttributesAreReported(t *testing.T) {
 	t.Logf("%d IR attributes are invisible to the differ and must force "+
 		"verdict unverified: %v", len(gaps), gaps)
 }
+
+// Diff.All must cover every bucket on the struct.
+//
+// Adding Destructive found six production sites that listed the three existing
+// buckets literally — change counts, lineage, drift reporting, plan detail —
+// and every one would have dropped destructive changes without a word. A plan
+// would have reported fewer changes than it contained, and the omitted kind
+// would have been the one that destroys data.
+//
+// Derived by reflection rather than by listing the buckets again, because
+// listing them again is the bug.
+func TestDiffAllCoversEveryBucket(t *testing.T) {
+	typ := reflect.TypeOf(Diff{})
+
+	// One change in every bucket, so a bucket All() forgets is one change
+	// missing from the total.
+	d := &Diff{}
+	want := 0
+	v := reflect.ValueOf(d).Elem()
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		if f.Type != reflect.TypeOf([]Change{}) {
+			continue
+		}
+		v.Field(i).Set(reflect.ValueOf([]Change{{Kind: KindEntityAdded, EntityID: f.Name}}))
+		want++
+	}
+	if want < 4 {
+		t.Fatalf("found %d change buckets on Diff; this test is not reading what it "+
+			"thinks it is", want)
+	}
+
+	got := d.All()
+	if len(got) != want {
+		seen := map[string]bool{}
+		for _, c := range got {
+			seen[c.EntityID] = true
+		}
+		var missing []string
+		for i := 0; i < typ.NumField(); i++ {
+			f := typ.Field(i)
+			if f.Type == reflect.TypeOf([]Change{}) && !seen[f.Name] {
+				missing = append(missing, f.Name)
+			}
+		}
+		t.Errorf("All() returned %d of %d changes; missing bucket(s): %v.\n"+
+			"  Every caller that counts, lists or reports changes goes through "+
+			"All(), so a bucket omitted here is invisible everywhere at once.",
+			len(got), want, missing)
+	}
+	if d.Len() != want {
+		t.Errorf("Len() = %d, want %d", d.Len(), want)
+	}
+	if d.IsEmpty() {
+		t.Error("IsEmpty() is true for a diff with a change in every bucket")
+	}
+}

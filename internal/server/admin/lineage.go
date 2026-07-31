@@ -19,10 +19,7 @@ func updateEntityLineage(ctx context.Context, tx pgx.Tx, version int64, caller s
 		return nil
 	}
 
-	allChanges := make([]codegen.Change, 0, len(d.Additive)+len(d.BackfillRequired)+len(d.Breaking))
-	allChanges = append(allChanges, d.Additive...)
-	allChanges = append(allChanges, d.BackfillRequired...)
-	allChanges = append(allChanges, d.Breaking...)
+	allChanges := d.All()
 
 	for _, ch := range allChanges {
 		switch ch.Kind {

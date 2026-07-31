@@ -21,19 +21,13 @@ func lower(t *testing.T, src string) *dsl.IR {
 }
 
 // findChange returns the first change matching kind, or nil if absent.
+// Searches every bucket via All(), not three of them by name. Listing the
+// buckets here is how this helper silently stopped finding destructive changes
+// the moment that bucket existed — and a helper that cannot find a change makes
+// every test using it pass for the wrong reason.
 func findChange(t *testing.T, d *Diff, kind ChangeKind) *Change {
 	t.Helper()
-	for _, c := range d.Additive {
-		if c.Kind == kind {
-			return &c
-		}
-	}
-	for _, c := range d.BackfillRequired {
-		if c.Kind == kind {
-			return &c
-		}
-	}
-	for _, c := range d.Breaking {
+	for _, c := range d.All() {
 		if c.Kind == kind {
 			return &c
 		}
@@ -593,7 +587,17 @@ func TestDiff_TableNameAppeared_IsBreaking(t *testing.T) {
 // TestDiff_FieldRemoved_OwnedNoCrossRef_IsAdditive: when the submitting
 // caller owns the entity and no other caller references the removed field,
 // the removal is downgraded to additive.
-func TestDiff_FieldRemoved_OwnedNoCrossRef_IsAdditive(t *testing.T) {
+// Removing a column you own is DESTRUCTIVE, not additive.
+//
+// This test previously asserted the opposite, and the opposite is what let a
+// deleted line in a .atl file reach production unattended: additive is the
+// class `tide apply` applies without a gate, so `ALTER TABLE ... DROP COLUMN`
+// ran and the only recovery was a point-in-time restore of the whole database.
+//
+// Owning the thing says nothing about whether deleting it loses data.
+// Reference analysis still escalates to cross-caller-breaking when somebody
+// else reads it; what it must not do is de-escalate below destructive.
+func TestDiff_FieldRemoved_OwnedNoCrossRef_IsDestructive(t *testing.T) {
 	oldIR := lower(t, `entity A in x { id bigint primary  brand text }`)
 	newIR := lower(t, `entity A in x { id bigint primary }`)
 
@@ -605,11 +609,12 @@ func TestDiff_FieldRemoved_OwnedNoCrossRef_IsAdditive(t *testing.T) {
 	if c == nil {
 		t.Fatal("expected KindFieldRemoved change")
 	}
-	if c.Class != ClassAdditive {
-		t.Errorf("field removal by owner with no cross-refs should be additive, got %v", c.Class)
+	if c.Class != ClassDestructive {
+		t.Errorf("field removal by its owner should be destructive, got %v — "+
+			"additive means auto-applied with no gate", c.Class)
 	}
-	if d.HighestClass() != ClassAdditive {
-		t.Errorf("highest class should be additive, got %v", d.HighestClass())
+	if d.HighestClass() != ClassDestructive {
+		t.Errorf("highest class should be destructive, got %v", d.HighestClass())
 	}
 }
 
@@ -653,7 +658,8 @@ func TestDiff_FieldRemoved_NotOwner_IsBreaking(t *testing.T) {
 
 // TestDiff_EntityRemoved_OwnedNoCrossRef_IsAdditive: dropping an entity
 // the submitting caller owns, with no cross-caller references, is additive.
-func TestDiff_EntityRemoved_OwnedNoCrossRef_IsAdditive(t *testing.T) {
+// Same for a whole entity: owning it does not make dropping it safe.
+func TestDiff_EntityRemoved_OwnedNoCrossRef_IsDestructive(t *testing.T) {
 	oldIR := lower(t, `entity A in x { id bigint primary } entity B in x { id bigint primary }`)
 	newIR := lower(t, `entity A in x { id bigint primary }`)
 
@@ -665,7 +671,7 @@ func TestDiff_EntityRemoved_OwnedNoCrossRef_IsAdditive(t *testing.T) {
 	if c == nil {
 		t.Fatal("expected KindEntityRemoved change")
 	}
-	if c.Class != ClassAdditive {
+	if c.Class != ClassDestructive {
 		t.Errorf("entity removal by owner with no cross-refs should be additive, got %v", c.Class)
 	}
 }

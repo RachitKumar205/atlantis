@@ -39,7 +39,7 @@ func TestEmit_Initial_BareEntity(t *testing.T) {
 	assertContains(t, up, `"id" BIGINT`)
 	assertContains(t, up, `"email" TEXT NOT NULL UNIQUE`)
 	assertContains(t, up, `CONSTRAINT "consumer_account_pkey" PRIMARY KEY ("id")`)
-	assertContains(t, scripts.Down, `DROP TABLE IF EXISTS "atlantis"."consumer_account" CASCADE`)
+	assertContains(t, scripts.Down, `DROP TABLE IF EXISTS "atlantis"."consumer_account"`)
 	assertContains(t, scripts.Down, "DROP SCHEMA IF EXISTS atlantis CASCADE")
 }
 
@@ -289,13 +289,17 @@ entity B in x { id bigint primary  name text }
 	assertNotContains(t, scripts.Up, `CREATE TABLE IF NOT EXISTS "atlantis"."x_a"`)
 }
 
+// With no caller context the removal is cross-caller-breaking — the diff cannot
+// tell who reads it — and the table is parked rather than dropped either way.
 func TestEmit_Diff_EntityRemovedIsBreakingBanner(t *testing.T) {
 	oldIR := lower(t, `entity A in x { id bigint primary } entity B in x { id bigint primary }`)
 	newIR := lower(t, `entity A in x { id bigint primary }`)
 	d := ComputeDiff(oldIR, newIR)
 	scripts, _ := EmitSQL(oldIR, newIR, d)
 	assertContains(t, scripts.Up, "BREAKING — REVIEW CAREFULLY")
-	assertContains(t, scripts.Up, `DROP TABLE IF EXISTS "atlantis"."x_b"`)
+	assertContains(t, scripts.Up, `SET SCHEMA "atlantis_tombstone"`)
+	// The rows have to survive the migration that removed them.
+	assertNotContains(t, scripts.Up, `DROP TABLE IF EXISTS "atlantis"."x_b"`)
 }
 
 func TestEmit_Diff_FieldAddedNullable(t *testing.T) {
@@ -376,9 +380,13 @@ func TestEmit_Diff_FieldRemoved(t *testing.T) {
 	newIR := lower(t, `entity A in x { id bigint primary }`)
 	d := ComputeDiff(oldIR, newIR)
 	scripts, _ := EmitSQL(oldIR, newIR, d)
-	assertContains(t, scripts.Up, `ALTER TABLE "atlantis"."x_a" DROP COLUMN "v"`)
+	// Parked, not dropped: the column is renamed out of the way and its rows
+	// stay put until the reaper runs.
+	assertContains(t, scripts.Up, `ALTER TABLE "atlantis"."x_a" RENAME COLUMN "v" TO "v__parked"`)
 	// Down reverses by re-adding the column.
-	assertContains(t, scripts.Down, `ALTER TABLE "atlantis"."x_a" ADD COLUMN "v" TEXT`)
+	// The down of a park is a rename back, not a recreate. Recreating would
+	// produce an empty column and discard exactly the data parking preserved.
+	assertContains(t, scripts.Down, `ALTER TABLE "atlantis"."x_a" RENAME COLUMN "v__parked" TO "v"`)
 }
 
 func TestEmit_Diff_NotNullTightenedLoosened(t *testing.T) {
@@ -532,7 +540,7 @@ func TestEmit_TableOverride_SchemaQualified(t *testing.T) {
 		t.Fatalf("EmitInitial: %v", err)
 	}
 	assertContains(t, scripts.Up, `CREATE TABLE IF NOT EXISTS "consumer"."accounts"`)
-	assertContains(t, scripts.Down, `DROP TABLE IF EXISTS "consumer"."accounts" CASCADE`)
+	assertContains(t, scripts.Down, `DROP TABLE IF EXISTS "consumer"."accounts"`)
 	assertNotContains(t, scripts.Up, `"atlantis"."consumer_account"`)
 }
 
