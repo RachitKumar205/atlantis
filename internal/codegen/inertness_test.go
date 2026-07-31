@@ -246,10 +246,17 @@ var clauseCases = map[string]struct {
 				"runtime.CallerPartition(ctx)` into gen/go/server/<ns>/<entity>_server.go " +
 				"— but that tree is not on disk and is not compiled: the server was " +
 				"rewritten to dispatch from the IR at runtime and never carried this " +
-				"layer across. So the documented per-tenant guarantee fails open in " +
-				"production while looking implemented from inside codegen. Task #11 " +
-				"(RLS) and task #29. The clause stays; the declaration is what the fix " +
-				"reads.",
+				"layer across, and CallerPartition/WithCallerPartition have no callers " +
+				"anywhere, so there was not even a value to inject. The documented " +
+				"per-tenant guarantee failed open in production while looking " +
+				"implemented from inside codegen.\n" +
+				"\n" +
+				"`partition by` is now REJECTED at validation, so PartitionField cannot " +
+				"be set from a schema and this case is reachable only by constructing " +
+				"the IR directly, as the test does. It is kept rather than deleted " +
+				"because the emitter is still there and would come back to life the " +
+				"moment the clause is re-enabled without the isolation behind it. " +
+				"Task #11 (RLS), gated on task #29.",
 		},
 	},
 	"TtlField": {

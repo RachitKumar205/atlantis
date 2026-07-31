@@ -822,14 +822,34 @@ entity Account in consumer {
 	assertContains(t, c, `extras = append(extras, "\"deleted_at\" IS NULL")`)
 }
 
-func TestEmitGoServer_PartitionInjected(t *testing.T) {
-	ir := lower(t, `
-entity Order in consumer {
-  id          bigint primary
-  consumer_id text not null
-  partition by consumer_id
-}
-`)
+// This test asserts on a STRING produced by a generator whose output is not
+// compiled, and it is worth being blunt about that because it is why the
+// tenant-isolation bug survived.
+//
+// It was named TestEmitGoServer_PartitionInjected and read as "the partition
+// predicate is injected". What it actually proved is that EmitGoServer writes
+// those characters into gen/go/server/<ns>/<entity>_server.go — a tree not on
+// disk and not built. The shipped server dispatches from the IR at runtime and
+// never reads PartitionField; CallerPartition and WithCallerPartition have no
+// callers anywhere. Reads returned every tenant's rows the whole time this was
+// green.
+//
+// `partition by` is rejected at validation now, so the IR is built directly
+// rather than lowered. The test is kept because the emitter is still present
+// and would come back the moment the clause is re-enabled — but it is not
+// evidence of isolation and must not be cited as such. That evidence can only
+// come from a test that reads rows as one tenant and fails to see another's.
+func TestEmitGoServer_PartitionEmitterStillRendersThePredicate(t *testing.T) {
+	ir := &dsl.IR{Entities: []dsl.Entity{{
+		Name: "Order", Namespace: "consumer",
+		Fields: []dsl.Field{
+			{Name: "id", Type: dsl.FieldType{Name: "bigint"}, Primary: true},
+			{Name: "consumer_id", Type: dsl.FieldType{Name: "text"}, NotNull: true},
+		},
+		PartitionField: "consumer_id",
+	}}}
+	AssignProtoNumbers(nil, ir)
+
 	files, _ := EmitGoServer(ir)
 	c := entityServerFile(t, files)
 	// Partition predicate uses $1; caller filter placeholders start at $2.

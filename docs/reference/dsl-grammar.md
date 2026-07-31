@@ -181,7 +181,7 @@ Go and proto mappings are in [the type mapping reference](dsl-types.md).
 The only unique-index form is `unique index partial`; `index by`, `index hnsw`, `index gin`, and the non-`unique` `index partial` are all non-unique. Non-partial uniqueness is declared with the per-field `unique` modifier or entity-level `unique by` (which emit UNIQUE constraints). A live `CREATE UNIQUE INDEX` the schema doesn't account for is treated as drift — `tide apply` refuses it unless `ATLANTIS_ALLOW_INDEX_DRIFT=1`; a declared `unique index partial` whose predicate matches the live one is recognized and not drift. See [`tide apply`](cli-tide.md).
 - `soft_delete by <field>` — replaces row deletion with setting `<field>` (must be `timestamptz`) to `now()`. Reads filter `<field> IS NULL` automatically.
 - `touch_on_update by <field>` — Postgres trigger sets `<field>` (must be `timestamptz`) to `now()` on every `UPDATE`.
-- `partition by <field>` — Atlantis-level multi-tenant partition. Not Postgres table partitioning. Generated read RPCs inject `<field> = <caller-partition>` into the predicate; callers cannot override. The caller partition is read from the auth context.
+- `partition by <field>` — **disabled; a schema declaring it is rejected.** It documented an atlantis-level multi-tenant partition injected into every generated read, and the shipped server never injected it, so it provided no isolation at all. Returning via Postgres row-level security, which enforces in the database rather than in each generated read.
 - `table "<schema.table>"` — overrides the physical table name. Without it, atlantis stores the entity at `atlantis.<namespace>_<snake_entity>`. The value's shape is `[schema.]table`, each segment matching `[A-Za-z_][A-Za-z0-9_]*`; a bare name (`table "vendors"`) lands in `public`. Foreign keys whose target carries the modifier render `REFERENCES "<schema>"."<table>"`. Changing the value on a previously-applied entity is classified `cross_caller_breaking` and rejected by `tide plan`; atlantis does not auto-rename. Used when adopting an existing database — see [Adopt an existing database](../guides/adopt-an-existing-database.md).
 
 ### Cache block
@@ -251,13 +251,13 @@ HypertableBody =
     [ other EntityBody clauses... ]
 ```
 
-The time column is named in the header — `hypertable Reading in iot on recorded_at { ... }` — and must be a `timestamptz` field declared in the body. It becomes the time dimension passed to `create_hypertable`. The entity-level `partition by` clause is a different mechanism (atlantis multi-tenant partitioning); both may coexist on one hypertable.
+The time column is named in the header — `hypertable Reading in iot on recorded_at { ... }` — and must be a `timestamptz` field declared in the body. It becomes the time dimension passed to `create_hypertable`. (The entity-level `partition by` clause was a different, atlantis-level mechanism and is currently disabled — see above.)
 
 `chunk_time_interval` sizes each chunk and uses the same `Duration` syntax as cache TTLs. Omit it to take TimescaleDB's default (7 days). Changing it later emits `set_chunk_time_interval`, which applies to chunks created from that point on — existing chunks keep the size they were made with.
 
 Only Apache-2.0-licensed TimescaleDB functionality is emitted (`create_hypertable`, `set_chunk_time_interval`), so a hypertable schema imposes no Timescale License obligation.
 
-Hypertables accept every entity-body clause (indexes, unique constraints, soft delete, cache block, the multi-tenant `partition by`).
+Hypertables accept every entity-body clause (indexes, unique constraints, soft delete, cache block).
 
 ## Identifiers
 

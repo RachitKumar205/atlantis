@@ -75,12 +75,23 @@ The generated `Delete` RPC sets `deleted_at` to `now()` instead of dropping the 
 
 ### Per-tenant partition
 
-```
-vendor_id varchar(8) not null references vendor.Vendor.id
-partition by vendor_id
-```
+`partition by` is **disabled**. A schema declaring it is rejected.
 
-Every generated read RPC injects `vendor_id = <caller-partition>` from the auth context; callers cannot override via the filter. Requires the caller's auth context to carry a partition; without it, reads return empty. Configure caller partitions in your auth interceptor before declaring `partition by`.
+It documented per-row tenant isolation — every generated read injecting
+`<field> = <caller-partition>`, with callers unable to override it — and the
+shipped server does none of that. The predicate was emitted by the previous
+code-generated server; that server was replaced by one dispatching from the IR
+at runtime, and the layer was never carried across. Reads returned every
+tenant's rows.
+
+It is refused rather than left in place because the failure was silent and the
+documentation asserted the opposite. Anyone who had followed this section would
+have believed their data was partitioned when it was not.
+
+Isolation returns via Postgres row-level security, which enforces it in the
+database rather than in each generated read, so a handler added later cannot
+forget the predicate. Until then, scope tenant reads explicitly in your own
+query predicates and treat that as the boundary.
 
 ## Related
 

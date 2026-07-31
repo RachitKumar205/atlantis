@@ -484,16 +484,32 @@ entity B in y { id bigint primary }
 	}
 }
 
-func TestIR_PartitionBy_SetsField(t *testing.T) {
-	ir := mustLower(t, `
+// `partition by` is rejected until the isolation it documents actually exists.
+//
+// This test previously asserted that PartitionField was set, which was true and
+// worthless: the field is set, and nothing reads it. internal/server/entity
+// never references it, and CallerPartition / WithCallerPartition have no callers
+// anywhere, so there is not even a value to inject. Reads returned every
+// tenant's rows while docs/guides/add-a-new-entity.md and the grammar reference
+// both stated that callers cannot override the predicate.
+//
+// A silently-absent isolation guarantee is worse than a missing feature,
+// because the author has been told twice that it holds. When task #11 lands the
+// enforcement moves into Postgres RLS, where no forgotten call site can leak,
+// and this becomes an assertion about the policy instead.
+func TestIR_PartitionBy_IsRejectedUntilIsolationIsReal(t *testing.T) {
+	err := mustLowerErr(t, `
 entity Order in consumer {
   id          bigint primary
   consumer_id text not null
   partition by consumer_id
 }
 `)
-	if got := ir.Entities[0].PartitionField; got != "consumer_id" {
-		t.Errorf("PartitionField = %q, want consumer_id", got)
+	if !strings.Contains(err.Error(), "provides no isolation") {
+		t.Errorf("error does not explain why the clause is refused: %v", err)
+	}
+	if !strings.Contains(err.Error(), "#11") {
+		t.Errorf("error does not name the task that restores it: %v", err)
 	}
 }
 

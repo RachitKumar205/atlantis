@@ -1342,6 +1342,33 @@ func isSolePrimaryKey(e *Entity, name string) bool {
 func validateEntity(e *Entity, byID map[string]*Entity) []error {
 	var errs []error
 
+	// `partition by` promises per-row tenant isolation and delivers none.
+	//
+	// The documented guarantee is that every generated read injects
+	// `<field> = <caller-partition>` and that callers cannot override it. No
+	// part of that is true of the shipped server. It was implemented in
+	// codegen's query emitter, but that server was replaced by one dispatching
+	// from the IR at runtime and the layer was never carried across:
+	// internal/server/entity never reads PartitionField, and CallerPartition /
+	// WithCallerPartition have no callers anywhere, so there is not even a
+	// value to inject. Reads return every tenant's rows.
+	//
+	// Rejecting is the only honest interim state. A silently-absent isolation
+	// guarantee is worse than a missing feature, because the schema author has
+	// been told in two places that it holds. Failing loud costs nothing here —
+	// no schema in the corpus declares it.
+	//
+	// It comes back with task #11 (Postgres RLS), which delegates enforcement
+	// to the database so no forgotten call site can leak, and which is itself
+	// gated on task #29: the obvious RLS design is defeated because a custom
+	// GUC is PGC_USERSET, so caller-supplied SQL can simply set the
+	// discriminator to another tenant's value.
+	if e.PartitionField != "" {
+		errs = append(errs, fmt.Errorf("%s: `partition by` is disabled: the per-row "+
+			"tenant predicate it documents is not injected by the server, so it "+
+			"provides no isolation. Tracked by task #11 (Postgres RLS)", e.ID()))
+	}
+
 	// chunk_time_interval is a create_hypertable argument, so it has nowhere to
 	// go on a plain entity. Rejecting beats accepting a setting that would be
 	// silently dropped — which is the failure this clause was an instance of.
