@@ -1109,6 +1109,29 @@ func lowerField(fd *FieldDecl) (Field, []error) {
 		case *ModUniqueDecl:
 			f.Unique = true
 		case *ModCheckDecl:
+			// Field carries one check, so a second silently replaced the first.
+			// The parser builds both ModCheckDecls faithfully; this loop kept
+			// only the last, so a constraint the author wrote disappeared with
+			// no diagnostic — invisible to the differ, absent from the emitted
+			// DDL, and therefore absent from the database.
+			//
+			// Reported rather than merged into one predicate with AND: the two
+			// are separate constraints in Postgres, with separate names, and
+			// silently fusing them would change which one a later error message
+			// names. Two table-level checks are the way to express this, and
+			// they are what the column rule in parseFieldModifiers now yields.
+			//
+			// Two *identical* predicates are still two declarations and still an
+			// error. Skipping them as a harmless duplicate reintroduces exactly
+			// the silent collapse this guard exists to stop, and codegen already
+			// treats repeated predicates as separate constraints
+			// (unnamedCheckName takes an occurrence counter for that reason).
+			if f.Check != "" {
+				errs = append(errs, fmt.Errorf("%s: field %s declares more than one `check`; "+
+					"a field carries a single check, so write the others as entity-level "+
+					"`check \"...\" as <name>` at member indentation", m.Pos, fd.Name))
+				continue
+			}
 			f.Check = m.Expr
 		case *ModBackfillDecl:
 			f.Backfill = m.Expr

@@ -297,7 +297,7 @@ func (p *Parser) parseEntityMembers() []EntityMember {
 			}
 		default:
 			if canBeFieldName(t.Kind) {
-				if m := p.parseField(); m != nil {
+				if m := p.parseField(true); m != nil {
 					members = append(members, m)
 				}
 			} else {
@@ -378,7 +378,13 @@ func (p *Parser) parsePrimaryDecl() *PrimaryDecl {
 
 // ---- field ----
 
-func (p *Parser) parseField() *FieldDecl {
+// parseField parses one field. tableChecksPossible says whether the enclosing
+// block can also hold an entity-level `check` member, which is what makes the
+// keyword ambiguous — see the TokCheck case in parseFieldModifiers. Only an
+// entity body can; `args`, `state` and `ephemeral` blocks hold fields and
+// nothing else, so there a `check` can only ever be a modifier and no
+// disambiguation is needed or wanted.
+func (p *Parser) parseField(tableChecksPossible bool) *FieldDecl {
 	t := p.peek()
 	if !canBeFieldName(t.Kind) {
 		p.errf(t.Pos, "expected field name, got %s", t.Kind)
@@ -386,7 +392,7 @@ func (p *Parser) parseField() *FieldDecl {
 	}
 	name := p.advance()
 	typ := p.parseType()
-	mods := p.parseFieldModifiers()
+	mods := p.parseFieldModifiers(name.Pos, tableChecksPossible)
 	return &FieldDecl{
 		Pos:       name.Pos,
 		Name:      name.Value,
@@ -457,7 +463,17 @@ func (p *Parser) parseType() TypeRef {
 	return ref
 }
 
-func (p *Parser) parseFieldModifiers() []FieldModifier {
+// parseFieldModifiers consumes a field's modifiers, including any that continue
+// onto following lines. fieldPos is the field name's position.
+//
+// Only the TokCheck case consults it. The other modifiers cannot begin an
+// entity member, so wherever they appear they are unambiguously this field's
+// and are consumed regardless of column. That does mean two visually identical
+// continuation lines can bind differently — a bare `not null` at member indent
+// still belongs to the field above while a `check` there does not — which is
+// the price of resolving the one genuine ambiguity without making the whole
+// grammar whitespace-sensitive.
+func (p *Parser) parseFieldModifiers(fieldPos Position, tableChecksPossible bool) []FieldModifier {
 	var mods []FieldModifier
 	for {
 		t := p.peek()
@@ -503,6 +519,55 @@ func (p *Parser) parseFieldModifiers() []FieldModifier {
 			p.advance()
 			mods = append(mods, &ModUniqueDecl{Pos: t.Pos})
 		case TokCheck:
+			// `check` is the only keyword that is valid both as a field
+			// modifier and as an entity member, and unlike `primary` and
+			// `unique` — which are separated by a following `by` — both
+			// spellings are `check` followed by a STRING. Lookahead cannot tell
+			// them apart, so indentation does.
+			//
+			// A field's modifiers may wrap onto following lines; those
+			// continuation lines are indented past the field. A `check` at or
+			// left of the field's own column is therefore not a continuation of
+			// it, but the next member — an entity-level CHECK constraint.
+			//
+			// This formalises the convention the schemas already follow. Across
+			// the corpus every continuation check is indented past its field —
+			// usually aligned under the type column, though one sits just two
+			// columns in — and all four entity-level checks sit at member
+			// indent:
+			//
+			//	status  varchar(20) not null default "active"
+			//	        check "status IN ('active','archived')"   <- field's
+			//
+			//	index by location_id
+			//
+			//	check "qty_available >= 0" as quantities_check     <- entity's
+			//
+			// Without the rule the modifier form always won after a field, and
+			// the consequences were silent. A table-level check written under a
+			// field became that field's — so the generated constraint took that
+			// column's name even when the predicate never mentioned it. Two of
+			// them in a row collapsed: the parser built two ModCheckDecls and
+			// lowering kept only the last, discarding a constraint the author
+			// wrote, with no diagnostic. And `check "..." as <name>` was a parse
+			// error there, because the modifier form does not consume `as`.
+			//
+			// One rule, not two: a same-line `check` needs no special case,
+			// because parseFieldModifiers is only reached after the field's name
+			// and type are consumed, so anything still on that line necessarily
+			// sits at a greater column. An earlier version also tested
+			// t.Pos.Line > fieldPos.Line; no input could distinguish it, and a
+			// condition nothing can exercise is a claim nothing checks.
+			//
+			// Columns count bytes, so one tab is one column. Consistent
+			// indentation — all tabs or all spaces, which is what the corpus
+			// uses — behaves as it reads. Mixing them within a single entity can
+			// invert the comparison against what the eye sees; that is worth
+			// knowing rather than defending against, since such a file is
+			// already ambiguous to a human reader.
+			if tableChecksPossible && t.Pos.Col <= fieldPos.Col {
+				return mods
+			}
 			p.advance()
 			expr := p.expect(TokString)
 			mods = append(mods, &ModCheckDecl{Pos: t.Pos, Expr: expr.Value})
@@ -1306,7 +1371,7 @@ func (p *Parser) parseJobArgs() []*FieldDecl {
 			p.recover(TokRBrace, TokIdent, TokEOF)
 			continue
 		}
-		if f := p.parseField(); f != nil {
+		if f := p.parseField(false); f != nil {
 			fields = append(fields, f)
 		}
 	}
@@ -1396,7 +1461,7 @@ func (p *Parser) parseWorkflowState() []*FieldDecl {
 			p.recover(TokRBrace, TokIdent, TokEOF)
 			continue
 		}
-		if f := p.parseField(); f != nil {
+		if f := p.parseField(false); f != nil {
 			fields = append(fields, f)
 		}
 	}
@@ -1505,7 +1570,7 @@ func (p *Parser) parseEphemeral() *EphemeralDecl {
 			d := p.expect(TokDuration)
 			eph.TTL = &JobTimeout{Pos: t.Pos, Duration: d.Value}
 		case TokIdent:
-			if f := p.parseField(); f != nil {
+			if f := p.parseField(false); f != nil {
 				eph.Fields = append(eph.Fields, f)
 			}
 		default:

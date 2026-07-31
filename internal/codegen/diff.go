@@ -570,10 +570,14 @@ type checkRef struct {
 // DROP + ADD (an ACCESS EXCLUSIVE revalidation for an unchanged schema) or stay
 // silent and let a migrated database diverge from a freshly created one.
 // Predicate-derived naming has no such defect; its only cost is this one-time
-// break. All 19 .atl files in this repository declare zero entity-level checks,
-// named or unnamed, so the affected population here is empty — but .atl files
-// live in caller repositories too (see the schema-in-caller-repos convention),
-// so this belongs in release notes rather than only in a comment.
+// break.
+//
+// The 19 .atl files in this repository declare four entity-level checks, and
+// all four are named (`check "..." as <name>`), which this scheme does not
+// touch — an author-supplied name is used verbatim. Zero are unnamed, so the
+// affected population here is empty. .atl files live in caller repositories too
+// (see the schema-in-caller-repos convention), so this belongs in release notes
+// rather than only in a comment.
 func resolvedChecks(e *dsl.Entity) map[string]checkRef {
 	refs := resolveCheckNames(e)
 	out := make(map[string]checkRef, len(refs))

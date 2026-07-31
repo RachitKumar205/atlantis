@@ -27,7 +27,7 @@ Entity = "entity" Ident "in" Ident "{" EntityBody "}"
 
 EntityBody =
     { FieldDecl }
-    [ "composite_pk" "by" IdentList ]
+    [ "primary" "by" IdentList ]
     { "unique" "by" IdentList }
     { "index" "by" IndexFieldList }
     { [ "unique" ] "index" "partial" "by" IdentList "where" PartialPredicate }
@@ -37,6 +37,8 @@ EntityBody =
     [ "touch_on_update" "by" Ident ]
     [ "partition" "by" Ident ]
     [ "table" StringLiteral ]
+    [ "ttl_field" Ident ]
+    { "check" "\"" SQLExpr "\"" [ "as" Ident ] }
     [ CacheBlock ]
 
 IdentList      = Ident { "," Ident }
@@ -85,7 +87,7 @@ Modifier =
   | "default" DefaultExpr
   | "unique"
   | "references" QualifiedField [ "on" "delete" RefAction ]
-  | "check" "\"" SQLExpr "\""
+  | "check" "\"" SQLExpr "\""     // must share the field's line, or be indented past it
 
 DefaultExpr =
     FunctionCall      // e.g. now(), gen_random_uuid()
@@ -95,7 +97,7 @@ DefaultExpr =
 
 QualifiedField = [ Namespace "." ] Entity "." Field
 
-RefAction = "cascade" | "set" "null" | "restrict" | "no" "action"
+RefAction = "cascade" | "set" "null" | "restrict"
 ```
 
 Field names use `SnakeIdent`. Modifier order is flexible, but the lexer rejects incompatible combinations: `serial` with `default`, two `primary` modifiers on different fields, etc.
@@ -103,6 +105,32 @@ Field names use `SnakeIdent`. Modifier order is flexible, but the lexer rejects 
 `QualifiedField`: same-namespace references can omit the namespace (`Customer.id`); cross-namespace references qualify (`vendor.Product.id`). The referenced field must be declared `primary` or have a column-level `unique`.
 
 `check`: the string body is parsed as a Postgres boolean expression. Anything valid inside `CREATE TABLE ... CHECK (...)` is accepted.
+
+#### Where a `check` binds
+
+`check` is the one keyword that is valid both as a field modifier and as an entity member, and both spellings are `check` followed by a string. Indentation decides which you get:
+
+```
+entity Order in shop {
+  id      bigint primary
+  status  varchar(20) not null
+          check "status IN ('open','closed')"   // the field's — indented past it
+
+  total   int not null
+  qty     int not null
+
+  check "total >= qty" as total_covers_qty      // the entity's — at member indent
+}
+```
+
+The rule: **a field's modifiers may continue on following lines, and a continuation line must be indented past the field it belongs to.** A `check` at or left of its field's column starts a new member, so it is an entity-level constraint.
+
+Two consequences worth knowing:
+
+- Only an entity-level `check` accepts `as <name>`. On a field's continuation line, `as` is a syntax error: a field modifier has no name of its own, so atlantis generates one — usually `<table>_<column>_check`, shortened with a hash suffix when that would exceed Postgres's 63-byte identifier limit, or suffixed with a digit if an entity-level check already claimed the name. Name a constraint yourself if you need to depend on what it is called.
+- A field carries exactly one `check`. Declaring a second is an error rather than a silent replacement; express additional constraints as entity-level checks.
+
+Columns count bytes, so one tab is one column. Indent consistently — a file mixing tabs and spaces inside one entity can bind a `check` differently from how it reads.
 
 ### Field types
 
@@ -131,17 +159,18 @@ Go and proto mappings are in [the type mapping reference](dsl-types.md).
 
 ### Modifier semantics
 
-- `primary` — primary key. Exactly one field, unless `composite_pk by` is used at the entity level. The two are mutually exclusive.
+- `primary` — primary key. Exactly one field, unless `primary by` is used at the entity level. The two are mutually exclusive.
 - `serial` — Postgres assigns the value via a sequence. Valid only with `bigint primary` or `int primary`. Incompatible with `default`.
 - `not null` — disallows null. Implied by `primary`.
 - `default <expr>` — Postgres default expression. See `DefaultExpr` above.
 - `unique` — Postgres column-level `UNIQUE`. For multi-column, use `unique by` at the entity level.
-- `references <Entity>.<field>` — foreign key. `on delete` accepts `cascade`, `set null`, `restrict`, `no action`. `on update` is not supported; see [Known gaps](#known-gaps).
-- `check "<predicate>"` — Postgres `CHECK` constraint.
+- `references <Entity>.<field>` — foreign key. `on delete` accepts `cascade`, `set null`, `restrict`. `on update` is not supported; see [Known gaps](#known-gaps).
+- `check "<predicate>"` — Postgres `CHECK` constraint on this column, given a generated name. Must be on the field's line or indented past it; see [Where a `check` binds](#where-a-check-binds). One per field — declare further constraints at the entity level.
 
 ### Entity-level clauses
 
-- `composite_pk by f1, f2` — composite primary key. Member fields must each be `not null`. Mutually exclusive with per-field `primary`.
+- `primary by f1, f2` — composite primary key. Member fields must each be `not null`. Mutually exclusive with per-field `primary`.
+- `check "<predicate>" [as <name>]` — table-level `CHECK` constraint. Unlike the field modifier this may reference several columns, and `as <name>` sets the constraint name in the database. Must sit at member indentation; see [Where a `check` binds](#where-a-check-binds).
 - `unique by f1, f2` — multi-column unique constraint. May appear multiple times. For a single column, use the per-field `unique` modifier instead.
 - `index by f1, f2` — non-unique B-tree index. May appear multiple times. Each field may instead be an expression (`expr "lower(email)"`) and may carry a per-field `asc` or `desc` (e.g. `index by created_at desc`).
 - `index partial by f1, f2 where <predicate>` — partial index. `<predicate>` is a [`PartialPredicate`](#entities) (any SQL boolean expression valid in a Postgres index predicate). e.g. `index partial by sku where deleted_at is null`, `index partial by id where status = "active" and lower(sku) like "a%"`.
@@ -246,8 +275,8 @@ The following are reserved everywhere and cannot be used as identifiers:
 entity, hypertable, query, procedure,
 in, for, input, output, steps, sql, touches, as,
 primary, serial, not, null, default, unique, references, check,
-on, update, delete, cascade, set, restrict, no, action,
-composite_pk, index, partial, where, is,
+on, update, delete, cascade, set, restrict,
+index, partial, where, is,
 hnsw, ops, cosine, l2, ip, gin, asc, desc, expr,
 soft_delete, touch_on_update, partition, by,
 table,
