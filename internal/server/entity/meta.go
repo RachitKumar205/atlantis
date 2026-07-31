@@ -22,6 +22,22 @@ type entityMeta struct {
 	sqlGet, sqlBatchGet, sqlQueryPrefix string
 	sqlInsert, sqlUpdate, sqlDelete     string
 
+	// inbound are the cross-entity invalidation rules that fire when this
+	// entity is written; inboundCols are the columns they read, in the order
+	// the write SQL returns them. Both empty for the vast majority of
+	// entities, and every code path they drive is skipped when they are.
+	inbound []inboundRule
+	// inboundCols are the columns the rules read, and inboundColMeta is their
+	// column metadata in the same order — needed so the values are scanned
+	// into the same Go types the rest of the system uses when it builds a
+	// cache id. See makeScanTargets.
+	inboundCols    []string
+	inboundColMeta []columnMeta
+	// sqlSelectInbound reads inboundCols for one row, FOR UPDATE. Used before
+	// an UPDATE to capture the pre-update parent key, so reparenting a child
+	// invalidates the parent it left as well as the one it joined.
+	sqlSelectInbound string
+
 	// Proto descriptors for dynamicpb message construction.
 	fileDesc   protoreflect.FileDescriptor
 	msgDesc    protoreflect.MessageDescriptor
@@ -108,9 +124,29 @@ func buildEntityMeta(e *dsl.Entity, ir *dsl.IR) *entityMeta {
 	meta.sqlGet = buildGetSQL(e)
 	meta.sqlBatchGet = buildBatchGetSQL(e)
 	meta.sqlQueryPrefix = buildQueryPrefix(e)
-	meta.sqlInsert = buildInsertSQL(e)
-	meta.sqlUpdate = buildUpdateSQL(e)
-	meta.sqlDelete = buildDeleteSQL(e)
+	meta.inbound = buildInboundIndex(ir)[e.ID()]
+	meta.inboundCols = inboundColumns(meta.inbound)
+	for _, name := range meta.inboundCols {
+		for i := range meta.columns {
+			if meta.columns[i].sqlName == name {
+				meta.inboundColMeta = append(meta.inboundColMeta, meta.columns[i])
+				break
+			}
+		}
+	}
+	// A rule naming a column this entity does not have cannot be scanned, and
+	// carrying half a rule set would scan values into the wrong slots. Drop the
+	// whole set rather than emit invalidations for the wrong parents.
+	if len(meta.inboundColMeta) != len(meta.inboundCols) {
+		meta.inbound = nil
+		meta.inboundCols = nil
+		meta.inboundColMeta = nil
+	}
+
+	meta.sqlInsert = buildInsertSQL(e, meta.inboundCols)
+	meta.sqlUpdate = buildUpdateSQL(e, meta.inboundCols)
+	meta.sqlDelete = buildDeleteSQL(e, meta.inboundCols)
+	meta.sqlSelectInbound = buildSelectInboundSQL(e, meta.inboundCols)
 
 	return meta
 }

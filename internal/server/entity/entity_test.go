@@ -91,7 +91,7 @@ func TestBuildGetSQL_CompositePK(t *testing.T) {
 
 func TestBuildInsertSQL(t *testing.T) {
 	e := testAccount()
-	sql := buildInsertSQL(e)
+	sql := buildInsertSQL(e, nil)
 
 	// All non-identity/serial columns should appear.
 	if !strings.Contains(sql, `"id"`) {
@@ -118,7 +118,7 @@ func TestBuildInsertSQL(t *testing.T) {
 
 func TestBuildUpdateSQL(t *testing.T) {
 	e := testAccount()
-	sql := buildUpdateSQL(e)
+	sql := buildUpdateSQL(e, nil)
 
 	// PK should not appear in SET.
 	if strings.Contains(sql, `"id" = $`) && !strings.Contains(sql, "WHERE") {
@@ -136,7 +136,7 @@ func TestBuildUpdateSQL(t *testing.T) {
 
 func TestBuildDeleteSQL_SoftDelete(t *testing.T) {
 	e := testAccount()
-	sql := buildDeleteSQL(e)
+	sql := buildDeleteSQL(e, nil)
 
 	// Soft delete: UPDATE SET deleted_at = now().
 	if !strings.Contains(sql, "UPDATE") {
@@ -152,7 +152,7 @@ func TestBuildDeleteSQL_SoftDelete(t *testing.T) {
 
 func TestBuildDeleteSQL_HardDelete(t *testing.T) {
 	e := testCompositeEntity()
-	sql := buildDeleteSQL(e)
+	sql := buildDeleteSQL(e, nil)
 
 	if !strings.Contains(sql, "DELETE FROM") {
 		t.Errorf("buildDeleteSQL should be DELETE for hard delete: %s", sql)
@@ -401,7 +401,7 @@ func TestBuildInsertSQL_Identity(t *testing.T) {
 			{Name: "value", Type: dsl.FieldType{Name: "text"}, NotNull: true, ProtoNumber: 2},
 		},
 	}
-	sql := buildInsertSQL(e)
+	sql := buildInsertSQL(e, nil)
 
 	// The INSERT column list should only have "value".
 	if strings.Contains(sql, `("id"`) && !strings.Contains(sql, "RETURNING") {
@@ -425,7 +425,7 @@ func TestBuildUpdateSQL_AllPK(t *testing.T) {
 			{Name: "b", Type: dsl.FieldType{Name: "bigint"}, NotNull: true, ProtoNumber: 2},
 		},
 	}
-	sql := buildUpdateSQL(e)
+	sql := buildUpdateSQL(e, nil)
 	if sql != "" {
 		t.Errorf("buildUpdateSQL should be empty for all-PK entity, got: %s", sql)
 	}

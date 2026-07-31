@@ -3,6 +3,7 @@ package entity
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"google.golang.org/grpc"
@@ -170,12 +171,19 @@ func (s *Server) handleCreate(ctx context.Context, meta *entityMeta, dec func(an
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
-	// INSERT RETURNING pk.
+	// INSERT RETURNING pk, then any cross-entity invalidation columns. They
+	// ride the same RETURNING clause, so learning the parent key costs no
+	// extra round trip.
 	pkScanTargets := makePKScanTargets(meta)
+	inboundTargets := makeScanTargets(meta.inboundColMeta)
+	// Cloned rather than appended to: append on a full slice would reallocate
+	// here and not there, which works by luck rather than by construction.
+	scanTargets := append(slices.Clone(pkScanTargets), inboundTargets...)
 	row := tx.QueryRow(ctx, meta.sqlInsert, args...)
-	if err := row.Scan(pkScanTargets...); err != nil {
+	if err := row.Scan(scanTargets...); err != nil {
 		return nil, err
 	}
+	inboundVals := readScanTargets(meta.inboundColMeta, inboundTargets)
 
 	// Build cache ID from returned PK.
 	pkValues := readPKScanTargets(meta, pkScanTargets)
@@ -187,6 +195,9 @@ func (s *Server) handleCreate(ctx context.Context, meta *entityMeta, dec func(an
 		return nil, err
 	}
 	if err := s.outbox.EnqueueGenerationBump(ctx, tx, meta.entityID); err != nil {
+		return nil, err
+	}
+	if err := s.enqueueParents(ctx, tx, meta, inboundVals); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -242,12 +253,33 @@ func (s *Server) handleUpdate(ctx context.Context, meta *entityMeta, dec func(an
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
-	tag, err := tx.Exec(ctx, meta.sqlUpdate, args...)
-	if err != nil {
-		return nil, err
-	}
-	if tag.RowsAffected() == 0 {
-		return nil, runtime.ErrNotFound
+	// The parent key as it stands BEFORE the update, read under FOR UPDATE.
+	// Reparenting a child — moving a CartItem from cart 1 to cart 2 — has to
+	// invalidate the cart it left as well as the one it joined, and the
+	// UPDATE's RETURNING clause reports only the new value. No-op for entities
+	// without inbound rules, which is nearly all of them.
+	oldInbound := s.readInboundValues(ctx, tx, meta, pkValues)
+
+	var inboundVals []any
+	if len(meta.inboundCols) == 0 {
+		tag, err := tx.Exec(ctx, meta.sqlUpdate, args...)
+		if err != nil {
+			return nil, err
+		}
+		if tag.RowsAffected() == 0 {
+			return nil, runtime.ErrNotFound
+		}
+	} else {
+		ptrs := makeScanTargets(meta.inboundColMeta)
+		// RETURNING makes this a query, so "no rows" replaces RowsAffected()==0
+		// as the not-found signal.
+		if err := tx.QueryRow(ctx, meta.sqlUpdate, args...).Scan(ptrs...); err != nil {
+			if runtime.IsNoRows(err) {
+				return nil, runtime.ErrNotFound
+			}
+			return nil, err
+		}
+		inboundVals = readScanTargets(meta.inboundColMeta, ptrs)
 	}
 
 	cacheID := runtime.CompositeID(pkValues...)
@@ -256,6 +288,9 @@ func (s *Server) handleUpdate(ctx context.Context, meta *entityMeta, dec func(an
 		return nil, err
 	}
 	if err := s.outbox.EnqueueGenerationBump(ctx, tx, meta.entityID); err != nil {
+		return nil, err
+	}
+	if err := s.enqueueParents(ctx, tx, meta, oldInbound, inboundVals); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -301,12 +336,26 @@ func (s *Server) handleDelete(ctx context.Context, meta *entityMeta, dec func(an
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
-	tag, err := tx.Exec(ctx, meta.sqlDelete, pkArgs...)
-	if err != nil {
-		return nil, err
-	}
-	if tag.RowsAffected() == 0 {
-		return nil, runtime.ErrNotFound
+	var delInbound []any
+	if len(meta.inboundCols) == 0 {
+		tag, err := tx.Exec(ctx, meta.sqlDelete, pkArgs...)
+		if err != nil {
+			return nil, err
+		}
+		if tag.RowsAffected() == 0 {
+			return nil, runtime.ErrNotFound
+		}
+	} else {
+		// The row is going away, so its parent key has to be captured on the
+		// way out; there is nothing left to read afterwards.
+		ptrs := makeScanTargets(meta.inboundColMeta)
+		if err := tx.QueryRow(ctx, meta.sqlDelete, pkArgs...).Scan(ptrs...); err != nil {
+			if runtime.IsNoRows(err) {
+				return nil, runtime.ErrNotFound
+			}
+			return nil, err
+		}
+		delInbound = readScanTargets(meta.inboundColMeta, ptrs)
 	}
 
 	cacheID := runtime.CompositeID(pkArgs...)
@@ -315,6 +364,9 @@ func (s *Server) handleDelete(ctx context.Context, meta *entityMeta, dec func(an
 		return nil, err
 	}
 	if err := s.outbox.EnqueueGenerationBump(ctx, tx, meta.entityID); err != nil {
+		return nil, err
+	}
+	if err := s.enqueueParents(ctx, tx, meta, delInbound); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -636,8 +688,22 @@ func buildPKArray(pk columnMeta, list protoreflect.List) any {
 
 // makePKScanTargets allocates scan targets for INSERT ... RETURNING.
 func makePKScanTargets(meta *entityMeta) []any {
-	targets := make([]any, len(meta.pkCols))
-	for i, cm := range meta.pkCols {
+	return makeScanTargets(meta.pkCols)
+}
+
+// makeScanTargets allocates typed scan destinations for a set of columns.
+//
+// Typed, not []*any, and that is the whole point. Scanning into *any lets pgx
+// pick the Go representation, which does not match what the rest of the system
+// uses: a uuid arrives as [16]uint8, a numeric as pgtype.Numeric, a timestamptz
+// as time.Time, a jsonb as map[string]any. Cache ids elsewhere are built from
+// goValueFromProto, so the same row would produce two different ids —
+// "49:[17 17 17 …]" from one path and "36:1111-2222-…" from the other. The
+// mismatch is silent: an outbox row is written, the worker faithfully bumps a
+// pointer key nobody reads, and the cached row stays stale until TTL.
+func makeScanTargets(cols []columnMeta) []any {
+	targets := make([]any, len(cols))
+	for i, cm := range cols {
 		switch cm.field.Type.Name {
 		case "text", "varchar", "citext", "uuid":
 			targets[i] = new(string)
@@ -655,8 +721,13 @@ func makePKScanTargets(meta *entityMeta) []any {
 // readPKScanTargets dereferences scan pointers into []any for cache
 // keys or subsequent GET queries.
 func readPKScanTargets(meta *entityMeta, targets []any) []any {
+	return readScanTargets(meta.pkCols, targets)
+}
+
+// readScanTargets dereferences the pointers makeScanTargets produced.
+func readScanTargets(cols []columnMeta, targets []any) []any {
 	out := make([]any, len(targets))
-	for i, cm := range meta.pkCols {
+	for i, cm := range cols {
 		switch cm.field.Type.Name {
 		case "text", "varchar", "citext", "uuid":
 			out[i] = *(targets[i].(*string))

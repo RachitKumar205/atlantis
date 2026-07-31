@@ -1325,6 +1325,20 @@ func parseTagPlaceholders(tag string) []string {
 //     dims — the index reads the field's own type so this is auto-ok.)
 //
 // 10. query_timeout must be 50ms..30s.
+// isSolePrimaryKey reports whether name is this entity's entire primary key.
+// False for a composite key, and for any non-key column.
+func isSolePrimaryKey(e *Entity, name string) bool {
+	if len(e.CompositePK) > 0 {
+		return false
+	}
+	for i := range e.Fields {
+		if e.Fields[i].Primary {
+			return e.Fields[i].Name == name
+		}
+	}
+	return false
+}
+
 func validateEntity(e *Entity, byID map[string]*Entity) []error {
 	var errs []error
 
@@ -1428,6 +1442,23 @@ func validateEntity(e *Entity, byID map[string]*Entity) []error {
 				if e.FindField(inv.Where.SelfField) == nil {
 					errs = append(errs, fmt.Errorf("%s cache invalidate_on: self has no field %q",
 						e.ID(), inv.Where.SelfField))
+				} else if !isSolePrimaryKey(e, inv.Where.SelfField) {
+					// The mapping yields ONE value from the written row, and
+					// that value has to name a cache entry of this entity. A
+					// cache id is built from the complete primary key, so a
+					// single value can only address a single-column key.
+					//
+					// Rejecting rather than accepting is the point. A composite
+					// key would silently produce a partial id — "1:4" where the
+					// entity's own handlers use "1:4|1:9" — so every write to
+					// the child would enqueue an invalidation for a key nothing
+					// reads. No error, no invalidation, stale rows until TTL.
+					// The same holds for a non-key column, which addresses
+					// nothing at all.
+					errs = append(errs, fmt.Errorf(
+						"%s cache invalidate_on: self.%s must be this entity's sole primary key "+
+							"(a cache id is built from the whole key, so one value cannot address "+
+							"a composite one)", e.ID(), inv.Where.SelfField))
 				}
 			}
 		}

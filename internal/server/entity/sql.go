@@ -58,7 +58,7 @@ func buildQueryPrefix(e *dsl.Entity) string {
 //	INSERT INTO "schema"."table" ("col1", "col2", ...) VALUES ($1, COALESCE($2::TYPE, default), ...) RETURNING "pk"
 //
 // Columns with declared defaults get COALESCE wrapping with type casts.
-func buildInsertSQL(e *dsl.Entity) string {
+func buildInsertSQL(e *dsl.Entity, extraReturning []string) string {
 	table := schema.QualifiedTable(e)
 	insertCols := schema.InsertColumns(e)
 	quotedCols := strings.Join(schema.QuoteAll(insertCols), ", ")
@@ -83,7 +83,10 @@ func buildInsertSQL(e *dsl.Entity) string {
 	for i, pk := range pkCols {
 		pkNames[i] = schema.QuoteIdent(pk.Name)
 	}
-	returning := strings.Join(pkNames, ", ")
+	// Cross-entity invalidation columns ride along on the RETURNING clause.
+	// The row is being returned anyway, so this costs no round trip, and it is
+	// the only way to learn the parent key without a second query.
+	returning := strings.Join(append(pkNames, schema.QuoteAll(extraReturning)...), ", ")
 
 	return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) RETURNING %s",
 		table, quotedCols, phStr, returning)
@@ -95,7 +98,7 @@ func buildInsertSQL(e *dsl.Entity) string {
 //
 // PK, identity, and serial columns are excluded from the SET list.
 // PK placeholder numbers start after the SET columns.
-func buildUpdateSQL(e *dsl.Entity) string {
+func buildUpdateSQL(e *dsl.Entity, extraReturning []string) string {
 	table := schema.QualifiedTable(e)
 
 	// SET assignments: non-PK, non-identity, non-serial columns.
@@ -117,23 +120,33 @@ func buildUpdateSQL(e *dsl.Entity) string {
 	setClause := strings.Join(sets, ", ")
 	pkWhere := pkWhereClause(e, idx+1)
 
-	return fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, setClause, pkWhere)
+	stmt := fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, setClause, pkWhere)
+	if len(extraReturning) > 0 {
+		stmt += " RETURNING " + strings.Join(schema.QuoteAll(extraReturning), ", ")
+	}
+	return stmt
 }
 
 // buildDeleteSQL renders either:
 //
 //	DELETE FROM "schema"."table" WHERE "pk" = $1                          (hard delete)
 //	UPDATE "schema"."table" SET "deleted_at" = now() WHERE "pk" = $1 AND "deleted_at" IS NULL  (soft delete)
-func buildDeleteSQL(e *dsl.Entity) string {
+func buildDeleteSQL(e *dsl.Entity, extraReturning []string) string {
 	table := schema.QualifiedTable(e)
 	pkWhere := pkWhereClause(e, 1)
 
+	var stmt string
 	if e.SoftDeleteField != "" {
 		qSoft := schema.QuoteIdent(e.SoftDeleteField)
-		return fmt.Sprintf("UPDATE %s SET %s = now() WHERE %s AND %s IS NULL",
+		stmt = fmt.Sprintf("UPDATE %s SET %s = now() WHERE %s AND %s IS NULL",
 			table, qSoft, pkWhere, qSoft)
+	} else {
+		stmt = fmt.Sprintf("DELETE FROM %s WHERE %s", table, pkWhere)
 	}
-	return fmt.Sprintf("DELETE FROM %s WHERE %s", table, pkWhere)
+	if len(extraReturning) > 0 {
+		stmt += " RETURNING " + strings.Join(schema.QuoteAll(extraReturning), ", ")
+	}
+	return stmt
 }
 
 // pkWhereClause builds the WHERE predicate for matching one row by PK,
@@ -155,4 +168,26 @@ func pkWhereClause(e *dsl.Entity, startIdx int) string {
 		phs[i] = fmt.Sprintf("$%d", startIdx+i)
 	}
 	return "(" + strings.Join(cols, ", ") + ") = (" + strings.Join(phs, ", ") + ")"
+}
+
+// buildSelectInboundSQL reads the cross-entity invalidation columns for one
+// row, locking it.
+//
+// Used before an UPDATE, to capture the parent key the row had going in.
+// Reparenting a child — moving a CartItem from cart 1 to cart 2 — has to
+// invalidate both carts, and the UPDATE's RETURNING clause reports only the new
+// value. FOR UPDATE because the read and the write must see the same row: an
+// unlocked read could observe a value another transaction is in the middle of
+// changing, and invalidate a parent that was never this row's.
+//
+// Empty when the entity has no inbound rules, and the caller skips the query
+// entirely — most entities never pay for this.
+func buildSelectInboundSQL(e *dsl.Entity, cols []string) string {
+	if len(cols) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("SELECT %s FROM %s WHERE %s FOR UPDATE",
+		strings.Join(schema.QuoteAll(cols), ", "),
+		schema.QualifiedTable(e),
+		pkWhereClause(e, 1))
 }
