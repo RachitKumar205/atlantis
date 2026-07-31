@@ -243,18 +243,19 @@ Procedures do not return rows. Read the result with a separate query.
 ## Hypertables
 
 ```
-Hypertable = "hypertable" Ident "in" Ident "{" HypertableBody "}"
+Hypertable = "hypertable" Ident "in" Ident "on" Ident "{" HypertableBody "}"
 
 HypertableBody =
     { FieldDecl }
-    "partition_field" Ident
-    "chunk_time_interval" Duration
+    [ "chunk_time_interval" Duration ]
     [ other EntityBody clauses... ]
 ```
 
-`partition_field` is the TimescaleDB hypertable partition column and must be a `timestamptz` field declared in the body. The entity-level `partition by` clause is a different mechanism (Atlantis multi-tenant partition); both may coexist on one hypertable.
+The time column is named in the header — `hypertable Reading in iot on recorded_at { ... }` — and must be a `timestamptz` field declared in the body. It becomes the time dimension passed to `create_hypertable`. The entity-level `partition by` clause is a different mechanism (atlantis multi-tenant partitioning); both may coexist on one hypertable.
 
-`chunk_time_interval` uses the same `Duration` syntax as cache TTLs.
+`chunk_time_interval` sizes each chunk and uses the same `Duration` syntax as cache TTLs. Omit it to take TimescaleDB's default (7 days). Changing it later emits `set_chunk_time_interval`, which applies to chunks created from that point on — existing chunks keep the size they were made with.
+
+Only Apache-2.0-licensed TimescaleDB functionality is emitted (`create_hypertable`, `set_chunk_time_interval`), so a hypertable schema imposes no Timescale License obligation.
 
 Hypertables accept every entity-body clause (indexes, unique constraints, soft delete, cache block, the multi-tenant `partition by`).
 
@@ -287,7 +288,7 @@ The following are contextual — they are keywords only inside specific blocks a
 
 ```
 read_through, ttl, tag         // only inside cache { ... }
-partition_field, chunk_time_interval   // only inside hypertable { ... }
+chunk_time_interval            // only inside hypertable { ... }
 ```
 
 ## Known gaps

@@ -370,6 +370,21 @@ type Entity struct {
 	// no automatic cleanup.
 	TtlField string `json:"ttl_field,omitempty"`
 
+	// ChunkTimeIntervalMS sizes a hypertable's chunks, passed through to
+	// create_hypertable's chunk_time_interval argument. Zero means unset, and
+	// TimescaleDB's own default (7 days) applies.
+	//
+	// Only meaningful on Kind == EntityKindHypertable; validateEntity rejects
+	// it elsewhere rather than accepting a setting that would be dropped.
+	//
+	// create_hypertable and this parameter are Apache-2.0 licensed
+	// (timescaledb sql/ddl_api.sql), which matters: the Timescale License
+	// forbids offering TSL software as a database service, and its "Value
+	// Added" exception requires that users be prohibited from modifying schema
+	// via DDL — precisely what this product exists to permit. Anything emitted
+	// here must stay inside the Apache-2 subset.
+	ChunkTimeIntervalMS int `json:"chunk_time_interval_ms,omitempty"`
+
 	// TableName overrides the physical table name codegen would otherwise
 	// compute as `atlantis.<namespace>_<snake>`. Format: `[schema.]table`,
 	// each part matching `[A-Za-z_][A-Za-z0-9_]*`. Used when adopting an
@@ -1066,6 +1081,13 @@ func lowerMembers(_ string, ms []EntityMember, e *Entity) []error {
 			e.PartitionField = mm.Field
 		case *TtlFieldDecl:
 			e.TtlField = mm.Field
+		case *ChunkTimeIntervalDecl:
+			ms, perr := parseDurationMS(mm.Duration)
+			if perr != nil {
+				errs = append(errs, fmt.Errorf("%s: chunk_time_interval: %w", mm.Pos, perr))
+				break
+			}
+			e.ChunkTimeIntervalMS = ms
 		case *TableNameDecl:
 			e.TableName = mm.Name
 		case *CacheBlock:
@@ -1305,6 +1327,13 @@ func parseTagPlaceholders(tag string) []string {
 // 10. query_timeout must be 50ms..30s.
 func validateEntity(e *Entity, byID map[string]*Entity) []error {
 	var errs []error
+
+	// chunk_time_interval is a create_hypertable argument, so it has nowhere to
+	// go on a plain entity. Rejecting beats accepting a setting that would be
+	// silently dropped — which is the failure this clause was an instance of.
+	if e.ChunkTimeIntervalMS > 0 && e.Kind != EntityKindHypertable {
+		errs = append(errs, fmt.Errorf("%s: chunk_time_interval is only valid on a hypertable", e.ID()))
+	}
 
 	// Rule 1: exactly one primary key. Either a single field carries the
 	// `primary` modifier OR the entity has a `primary by` composite, but

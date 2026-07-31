@@ -482,6 +482,15 @@ type TtlFieldDecl struct {
 	Field string
 }
 
+// ChunkTimeIntervalDecl: `chunk_time_interval 7d` inside a hypertable body.
+type ChunkTimeIntervalDecl struct {
+	Pos      Position
+	Duration string
+}
+
+func (*ChunkTimeIntervalDecl) isEntityMember()      {}
+func (d *ChunkTimeIntervalDecl) Position() Position { return d.Pos }
+
 func (*TtlFieldDecl) isEntityMember()      {}
 func (t *TtlFieldDecl) Position() Position { return t.Pos }
 

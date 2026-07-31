@@ -95,6 +95,15 @@ const (
 	// Added and Changed are backfill-required: ADD CONSTRAINT without NOT VALID
 	// takes ACCESS EXCLUSIVE and validates every existing row, so both can fail
 	// on data. Removed is additive — rows the constraint rejected become legal.
+	// KindChunkTimeIntervalChanged carries a hypertable's chunk sizing.
+	//
+	// create_hypertable's chunk_time_interval only applies at creation, and the
+	// call is emitted with if_not_exists, so re-running it against an existing
+	// hypertable changes nothing. Without this the clause would work on a fresh
+	// table and silently no-op on every edit — a clause that appears to work,
+	// which is worse than one that plainly does not.
+	KindChunkTimeIntervalChanged ChangeKind = "chunk_time_interval_changed"
+
 	KindCheckAdded   ChangeKind = "check_added"
 	KindCheckRemoved ChangeKind = "check_removed"
 	KindCheckChanged ChangeKind = "check_changed"
@@ -407,6 +416,7 @@ func diffEntity(oldE, newE *dsl.Entity, d *Diff, ctx *diffCtx) {
 	diffIndexes(oldE, newE, d)
 	diffUniques(oldE, newE, d)
 	diffChecks(oldE, newE, d)
+	diffChunkTimeInterval(oldE, newE, d)
 	diffCache(oldE, newE, d)
 	diffQueryTimeout(oldE, newE, d)
 }
@@ -529,6 +539,26 @@ func diffChecks(oldE, newE *dsl.Entity, d *Diff) {
 			From:       prior.expr,
 		})
 	}
+}
+
+// diffChunkTimeInterval reports a change to a hypertable's chunk sizing.
+//
+// Additive: set_chunk_time_interval affects only chunks created afterwards,
+// leaving existing chunks and their data untouched, so it can neither fail on
+// data nor take a disruptive lock.
+func diffChunkTimeInterval(oldE, newE *dsl.Entity, d *Diff) {
+	if oldE.ChunkTimeIntervalMS == newE.ChunkTimeIntervalMS {
+		return
+	}
+	d.append(Change{
+		Kind:     KindChunkTimeIntervalChanged,
+		Class:    ClassAdditive,
+		EntityID: newE.ID(),
+		Detail: fmt.Sprintf("hypertable chunk_time_interval changed; applies to chunks " +
+			"created from now on, existing chunks keep their sizing"),
+		From: oldE.ChunkTimeIntervalMS,
+		To:   newE.ChunkTimeIntervalMS,
+	})
 }
 
 // checkRef is one resolved CHECK: its predicate, and the column it came from

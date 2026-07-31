@@ -89,6 +89,15 @@ func (p *Parser) errf(pos Position, format string, args ...any) {
 
 // recover advances until we hit one of the synchronization tokens, so the
 // parser can keep trying after a localized error.
+// recover skips tokens until one of syncs, or EOF.
+//
+// It does NOT advance past the current token first. So calling it with a sync
+// kind that the current token already matches returns immediately, and a caller
+// that then `continue`s re-reads the same token and spins forever. That is not
+// hypothetical: a diagnostic for withdrawn keywords called
+// recover(TokRBrace, TokIdent) while sitting on the identifier it had just
+// rejected, and `go test ./internal/dsl/...` ran for 600 seconds before being
+// killed. Advance past the offending token before syncing.
 func (p *Parser) recover(syncs ...TokenKind) {
 	for {
 		t := p.peek()
@@ -291,6 +300,10 @@ func (p *Parser) parseEntityMembers() []EntityMember {
 			kw := p.advance()
 			field := p.expect(TokIdent)
 			members = append(members, &TtlFieldDecl{Pos: kw.Pos, Field: field.Value})
+		case TokChunkTimeInterval:
+			kw := p.advance()
+			dur := p.expect(TokDuration)
+			members = append(members, &ChunkTimeIntervalDecl{Pos: kw.Pos, Duration: dur.Value})
 		case TokTable:
 			if m := p.parseTableNameDecl(); m != nil {
 				members = append(members, m)

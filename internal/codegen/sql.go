@@ -579,6 +579,27 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 		e := newByID[ch.EntityID]
 		emitUnique(up, e, ch.Field, false)
 		emitUnique(down, e, ch.Field, true)
+	case KindChunkTimeIntervalChanged:
+		e := newByID[ch.EntityID]
+		if e == nil {
+			break
+		}
+		emitChunkInterval := func(b *sqlBuilder, ms int) {
+			if ms <= 0 {
+				// Unset means "TimescaleDB's default". There is no call that
+				// restores it, so the down script leaves the interval where the
+				// up script put it rather than guessing at 7 days and pinning a
+				// value the author never wrote.
+				b.line("-- chunk_time_interval unset; TimescaleDB's default applies to new chunks")
+				return
+			}
+			b.linef("SELECT set_chunk_time_interval('%s', INTERVAL '%d milliseconds');",
+				qualifiedTable(e), ms)
+		}
+		to, _ := ch.To.(int)
+		from, _ := ch.From.(int)
+		emitChunkInterval(up, to)
+		emitChunkInterval(down, from)
 	case KindCheckAdded:
 		e := newByID[ch.EntityID]
 		if e == nil {
@@ -817,8 +838,21 @@ func emitEntityCreate(b *sqlBuilder, e *dsl.Entity) {
 	// quoted string literal (not an identifier), so we double the single
 	// quotes for safety in the same way defaultExpr does.
 	if e.Kind == dsl.EntityKindHypertable {
-		b.linef("SELECT create_hypertable('%s', '%s', if_not_exists => TRUE);",
-			qualifiedTable(e), strings.ReplaceAll(e.TimeField, "'", "''"))
+		// chunk_time_interval sizes each chunk. Omitted when unset so
+		// TimescaleDB applies its own default (7 days) rather than us
+		// hard-coding a number that would then be ours to keep current.
+		//
+		// Passed as an INTERVAL literal rather than a bare integer: the
+		// parameter is ANYELEMENT, and an integer is interpreted in the time
+		// column's own units — microseconds for timestamptz — so `604800000`
+		// meaning "7 days" would silently become 10 minutes.
+		interval := ""
+		if e.ChunkTimeIntervalMS > 0 {
+			interval = fmt.Sprintf(", chunk_time_interval => INTERVAL '%d milliseconds'",
+				e.ChunkTimeIntervalMS)
+		}
+		b.linef("SELECT create_hypertable('%s', '%s', if_not_exists => TRUE%s);",
+			qualifiedTable(e), strings.ReplaceAll(e.TimeField, "'", "''"), interval)
 	}
 
 	// BEFORE UPDATE auto-touch trigger. Emitted after the
