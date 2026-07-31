@@ -1364,9 +1364,20 @@ func validateEntity(e *Entity, byID map[string]*Entity) []error {
 	// GUC is PGC_USERSET, so caller-supplied SQL can simply set the
 	// discriminator to another tenant's value.
 	if e.PartitionField != "" {
-		errs = append(errs, fmt.Errorf("%s: `partition by` is disabled: the per-row "+
-			"tenant predicate it documents is not injected by the server, so it "+
-			"provides no isolation. Tracked by task #11 (Postgres RLS)", e.ID()))
+		if f := e.FindField(e.PartitionField); f == nil {
+			errs = append(errs, fmt.Errorf("%s: `partition by` names unknown field %q",
+				e.ID(), e.PartitionField))
+		} else if !f.NotNull {
+			// A nullable discriminator is a hole. The policy compares
+			// `col = current_partition()`, and NULL = anything is NULL, so a row
+			// with a NULL tenant is invisible to every tenant — including the
+			// one that wrote it — and is reachable only by a superuser or a
+			// path that bypasses RLS. Rows nobody can see are worse than an
+			// error at schema time.
+			errs = append(errs, fmt.Errorf("%s: `partition by` field %q must be `not null`; "+
+				"a NULL discriminator matches no tenant's policy and the row becomes "+
+				"invisible to everyone", e.ID(), e.PartitionField))
+		}
 	}
 
 	// chunk_time_interval is a create_hypertable argument, so it has nowhere to

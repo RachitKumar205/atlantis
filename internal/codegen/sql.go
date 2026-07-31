@@ -855,6 +855,9 @@ func emitEntityCreate(b *sqlBuilder, e *dsl.Entity) {
 			qualifiedTable(e), strings.ReplaceAll(e.TimeField, "'", "''"), interval)
 	}
 
+	// Row-level security for `partition by`.
+	emitPartitionPolicy(b, e)
+
 	// BEFORE UPDATE auto-touch trigger. Emitted after the
 	// table so the table exists at the moment the trigger function
 	// references it via CREATE TRIGGER ... ON.
@@ -1502,4 +1505,47 @@ func assertCheckNamesUnique(ir *dsl.IR) error {
 		}
 	}
 	return nil
+}
+
+// emitPartitionPolicy renders the row-level security that enforces
+// `partition by`.
+//
+// Enforcement lives in Postgres rather than in each generated read, and that is
+// the entire point. The previous design injected a predicate into every
+// generated query; the server was later rewritten to dispatch from the IR at
+// runtime, the injection was not carried across, and every read silently
+// returned every tenant's rows. A policy cannot be forgotten by a handler
+// written afterwards, and it covers paths atlantis never sees — custom query
+// bodies, backfill expressions, anything executed on that connection.
+//
+// FORCE is not optional. Without it the table owner bypasses RLS entirely, and
+// atlantis owns the tables it creates, so the policy would apply to everyone
+// except the one role that actually connects.
+//
+// The predicate compares against atlantis.current_partition() rather than
+// current_setting('atlantis.partition'). A custom GUC is PGC_USERSET, so
+// caller-authored SQL can reassign it mid-transaction and read another tenant's
+// rows — verified against live PostgreSQL 16. See migration 0021.
+func emitPartitionPolicy(b *sqlBuilder, e *dsl.Entity) {
+	if e.PartitionField == "" {
+		return
+	}
+	table := qualifiedTable(e)
+	col := quoteIdent(e.PartitionField)
+
+	b.linef("ALTER TABLE %s ENABLE ROW LEVEL SECURITY;", table)
+	b.linef("ALTER TABLE %s FORCE ROW LEVEL SECURITY;", table)
+	// USING gates what a statement may read; WITH CHECK gates what it may
+	// write. Both are required: USING alone would let a caller INSERT a row
+	// attributed to another tenant, which it could then not see — a write leak
+	// rather than a read leak, and just as much a breach.
+	b.linef("CREATE POLICY %s ON %s USING (%s = atlantis.current_partition()) "+
+		"WITH CHECK (%s = atlantis.current_partition());",
+		quoteIdent(partitionPolicyName(e)), table, col, col)
+}
+
+// partitionPolicyName is the policy identifier, derived so the differ can find
+// it again. Length-capped for the same reason constraint names are.
+func partitionPolicyName(e *dsl.Entity) string {
+	return truncateIdent(tableName(e) + "_tenant_isolation")
 }

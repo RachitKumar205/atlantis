@@ -497,19 +497,32 @@ entity B in y { id bigint primary }
 // because the author has been told twice that it holds. When task #11 lands the
 // enforcement moves into Postgres RLS, where no forgotten call site can leak,
 // and this becomes an assertion about the policy instead.
-func TestIR_PartitionBy_IsRejectedUntilIsolationIsReal(t *testing.T) {
-	err := mustLowerErr(t, `
+func TestIR_PartitionBy_RequiresANotNullDiscriminator(t *testing.T) {
+	// Accepted when the discriminator cannot be NULL.
+	ir := mustLower(t, `
 entity Order in consumer {
   id          bigint primary
   consumer_id text not null
   partition by consumer_id
 }
 `)
-	if !strings.Contains(err.Error(), "provides no isolation") {
-		t.Errorf("error does not explain why the clause is refused: %v", err)
+	if got := ir.Entities[0].PartitionField; got != "consumer_id" {
+		t.Errorf("PartitionField = %q, want consumer_id", got)
 	}
-	if !strings.Contains(err.Error(), "#11") {
-		t.Errorf("error does not name the task that restores it: %v", err)
+
+	// Refused when it can. The policy compares col = current_partition(), and
+	// NULL = anything is NULL, so a row with a NULL discriminator matches no
+	// tenant's policy — invisible to everyone including whoever wrote it, and
+	// reachable only by a path that bypasses RLS.
+	err := mustLowerErr(t, `
+entity Order in consumer {
+  id          bigint primary
+  consumer_id text
+  partition by consumer_id
+}
+`)
+	if !strings.Contains(err.Error(), "not null") {
+		t.Errorf("a nullable discriminator was not refused clearly: %v", err)
 	}
 }
 
