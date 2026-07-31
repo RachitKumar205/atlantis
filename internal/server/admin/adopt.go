@@ -373,8 +373,22 @@ func filterToExistingEntities(in *dsl.IR, existing map[string]bool) *dsl.IR {
 // classifyDriftSeverity assigns a Terraform-style severity. "Added" /
 // "removed" kinds are pure additions or removals; everything else is a
 // modification (both sides exist, they disagree). The string match is
-// against codegen.ChangeKind values verbatim so a new kind there fails
-// loudly here (default = mismatch, the safer assumption).
+// against codegen.ChangeKind values verbatim, so a kind added in codegen and
+// not listed here falls to the default. That default is the safer assumption —
+// "mismatch" understates nothing — but it is silent, not loud: check_added and
+// check_removed were reported as mismatches for as long as it took to notice.
+// Nothing links this switch to codegen's ChangeKind constants at compile time,
+// so driftseverity_test.go reads them out of codegen's source and holds this
+// function to the rule above. That test is what caught index_added,
+// composite_unique_added, custom_query_added, procedure_added and their
+// removal counterparts all being reported as modifications — eight kinds, none
+// of them new, misfiled for as long as the list was maintained by hand.
+//
+// The kinds stay enumerated rather than classified by suffix so that each one
+// is a decision. A future kind whose name ends in _added but which is really a
+// tightening of an existing column would be classified wrongly by a suffix
+// rule and correctly by a person; the test exists to make sure the person is
+// asked.
 func classifyDriftSeverity(kind string) string {
 	switch kind {
 	case "entity_added",
@@ -382,14 +396,24 @@ func classifyDriftSeverity(kind string) string {
 		"field_reference_added",
 		"field_unique_added",
 		"field_serial_added",
-		"field_backfill_added":
+		"field_backfill_added",
+		"check_added",
+		"index_added",
+		"composite_unique_added",
+		"custom_query_added",
+		"procedure_added":
 		return "addition"
 	case "entity_removed",
 		"field_removed",
 		"field_reference_removed",
 		"field_unique_removed",
 		"field_serial_removed",
-		"field_backfill_removed":
+		"field_backfill_removed",
+		"check_removed",
+		"index_removed",
+		"composite_unique_removed",
+		"custom_query_removed",
+		"procedure_removed":
 		return "removal"
 	}
 	return "mismatch"

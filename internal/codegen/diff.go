@@ -91,6 +91,14 @@ const (
 	KindCompositeUniqueAdded   ChangeKind = "composite_unique_added"
 	KindCompositeUniqueRemoved ChangeKind = "composite_unique_removed"
 
+	// CHECK constraints, entity-level (`check "..."`) and per-field (`check`).
+	// Added and Changed are backfill-required: ADD CONSTRAINT without NOT VALID
+	// takes ACCESS EXCLUSIVE and validates every existing row, so both can fail
+	// on data. Removed is additive — rows the constraint rejected become legal.
+	KindCheckAdded   ChangeKind = "check_added"
+	KindCheckRemoved ChangeKind = "check_removed"
+	KindCheckChanged ChangeKind = "check_changed"
+
 	// KindFieldSerialAdded: BIGSERIAL added to an existing column.
 	// Sequence must be seeded to MAX(col)+1 before apply or new inserts
 	// collide with existing rows.
@@ -135,6 +143,18 @@ type Change struct {
 	Detail   string      `json:"detail,omitempty"` // human-readable summary
 	From     any         `json:"from,omitempty"`
 	To       any         `json:"to,omitempty"`
+
+	// Constraint is the database identifier this change acts on, for kinds
+	// where the emitter must name one (today: the CHECK kinds).
+	//
+	// Resolved here rather than in the emitter because the emitter is handed
+	// the *new* entity, and a removal's constraint exists only on the old one.
+	// Deriving the name there meant scanning an entity that did not contain the
+	// constraint, falling through to a hash of the predicate, and emitting
+	// DROP CONSTRAINT IF EXISTS <name-that-never-existed> — which, because of
+	// the IF EXISTS, dropped nothing and reported success. The plan said the
+	// constraint was gone; it was still enforcing.
+	Constraint string `json:"constraint,omitempty"`
 }
 
 // Diff is the full set of changes between two IRs, partitioned by class.
@@ -386,8 +406,294 @@ func diffEntity(oldE, newE *dsl.Entity, d *Diff, ctx *diffCtx) {
 	diffFields(oldE, newE, d, ctx)
 	diffIndexes(oldE, newE, d)
 	diffUniques(oldE, newE, d)
+	diffChecks(oldE, newE, d)
 	diffCache(oldE, newE, d)
 	diffQueryTimeout(oldE, newE, d)
+}
+
+// diffChecks diffs CHECK constraints — both the entity-level `check "..."`
+// declarations and the per-field `check` modifier.
+//
+// Adding a CHECK is backfill-required, not additive, and the distinction is the
+// point: Postgres validates the predicate against every existing row when the
+// constraint is added, so a table with one violating row takes an
+// ACCESS EXCLUSIVE lock, scans, and fails. That is a data-dependent outcome the
+// plan must surface before apply, which is exactly what a rehearsal probe would
+// check — and could not, while this differ did not exist and the emitted DDL
+// therefore contained no CHECK at all.
+//
+// Changing a predicate is modelled as one change rather than remove+add,
+// because the emitted DDL must drop and re-add in that order within the same
+// statement group; splitting it risks a re-ordering that leaves the table
+// briefly unconstrained.
+//
+// A note for whoever writes the rehearsal probe for this kind: Postgres accepts
+// a row when a CHECK evaluates TRUE *or* NULL, so `CHECK (total > 0)` does not
+// reject rows where total IS NULL. The Detail below says the constraint is
+// validated against every existing row, which is true — but the set of rows it
+// can reject is narrower than the predicate reads. A probe counting
+// `WHERE NOT (expr)` matches that semantics exactly, because NOT NULL is NULL
+// and the row is excluded; a probe counting `WHERE expr IS NOT TRUE` would
+// over-report.
+//
+// Entity-level checks are keyed by resolved constraint name, matching how
+// EmitInitial names them, so an unnamed check that shifts position is not
+// mistaken for a different constraint.
+func diffChecks(oldE, newE *dsl.Entity, d *Diff) {
+	oldChecks := resolvedChecks(oldE)
+	newChecks := resolvedChecks(newE)
+
+	// A field-level check on a column that is itself being added or dropped
+	// travels with the column: columnDecl inlines CHECK (...) into ADD COLUMN,
+	// and DROP COLUMN takes the constraint with it. Emitting a separate
+	// ADD CONSTRAINT for it is not merely redundant — Postgres auto-names the
+	// inline check <table>_<column>_check, which is exactly the name resolved
+	// here, so the second statement fails with
+	//
+	//	ERROR:  constraint "shop_order_total_check" for relation "shop_order" already exists
+	//
+	// and takes the whole migration down. `total int check "total > 0"` on a
+	// new column is the most ordinary thing in this grammar, so this guard
+	// covers common usage rather than an edge case.
+	//
+	// diffUniques makes the same argument one level up, for a brand-new
+	// entity whose constraints come from EmitInitial.
+	oldFields := fieldsByName(oldE)
+	newFields := fieldsByName(newE)
+	travelsWithColumn := func(c checkRef) bool {
+		if c.field == "" {
+			return false
+		}
+		_, inOld := oldFields[c.field]
+		_, inNew := newFields[c.field]
+		return inOld != inNew
+	}
+
+	// Iterated in sorted key order, not map order. Emitted SQL is a persisted
+	// artifact — migration files land in git, PreviewRollback renders it, and
+	// tide hashes it — so the same inputs must produce the same bytes. Ranging
+	// the maps directly produced four distinct up-scripts across sixty runs of
+	// one four-check diff.
+	for _, key := range sortedCheckKeys(newChecks) {
+		now := newChecks[key]
+		if travelsWithColumn(now) {
+			continue
+		}
+		prior, existed := oldChecks[key]
+		switch {
+		case !existed:
+			d.append(Change{
+				Kind:       KindCheckAdded,
+				Class:      ClassBackfillRequired,
+				EntityID:   newE.ID(),
+				Field:      now.field,
+				Constraint: now.name,
+				Detail: "CHECK added — Postgres validates it against every existing row " +
+					"under an exclusive lock: " + now.expr,
+				To: now.expr,
+			})
+		case prior.expr != now.expr:
+			d.append(Change{
+				Kind:       KindCheckChanged,
+				Class:      ClassBackfillRequired,
+				EntityID:   newE.ID(),
+				Field:      now.field,
+				Constraint: now.name,
+				Detail:     "CHECK predicate changed — revalidated against every existing row",
+				From:       prior.expr,
+				To:         now.expr,
+			})
+		}
+	}
+
+	for _, key := range sortedCheckKeys(oldChecks) {
+		prior := oldChecks[key]
+		if _, still := newChecks[key]; still {
+			continue
+		}
+		if travelsWithColumn(prior) {
+			continue
+		}
+		// Dropping a constraint cannot fail on data and takes only a brief
+		// lock, so it is additive in the plan-class sense — the rows it used to
+		// reject simply become legal. Routed through append rather than
+		// assigned to d.Additive directly so the unknown-class backstop there
+		// applies to this kind too.
+		d.append(Change{
+			Kind:       KindCheckRemoved,
+			Class:      ClassAdditive,
+			EntityID:   oldE.ID(),
+			Field:      prior.field,
+			Constraint: prior.name,
+			Detail:     "CHECK removed: " + prior.expr,
+			From:       prior.expr,
+		})
+	}
+}
+
+// checkRef is one resolved CHECK: its predicate, and the column it came from
+// when it was written as a per-field `check` modifier.
+type checkRef struct {
+	// name is the constraint's identifier in the database — the same name
+	// EmitInitial writes when it creates the table fresh.
+	name  string
+	expr  string
+	field string // empty for entity-level checks
+}
+
+// resolvedChecks returns an entity's CHECK constraints keyed by the name they
+// carry in the database.
+//
+// Identity is the constraint name, not the predicate, because the name is what
+// a later ALTER has to target. Keying by predicate conflated constraints that
+// Postgres considers distinct: two checks sharing a predicate collapsed to one
+// map entry, so deleting one produced no change at all, and — worse — the
+// emitter's predicate-scan resolved the survivor's name, emitting a DROP for
+// the constraint the author had kept while the one they removed stayed live.
+//
+// The three name forms mirror what actually ends up in the catalog:
+//
+//   - field-level `check`, which codegen inlines into the column definition.
+//     Postgres auto-names a single-column inline check <table>_<column>_check,
+//     so that is the name here.
+//   - entity-level `check "..." as name` — the author's name, verbatim.
+//   - entity-level `check "..."` — derived from the predicate by
+//     unnamedCheckName, matching EmitInitial.
+//
+// COMPATIBILITY: unnamed entity-level checks were previously named positionally
+// (<table>_check_1, _2, …). A database created by an earlier build therefore
+// holds the positional name, and a later removal emits DROP CONSTRAINT IF
+// EXISTS against the predicate-derived one, which misses silently.
+//
+// Taken deliberately. Positional naming has a permanent defect — reordering two
+// unnamed checks renames both, so the differ must either report a spurious
+// DROP + ADD (an ACCESS EXCLUSIVE revalidation for an unchanged schema) or stay
+// silent and let a migrated database diverge from a freshly created one.
+// Predicate-derived naming has no such defect; its only cost is this one-time
+// break. All 19 .atl files in this repository declare zero entity-level checks,
+// named or unnamed, so the affected population here is empty — but .atl files
+// live in caller repositories too (see the schema-in-caller-repos convention),
+// so this belongs in release notes rather than only in a comment.
+func resolvedChecks(e *dsl.Entity) map[string]checkRef {
+	refs := resolveCheckNames(e)
+	out := make(map[string]checkRef, len(refs))
+	for _, r := range refs {
+		out[r.name] = r
+	}
+	return out
+}
+
+// resolveCheckNames assigns every CHECK on an entity the name it carries in the
+// database, in a fixed order: entity-level checks in declaration order, then
+// field-level checks in field order.
+//
+// This is the single source of those names. EmitInitial writes them when it
+// creates the table and resolvedChecks derives constraint identity from them;
+// if the two disagreed, a migrated database and a freshly created one would end
+// up with differently-named constraints and every later ALTER would target the
+// wrong one.
+//
+// Author-supplied names are reserved first, then generated names are assigned
+// around them. The ordering matters: a user who copies a constraint name out of
+// a live database can land on exactly the form unnamedCheckName produces, and
+// whoever loses that collision disappears — two checks map to one name, one
+// vanishes from the diff in both directions, and no DDL is emitted for it. The
+// author asked for their name, so the generated one yields.
+//
+// Two identical author-supplied names DO collapse here — the result is a map
+// keyed by name, and nothing can distinguish them. That is tolerable only
+// because such a schema never reaches a database: checkNameCollisions rejects
+// it in both EmitSQL and EmitInitial, so the collapsed diff is never emitted.
+// The ordering matters and is easy to get wrong — if the guard were ever
+// removed or bypassed, this map would silently lose a constraint.
+func resolveCheckNames(e *dsl.Entity) []checkRef {
+	taken := map[string]bool{}
+	for _, c := range e.Checks {
+		if c.Name != "" {
+			taken[c.Name] = true
+		}
+	}
+
+	// free returns the first unused variant of a generated name. Bumping the
+	// occurrence rather than giving up is what makes collapse structurally
+	// impossible: every check gets a distinct key no matter what names the
+	// author chose.
+	free := func(gen func(int) string) string {
+		for occ := 1; ; occ++ {
+			if n := gen(occ); !taken[n] {
+				taken[n] = true
+				return n
+			}
+		}
+	}
+
+	out := make([]checkRef, 0, len(e.Checks)+len(e.Fields))
+	for _, c := range e.Checks {
+		if c.Name != "" {
+			out = append(out, checkRef{name: c.Name, expr: c.Expr})
+			continue
+		}
+		expr := c.Expr
+		out = append(out, checkRef{
+			name: free(func(occ int) string { return unnamedCheckName(e, expr, occ) }),
+			expr: expr,
+		})
+	}
+	for i := range e.Fields {
+		f := &e.Fields[i]
+		if f.Check == "" {
+			continue
+		}
+		// Postgres auto-names a single-column inline CHECK
+		// <table>_<column>_check, and codegen inlines field checks into the
+		// column definition, so that is the name in the catalog.
+		field := f.Name
+		out = append(out, checkRef{
+			name: free(func(occ int) string {
+				if occ == 1 {
+					return truncateIdent(fmt.Sprintf("%s_%s_check", tableName(e), field))
+				}
+				return truncateIdent(fmt.Sprintf("%s_%s_check%d", tableName(e), field, occ))
+			}),
+			expr:  f.Check,
+			field: field,
+		})
+	}
+	return out
+}
+
+// sortedCheckKeys returns constraint names in a stable order, so an emitter
+// walking the result produces the same bytes on every run. Emitted SQL is a
+// persisted artifact — migration files land in git, PreviewRollback renders it,
+// and tide hashes it — so ranging the map directly is not acceptable here.
+func sortedCheckKeys(m map[string]checkRef) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// checkNameCollisions reports author-supplied constraint names used more than
+// once on an entity. Postgres rejects the resulting CREATE TABLE, so emitting
+// it would produce a migration that cannot apply; failing here names the actual
+// problem instead.
+func checkNameCollisions(e *dsl.Entity) []string {
+	seen := map[string]int{}
+	for _, c := range e.Checks {
+		if c.Name != "" {
+			seen[c.Name]++
+		}
+	}
+	var dup []string
+	for name, n := range seen {
+		if n > 1 {
+			dup = append(dup, name)
+		}
+	}
+	sort.Strings(dup)
+	return dup
 }
 
 // diffUniques diffs entity-level composite UNIQUE specs by order-independent
@@ -788,6 +1094,22 @@ func diffQueryTimeout(oldE, newE *dsl.Entity, d *Diff) {
 
 // ---- helpers ----
 
+// append files a Change under its class.
+//
+// The default is the whole point of the function. Without it, a Change whose
+// class this switch does not handle is silently discarded: it appears in no
+// bucket, so the plan reports no such change, no DDL is emitted for it, and
+// rehearsal examines DDL that does not contain it. That is the same failure the
+// coverage registry in diff_coverage.go exists to prevent, reached by a
+// different route — there, a differ never produced the Change; here, the Change
+// was produced and then dropped.
+//
+// Filing it as breaking rather than panicking is deliberate. An unknown class
+// is a programming error, but this runs inside a server handler, and the
+// correct response to "we do not know how dangerous this is" is to treat it as
+// the most dangerous thing it could be. Breaking stops the apply and surfaces
+// the change to a human, which is both loud and safe; a panic is loud and takes
+// the request with it.
 func (d *Diff) append(c Change) {
 	switch c.Class {
 	case ClassAdditive:
@@ -795,6 +1117,8 @@ func (d *Diff) append(c Change) {
 	case ClassBackfillRequired:
 		d.BackfillRequired = append(d.BackfillRequired, c)
 	case ClassCrossCallerBreaking:
+		d.Breaking = append(d.Breaking, c)
+	default:
 		d.Breaking = append(d.Breaking, c)
 	}
 }

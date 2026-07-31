@@ -460,8 +460,12 @@ func assembleEntity(out, declared *dsl.Entity, cols []colMeta, cons constraints,
 		byName[c.name] = c
 	}
 	declaredNames := make(map[string]bool, len(declared.Fields))
+	declaredChecks := make(map[string]string, len(declared.Fields))
 	for _, df := range declared.Fields {
 		declaredNames[df.Name] = true
+		if df.Check != "" {
+			declaredChecks[df.Name] = df.Check
+		}
 	}
 
 	pkSet := make(map[string]bool, len(cons.pk))
@@ -491,6 +495,20 @@ func assembleEntity(out, declared *dsl.Entity, cols []colMeta, cons constraints,
 			Name:    c.name,
 			Type:    fieldType(c),
 			NotNull: c.notNull,
+			// Carried from the declaration rather than read out of
+			// pg_constraint, matching how entity-level Checks are handled at
+			// the top of FromPostgres. This introspection supplies column
+			// facts; CHECK predicates it does not verify, and unverifiedWarnings
+			// says so.
+			//
+			// Carrying it is what keeps that honest. Leaving it empty made both
+			// sides differ by construction, so every adopt of a database whose
+			// CHECK constraints already existed reported them as drift to be
+			// added — a permanent false positive contradicting the warning
+			// emitted alongside it. Comparing an author's `total > 0` against
+			// Postgres's normalised `((total > 0))` is the real fix and needs
+			// expression normalisation, not a string compare.
+			Check: declaredChecks[c.name],
 		}
 		if len(cons.pk) == 1 && cons.pk[0] == c.name {
 			f.Primary = true
@@ -764,8 +782,20 @@ func unverifiedWarnings(declared *dsl.Entity, cons constraints) []string {
 	if n := len(declared.Indexes); n > 0 {
 		warns = append(warns, fmt.Sprintf("%s: %d declared index(es) not verified against the live DB (adopt v1 covers tables, columns, PKs, FKs only)", declared.ID(), n))
 	}
-	if n := len(declared.Checks); n > 0 || len(cons.checks) > 0 {
-		warns = append(warns, fmt.Sprintf("%s: %d declared CHECK constraint(s), %d live CHECK constraint(s) — not verified", declared.ID(), len(declared.Checks), len(cons.checks)))
+	// Field-level `check` modifiers count toward "declared", not just
+	// entity-level ones. Counting only declared.Checks made the warning silent
+	// for a schema whose checks are all per-field — and since assembleEntity
+	// carries Field.Check across from the declaration, that is exactly the case
+	// where the diff is clean by construction. A table whose CHECK had been
+	// dropped by hand produced no drift item and no warning: nothing at all.
+	declaredChecks := len(declared.Checks)
+	for i := range declared.Fields {
+		if declared.Fields[i].Check != "" {
+			declaredChecks++
+		}
+	}
+	if declaredChecks > 0 || len(cons.checks) > 0 {
+		warns = append(warns, fmt.Sprintf("%s: %d declared CHECK constraint(s), %d live CHECK constraint(s) — not verified", declared.ID(), declaredChecks, len(cons.checks)))
 	}
 	if n := len(declared.Uniques); n > 0 || len(cons.uniqs) > 0 {
 		// Single-column uniqueness is already verified above via Field.Unique;

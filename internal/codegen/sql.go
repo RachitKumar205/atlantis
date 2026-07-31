@@ -1,6 +1,8 @@
 package codegen
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -82,6 +84,16 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 	if newIR == nil {
 		return SQLScripts{}, fmt.Errorf("EmitSQL: newIR is required")
 	}
+	// Both sides. The down script re-creates entities dropped in this migration
+	// from the *old* IR (emitChange/KindEntityRemoved), so an old entity with
+	// two identically-named checks produced a rollback Postgres rejects —
+	// EmitInitial refused the very same IR while EmitSQL emitted it happily.
+	if err := assertCheckNamesUnique(newIR); err != nil {
+		return SQLScripts{}, err
+	}
+	if err := assertCheckNamesUnique(oldIR); err != nil {
+		return SQLScripts{}, fmt.Errorf("prior schema: %w", err)
+	}
 	newByID := indexByID(newIR)
 	oldByID := indexByID(oldIR)
 
@@ -115,9 +127,37 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 	// Process all changes in a deterministic order. We split by class so the
 	// reader sees additive first, then any backfill-required changes (with
 	// big comment banners), then breaking changes (likewise).
-	emitClass(up, down, "ADDITIVE", d.Additive, newByID, oldByID)
-	emitClass(up, down, "BACKFILL REQUIRED", d.BackfillRequired, newByID, oldByID)
-	emitClass(up, down, "BREAKING — REVIEW CAREFULLY", d.Breaking, newByID, oldByID)
+	// The down script emits its class groups in reverse, because a rollback
+	// has to undo the migration in the opposite order it was applied.
+	//
+	// Emitting both scripts in the same order produced rollbacks that could not
+	// run. Dropping a column and the entity-level CHECK that references it puts
+	// the CHECK removal in ADDITIVE and the column removal in BREAKING; the up
+	// script correctly drops the constraint first, but the down script then
+	// re-added the constraint before re-adding the column:
+	//
+	//	ALTER TABLE "zz_zz" ADD CONSTRAINT "zz_total_pos" CHECK (total > 0);
+	//	ALTER TABLE "zz_zz" ADD COLUMN "total" INTEGER;
+	//	ERROR:  column "total" does not exist
+	//
+	// This is general, not specific to CHECKs: any dependency spanning two
+	// class groups has the same shape.
+	downGroups := make([]*sqlBuilder, 0, 3)
+	for _, g := range []struct {
+		label   string
+		changes []Change
+	}{
+		{"ADDITIVE", d.Additive},
+		{"BACKFILL REQUIRED", d.BackfillRequired},
+		{"BREAKING — REVIEW CAREFULLY", d.Breaking},
+	} {
+		gd := &sqlBuilder{}
+		emitClass(up, gd, g.label, g.changes, newByID, oldByID)
+		downGroups = append(downGroups, gd)
+	}
+	for i := len(downGroups) - 1; i >= 0; i-- {
+		down.raw(downGroups[i].String())
+	}
 
 	// If nothing was emitted, the migration is genuinely empty (e.g., only
 	// cache changes). Leave a comment so the file isn't blank.
@@ -398,7 +438,7 @@ func emitPhaseSplitChange(ch Change, newByID, oldByID map[string]*dsl.Entity, pr
 func emitFieldAddNullable(b *sqlBuilder, e *dsl.Entity, f *dsl.Field) {
 	nullable := *f
 	nullable.NotNull = false
-	b.linef("ALTER TABLE %s ADD COLUMN %s;", qualifiedTable(e), columnDecl(nullable))
+	b.linef("ALTER TABLE %s ADD COLUMN %s;", qualifiedTable(e), columnDecl(nullable, fieldCheckName(e, nullable.Name)))
 	if f.Ref != nil {
 		emitFKAdd(b, e, f)
 	}
@@ -539,6 +579,64 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 		e := newByID[ch.EntityID]
 		emitUnique(up, e, ch.Field, false)
 		emitUnique(down, e, ch.Field, true)
+	case KindCheckAdded:
+		e := newByID[ch.EntityID]
+		if e == nil {
+			break
+		}
+		emitCheckAdd(up, e, ch)
+		emitCheckDrop(down, e, ch)
+	case KindCheckRemoved:
+		// The constraint exists on the old side, so its name and predicate come
+		// from there; newByID is what the entity looks like after the change.
+		e := newByID[ch.EntityID]
+		if e == nil {
+			break
+		}
+		emitCheckDrop(up, e, ch)
+		// Re-adding on the down path restores the predicate that was dropped,
+		// under the name it was dropped from. Omitting ch.Constraint here made
+		// the synthetic Change fall back to the predicate scan, which found a
+		// *different* constraint carrying the same predicate and re-added under
+		// its name — so rolling back a removal of "b" emitted
+		// ADD CONSTRAINT "a", colliding with the "a" that was never touched:
+		//
+		//	ERROR:  constraint "a" for relation "ckt_order" already exists
+		emitCheckAdd(down, e, Change{
+			EntityID:   ch.EntityID,
+			Field:      ch.Field,
+			Constraint: ch.Constraint,
+			To:         ch.From,
+		})
+	case KindCheckChanged:
+		e := newByID[ch.EntityID]
+		if e == nil {
+			break
+		}
+		// Drop then add, in that order, within one statement group. Splitting
+		// them across groups would leave a window where the table carries
+		// neither predicate.
+		//
+		// Every statement targets ch.Constraint, because a changed check keeps
+		// its name: only an author-named check or a field check can reach this
+		// kind. An *unnamed* entity check is named from its predicate, so
+		// changing the predicate changes the name, which makes it a removal
+		// plus an addition rather than a change — different keys, different
+		// branch. Synthesizing a Change without the name here was the bug: the
+		// drop fell back to hashing the old predicate and emitted
+		// DROP CONSTRAINT IF EXISTS on a name that had never existed, so the
+		// old constraint survived and the ADD then collided with it:
+		//
+		//	ERROR:  constraint "total_positive" for relation "shop_order" already exists
+		emitCheckDrop(up, e, ch)
+		emitCheckAdd(up, e, ch)
+		emitCheckDrop(down, e, ch)
+		emitCheckAdd(down, e, Change{
+			EntityID:   ch.EntityID,
+			Field:      ch.Field,
+			Constraint: ch.Constraint,
+			To:         ch.From,
+		})
 	case KindCompositeUniqueAdded:
 		u, _ := ch.To.(dsl.UniqueSpec)
 		e := newByID[ch.EntityID]
@@ -665,7 +763,7 @@ func emitEntityCreate(b *sqlBuilder, e *dsl.Entity) {
 	cols := []string{}
 	var tableConstraints []string
 	for _, f := range e.Fields {
-		cols = append(cols, "  "+columnDecl(f))
+		cols = append(cols, "  "+columnDecl(f, fieldCheckName(e, f.Name)))
 		if f.Ref != nil {
 			// Emit FKs as table-level constraints so we can name them
 			// deterministically (needed for DROP CONSTRAINT on FK removal).
@@ -693,13 +791,18 @@ func emitEntityCreate(b *sqlBuilder, e *dsl.Entity) {
 	// Table-level CHECK constraints (multi-column / polymorphic XOR
 	// predicates). The Expr is whatever the engineer wrote inside the
 	// `check "..."` declaration; Postgres validates it at migration time.
-	for i, c := range e.Checks {
-		name := c.Name
-		if name == "" {
-			name = fmt.Sprintf("%s_check_%d", tableName(e), i+1)
+	// Names come from resolveCheckNames, the same function the differ uses, so
+	// a constraint created here and a constraint an ALTER later targets cannot
+	// be named differently. Field-level checks are inlined by columnDecl and
+	// auto-named by Postgres, so only the entity-level ones are emitted here —
+	// but they are named in the presence of the field ones, which is why the
+	// filter is on the resolved list rather than on e.Checks.
+	for _, r := range resolveCheckNames(e) {
+		if r.field != "" {
+			continue
 		}
 		tableConstraints = append(tableConstraints,
-			fmt.Sprintf("  CONSTRAINT %s CHECK (%s)", quoteIdent(name), c.Expr))
+			fmt.Sprintf("  CONSTRAINT %s CHECK (%s)", quoteIdent(r.name), r.expr))
 	}
 	allLines := append(cols, tableConstraints...)
 	b.line(strings.Join(allLines, ",\n"))
@@ -736,7 +839,7 @@ func emitEntityDrop(b *sqlBuilder, e *dsl.Entity) {
 }
 
 func emitFieldAdd(b *sqlBuilder, e *dsl.Entity, f *dsl.Field) {
-	b.linef("ALTER TABLE %s ADD COLUMN %s;", qualifiedTable(e), columnDecl(*f))
+	b.linef("ALTER TABLE %s ADD COLUMN %s;", qualifiedTable(e), columnDecl(*f, fieldCheckName(e, f.Name)))
 	if f.Ref != nil {
 		emitFKAdd(b, e, f)
 	}
@@ -769,6 +872,130 @@ func emitDefault(b *sqlBuilder, e *dsl.Entity, field string, d *dsl.Default) {
 // emitCompositeUnique adds or drops a multi-column UNIQUE constraint. The
 // name is deterministic (compositeUniqueName) so the DROP on `on=false`
 // finds exactly what a prior ADD created.
+// checkConstraintName resolves the name a CHECK constraint is emitted under.
+//
+// This is the emitter's business, not the differ's. The differ matches old
+// against new by identity (see resolvedChecks); names are computed here, from
+// the entity being emitted for, so a positional name is always positional
+// within the schema version it belongs to.
+//
+// A field-level check written as `total int check "total > 0"` is inlined into
+// the column definition by EmitInitial and so has no name of its own there. It
+// needs one to be added or dropped later, and the name must be derivable from
+// the column alone.
+// checkConstraintName returns the identifier a CHECK change acts on.
+//
+// Resolved at diff time and carried on the Change, because only the differ can
+// see both sides. Deriving it here scanned the entity the emitter was handed —
+// always the *new* one, which for a removal cannot contain the constraint being
+// removed — then fell back to hashing the predicate, emitting
+// DROP CONSTRAINT IF EXISTS on a name that had never existed. IF EXISTS turned
+// that into a no-op, so the plan reported the constraint gone while the
+// database went on enforcing it.
+//
+// There is no fallback. An earlier version kept one "for Changes built before
+// Constraint existed", justified by a persisted-plan replay path — which does
+// not exist: every emitter call site recomputes the diff from IR snapshots
+// (admin.go, backfill.go, history.go, sandbox/embedded.go, cmd/tidectl/plan.go),
+// and the stored schema_versions.diff JSON is only ever counted and rendered,
+// never re-emitted. A fallback that cannot run is a second naming scheme
+// nobody maintains, and it disagreed with resolveCheckNames.
+//
+// An empty name yields DROP CONSTRAINT IF EXISTS "" — invalid SQL that fails at
+// apply. That is the right outcome for a Change this build cannot interpret,
+// and the opposite of the silent success the old fallback produced.
+func checkConstraintName(ch Change) string { return ch.Constraint }
+
+// fieldCheckName returns the constraint name resolveCheckNames assigned to a
+// field's `check` modifier, so the DDL that creates it and the DDL that later
+// drops it cannot disagree. Empty when the field carries no check.
+func fieldCheckName(e *dsl.Entity, field string) string {
+	for _, r := range resolveCheckNames(e) {
+		if r.field == field {
+			return r.name
+		}
+	}
+	return ""
+}
+
+// truncateIdent keeps a generated identifier inside Postgres's 63-byte limit.
+//
+// Postgres does not reject an over-long identifier; it silently truncates it.
+// That is the dangerous behaviour: a CREATE storing a 63-byte prefix and a
+// later DROP supplying the full 80-byte name refer to the same object only by
+// accident, and DROP CONSTRAINT IF EXISTS turns the mismatch into a success.
+//
+// Truncating here, deterministically, means the name we emit is the name stored
+// — so the two statements always agree. The hash suffix keeps distinct inputs
+// distinct, which plain truncation would not: two long column names sharing a
+// prefix would otherwise collapse to one identifier and CREATE TABLE would fail
+// with "constraint already exists".
+func truncateIdent(name string) string {
+	const maxIdent = 63
+	if len(name) <= maxIdent {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	suffix := "_" + hex.EncodeToString(sum[:4])
+	return name[:maxIdent-len(suffix)] + suffix
+}
+
+// unnamedCheckName names an entity-level `check "..."` that the author did not
+// name. It is the single source of that name: EmitInitial writes it when
+// creating the table, and resolvedChecks derives constraint identity from it.
+// The two must agree, or a migrated database and a freshly created one carry
+// differently-named constraints and every later ALTER targets the wrong one.
+//
+// Derived from the predicate rather than from position. Position was the
+// obvious choice and it was wrong: deleting the first of two unnamed checks
+// renumbered the second, so a single deletion reported as a removal *plus* a
+// predicate change on a constraint nobody touched — escalating the plan to
+// backfill-required and re-validating the whole table under ACCESS EXCLUSIVE
+// for a constraint that had not moved. Predicate-derived names make reordering
+// a no-op, which is what it is.
+//
+// occurrence disambiguates the degenerate case of the same predicate written
+// twice; Postgres requires distinct constraint names on a table, and two
+// identical CHECKs are two constraints as far as the catalog is concerned.
+//
+// Truncated to four bytes. The collision domain is the checks of one table, so
+// 2^32 is ample, and the name has to stay inside Postgres's 63-byte identifier
+// limit alongside the table name.
+func unnamedCheckName(e *dsl.Entity, expr string, occurrence int) string {
+	sum := sha256.Sum256([]byte(expr))
+	name := fmt.Sprintf("%s_check_%s", tableName(e), hex.EncodeToString(sum[:4]))
+	if occurrence > 1 {
+		name = fmt.Sprintf("%s_%d", name, occurrence)
+	}
+	return truncateIdent(name)
+}
+
+// emitCheckAdd renders ADD CONSTRAINT ... CHECK.
+//
+// No NOT VALID: the whole point of classifying this backfill-required is that
+// the constraint IS validated against existing rows, so the apply fails loudly
+// on data that violates it rather than leaving an unenforced constraint behind.
+// A NOT VALID variant would be a different, deliberately-chosen behaviour, and
+// would need its own plan class.
+func emitCheckAdd(b *sqlBuilder, e *dsl.Entity, ch Change) {
+	expr, _ := ch.To.(string)
+	if expr == "" {
+		return
+	}
+	b.linef("ALTER TABLE %s ADD CONSTRAINT %s CHECK (%s);",
+		qualifiedTable(e), quoteIdent(checkConstraintName(ch)), expr)
+}
+
+// emitCheckDrop renders DROP CONSTRAINT IF EXISTS.
+//
+// IF EXISTS because a down-migration may run against a database where the ADD
+// never landed — the apply that would have created it failed on the very data
+// validation this constraint exists to perform.
+func emitCheckDrop(b *sqlBuilder, e *dsl.Entity, ch Change) {
+	b.linef("ALTER TABLE %s DROP CONSTRAINT IF EXISTS %s;",
+		qualifiedTable(e), quoteIdent(checkConstraintName(ch)))
+}
+
 func emitCompositeUnique(b *sqlBuilder, e *dsl.Entity, fields []string, on bool) {
 	name := compositeUniqueName(e, fields)
 	if on {
@@ -864,7 +1091,7 @@ func tableName(e *dsl.Entity) string {
 //	           sequence + NOT NULL + DEFAULT nextval(...) implicitly).
 //	identity → render `<type> GENERATED ALWAYS AS IDENTITY`.
 //	neither  → render `<type>` with explicit NOT NULL / DEFAULT modifiers.
-func columnDecl(f dsl.Field) string {
+func columnDecl(f dsl.Field, checkName string) string {
 	var parts []string
 	switch {
 	case f.Serial:
@@ -885,7 +1112,28 @@ func columnDecl(f dsl.Field) string {
 		parts = append(parts, "UNIQUE")
 	}
 	if f.Check != "" {
-		parts = append(parts, "CHECK ("+f.Check+")")
+		// Named explicitly rather than left to Postgres.
+		//
+		// Postgres auto-names an inline single-column check <table>_<column>_check
+		// and, when that exceeds the 63-byte identifier limit, shortens the table
+		// and column parts *proportionally* (makeObjectName). Reproducing that
+		// meant guessing an implementation detail, and the guess was wrong:
+		//
+		//	postgres:  zzlongns_an_entity_with_a_reall_a_column_with_a_long_name_check
+		//	atlantis:  zzlongns_an_entity_with_a_really_quite_long_name_a_column_with_a_long_name_check
+		//
+		// A later DROP CONSTRAINT IF EXISTS used our 80-byte name, Postgres
+		// truncated it to a different 63-byte string, IF EXISTS swallowed the
+		// miss, and the migration reported success with the constraint still
+		// enforcing. Emitting the name removes the guess entirely.
+		//
+		// For names inside the limit this produces exactly the name Postgres
+		// would have chosen, so nothing already deployed is renamed.
+		if checkName != "" {
+			parts = append(parts, "CONSTRAINT "+quoteIdent(checkName)+" CHECK ("+f.Check+")")
+		} else {
+			parts = append(parts, "CHECK ("+f.Check+")")
+		}
 	}
 	return strings.Join(parts, " ")
 }
@@ -1089,6 +1337,8 @@ func (s *sqlBuilder) blank() {
 	s.b.WriteByte('\n')
 }
 
+func (s *sqlBuilder) raw(text string) { s.b.WriteString(text) }
+
 func (s *sqlBuilder) String() string { return s.b.String() }
 
 // EmitInitial generates the initial migration that creates every entity in
@@ -1098,6 +1348,9 @@ func (s *sqlBuilder) String() string { return s.b.String() }
 func EmitInitial(newIR *dsl.IR) (SQLScripts, error) {
 	if newIR == nil {
 		return SQLScripts{}, fmt.Errorf("EmitInitial: newIR is required")
+	}
+	if err := assertCheckNamesUnique(newIR); err != nil {
+		return SQLScripts{}, err
 	}
 	order, err := topoSortEntities(newIR.Entities)
 	if err != nil {
@@ -1188,4 +1441,31 @@ func topoSortEntities(entities []dsl.Entity) ([]*dsl.Entity, error) {
 		}
 	}
 	return out, nil
+}
+
+// assertCheckNamesUnique refuses to emit a schema in which two author-supplied
+// CHECK names collide on one entity. Postgres rejects such a table, so emitting
+// it would produce a migration that cannot apply; the generated SQL would fail
+// deep inside an apply transaction with Postgres's own message, naming the
+// constraint but not the file it came from.
+//
+// Generated names never reach here — resolveCheckNames assigns them around
+// whatever the author reserved — so this can only fire on something a person
+// wrote twice.
+//
+// It runs on both IRs in EmitSQL, not just the new one, because the down script
+// re-creates dropped entities from the old IR.
+func assertCheckNamesUnique(ir *dsl.IR) error {
+	if ir == nil {
+		return nil
+	}
+	for i := range ir.Entities {
+		e := &ir.Entities[i]
+		if dup := checkNameCollisions(e); len(dup) > 0 {
+			return fmt.Errorf("%s: CHECK constraint name(s) declared more than once: %s "+
+				"— Postgres requires constraint names to be unique per table",
+				e.ID(), strings.Join(dup, ", "))
+		}
+	}
+	return nil
 }
