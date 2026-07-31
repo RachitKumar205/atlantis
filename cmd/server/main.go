@@ -118,6 +118,37 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	defer pool.Close()
 	log.Info("pg pool ready", "max_conns", cfg.PGMaxConns)
 
+	// Which TimescaleDB build this database runs, and whether that is allowed.
+	//
+	// Always reported, never silently assumed. The default TimescaleDB package
+	// is the Community (TSL) build, so getting the Apache one is a deliberate
+	// act on every image rebuild — exactly the kind of thing that is quietly
+	// lost. Logging it means an operator can see the answer without knowing to
+	// go looking.
+	//
+	// Refusal is opt-in via ATL_REQUIRE_APACHE_TIMESCALE because self-hosting on
+	// the Community build is entirely legitimate: the Timescale License
+	// restricts offering the software as a service, not running it. A hosted
+	// deployment sets the flag; nobody else is affected.
+	if edition, derr := pg.DetectTimescaleEdition(ctx, pool); derr != nil {
+		log.Warn("could not determine the TimescaleDB edition", "err", derr)
+	} else {
+		log.Info("timescaledb edition", "edition", string(edition))
+		if err := pg.RequireApacheTimescale(edition); err != nil {
+			if cfg.RequireApacheTimescale {
+				return fmt.Errorf("refusing to start: %w", err)
+			}
+			if edition == pg.TimescaleCommunity {
+				log.Warn("running the Community (TSL) TimescaleDB build. Legal to "+
+					"self-host; NOT permitted for a hosted database service, and the "+
+					"license's Value Added exception does not cover a product whose "+
+					"purpose is letting users modify schema via DDL. Set "+
+					"ATL_REQUIRE_APACHE_TIMESCALE=true to make this fatal",
+					"edition", string(edition))
+			}
+		}
+	}
+
 	obs.RegisterPoolStats(nil, pool.Raw())
 
 	// Auth allowlist is loaded once at startup and refreshed on its own

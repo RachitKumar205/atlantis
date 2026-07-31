@@ -87,6 +87,18 @@ type config struct {
 	AdminMirrorDir          string
 	AdminAllowApplyMutation bool
 
+	// RequireApacheTimescale refuses to start on a Community (TSL) TimescaleDB
+	// build. Off by default: self-hosting on Community is legitimate, since the
+	// Timescale License restricts offering the software as a service rather
+	// than running it.
+	//
+	// A hosted deployment must set it. The license's "Value Added" exception —
+	// the obvious thing to reach for — requires that users be prohibited from
+	// modifying the database schema via DDL, which is the one thing this
+	// product exists to permit, so a hosted atlantis on Community has no
+	// carve-out available.
+	RequireApacheTimescale bool
+
 	// CertBindingExemptCallers are CNs that bypass the per-RPC cert
 	// fingerprint check. Reserved for management-plane services whose
 	// trust comes from a higher layer (session cookies + sudo for the
@@ -213,6 +225,7 @@ func loadConfig() (config, error) {
 		AdminMirrorSchema:       envBool("ATL_MIRROR_SCHEMA", false),
 		AdminMirrorDir:          envStr("ATL_MIRROR_DIR", "schema"),
 		AdminAllowApplyMutation: envBool("ATL_ALLOW_APPLY_MUTATION", true),
+		RequireApacheTimescale:  envBool("ATL_REQUIRE_APACHE_TIMESCALE", false),
 		// Default exempts the console CN so it can keep calling admin
 		// RPCs after the cert-binding rollout without an operator
 		// step. Add more via comma-separated env.
