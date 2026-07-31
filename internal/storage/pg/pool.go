@@ -10,7 +10,6 @@ package pg
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -173,19 +172,15 @@ type pgxRow struct {
 func (r pgxRow) Scan(dest ...any) error {
 	err := r.row.Scan(dest...)
 	if err != nil && err.Error() == "no rows in result set" {
-		// Wrap so errors.Is matches both the pgx string and the runtime
-		// sentinel. We keep the wrap shallow so the caller still sees the
-		// underlying message when logging.
-		return fmt.Errorf("%w: %s", errNoRowsRuntimeAlias, err)
+		// Wrap the RUNTIME's sentinel, not a local one. errors.Is compares by
+		// identity, so a local sentinel with an identical message never
+		// matched — and because the wrap also rewrote the message to
+		// "no rows: no rows in result set", IsNoRows' string fallbacks missed
+		// it too. Every no-rows from this adapter was invisible.
+		return fmt.Errorf("%w: %s", runtime.ErrNoRows, err)
 	}
 	return err
 }
-
-// errNoRowsRuntimeAlias is a local sentinel that errors.Is(err, runtime.X)
-// transitively matches. It's identified by being a distinct error with the
-// same Error() output as the runtime's sentinel; concrete handlers only
-// ever check runtime.IsNoRows so the chain works.
-var errNoRowsRuntimeAlias = errors.New("no rows")
 
 type pgxRows struct {
 	rows pgx.Rows

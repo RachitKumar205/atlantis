@@ -100,9 +100,19 @@ func IsNoRows(err error) bool {
 		msg == "sql: no rows in result set"
 }
 
-// errNoRowsSentinel is the runtime's own sentinel; pool adapters can wrap
-// their driver-specific no-rows error to point at this so errors.Is works.
-var errNoRowsSentinel = errors.New("no rows")
+// ErrNoRows is the runtime's own no-rows sentinel. Pool adapters wrap their
+// driver-specific error with THIS value so errors.Is matches.
+//
+// It is exported because it has to be: errors.Is compares by identity, so an
+// adapter that declares its own sentinel with the same message does not match,
+// however similar the two look. internal/storage/pg did exactly that, and the
+// comment there asserted "the chain works" while IsNoRows returned false for
+// every no-rows the production adapter produced — silently breaking handleGet's
+// not-found path long before anything else depended on it.
+var ErrNoRows = errors.New("no rows")
+
+// errNoRowsSentinel is retained as the internal name used by IsNoRows.
+var errNoRowsSentinel = ErrNoRows
 
 // Outbox is how a write transaction records the cache invalidations it owes.
 // The actual invalidation happens after commit via a LISTEN/NOTIFY worker.
