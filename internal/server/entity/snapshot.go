@@ -31,9 +31,15 @@ func buildSnapshot(ir *dsl.IR, contentHash string) (*entitySnapshot, error) {
 		contentHash: contentHash,
 	}
 
+	// Built once, not once per entity. buildInboundIndex walks every entity's
+	// rules, so calling it inside the loop made startup and every hot-reload
+	// O(entities x rules) for a result that never varies.
+	inbound := buildInboundIndex(ir)
+	procWritten := procedureWrittenEntities(ir)
+
 	for i := range ir.Entities {
 		e := &ir.Entities[i]
-		meta := buildEntityMeta(e, ir)
+		meta := buildEntityMeta(e, ir, inbound, procWritten)
 
 		fd, err := buildProtoDescriptors(e)
 		if err != nil {
@@ -139,6 +145,7 @@ func buildSnapshot(ir *dsl.IR, contentHash string) (*entitySnapshot, error) {
 			}
 		}
 		pm.touched = sortedKeys(touched)
+		pm.invalidateParents = parentsOf(inbound, pm.touched)
 
 		fd, err := buildCustomProcedureDescs(cp, ns)
 		if err != nil {

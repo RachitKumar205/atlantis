@@ -186,6 +186,27 @@ func buildSelectInboundSQL(e *dsl.Entity, cols []string) string {
 	if len(cols) == 0 {
 		return ""
 	}
+	// If every inbound column is part of the primary key, the pre-read buys
+	// nothing. PK columns are excluded from the UPDATE's SET list, so the value
+	// cannot change — reparenting is impossible for such an entity — and the
+	// handler already holds the value in pkValues. The real consumer.CartItem
+	// is exactly this shape (primary by cart_id, variant_id), so without this
+	// every cart-line update paid an extra round trip and an extra row lock to
+	// re-learn a value it had.
+	pk := map[string]bool{}
+	for _, c := range schema.PKColumns(e) {
+		pk[c.Name] = true
+	}
+	allPK := true
+	for _, c := range cols {
+		if !pk[c] {
+			allPK = false
+			break
+		}
+	}
+	if allPK {
+		return ""
+	}
 	return fmt.Sprintf("SELECT %s FROM %s WHERE %s FOR UPDATE",
 		strings.Join(schema.QuoteAll(cols), ", "),
 		schema.QualifiedTable(e),

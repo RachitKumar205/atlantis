@@ -28,7 +28,7 @@ func vectorEntity() *dsl.Entity {
 func vectorMeta(t *testing.T) *entityMeta {
 	t.Helper()
 	e := vectorEntity()
-	meta := buildEntityMeta(e, &dsl.IR{Version: 1})
+	meta := entityMetaFor(e, &dsl.IR{Version: 1})
 	fd, err := buildProtoDescriptors(e)
 	if err != nil {
 		t.Fatalf("buildProtoDescriptors: %v", err)

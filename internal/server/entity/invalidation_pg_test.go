@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/rachitkumar205/atlantis/internal/cache/invalidate"
+	"github.com/rachitkumar205/atlantis/internal/cache/read"
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/runtime"
@@ -87,7 +88,7 @@ func TestInboundValuesUseTheSameRepresentationAsTheParent(t *testing.T) {
 			child = &ir.Entities[i]
 		}
 	}
-	meta := buildEntityMeta(child, ir)
+	meta := entityMetaFor(child, ir)
 
 	if len(meta.inboundColMeta) != len(meta.inboundCols) {
 		t.Fatalf("inboundColMeta has %d entries for %d columns; a rule naming an "+
@@ -295,4 +296,158 @@ func (noopCache) Get(context.Context, string) ([]byte, error) {
 func (noopCache) Set(context.Context, string, []byte, time.Duration) error { return nil }
 func (noopCache) CurrentVersion(context.Context, string, string) (int64, error) {
 	return 0, nil
+}
+
+// A procedure-written entity must not be served from the cache even when a
+// reader is present. Asserted behaviourally: change the row underneath the
+// handler and Get again. A cached read returns the old value.
+//
+// Without this, ignoring meta.cacheable in handleGet leaves every test green
+// while ten shipped procedures write entities that would then serve stale rows.
+func TestProcedureWrittenEntityIsReadUncached(t *testing.T) {
+	url := os.Getenv("ATLANTIS_TEST_PG")
+	if url == "" {
+		t.Skip("set ATLANTIS_TEST_PG to exercise the read path")
+	}
+	ctx := context.Background()
+
+	pool, err := pg.New(ctx, pg.Config{
+		URL: url, MaxConns: 4, MinConns: 1,
+		MaxConnIdleTime: time.Minute, MaxConnLifetime: time.Hour,
+		HealthCheckPeriod: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	raw := pool.Raw()
+
+	reset := func() { _, _ = raw.Exec(ctx, `DROP TABLE IF EXISTS atlantis.procr_widget`) }
+	reset()
+	t.Cleanup(reset)
+	if _, err := raw.Exec(ctx, `CREATE TABLE atlantis.procr_widget (id BIGINT PRIMARY KEY, label TEXT)`); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := raw.Exec(ctx, `INSERT INTO atlantis.procr_widget VALUES (1, 'before')`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	const src = `
+entity Widget in procr {
+  id bigint primary
+  label text
+  cache { read_through ttl=5m }
+}
+procedure TouchWidget for Widget {
+  input { id: bigint }
+  steps {
+    sql touches(procr.Widget) {
+      UPDATE atlantis.procr_widget SET label = 'after' WHERE id = $id
+    }
+  }
+}
+`
+	f, err := dsl.Parse("procr.atl", []byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	ir, err := dsl.Lower([]*dsl.File{f})
+	if err != nil {
+		t.Fatalf("lower: %v", err)
+	}
+	codegen.AssignProtoNumbers(nil, ir)
+
+	reader, err := read.New(noopCache{}, read.Config{LRUSize: 16, DefaultTTL: time.Minute})
+	if err != nil {
+		t.Fatalf("read.New: %v", err)
+	}
+	srv := NewServer(pool, noopCache{}, invalidate.NewOutbox(), nil, reader)
+	if err := srv.Reload(ir, "test"); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	meta := srv.snapshot.Load().entities["procr.Widget"]
+	if meta == nil {
+		t.Fatal("Widget missing from the snapshot")
+	}
+	if meta.cacheable {
+		t.Fatal("Widget is written by a procedure and is still marked cacheable")
+	}
+
+	get := func() string {
+		req := dynamicpb.NewMessage(meta.getRequestDesc)
+		req.Set(meta.getRequestDesc.Fields().ByNumber(1), protoreflect.ValueOfInt64(1))
+		resp, err := srv.handleGet(ctx, meta, func(dst any) error {
+			proto.Reset(dst.(proto.Message))
+			proto.Merge(dst.(proto.Message), req)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		m := resp.(*dynamicpb.Message)
+		ent := m.Get(meta.getResponseDesc.Fields().ByName("entity")).Message()
+		return ent.Get(meta.msgDesc.Fields().ByName("label")).String()
+	}
+
+	if got := get(); got != "before" {
+		t.Fatalf("first read = %q, want before", got)
+	}
+	// Change the row behind the handler's back, exactly as a procedure would.
+	if _, err := raw.Exec(ctx, `UPDATE atlantis.procr_widget SET label = 'after' WHERE id = 1`); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if got := get(); got != "after" {
+		t.Errorf("second read = %q, want after. The entity is written by a "+
+			"procedure that cannot invalidate row bodies, so it must not be "+
+			"served from cache — this read came from a cached body.", got)
+	}
+}
+
+// A real error from the pre-update read must propagate, not be swallowed.
+//
+// The swallow was justified as "invalidating one parent beats failing the
+// write", which Postgres does not permit: a genuine error aborts the
+// transaction, so the write fails anyway with "current transaction is aborted"
+// and the root cause discarded.
+func TestPreUpdateReadPropagatesRealErrors(t *testing.T) {
+	url := os.Getenv("ATLANTIS_TEST_PG")
+	if url == "" {
+		t.Skip("set ATLANTIS_TEST_PG to exercise the pre-update read")
+	}
+	ctx := context.Background()
+
+	pool, err := pg.New(ctx, pg.Config{
+		URL: url, MaxConns: 2, MinConns: 1,
+		MaxConnIdleTime: time.Minute, MaxConnLifetime: time.Hour,
+		HealthCheckPeriod: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	ir := invIR(t)
+	var child *dsl.Entity
+	for i := range ir.Entities {
+		if ir.Entities[i].Name == "InvChild" {
+			child = &ir.Entities[i]
+		}
+	}
+	meta := entityMetaFor(child, ir)
+	// A statement that cannot succeed — the table does not exist.
+	meta.sqlSelectInbound = `SELECT parent_id FROM atlantis.definitely_not_a_table WHERE id = $1 FOR UPDATE`
+
+	srv := NewServer(pool, noopCache{}, invalidate.NewOutbox(), nil, nil)
+	tx, err := pool.BeginTx(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	_, rerr := srv.readInboundValues(ctx, tx, meta, []any{int64(1)})
+	if rerr == nil {
+		t.Error("a failing pre-update read returned no error. Swallowing it does " +
+			"not let the write proceed — the transaction is already aborted — it " +
+			"only discards the reason.")
+	}
 }

@@ -188,7 +188,7 @@ func TestBuildQueryPrefix(t *testing.T) {
 func TestBuildEntityMeta(t *testing.T) {
 	e := testAccount()
 	ir := testIR(e)
-	meta := buildEntityMeta(e, ir)
+	meta := entityMetaFor(e, ir)
 
 	if meta.entityID != "consumer.Account" {
 		t.Errorf("entityID = %q, want consumer.Account", meta.entityID)
@@ -235,7 +235,7 @@ func TestBuildEntityMeta(t *testing.T) {
 func TestBuildEntityMeta_CompositePK(t *testing.T) {
 	e := testCompositeEntity()
 	ir := testIR(e)
-	meta := buildEntityMeta(e, ir)
+	meta := entityMetaFor(e, ir)
 
 	if len(meta.pkCols) != 2 {
 		t.Fatalf("pkCols len = %d, want 2", len(meta.pkCols))
@@ -380,7 +380,7 @@ func TestBuildEntityMeta_WithIdentity(t *testing.T) {
 		},
 	}
 	ir := testIR(e)
-	meta := buildEntityMeta(e, ir)
+	meta := entityMetaFor(e, ir)
 
 	if len(meta.insertCols) != 1 {
 		t.Fatalf("insertCols len = %d, want 1 (id excluded)", len(meta.insertCols))

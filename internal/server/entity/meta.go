@@ -33,6 +33,10 @@ type entityMeta struct {
 	// cache id. See makeScanTargets.
 	inboundCols    []string
 	inboundColMeta []columnMeta
+	// cacheable is false when some procedure writes this entity. Procedures
+	// cannot invalidate row bodies — see procedureWrittenEntities — so serving
+	// this entity from the read cache would serve stale rows.
+	cacheable bool
 	// sqlSelectInbound reads inboundCols for one row, FOR UPDATE. Used before
 	// an UPDATE to capture the pre-update parent key, so reparenting a child
 	// invalidates the parent it left as well as the one it joined.
@@ -74,7 +78,7 @@ type columnMeta struct {
 }
 
 // buildEntityMeta constructs the full entityMeta for one entity.
-func buildEntityMeta(e *dsl.Entity, ir *dsl.IR) *entityMeta {
+func buildEntityMeta(e *dsl.Entity, ir *dsl.IR, inbound map[string][]inboundRule, procWritten map[string]bool) *entityMeta {
 	meta := &entityMeta{
 		entity:   e,
 		entityID: e.ID(),
@@ -124,7 +128,8 @@ func buildEntityMeta(e *dsl.Entity, ir *dsl.IR) *entityMeta {
 	meta.sqlGet = buildGetSQL(e)
 	meta.sqlBatchGet = buildBatchGetSQL(e)
 	meta.sqlQueryPrefix = buildQueryPrefix(e)
-	meta.inbound = buildInboundIndex(ir)[e.ID()]
+	meta.cacheable = !procWritten[e.ID()]
+	meta.inbound = inbound[e.ID()]
 	meta.inboundCols = inboundColumns(meta.inbound)
 	for _, name := range meta.inboundCols {
 		for i := range meta.columns {

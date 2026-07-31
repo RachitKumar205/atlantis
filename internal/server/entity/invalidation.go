@@ -140,18 +140,20 @@ func (s *Server) enqueueParents(ctx context.Context, tx runtime.Tx, meta *entity
 			continue
 		}
 		for _, r := range meta.inbound {
-			i, ok := col[r.childCol]
-			if !ok {
-				continue
-			}
+			// inboundCols is derived from meta.inbound, so every rule's column
+			// is a key by construction; buildEntityMeta drops the whole rule
+			// set if any column is unresolvable.
+			i := col[r.childCol]
 			v := vals[i]
 			if v == nil {
+				// The row points at no parent, so there is nothing to
+				// invalidate. Only reachable for a nullable FK.
 				continue
 			}
+			// No parentID == "" check: CompositeID length-prefixes, so a
+			// non-nil value always yields at least "0:". A guard nothing can
+			// trigger is a claim nothing checks.
 			parentID := runtime.CompositeID(v)
-			if parentID == "" {
-				continue
-			}
 			key := r.parentEntityID + "\x00" + parentID
 			if seen[key] {
 				continue
@@ -176,16 +178,89 @@ func (s *Server) enqueueParents(ctx context.Context, tx runtime.Tx, meta *entity
 // readInboundValues runs meta.sqlSelectInbound for one row. Returns nil when
 // the entity has no inbound rules, or when the row does not exist — an update
 // against a missing row invalidates nothing.
-func (s *Server) readInboundValues(ctx context.Context, tx runtime.Tx, meta *entityMeta, pkArgs []any) []any {
+func (s *Server) readInboundValues(ctx context.Context, tx runtime.Tx, meta *entityMeta, pkArgs []any) ([]any, error) {
 	if meta.sqlSelectInbound == "" {
-		return nil
+		return nil, nil
 	}
 	ptrs := makeScanTargets(meta.inboundColMeta)
 	if err := tx.QueryRow(ctx, meta.sqlSelectInbound, pkArgs...).Scan(ptrs...); err != nil {
-		// Not found, or a scan problem. Either way there is no old parent to
-		// invalidate, and failing the write over it would be worse than
-		// invalidating one parent instead of two.
+		// No rows is the expected case for an update against a missing row:
+		// there is no old parent, and the UPDATE below reports NotFound.
+		//
+		// Anything else is returned. An earlier version swallowed every error
+		// on the theory that invalidating one parent beat failing the write —
+		// which Postgres does not allow. A genuine error (connection reset,
+		// statement timeout, permission) aborts the transaction, so the next
+		// statement fails with "current transaction is aborted" regardless. The
+		// swallow bought nothing except discarding the root cause.
+		if runtime.IsNoRows(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return readScanTargets(meta.inboundColMeta, ptrs), nil
+}
+
+// procedureWrittenEntities returns every entity id some procedure writes.
+//
+// Read-through caching is disabled for these, and that is a deliberate
+// fail-closed choice rather than a limitation being tolerated.
+//
+// A procedure runs raw SQL steps. It declares which entities it touches, but
+// nothing reports which ROWS it changed, and a row body is cached under a
+// per-row version pointer — so there is no way to invalidate the bodies it
+// invalidated. The generation bump the procedure does emit clears cached query
+// results and leaves row bodies untouched.
+//
+// Before Get was served from the cache this cost nothing, because nothing was
+// cached. It is live now: without this, HardDeleteProduct would delete a
+// product and leave its cached body being served until TTL, and
+// UpdateOrderFinancialStatusIfFresh would leave a stale order. Ten procedures
+// in the shipped schemas write entities that declare read_through.
+//
+// Serving those entities uncached is strictly correct and merely slower. The
+// alternative — caching them and hoping the TTL is short enough — is the class
+// of silent staleness this whole area has been about.
+func procedureWrittenEntities(ir *dsl.IR) map[string]bool {
+	if ir == nil {
 		return nil
 	}
-	return readScanTargets(meta.inboundColMeta, ptrs)
+	out := map[string]bool{}
+	for i := range ir.Procedures {
+		for _, st := range ir.Procedures[i].Steps {
+			if st.Raw == nil {
+				continue
+			}
+			for _, t := range st.Raw.Touches {
+				out[t] = true
+			}
+		}
+	}
+	return out
+}
+
+// parentsOf returns the entities whose invalidate_on rules name any of the
+// given entity ids. Used by the procedure path, which knows which entities it
+// wrote but not which rows, so it can bump the parents' generation counters
+// even though it cannot invalidate their row bodies.
+func parentsOf(index map[string][]inboundRule, written []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, w := range written {
+		for _, r := range index[w] {
+			if !seen[r.parentEntityID] {
+				seen[r.parentEntityID] = true
+				out = append(out, r.parentEntityID)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// entityMetaFor builds one entity's meta with the indexes buildSnapshot would
+// have supplied. Test helper, kept beside the indexes it wires so the two
+// cannot drift.
+func entityMetaFor(e *dsl.Entity, ir *dsl.IR) *entityMeta {
+	return buildEntityMeta(e, ir, buildInboundIndex(ir), procedureWrittenEntities(ir))
 }

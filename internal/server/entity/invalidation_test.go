@@ -198,3 +198,125 @@ func TestInboundColumnsAreDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// An entity some procedure writes must not be served from the read cache.
+//
+// A procedure runs raw SQL and declares which entities it touches, but nothing
+// reports which ROWS changed — and a row body is cached under a per-row version
+// pointer, so there is no way to invalidate the bodies it invalidated. The
+// generation bump it does emit clears cached query results only.
+//
+// This cost nothing before Get was served from the cache. It is live now: in
+// the shipped schemas ten procedures write entities that declare read_through,
+// so HardDeleteProduct would delete a product and leave its cached body being
+// served until TTL.
+func TestProcedureWrittenEntitiesAreNotCached(t *testing.T) {
+	src := `
+entity Widget in proc {
+  id bigint primary
+  label text
+  cache { read_through ttl=5m }
+}
+entity Gadget in proc {
+  id bigint primary
+  label text
+  cache { read_through ttl=5m }
+}
+procedure TouchWidget for Widget {
+  input { id: bigint }
+  steps {
+    sql touches(proc.Widget) {
+      UPDATE atlantis.proc_widget SET label = 'x' WHERE id = $id
+    }
+  }
+}
+`
+	f, err := dsl.Parse("proc.atl", []byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	ir, err := dsl.Lower([]*dsl.File{f})
+	if err != nil {
+		t.Fatalf("lower: %v", err)
+	}
+
+	written := procedureWrittenEntities(ir)
+	if !written["proc.Widget"] {
+		t.Fatal("proc.Widget is written by a procedure and was not detected")
+	}
+	if written["proc.Gadget"] {
+		t.Fatal("proc.Gadget is written by no procedure and was flagged")
+	}
+
+	for i := range ir.Entities {
+		e := &ir.Entities[i]
+		meta := entityMetaFor(e, ir)
+		switch e.Name {
+		case "Widget":
+			if meta.cacheable {
+				t.Error("Widget is written by a procedure that cannot invalidate row " +
+					"bodies, and is still cacheable — a Get after that procedure " +
+					"would serve the pre-write row until TTL")
+			}
+		case "Gadget":
+			if !meta.cacheable {
+				t.Error("Gadget is written by no procedure and lost its cache; " +
+					"failing closed must be targeted, not blanket")
+			}
+		}
+	}
+}
+
+// A procedure writing a child must at least bump the PARENT's generation, so
+// cached query results over the parent go. It cannot invalidate the parent's
+// row bodies — it does not know which rows — but that is why such parents are
+// themselves excluded from caching when a procedure writes them.
+func TestProcedureBumpsParentsOfWrittenChildren(t *testing.T) {
+	idx := buildInboundIndex(parentChildIR())
+
+	got := parentsOf(idx, []string{"consumer.CartItem"})
+	if len(got) != 1 || got[0] != "consumer.Cart" {
+		t.Errorf("parentsOf(CartItem) = %v, want [consumer.Cart] — writing a cart "+
+			"line changes what a query over Cart returns", got)
+	}
+
+	// An entity no rule names contributes no parents.
+	if got := parentsOf(idx, []string{"consumer.Cart"}); len(got) != 0 {
+		t.Errorf("parentsOf(Cart) = %v, want none", got)
+	}
+
+	// Deterministic: the result drives outbox writes.
+	for i := 0; i < 20; i++ {
+		if g := parentsOf(idx, []string{"consumer.CartItem"}); len(g) != 1 {
+			t.Fatalf("unstable result: %v", g)
+		}
+	}
+}
+
+// When every inbound column is a primary-key column the pre-update read is
+// skipped: PK columns are excluded from the UPDATE's SET list, so the value
+// cannot change and the handler already holds it in pkValues.
+//
+// This is the shipped consumer.CartItem shape (primary by cart_id, variant_id).
+// Without the skip, every cart-line update paid a round trip and a row lock to
+// re-learn a value it had.
+func TestNoPreReadWhenTheParentKeyIsPartOfThePK(t *testing.T) {
+	e := &dsl.Entity{
+		Name: "CartItem", Namespace: "consumer",
+		Fields: []dsl.Field{
+			{Name: "cart_id", Type: dsl.FieldType{Name: "bigint"}, NotNull: true},
+			{Name: "variant_id", Type: dsl.FieldType{Name: "bigint"}, NotNull: true},
+			{Name: "qty", Type: dsl.FieldType{Name: "int"}, NotNull: true},
+		},
+		CompositePK: []string{"cart_id", "variant_id"},
+	}
+	if got := buildSelectInboundSQL(e, []string{"cart_id"}); got != "" {
+		t.Errorf("emitted a pre-update read for a PK column, which cannot change:\n%s", got)
+	}
+
+	// A non-PK parent key still needs it — that is the reparenting case.
+	if got := buildSelectInboundSQL(e, []string{"qty"}); got == "" {
+		t.Error("skipped the pre-update read for a mutable column; reparenting " +
+			"would then invalidate only the parent the row joined")
+	}
+}

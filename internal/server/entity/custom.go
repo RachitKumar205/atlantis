@@ -62,6 +62,9 @@ type customProcMeta struct {
 	inputCols []dsl.QueryParam // declared inputs (for proto + bind type lookup)
 	steps     []procStep       // raw steps in declaration order
 	touched   []string         // sorted union of every step's touched entity ids
+	// invalidateParents are entities whose invalidate_on rules name a touched
+	// entity. Their cached query results must go when this procedure runs.
+	invalidateParents []string
 
 	// unsupported, when non-empty, names a step kind the dynamic executor
 	// can't run yet (typed-verb / enqueue). The method is still registered
@@ -214,8 +217,24 @@ func (s *Server) executeCustomProcedureWithReq(ctx context.Context, pm *customPr
 
 	// Tier-2 cache invalidation for every touched entity, inside the tx —
 	// identical to the dynamic entity-write path (handler.go).
+	//
+	// Generation bumps only. A procedure knows which entities it wrote but not
+	// which rows, so it cannot invalidate row bodies; those entities are served
+	// uncached instead (see procedureWrittenEntities).
 	for _, entityID := range pm.touched {
 		if err := s.outbox.EnqueueGenerationBump(ctx, tx, entityID); err != nil {
+			return nil, err
+		}
+	}
+	// And the parents whose invalidate_on rules name a touched entity. Writing
+	// a CartItem changes what a query over Cart returns, so Cart's cached query
+	// results have to go even though the procedure cannot say which carts. Its
+	// row bodies are safe because a parent named this way is reachable from a
+	// procedure-written child and therefore not itself cached only if a
+	// procedure writes IT — so this bump is the part that is both possible and
+	// necessary.
+	for _, parentID := range pm.invalidateParents {
+		if err := s.outbox.EnqueueGenerationBump(ctx, tx, parentID); err != nil {
 			return nil, err
 		}
 	}

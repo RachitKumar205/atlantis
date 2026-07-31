@@ -92,7 +92,9 @@ func (s *Server) handleGet(ctx context.Context, meta *entityMeta, dec func(any) 
 	// XFetch early refresh; all this path supplies is a loader and the codec.
 	//
 	// Nil reader means caching is off, which is what the sandbox and most tests
-	// want, and the loader below is then the whole of the read.
+	// want, and the loader below is then the whole of the read. So does
+	// !meta.cacheable: a procedure writes this entity and cannot invalidate the
+	// row bodies it changes, so caching it would serve stale rows.
 	loadRow := func(ctx context.Context) (*dynamicpb.Message, error) {
 		row := s.pool.QueryRow(ctx, meta.sqlGet, pkArgs...)
 		e, err := scanRow(meta, row)
@@ -106,7 +108,7 @@ func (s *Server) handleGet(ctx context.Context, meta *entityMeta, dec func(any) 
 	}
 
 	var entity *dynamicpb.Message
-	if s.reader == nil {
+	if s.reader == nil || !meta.cacheable {
 		var err error
 		if entity, err = loadRow(ctx); err != nil {
 			return nil, err
@@ -258,7 +260,10 @@ func (s *Server) handleUpdate(ctx context.Context, meta *entityMeta, dec func(an
 	// invalidate the cart it left as well as the one it joined, and the
 	// UPDATE's RETURNING clause reports only the new value. No-op for entities
 	// without inbound rules, which is nearly all of them.
-	oldInbound := s.readInboundValues(ctx, tx, meta, pkValues)
+	oldInbound, err := s.readInboundValues(ctx, tx, meta, pkValues)
+	if err != nil {
+		return nil, err
+	}
 
 	var inboundVals []any
 	if len(meta.inboundCols) == 0 {
