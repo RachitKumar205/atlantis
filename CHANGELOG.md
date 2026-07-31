@@ -95,7 +95,7 @@ is outside the generated-name scheme entirely.
   the invalidation worker, and never read from.
 - Startup reports which TimescaleDB build the database runs.
   `ATL_REQUIRE_APACHE_TIMESCALE=true` refuses to start on the Community (TSL)
-  build, which a hosted deployment needs and a self-hoster does not.
+  build.
 
 ### Fixed
 
@@ -112,6 +112,26 @@ is outside the generated-name scheme entirely.
   them served stale rows.
 
 ### Changed
+
+- **The Postgres image is now the Apache-2.0 TimescaleDB build**
+  (`timescale/timescaledb-ha:pg16-oss`) in local dev, the self-host bundle and
+  CI. It was `-all`, which is the Community (TSL) edition.
+
+  The Timescale License forbids using TSL software to provide a
+  database-as-a-service, and its "Value Added" exception does not cover
+  atlantis: that exception requires users be prohibited from modifying the
+  database schema via DDL, which is the one thing this product exists to allow.
+  Nothing is lost — atlantis uses hypertables only, and `create_hypertable` and
+  `set_chunk_time_interval` are both Apache-2.0. `-oss` still carries `vector`
+  and `postgis`; the only omission is `timescaledb_toolkit`, which nothing here
+  uses.
+
+  Dev and CI match production deliberately: developing against TSL features that
+  cannot be shipped is how a licence dependency arrives unnoticed.
+
+  **If you self-host**, running the Community build for your own use remains
+  entirely permitted — the licence restricts offering the software as a service,
+  not running it. Pin whichever image you prefer.
 
 - Whether a `check` binds to the preceding field or to the entity is now decided
   by indentation rather than by what happens to precede it. A `check` at or left

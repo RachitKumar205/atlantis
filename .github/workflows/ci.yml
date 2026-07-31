@@ -109,7 +109,9 @@ jobs:
 
     services:
       postgres:
-        image: timescale/timescaledb-ha:pg16-all
+        # -oss is the Apache-2.0 build; -all is Community (TSL) and cannot be
+        # offered as a hosted service. CI matches production.
+        image: timescale/timescaledb-ha:pg16-oss
         env:
           POSTGRES_USER: atlantis
           POSTGRES_PASSWORD: atlantis

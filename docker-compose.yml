@@ -2,8 +2,27 @@
 
 services:
   postgres:
-    # TimescaleDB image bundles Postgres + Timescale; we layer pgvector on top.
-    image: timescale/timescaledb-ha:pg16-all
+    # The -oss tag is the Apache-2.0 build. NOT -all, which is the Community
+    # (TSL) edition.
+    #
+    # The Timescale License forbids using TSL software to provide a
+    # database-as-a-service, and its "Value Added" exception does not cover
+    # atlantis: that exception requires users be prohibited from modifying the
+    # database schema via DDL, which is the one thing this product exists to
+    # allow. Since atlantis is built to be offered to customers, the Apache
+    # build is the only one it can ship on.
+    #
+    # Nothing is lost. atlantis uses hypertables only — create_hypertable and
+    # set_chunk_time_interval, both Apache-2.0 — and -oss still carries vector
+    # and postgis. The one omission is timescaledb_toolkit, which nothing here
+    # uses and which is TSL.
+    #
+    # Dev matches production deliberately. Developing against TSL features that
+    # cannot be shipped is how a licence dependency arrives unnoticed: someone
+    # uses continuous aggregates or compression, it works locally, and it is
+    # found at launch. The server reports timescaledb.license at startup, and
+    # ATL_REQUIRE_APACHE_TIMESCALE=true makes a Community build refuse to boot.
+    image: timescale/timescaledb-ha:pg16-oss
     environment:
       POSTGRES_USER: atlantis
       POSTGRES_PASSWORD: atlantis
