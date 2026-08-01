@@ -349,7 +349,9 @@ function SkeletonRows() {
 }
 
 // Inline edit panel — design's .editpanel with a preview .plan block.
-function EditPanel({ entity, onClose }: { entity: EntityDecl; onClose: () => void }) {
+// Exported so it is not an unused local: the component is deliberately
+// dormant, not dead, and the typecheck gate has to be able to run.
+export function EditPanel({ entity, onClose }: { entity: EntityDecl; onClose: () => void }) {
   const [op, setOp] = useState<'add' | 'replace' | 'remove'>('add')
   const [field, setField] = useState('')
   const [fieldText, setFieldText] = useState('')

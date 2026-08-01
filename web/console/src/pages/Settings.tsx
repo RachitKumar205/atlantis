@@ -393,7 +393,9 @@ function MembersPanel({
 }
 
 // ── Integrations ─────────────────────────────────────────────────────────
-function IntegrationsPanel({
+// Exported so it is not an unused local: the component is deliberately
+// dormant, not dead, and the typecheck gate has to be able to run.
+export function IntegrationsPanel({
   repos, loading, onSave, saving, onToast,
 }: {
   repos: CallerRepo[]
@@ -914,7 +916,9 @@ export function SudoConfirmDialog({
 // disabled until the user types the required phrase verbatim. Kept for
 // non-sudo-required typed gates; the danger-zone uses SudoConfirmDialog
 // above which composes typed-phrase + password re-auth.
-function TypedConfirmDialog({
+// Exported so it is not an unused local: the component is deliberately
+// dormant, not dead, and the typecheck gate has to be able to run.
+export function TypedConfirmDialog({
   title, icon, body, requiredText, confirmLabel, pending, onCancel, onConfirm,
 }: {
   title: string

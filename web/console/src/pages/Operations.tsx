@@ -338,6 +338,17 @@ function DeadJobsPanel({ onToast }: { onToast: (msg: string) => void }) {
   )
 }
 
+// args crosses the wire as base64 (proto `bytes`), so it needs decoding before
+// it is readable. Falls back to the raw value rather than throwing: an
+// undecodable payload is still worth showing to whoever is debugging it.
+function decodeJobArgs(args: string): string {
+  try {
+    return JSON.stringify(JSON.parse(atob(args)), null, 2)
+  } catch {
+    return args
+  }
+}
+
 function DeadJob({
   job, isOpen, onToggle, onRetry, onDiscard, canAdmin, retrying,
 }: {
@@ -366,10 +377,10 @@ function DeadJob({
           {job.job_id.slice(0, 10)}
         </span>
         <span className="badge badge--plain">{job.job_name}</span>
-        <span className="mono muted" style={{ fontSize: 12 }}>{job.entity_id ?? '—'}</span>
+        <span className="mono muted" style={{ fontSize: 12 }}>{job.queue || '—'}</span>
         <span className="spacer" style={{ flex: 1 }} />
         <span className="mono faint" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>
-          {job.attempts}/{job.max_attempts} attempts
+          {job.attempts}/{job.max_retries} attempts
         </span>
         <span className="brass" style={{ display: 'flex', transform: isOpen ? 'rotate(90deg)' : '', transition: 'transform var(--fast) var(--ease)' }}>
           <ChevronRight size={14} />
@@ -384,14 +395,14 @@ function DeadJob({
               <span className="mono" style={{ fontSize: 12 }}>{job.last_error}</span>
             </div>
           )}
-          {job.payload && (
+          {job.args && (
             <>
               <div className="section-label" style={{ marginBottom: 6 }}>payload</div>
               <pre style={{
                 margin: '0 0 14px', padding: '11px 13px', background: 'var(--canvas-0)',
                 border: '1px solid var(--line-soft)', borderRadius: 'var(--radius)',
                 fontFamily: 'var(--mono)', fontSize: 11.5, color: 'var(--ink-2)',
-              }}>{JSON.stringify(job.payload, null, 2)}</pre>
+              }}>{decodeJobArgs(job.args)}</pre>
             </>
           )}
           <div className="row" style={{ gap: 8 }}>

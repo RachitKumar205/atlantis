@@ -5,7 +5,7 @@ export const Route = createRoute({
   getParentRoute: () => RootRoute,
   path: '/',
   beforeLoad: () => {
-    throw redirect({ to: '/schema' })
+    throw redirect({ to: '/schema', search: { namespace: undefined, entity: undefined } })
   },
   component: () => null,
 })

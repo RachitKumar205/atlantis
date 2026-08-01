@@ -19,7 +19,7 @@ export function Login() {
     mutationFn: () => api.auth.login(email, password),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['auth', 'me'] })
-      navigate({ to: '/schema' })
+      navigate({ to: '/schema', search: { namespace: undefined, entity: undefined } })
     },
   })
 
