@@ -66,11 +66,15 @@ func printOwnersTable(resp *adminpb.GetEntityOwnersResponse) {
 		fmt.Println(cliout.Grey("(no entities)"))
 		return
 	}
-	fmt.Printf("%-32s %-16s %-8s %s\n",
-		cliout.Bold("ENTITY"), cliout.Bold("OWNER"),
-		cliout.Bold("SINCE"), cliout.Bold("FIELDS"))
+	// cliout.Pad, not %-Ns: fmt pads by bytes, and the colour wrappers here add
+	// invisible ones, so these columns never lined up when colour was on.
+	fmt.Println(cliout.Pad(cliout.Bold("ENTITY"), 33) +
+		cliout.Pad(cliout.Bold("OWNER"), 17) +
+		cliout.Pad(cliout.Bold("SINCE"), 9) + cliout.Bold("FIELDS"))
 	for _, o := range resp.GetOwners() {
-		fmt.Printf("%-32s %-16s v%-7d %d\n",
-			cliout.Cyan(o.GetEntityId()), o.GetIntroducedBy(), o.GetIntroducedAt(), o.GetFieldCount())
+		fmt.Println(cliout.Pad(cliout.Cyan(o.GetEntityId()), 33) +
+			cliout.Pad(o.GetIntroducedBy(), 17) +
+			cliout.Pad(fmt.Sprintf("v%d", o.GetIntroducedAt()), 9) +
+			fmt.Sprintf("%d", o.GetFieldCount()))
 	}
 }
