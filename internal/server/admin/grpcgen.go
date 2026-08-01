@@ -75,6 +75,7 @@ var migratedRPCs = map[string]bool{
 	"GetMergedSchema":        true,
 	"GetCanonicalIR":         true,
 	"GetCallerFiles":         true,
+	"ListParkedObjects":      true,
 	"GetSchemaHistory":       true,
 	"GetSchemaVersion":       true,
 	"DiffSchemaVersions":     true,
@@ -140,6 +141,10 @@ func (g *grpcServer) SubmitJob(ctx context.Context, req *adminpb.SubmitJobReques
 
 func (g *grpcServer) GetJobStatus(ctx context.Context, req *adminpb.GetJobStatusRequest) (*adminpb.GetJobStatusResponse, error) {
 	return g.svc.GetJobStatus(ctx, req)
+}
+
+func (g *grpcServer) ListParkedObjects(ctx context.Context, req *adminpb.ListParkedObjectsRequest) (*adminpb.ListParkedObjectsResponse, error) {
+	return g.svc.ListParkedObjects(ctx, req)
 }
 
 func (g *grpcServer) ListDeadJobs(ctx context.Context, req *adminpb.ListDeadJobsRequest) (*adminpb.ListDeadJobsResponse, error) {

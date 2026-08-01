@@ -271,6 +271,10 @@ a { color: inherit; text-decoration: none; }
   padding: 1px 6px; height: 18px; white-space: nowrap;
 }
 .chip--count { min-width: 22px; justify-content: center; color: var(--ink-2); }
+/* Chip state. Same tints the banner modifiers use, so "this is fine" and
+   "this needs a look" read the same wherever they appear. */
+.chip.is-ok   { color: var(--sage);   background: var(--sage-tint);   border-color: rgba(125,181,147,.25); }
+.chip.is-warn { color: var(--accent); background: var(--accent-tint); border-color: var(--accent-tint-2); }
 .badge {
   display: inline-flex; align-items: center; gap: 4px;
   font-family: var(--mono); font-size: 10.5px; font-weight: 500; letter-spacing: .02em;

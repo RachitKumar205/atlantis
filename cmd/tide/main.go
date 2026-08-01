@@ -72,6 +72,8 @@ func main() {
 		os.Exit(cmdBlame(os.Args[2:]))
 	case "owners":
 		os.Exit(cmdOwners(os.Args[2:]))
+	case "parked":
+		os.Exit(cmdParked(os.Args[2:]))
 	case "rollback":
 		os.Exit(cmdRollback(os.Args[2:]))
 	case "sandbox":
@@ -103,6 +105,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       tide diff     <from-version> <to-version>")
 	fmt.Fprintln(os.Stderr, "       tide blame    <entity-id>")
 	fmt.Fprintln(os.Stderr, "       tide owners")
+	fmt.Fprintln(os.Stderr, "       tide parked   [--all] [--format table|json]")
 	fmt.Fprintln(os.Stderr, "       tide rollback --to=<version> [--dry-run] [--yes]")
 	fmt.Fprintln(os.Stderr, "       tide caller   alias list|add|rm <caller> [alias]")
 	fmt.Fprintln(os.Stderr, "       tide version")

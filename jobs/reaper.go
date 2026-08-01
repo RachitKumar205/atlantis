@@ -2,10 +2,12 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -120,9 +122,11 @@ SELECT id, kind, schema_name, object_name, coalesce(parent_table, ''), original_
 			h.log().Warn("reap: drop failed, leaving parked",
 				"id", p.id, "kind", p.kind, "object", p.describe(), "err", err)
 			h.recordFailure(ctx, p, err)
+			reapFailuresTotal.WithLabelValues(p.kind).Inc()
 			failed++
 			continue
 		}
+		reapedTotal.WithLabelValues(p.kind).Inc()
 		h.log().Info("reap: dropped parked object",
 			"kind", p.kind, "object", p.describe(), "was", p.originalName)
 		reaped++
@@ -131,7 +135,26 @@ SELECT id, kind, schema_name, object_name, coalesce(parent_table, ''), original_
 		h.log().Info("reap: batch complete",
 			"due", len(due), "reaped", reaped, "failed", failed)
 	}
+	h.observeBacklog(ctx)
 	return nil
+}
+
+// observeBacklog publishes how much is outstanding.
+//
+// Read at the end of every run rather than derived from the counters above,
+// because the counters only move when this process reaps something: a replica
+// that never wins a job would otherwise report a backlog of zero while the
+// register fills up.
+func (h *ReapParkedHandler) observeBacklog(ctx context.Context) {
+	var pending, due int64
+	if err := h.Pool.QueryRow(ctx, `
+SELECT count(*), count(*) FILTER (WHERE reap_after <= now())
+  FROM atlantis.parked_objects WHERE reaped_at IS NULL`).Scan(&pending, &due); err != nil {
+		h.log().Warn("reap: could not measure the parked backlog", "err", err)
+		return
+	}
+	parkedPending.Set(float64(pending))
+	parkedDue.Set(float64(due))
 }
 
 // reapOne drops a single parked object and records the drop, in one
@@ -198,11 +221,34 @@ UPDATE atlantis.parked_objects
        next_attempt_after = now()
          + least(interval '1 hour' * power(2, least(attempts, 6)), interval '24 hours')
  WHERE id = $1`
-	if _, err := h.Pool.Exec(ctx, backoff, p.id, cause.Error()); err != nil {
+	if _, err := h.Pool.Exec(ctx, backoff, p.id, describeCause(cause)); err != nil {
 		h.log().Warn("reap: could not record the failed attempt; it will be "+
 			"retried on the next run instead of backing off",
 			"id", p.id, "err", err)
 	}
+}
+
+// describeCause renders a failure the way somebody debugging it needs it.
+//
+// pgx's PgError.Error() prints only Message, and for the failure that actually
+// happens here — "cannot drop table X because other objects depend on it" —
+// the useful half is in Detail ("view v depends on table X"). Storing only the
+// message points the operator at a string that repeats the object name they
+// are already looking at. Both the CLI and the console surface this field as
+// the answer to "why is this still here".
+func describeCause(err error) string {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return err.Error()
+	}
+	out := pgErr.Message
+	if pgErr.Detail != "" {
+		out += " — " + pgErr.Detail
+	}
+	if pgErr.Hint != "" {
+		out += " (" + pgErr.Hint + ")"
+	}
+	return out
 }
 
 // describe names a parked object the way an operator needs to see it: a column

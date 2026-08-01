@@ -210,6 +210,7 @@ func (s *Server) buildMux() {
 	mux.HandleFunc("GET /api/lineage/{entity}", s.auth(s.handleGetEntityLineage))
 	// GetEntityOwners returns all entity→caller ownership; no per-entity filter in the RPC.
 	mux.HandleFunc("GET /api/owners", s.auth(s.handleGetEntityOwners))
+	mux.HandleFunc("GET /api/parked", s.auth(s.handleListParkedObjects))
 	mux.HandleFunc("GET /api/health", s.auth(s.handleHealth))
 
 	// Schema editing — preview is read-only (any authenticated user); PR is admin-only.
@@ -614,6 +615,24 @@ func (s *Server) handleGetEntityLineage(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleGetEntityOwners(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.atl.GetEntityOwners(r.Context(), &adminpb.GetEntityOwnersRequest{})
 	s.proxyProto(w, "GetEntityOwners", resp, err)
+}
+
+// handleListParkedObjects reads the register of objects a destructive
+// migration parked instead of dropping.
+//
+// Read-only, like the RPC behind it. Extending a retention window or reaping
+// early are deliberate acts with data consequences and stay documented SQL
+// rather than a button — the value of a 30-day window comes from it being hard
+// to shorten by accident.
+func (s *Server) handleListParkedObjects(w http.ResponseWriter, r *http.Request) {
+	// Accepts "1" or "true": a query param that silently means false for one
+	// of the two obvious spellings is a bug waiting to be filed.
+	all := r.URL.Query().Get("all")
+	resp, err := s.atl.ListParkedObjects(r.Context(), &adminpb.ListParkedObjectsRequest{
+		IncludeReaped: all == "1" || all == "true",
+		Limit:         200,
+	})
+	s.proxyProto(w, "ListParkedObjects", resp, err)
 }
 
 // handleHealth proxies atlantis's HTTP health endpoints, not an admin RPC.

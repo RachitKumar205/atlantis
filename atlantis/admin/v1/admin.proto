@@ -108,6 +108,13 @@ service AdminService {
   rpc GetEntityOwners(GetEntityOwnersRequest) returns (GetEntityOwnersResponse) {
     option (required_capability) = CAPABILITY_SCHEMA_READ;
   }
+  // Objects a destructive migration parked instead of dropping. Read-only:
+  // changing a retention window is a deliberate act with data consequences,
+  // and it stays a documented UPDATE rather than a one-click button.
+  rpc ListParkedObjects(ListParkedObjectsRequest) returns (ListParkedObjectsResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+
   // Reverts the shared checkpoint for every caller in one transaction.
   rpc RollbackSchema(RollbackSchemaRequest) returns (RollbackSchemaResponse) {
     option (required_capability) = CAPABILITY_OPERATOR;
@@ -508,6 +515,55 @@ message ListDeadJobsRequest {
 
 message ListDeadJobsResponse {
   repeated JobStatus jobs = 1;
+}
+
+// ParkedObject is one entry in the register of objects a destructive migration
+// renamed out of the way instead of dropping.
+message ParkedObject {
+  int64 id = 1;
+  // "table" or "column".
+  string kind = 2;
+  // Where the object lives NOW. For a table this is the tombstone schema; for
+  // a column it is the live schema, because a column cannot move.
+  string schema_name = 3;
+  string object_name = 4;
+  // The table holding it, for a column. Empty for a parked table.
+  string parent_table = 5;
+  // Where it came from, which for a table is not schema_name. This is what a
+  // restore puts it back to.
+  string original_schema = 6;
+  string original_name = 7;
+  string parked_at = 8;
+  // The instant the reaper may drop it. Fixed when the object was parked, so
+  // changing the retention setting never shortens a window already promised.
+  string reap_after = 9;
+  // Set once the object has actually been dropped. A row with this set is an
+  // audit record, not something recoverable.
+  string reaped_at = 10;
+  // Failed reap attempts, why, and when the next one is allowed. Non-zero
+  // attempts almost always mean something was created that depends on the
+  // parked object; the reaper declines rather than cascading.
+  int32 attempts = 11;
+  string last_error = 12;
+  string next_attempt_after = 13;
+}
+
+message ListParkedObjectsRequest {
+  // Include rows already reaped. Off by default: the common question is "what
+  // can I still get back", and the audit rows accumulate forever.
+  bool include_reaped = 1;
+  // Rows per category. Clamped server-side — reaped rows are retained
+  // indefinitely, so an unbounded limit is a request to serialize the whole
+  // audit history into one message.
+  int32 limit = 2;
+}
+
+message ListParkedObjectsResponse {
+  repeated ParkedObject objects = 1;
+  // True when either category was truncated, so a caller can tell "nothing
+  // else is parked" from "the page stops here". Without it a list whose whole
+  // purpose is "what can I still get back" silently omits rows.
+  bool has_more = 2;
 }
 
 message RetryDeadJobRequest {

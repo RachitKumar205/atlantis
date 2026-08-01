@@ -163,6 +163,41 @@ export interface EntityOwnersResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Parked objects — what a destructive migration renamed out of the way instead
+// of dropping, and how long it stays recoverable.
+// ---------------------------------------------------------------------------
+
+export interface ParkedObject {
+  /** int64, so protojson sends it as a string — see MergedSchemaResponse.version. */
+  id: string
+  /** "table" or "column". */
+  kind: string
+  /** Where the object lives now: the tombstone schema for a table. */
+  schema_name: string
+  object_name: string
+  /** The table holding it, for a column. */
+  parent_table: string
+  /** Where it came from, and where a restore puts it back. */
+  original_schema: string
+  original_name: string
+  parked_at: string
+  /** RFC3339. After this instant the reaper may drop it. */
+  reap_after: string
+  /** Set once dropped. A row with this set is an audit record, not recoverable. */
+  reaped_at: string
+  /** Failed reap attempts, and why the last one failed. */
+  attempts: number
+  last_error: string
+  next_attempt_after: string
+}
+
+export interface ParkedObjectsResponse {
+  objects: ParkedObject[]
+  /** True when the server withheld rows, so the page can say so. */
+  has_more: boolean
+}
+
+// ---------------------------------------------------------------------------
 // Schema editing types
 // ---------------------------------------------------------------------------
 
@@ -260,17 +295,30 @@ export interface IssueCertResponse {
 // Jobs types
 // ---------------------------------------------------------------------------
 
+// Mirrors atlantis.admin.v1.JobStatus. The field names here had drifted from
+// the proto — payload/max_attempts/created_at against the wire's
+// args/max_retries/enqueued_at — so the console read `undefined` for each and
+// rendered em-dashes that looked like real empty values.
 export interface JobStatus {
   job_id: string
   job_name: string
+  queue: string
+  /** Typed args from the DSL `args { ... }` block, as JSON bytes → base64. */
+  args: string
   status: string
-  payload: unknown
   attempts: number
-  max_attempts: number
-  last_error?: string
-  created_at: string
-  updated_at: string
-  run_after?: string
+  max_retries: number
+  last_error: string
+  last_error_at: string
+  scheduled_for: string
+  started_at: string
+  completed_at: string
+  enqueued_at: string
+  submitted_by: string
+  /** -1 when the handler has never checkpointed, distinguishing 0% from unknown. */
+  progress_pct: number
+  progress_msg: string
+  progress_at: string
 }
 
 export interface GetJobStatusResponse {
@@ -531,6 +579,11 @@ export const api = {
   lineage: {
     entity: (entityId: string): Promise<EntityLineageResponse> =>
       apiFetch<EntityLineageResponse>(`/api/lineage/${encodeURIComponent(entityId)}`),
+  },
+
+  parked: {
+    list: (includeReaped = false): Promise<ParkedObjectsResponse> =>
+      apiFetch<ParkedObjectsResponse>(`/api/parked${includeReaped ? '?all=1' : ''}`),
   },
 
   owners: {
@@ -929,6 +982,14 @@ export const queries = {
     queryKey: ['lineage', entityId] as const,
     queryFn: () => api.lineage.entity(entityId),
     enabled: !!entityId,
+  }),
+
+  parkedObjects: (includeReaped = false) => ({
+    queryKey: ['parked', includeReaped] as const,
+    queryFn: () => api.parked.list(includeReaped),
+    // Keep the previous rows on screen while the toggle refetches; without it
+    // the table is replaced by the loading block on every checkbox click.
+    placeholderData: (prev: ParkedObjectsResponse | undefined) => prev,
   }),
 
   entityOwners: (entityId?: string) => ({

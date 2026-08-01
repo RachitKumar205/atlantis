@@ -5,6 +5,7 @@ import {
   Cog,
   Cpu,
   History,
+  Archive,
   Layers,
   LogOut,
   Settings,
@@ -21,6 +22,7 @@ const NAV = [
   { to: '/workers',    icon: Cpu,      tip: 'Workers' },
   { to: '/health',     icon: Activity, tip: 'Health' },
   { to: '/callers',    icon: Users,    tip: 'Callers' },
+  { to: '/parked',     icon: Archive,  tip: 'Parked' },
   { to: '/operations', icon: Cog,      tip: 'Operations' },
 ] as const
 

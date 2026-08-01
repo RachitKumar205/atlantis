@@ -89,6 +89,7 @@ func (h *SweepExpiredHandler) Handle(ctx context.Context, argsJSON []byte) error
 		n := tag.RowsAffected()
 		if n > 0 {
 			h.log().Info("sweep: deleted expired rows", "entity", e.ID(), "count", n)
+			sweptTotal.WithLabelValues(e.ID()).Add(float64(n))
 			total += n
 		}
 	}

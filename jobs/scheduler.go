@@ -206,6 +206,7 @@ SELECT count(*) FROM atlantis.jobs
 			`UPDATE atlantis.job_schedules SET last_fired_at = now() WHERE id = $1`, id); err != nil {
 			return err
 		}
+		scheduleFiresTotal.WithLabelValues(jobName, "skipped").Inc()
 		s.log().Info("scheduled job skipped: a previous run is still outstanding",
 			"job", jobName, "outstanding", pending)
 		return tx.Commit(ctx)
@@ -227,6 +228,7 @@ VALUES ($1, $2, $3, 0, $4, 'atlantis.scheduler')`,
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
+	scheduleFiresTotal.WithLabelValues(jobName, "fired").Inc()
 	s.log().Info("scheduled job enqueued", "job", jobName, "queue", BuiltinQueue)
 	return nil
 }

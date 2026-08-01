@@ -83,6 +83,14 @@ CREATE INDEX IF NOT EXISTS parked_objects_due_idx
     ON atlantis.parked_objects (reap_after)
     WHERE reaped_at IS NULL;
 
+-- The audit half of the same question: "did this exist, and when was it
+-- dropped". Reaped rows are never deleted, so without this index listing them
+-- is a sequential scan over the entire history — and because the console reads
+-- this on the shared pool, that scan competes with auth and the admin plane.
+CREATE INDEX IF NOT EXISTS parked_objects_reaped_idx
+    ON atlantis.parked_objects (reaped_at DESC)
+    WHERE reaped_at IS NOT NULL;
+
 -- One live registration per object. A second park of the same name while the
 -- first is still pending would otherwise leave two rows, and reaping either
 -- would drop an object the other still claims to be protecting.
