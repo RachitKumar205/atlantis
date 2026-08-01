@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/dsl/predsql"
@@ -920,10 +921,30 @@ func emitEntityDrop(b *sqlBuilder, e *dsl.Entity) {
 // and that point-in-time restore of the whole database is the recovery path,
 // which is no recovery path at all for one mistaken line in a schema file.
 func emitEntityPark(b *sqlBuilder, e *dsl.Entity) {
+	// The PHYSICAL name, not the computed one. An entity may override its table
+	// with `table "consumer.accounts"`, and 17 of the 19 schemas in this repo
+	// do. SET SCHEMA moves whatever qualifiedTable names, so the table arrives
+	// in the tombstone schema called `accounts` — while a rename addressing the
+	// computed `<ns>_<entity>` name finds nothing. With IF EXISTS that rename
+	// was a silent no-op, so the real table ended up stranded in the tombstone
+	// schema registered under a name that had never existed: invisible to the
+	// reaper, unrestorable by the down migration, and recorded in the register
+	// as reaped on a date when it was not.
+	srcSchema, srcTable := physicalParts(e)
+
+	// Qualified by source schema because the tombstone schema is shared: two
+	// entities differing only by schema (public.accounts, consumer.accounts)
+	// would otherwise both want to be `accounts__parked` in it, and the second
+	// park of the pair would fail the migration.
+	parked := parkedName(srcSchema + "_" + srcTable)
+
 	b.linef("CREATE SCHEMA IF NOT EXISTS %s;", quoteIdent(TombstoneSchema))
-	b.linef("ALTER TABLE IF EXISTS %s SET SCHEMA %s;", qualifiedTable(e), quoteIdent(TombstoneSchema))
-	b.linef("ALTER TABLE IF EXISTS %s.%s RENAME TO %s;",
-		quoteIdent(TombstoneSchema), quoteIdent(tableName(e)), quoteIdent(parkedName(tableName(e))))
+	// No IF EXISTS. Parking a table that is not there means the diff and the
+	// database disagree about what exists, which is worth stopping for.
+	b.linef("ALTER TABLE %s SET SCHEMA %s;", qualifiedTable(e), quoteIdent(TombstoneSchema))
+	b.linef("ALTER TABLE %s.%s RENAME TO %s;",
+		quoteIdent(TombstoneSchema), quoteIdent(srcTable), quoteIdent(parked))
+	emitParkRegistration(b, "table", TombstoneSchema, parked, "", srcSchema, srcTable)
 }
 
 // emitEntityUnpark is the inverse: bring the table back with its rows.
@@ -931,10 +952,31 @@ func emitEntityPark(b *sqlBuilder, e *dsl.Entity) {
 // Not emitEntityCreate. Recreating the table would produce an empty one and
 // discard precisely what parking preserved.
 func emitEntityUnpark(b *sqlBuilder, e *dsl.Entity) {
-	b.linef("ALTER TABLE IF EXISTS %s.%s RENAME TO %s;",
-		quoteIdent(TombstoneSchema), quoteIdent(parkedName(tableName(e))), quoteIdent(tableName(e)))
-	b.linef("ALTER TABLE IF EXISTS %s.%s SET SCHEMA \"atlantis\";",
-		quoteIdent(TombstoneSchema), quoteIdent(tableName(e)))
+	srcSchema, srcTable := physicalParts(e)
+	parked := parkedName(srcSchema + "_" + srcTable)
+
+	// Both statements below are renames, and a rename of an absent table under
+	// IF EXISTS is a silent no-op — so this path used to report success having
+	// restored nothing, which is the worst available answer to "put it back".
+	// The guard exists to say WHY it is absent: by far the likeliest reason is
+	// that the retention window passed and the reaper did its job, and the
+	// operator needs to hear that rather than a bare "relation does not exist".
+	b.linef("DO $$ BEGIN IF to_regclass(format('%%I.%%I', %s, %s)) IS NULL THEN "+
+		"RAISE EXCEPTION 'atlantis: cannot restore %%: it is no longer in the "+
+		"tombstone schema. Its retention window has most likely passed and the "+
+		"reaper has dropped it, in which case its rows are gone and only a "+
+		"restore from backup will bring them back.', %s; END IF; END $$;",
+		sqlStringLiteral(TombstoneSchema), sqlStringLiteral(parked),
+		sqlStringLiteral(srcSchema+"."+srcTable))
+
+	b.linef("ALTER TABLE %s.%s RENAME TO %s;",
+		quoteIdent(TombstoneSchema), quoteIdent(parked), quoteIdent(srcTable))
+	// Back to the schema it came from, which is not necessarily atlantis: this
+	// line named atlantis literally, so an adopted table restored into the
+	// wrong schema and the entity's own reads could not find it.
+	b.linef("ALTER TABLE %s.%s SET SCHEMA %s;",
+		quoteIdent(TombstoneSchema), quoteIdent(srcTable), quoteIdent(srcSchema))
+	emitParkDeregistration(b, TombstoneSchema, "", parked)
 }
 
 // TombstoneSchema holds parked objects awaiting the retention window.
@@ -994,6 +1036,8 @@ func emitFieldPark(b *sqlBuilder, e *dsl.Entity, name string) {
 		qualifiedTable(e), quoteIdent(name), quoteIdent(parked))
 	b.linef("ALTER TABLE %s ALTER COLUMN %s DROP NOT NULL;",
 		qualifiedTable(e), quoteIdent(parked))
+	sch, tbl := physicalParts(e)
+	emitParkRegistration(b, "column", sch, parked, tbl, sch, name)
 }
 
 // emitFieldUnpark renames the column back and restores the NOT NULL the park
@@ -1002,12 +1046,86 @@ func emitFieldPark(b *sqlBuilder, e *dsl.Entity, name string) {
 // leaving the column nullable would return a different schema than the one
 // being rolled back to.
 func emitFieldUnpark(b *sqlBuilder, e *dsl.Entity, name string, f *dsl.Field) {
+	parked := parkedName(name)
 	b.linef("ALTER TABLE %s RENAME COLUMN %s TO %s;",
-		qualifiedTable(e), quoteIdent(parkedName(name)), quoteIdent(name))
+		qualifiedTable(e), quoteIdent(parked), quoteIdent(name))
 	if f != nil && f.NotNull && !f.Primary {
 		b.linef("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL;",
 			qualifiedTable(e), quoteIdent(name))
 	}
+	sch, tbl := physicalParts(e)
+	emitParkDeregistration(b, sch, tbl, parked)
+}
+
+// DefaultParkRetention is how long a parked object is kept before the reaper
+// may drop it.
+//
+// Long enough that a mistake is noticed by someone returning from leave, rather
+// than only by whoever was watching that afternoon. The window is written into
+// each row as an absolute instant, so shortening this later cannot retroactively
+// expire something already parked under a longer promise.
+const DefaultParkRetention = 30 * 24 * time.Hour
+
+// emitParkRegistration records a parked object in the same statement group as
+// the rename that parked it.
+//
+// In the migration rather than in the server on the side, because a park
+// applied but not recorded is invisible to the reaper and to anyone looking for
+// it: the object would survive every retention window and nobody would have a
+// list saying it exists.
+func emitParkRegistration(b *sqlBuilder, kind, schemaName, objectName, parentTable, originalSchema, originalName string) {
+	parent := "NULL"
+	if parentTable != "" {
+		parent = sqlStringLiteral(parentTable)
+	}
+	// originalSchema is recorded separately from schema_name because for a
+	// table they differ: schema_name is the tombstone the object now lives in,
+	// originalSchema is where it has to go back to. Without it the register
+	// cannot describe a restore, which is most of what a register is for.
+	//
+	// The conflict target is the partial unique index over live registrations.
+	// Untargeted, DO NOTHING would also swallow a primary-key conflict and any
+	// future constraint, turning a failed registration into a park that was
+	// applied and never recorded.
+	b.linef("INSERT INTO atlantis.parked_objects "+
+		"(kind, schema_name, object_name, parent_table, original_schema, original_name, reap_after) "+
+		"VALUES (%s, %s, %s, %s, %s, %s, now() + INTERVAL '%d days') "+
+		"ON CONFLICT (schema_name, coalesce(parent_table, ''), object_name) "+
+		"WHERE reaped_at IS NULL DO NOTHING;",
+		sqlStringLiteral(kind), sqlStringLiteral(schemaName), sqlStringLiteral(objectName),
+		parent, sqlStringLiteral(originalSchema), sqlStringLiteral(originalName),
+		int(DefaultParkRetention/(24*time.Hour)))
+}
+
+// emitParkDeregistration removes the registration when a park is undone.
+//
+// A DELETE, not a reaped_at stamp: the object was restored, not reaped, and
+// recording it as reaped would tell a later reader that data was destroyed when
+// it was returned.
+func emitParkDeregistration(b *sqlBuilder, schemaName, parentTable, objectName string) {
+	parent := "parent_table IS NULL"
+	if parentTable != "" {
+		parent = "parent_table = " + sqlStringLiteral(parentTable)
+	}
+	b.linef("DELETE FROM atlantis.parked_objects "+
+		"WHERE schema_name = %s AND %s AND object_name = %s AND reaped_at IS NULL;",
+		sqlStringLiteral(schemaName), parent, sqlStringLiteral(objectName))
+}
+
+// sqlStringLiteral renders a Go string as a SQL literal. These values come from
+// the schema (table and column names), not from request data, but they are
+// still interpolated into DDL, so doubling quotes is not optional.
+func sqlStringLiteral(v string) string {
+	return "'" + strings.ReplaceAll(v, "'", "''") + "'"
+}
+
+// physicalParts splits an entity's physical location into schema and table,
+// which the registry stores separately so the reaper can address either.
+func physicalParts(e *dsl.Entity) (string, string) {
+	if sch, tbl, ok := strings.Cut(strings.ReplaceAll(qualifiedTable(e), `"`, ""), "."); ok {
+		return sch, tbl
+	}
+	return "atlantis", tableName(e)
 }
 
 func emitNotNull(b *sqlBuilder, e *dsl.Entity, field string, on bool) {
@@ -1098,7 +1216,25 @@ func truncateIdent(name string) string {
 	}
 	sum := sha256.Sum256([]byte(name))
 	suffix := "_" + hex.EncodeToString(sum[:4])
-	return name[:maxIdent-len(suffix)] + suffix
+
+	// Cut on a rune boundary. The limit is bytes, but slicing bytes can land
+	// mid-rune, and the resulting identifier is not valid UTF-8 — Postgres
+	// rejects the whole statement with "invalid byte sequence for encoding
+	// UTF8", naming a byte offset rather than the column, which leaves a
+	// destructive migration stuck behind an error nobody can trace back to a
+	// field name. The DSL admits any unicode letter, so this is reachable.
+	budget := maxIdent - len(suffix)
+	cut := 0
+	for i := range name {
+		if i > budget {
+			break
+		}
+		cut = i
+	}
+	if cut+len(suffix) > maxIdent {
+		cut = 0
+	}
+	return name[:cut] + suffix
 }
 
 // unnamedCheckName names an entity-level `check "..."` that the author did not

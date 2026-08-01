@@ -13,6 +13,36 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Breaking
 
+#### Parked tables are named after their physical table, not the entity
+
+Destructive migrations park objects rather than dropping them: a removed table
+is moved into the `atlantis_tombstone` schema and kept for 30 days. The parked
+name was derived from the entity's computed `<namespace>_<entity>` name, which
+is wrong for any entity that overrides its table with `table "schema.name"` —
+and 17 of the 19 schemas in this repository do.
+
+The effect was that the real table was moved into the tombstone schema under
+its own name, the rename that should have marked it as parked silently matched
+nothing, and the register recorded an object that had never existed. The reaper
+then "reaped" the phantom and recorded a successful drop, while the real table
+sat unreferenced and unrestorable.
+
+The parked name is now `<source schema>_<source table>__parked` and the register
+records the source schema so a restore knows where to put the table back.
+
+**What to check.** If you applied a destructive migration on a build between
+`387656d` and this change, look for orphans:
+
+```sql
+SELECT c.relname
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+ WHERE n.nspname = 'atlantis_tombstone'
+   AND c.relname NOT LIKE '%\_\_parked';
+```
+
+Anything listed was parked but never registered. Rename it back into its
+original schema to restore it; it is not otherwise reachable.
+
 #### Unnamed entity-level CHECK constraints are named differently
 
 A `check "..."` written at entity level without `as <name>` used to be named
