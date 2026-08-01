@@ -449,6 +449,69 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// caller code uses the generated SDK to RegisterJobHandlers, the
 	// worker's runtime lookups will resolve. Until then, submitted
 	// jobs sit in atlantis.jobs awaiting handler deployment.
+	// Built-in jobs — the maintenance atlantis performs on its own behalf,
+	// registered and scheduled together by jobs.RegisterBuiltins because
+	// splitting those two steps across separate call sites is how the TTL
+	// sweeper ended up with neither.
+	//
+	// Deliberately OUTSIDE the ATL_JOBS_WORKER_ENABLED branch below. That flag
+	// governs caller job queues and defaults to false; atlantis's own garbage
+	// collection cannot be conditional on it. Destructive migrations retain
+	// parked objects for thirty days on the promise that something eventually
+	// removes them, and a promise contingent on an unrelated opt-in is not one
+	// worth making.
+	builtinRegistry := jobs.NewRegistry()
+	if err := jobs.RegisterBuiltins(ctx, builtinRegistry, pool.Raw(), log); err != nil {
+		// Returned, not os.Exit: every defer in run() — the pool, the
+		// allowlist refresher, the memcache client, the worker context — is
+		// skipped by an exit here, and this would turn a transient database
+		// blip during a rolling restart into a hard crash of a process that
+		// was otherwise ready to serve.
+		return fmt.Errorf("register built-in jobs: %w", err)
+	}
+
+	// The scheduler evaluates atlantis.job_schedules and enqueues due work.
+	// Every replica runs one; a session-level advisory lock elects the single
+	// evaluator, so N pods produce one fire per occurrence rather than N.
+	scheduler := &jobs.Scheduler{
+		Pool:   pool.Raw(),
+		Logger: log.With("component", "jobs-scheduler"),
+	}
+	workerWG.Add(1)
+	go func() {
+		defer workerWG.Done()
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Error("jobs scheduler panic", "panic", rec)
+			}
+		}()
+		if err := scheduler.Run(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("jobs scheduler exited", "err", err)
+		}
+	}()
+
+	// And a worker draining the built-in queue, for the same reason: a
+	// schedule that fires into a queue nobody drains is no better than a
+	// schedule that never fires.
+	builtinWorker := jobs.NewWorker(pool.Raw(), builtinRegistry, jobs.BuiltinQueue, jobs.Config{
+		Schema:        "atlantis",
+		DrainInterval: time.Second,
+		BatchSize:     10,
+		Logger:        log.With("component", "jobs-worker", "queue", jobs.BuiltinQueue),
+	})
+	workerWG.Add(1)
+	go func() {
+		defer workerWG.Done()
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Error("built-in jobs worker panic", "panic", rec)
+			}
+		}()
+		if err := builtinWorker.Run(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Error("built-in jobs worker exited", "err", err)
+		}
+	}()
+
 	var jobsRegistry *jobs.Registry
 	if cfg.JobsWorkerEnabled {
 		jobsRegistry = jobs.NewRegistry()

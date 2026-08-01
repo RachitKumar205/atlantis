@@ -11,6 +11,25 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ## Unreleased
 
+### Fixed
+
+#### Scheduled jobs now actually run
+
+`atlantis.job_schedules` was written by two functions and read by none: the
+scheduler component that `migrations/infra/0006_jobs.up.sql` describes had never
+been written. Everything downstream of it was inert —
+
+- `ttl_field` deleted nothing. The TTL sweeper was registered by no call site
+  and scheduled by nobody, and its `DELETE ... LIMIT` was MySQL syntax that
+  Postgres rejects, so it would have failed on its first entity had it ever run.
+  Both are fixed; expired rows are now deleted every five minutes.
+- The DSL's `schedule "..."` modifier parsed, validated and produced no fires.
+
+If you relied on `ttl_field`, expect a backlog of expired rows to be deleted
+over the first few sweeps after upgrading. The sweeper deletes at most 1000 rows
+per entity per fire, so a large backlog drains over several cycles rather than
+in one statement.
+
 ### Breaking
 
 #### Parked tables are named after their physical table, not the entity

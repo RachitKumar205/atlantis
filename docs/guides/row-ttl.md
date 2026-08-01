@@ -35,17 +35,18 @@ INSERT INTO consumer.sessions (id, consumer_id, session_token, expires_at)
 VALUES ('s1', 'c1', 'tok', now() - interval '1 hour');
 ```
 
-Within a minute the sweeper deletes it. Check:
+Within five minutes the sweeper deletes it. Check:
 
-```bash
-tide job status <sweeper-job-id>
+```sql
+SELECT count(*) FROM consumer.sessions WHERE expires_at < now();
 ```
 
 ## How it works
 
-- atlantis ships a built-in job `atlantis.SweepExpired` that runs on a `* * * * *` cron schedule (every minute).
-- On each fire, the sweeper loads the IR checkpoint, finds every entity with `ttl_field` set, and runs `DELETE FROM <table> WHERE <ttl_field> < now() LIMIT 1000`.
+- atlantis ships a built-in job `atlantis.SweepExpired` that runs on a `*/5 * * * *` cron schedule (every five minutes).
+- On each fire, the sweeper loads the IR checkpoint, finds every entity with `ttl_field` set, and deletes up to 1000 expired rows per entity.
 - The batch limit prevents vacuum churn; leftover rows get caught on the next sweep tick.
+- A sweep that fails is reported to the job runtime, so it retries and eventually dead-letters rather than failing silently. Check `tide job dead` if rows are not disappearing.
 - Operators can tune the cadence by updating `atlantis.job_schedules` directly (`UPDATE ... SET cron_spec = '*/5 * * * *'`) or disable with `enabled = false`.
 
 ## Related

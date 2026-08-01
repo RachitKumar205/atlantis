@@ -2,9 +2,9 @@ package jobs
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -54,21 +54,41 @@ func (h *SweepExpiredHandler) Handle(ctx context.Context, argsJSON []byte) error
 	}
 
 	total := int64(0)
+	var failures []string
 	for _, e := range ir.Entities {
 		if e.TtlField == "" {
 			continue
 		}
 		schema, table := resolvePhysical(&e)
-		sql := fmt.Sprintf(`DELETE FROM %s.%s WHERE %s < now() LIMIT %d`,
-			schema, table, e.TtlField, limit)
+
+		// DELETE ... LIMIT is MySQL. Postgres rejects it outright, so for as
+		// long as this statement had that shape every sweep failed on its
+		// first entity — which nobody noticed, because the failure was
+		// swallowed below and the job was never registered to run in the first
+		// place. The bound has to be expressed as a subquery over ctid.
+		//
+		// Identifiers are quoted rather than interpolated bare: they come from
+		// the IR checkpoint, but a `table "..."` override is author-supplied
+		// text and this is a DELETE.
+		sql := fmt.Sprintf(
+			`DELETE FROM %s.%s WHERE ctid = ANY (ARRAY(
+			     SELECT ctid FROM %s.%s WHERE %s < now() LIMIT %d))`,
+			quoteIdent(schema), quoteIdent(table),
+			quoteIdent(schema), quoteIdent(table), quoteIdent(e.TtlField), limit)
 		tag, err := h.Pool.Exec(ctx, sql)
 		if err != nil {
-			h.Logger.Warn("sweep: delete failed", "entity", e.ID(), "err", err)
+			// Collected, not swallowed. The previous version logged a Warn and
+			// continued, so a sweeper that deleted nothing on every entity for
+			// months looked exactly like a sweeper with nothing to delete.
+			// Returning the error hands it to the job runtime's retry and
+			// dead-letter path, where a persistent failure becomes visible.
+			h.log().Error("sweep: delete failed", "entity", e.ID(), "err", err)
+			failures = append(failures, fmt.Sprintf("%s: %v", e.ID(), err))
 			continue
 		}
 		n := tag.RowsAffected()
 		if n > 0 {
-			h.Logger.Info("sweep: deleted expired rows", "entity", e.ID(), "count", n)
+			h.log().Info("sweep: deleted expired rows", "entity", e.ID(), "count", n)
 			total += n
 		}
 	}
@@ -76,7 +96,18 @@ func (h *SweepExpiredHandler) Handle(ctx context.Context, argsJSON []byte) error
 	if total > 0 {
 		_ = Checkpoint(ctx, 100, fmt.Sprintf("swept %d expired row(s)", total))
 	}
+	if len(failures) > 0 {
+		return fmt.Errorf("sweep: %d of %d entities failed: %s",
+			len(failures), len(failures)+1, strings.Join(failures, "; "))
+	}
 	return nil
+}
+
+func (h *SweepExpiredHandler) log() *slog.Logger {
+	if h.Logger != nil {
+		return h.Logger
+	}
+	return slog.Default()
 }
 
 // resolvePhysical returns the (schema, table) for an entity, honoring
@@ -107,33 +138,4 @@ func snakeCaseSweep(name string) string {
 		out = append(out, byte(r))
 	}
 	return string(out)
-}
-
-// RegisterSweeper wires the built-in SweepExpired job into the
-// registry. Called from cmd/server/main.go when the jobs worker is
-// enabled; no caller-side opt-in is needed because this is a
-// platform-level sweeper, not a domain handler.
-func RegisterSweeper(reg *Registry, pool *pgxpool.Pool, logger *slog.Logger) {
-	handler := &SweepExpiredHandler{
-		Pool:       pool,
-		Logger:     logger,
-		BatchLimit: 1000,
-	}
-	reg.Register(SweepExpiredJobName, HandlerFunc(func(ctx context.Context, argsJSON []byte) error {
-		return handler.Handle(ctx, argsJSON)
-	}))
-}
-
-// EnsureSweepSchedule inserts the atlantis.SweepExpired row into
-// atlantis.job_schedules if it doesn't already exist. The sweeper
-// fires every minute; operators can UPDATE the cron_spec or set
-// enabled=false to change cadence or pause.
-func EnsureSweepSchedule(ctx context.Context, pool *pgxpool.Pool) error {
-	const upsert = `
-INSERT INTO atlantis.job_schedules (job_name, cron_spec, default_args)
-VALUES ($1, '* * * * *', $2)
-ON CONFLICT (job_name) DO NOTHING`
-	args, _ := json.Marshal(SweepExpiredArgs{})
-	_, err := pool.Exec(ctx, upsert, SweepExpiredJobName, args)
-	return err
 }
