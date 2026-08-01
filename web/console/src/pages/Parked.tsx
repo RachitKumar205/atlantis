@@ -116,6 +116,10 @@ export function Parked() {
           ) : (
             <div className="card" style={{ padding: 6 }}>
             <table className="tbl">
+              <caption className="sr-only">
+                Objects a destructive migration parked instead of dropping, with
+                how long each one remains recoverable.
+              </caption>
               <thead>
                 <tr>
                   <th>Kind</th>
@@ -135,7 +139,7 @@ export function Parked() {
                       <td className="mono">{o.parked_at ? o.parked_at.slice(0, 10) : '—'}</td>
                       <td className="mono">
                         {o.reaped_at ? (
-                          '—'
+                          <span aria-label="Already reaped; no longer recoverable">—</span>
                         ) : (
                           <span className={w.urgent ? 'chip is-warn' : 'chip'}>{w.label}</span>
                         )}
@@ -144,9 +148,25 @@ export function Parked() {
                         {o.reaped_at ? (
                           <span className="chip">reaped {o.reaped_at.slice(0, 10)}</span>
                         ) : o.attempts >= STUCK_ATTEMPTS ? (
-                          <span className="chip is-warn" title={o.last_error}>
-                            stuck ({o.attempts})
-                          </span>
+                          <HoverInfo
+                            inline
+                            content={
+                              <span className="mono" style={{ fontSize: 11.5 }}>
+                                {o.last_error || 'No error was recorded.'}
+                              </span>
+                            }
+                          >
+                            <button
+                              type="button"
+                              className="chip is-warn"
+                              style={{ cursor: 'help', font: 'inherit' }}
+                              aria-label={`Failed to drop ${o.attempts} times. ${
+                                o.last_error || 'No error was recorded.'
+                              }`}
+                            >
+                              stuck ({o.attempts})
+                            </button>
+                          </HoverInfo>
                         ) : (
                           <span className="chip is-ok">recoverable</span>
                         )}

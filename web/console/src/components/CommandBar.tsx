@@ -2,8 +2,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, Box, Cog, History, Layers, Search, Settings, Users } from 'lucide-react'
+import { Activity, Archive, Box, Cog, Cpu, History, Layers, Search, Settings, Users } from 'lucide-react'
 import { queries, type MergedSchemaResponse } from '@/api/client'
+
+// Words people actually reach for when they cannot remember a page's name.
+// "I dropped a table" and "restore" should both find Parked; nobody searches
+// for the noun we happened to pick.
+const NAV_KEYWORDS: Record<string, string> = {
+  '/parked': 'dropped deleted removed restore recover tombstone reap retention undo',
+  '/workers': 'jobs queue sessions',
+  '/operations': 'rollback audit dead letter dlq',
+  '/history': 'versions diff blame',
+  '/callers': 'certs identities mtls',
+  '/health': 'status uptime metrics',
+}
 
 // ── Item shape: group + icon + label + meta + run ──
 type ItemGroup = 'Navigate' | 'Entities' | 'Versions' | 'Callers'
@@ -65,12 +77,14 @@ export function CommandBar({ open, onClose }: CommandBarProps) {
       { id: '/sandbox',    tip: 'Sandbox',    icon: <Box size={14} /> },
       { id: '/health',     tip: 'Health',     icon: <Activity size={14} /> },
       { id: '/callers',    tip: 'Callers',    icon: <Users size={14} /> },
+      { id: '/workers',    tip: 'Workers',    icon: <Cpu size={14} /> },
+      { id: '/parked',     tip: 'Parked',     icon: <Archive size={14} /> },
       { id: '/operations', tip: 'Operations', icon: <Cog size={14} /> },
       { id: '/settings',   tip: 'Settings',   icon: <Settings size={14} /> },
     ]
     navs.forEach(n => items.push({
       group: 'Navigate', icon: n.icon, label: n.tip,
-      meta: 'page', search: n.tip,
+      meta: 'page', search: `${n.tip} ${n.id} ${NAV_KEYWORDS[n.id] ?? ''}`,
       run: () => navigate({ to: n.id }),
     }))
 
