@@ -251,12 +251,15 @@ var clauseCases = map[string]struct {
 				"per-tenant guarantee failed open in production while looking " +
 				"implemented from inside codegen.\n" +
 				"\n" +
-				"`partition by` is now REJECTED at validation, so PartitionField cannot " +
-				"be set from a schema and this case is reachable only by constructing " +
-				"the IR directly, as the test does. It is kept rather than deleted " +
-				"because the emitter is still there and would come back to life the " +
-				"moment the clause is re-enabled without the isolation behind it. " +
-				"Task #11 (RLS), gated on task #29.",
+				"`partition by` is accepted again, and enforcement moved to the " +
+				"database: codegen emits ENABLE/FORCE ROW LEVEL SECURITY and a policy " +
+				"on atlantis.current_partition(). This entry stays because the DEAD Go " +
+				"emitter is still present and would come back to life if anything " +
+				"started compiling gen/go/server again — and a predicate in a file " +
+				"nobody builds is exactly the shape of the original failure. The " +
+				"isolation evidence lives in partition_rls_pg_test.go, which reads as " +
+				"one tenant and fails to see another's row. Task #11 tracks deleting " +
+				"the dead emitter and wiring set_partition into the request path.",
 		},
 	},
 	"TtlField": {

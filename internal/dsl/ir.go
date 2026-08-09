@@ -1342,27 +1342,31 @@ func isSolePrimaryKey(e *Entity, name string) bool {
 func validateEntity(e *Entity, byID map[string]*Entity) []error {
 	var errs []error
 
-	// `partition by` promises per-row tenant isolation and delivers none.
+	// `partition by` names the column PostgreSQL row-level security isolates on.
 	//
-	// The documented guarantee is that every generated read injects
-	// `<field> = <caller-partition>` and that callers cannot override it. No
-	// part of that is true of the shipped server. It was implemented in
-	// codegen's query emitter, but that server was replaced by one dispatching
-	// from the IR at runtime and the layer was never carried across:
-	// internal/server/entity never reads PartitionField, and CallerPartition /
-	// WithCallerPartition have no callers anywhere, so there is not even a
-	// value to inject. Reads return every tenant's rows.
+	// The clause is accepted rather than rejected — an earlier revision rejected
+	// it outright, and this comment described that. Enforcement now lives in the
+	// database: codegen emits ENABLE / FORCE ROW LEVEL SECURITY and a policy
+	// comparing the column to atlantis.current_partition(), so a read that
+	// forgot to inject a predicate is still filtered, and so caller-authored SQL
+	// — custom query bodies, CHECK expressions, backfill expressions — is
+	// covered by the same guarantee as a generated read. Delegating to the
+	// database is the entire point; predicate injection is what failed before,
+	// because it leaks the moment a handler is added without it.
 	//
-	// Rejecting is the only honest interim state. A silently-absent isolation
-	// guarantee is worse than a missing feature, because the schema author has
-	// been told in two places that it holds. Failing loud costs nothing here —
-	// no schema in the corpus declares it.
+	// The discriminator deliberately is not a GUC. A custom GUC is PGC_USERSET,
+	// so caller-supplied SQL can set it to another tenant's value; migration
+	// 0021 replaces it with a locked table plus a SECURITY DEFINER setter that
+	// refuses to be overwritten inside a transaction. internal/codegen has a
+	// live test that attacks both designs and shows the GUC one leaking.
 	//
-	// It comes back with task #11 (Postgres RLS), which delegates enforcement
-	// to the database so no forgotten call site can leak, and which is itself
-	// gated on task #29: the obvious RLS design is defeated because a custom
-	// GUC is PGC_USERSET, so caller-supplied SQL can simply set the
-	// discriminator to another tenant's value.
+	// Two things must hold at runtime for any of this to mean anything, and
+	// neither is checked here because neither is a schema property: the server
+	// must connect as a role that does not bypass RLS (a superuser sees through
+	// FORCE — asserted at boot by pg.RequireIsolatedRole), and something must
+	// call atlantis.set_partition for the request. Until the second lands, a
+	// partitioned entity reads as zero rows for a restricted role rather than
+	// leaking — the correct failure direction.
 	if e.PartitionField != "" {
 		if f := e.FindField(e.PartitionField); f == nil {
 			errs = append(errs, fmt.Errorf("%s: `partition by` names unknown field %q",

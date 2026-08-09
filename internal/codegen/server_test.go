@@ -834,11 +834,13 @@ entity Account in consumer {
 // callers anywhere. Reads returned every tenant's rows the whole time this was
 // green.
 //
-// `partition by` is rejected at validation now, so the IR is built directly
-// rather than lowered. The test is kept because the emitter is still present
-// and would come back the moment the clause is re-enabled — but it is not
-// evidence of isolation and must not be cited as such. That evidence can only
-// come from a test that reads rows as one tenant and fails to see another's.
+// The IR is built directly rather than lowered, so this exercises the emitter
+// without depending on how the clause parses. The test is kept because the
+// emitter is still present in a tree nothing compiles, and would come back the
+// moment anything built gen/go/server again — but it is NOT evidence of
+// isolation and must not be cited as such. That evidence lives in
+// partition_rls_pg_test.go, which reads rows as one tenant against a real
+// database and fails to see another tenant's.
 func TestEmitGoServer_PartitionEmitterStillRendersThePredicate(t *testing.T) {
 	ir := &dsl.IR{Entities: []dsl.Entity{{
 		Name: "Order", Namespace: "consumer",
