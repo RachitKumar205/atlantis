@@ -99,6 +99,13 @@ type config struct {
 	// carve-out available.
 	RequireApacheTimescale bool
 
+	// RequireTenantIsolation refuses to start when the database role can
+	// bypass row-level security, which makes every `partition by` policy
+	// inert. Off by default: a deployment with no partitioned entities is
+	// unaffected, and defaulting to fatal would break every existing install
+	// to protect a feature it does not use. A hosted deployment sets it.
+	RequireTenantIsolation bool
+
 	// CertBindingExemptCallers are CNs that bypass the per-RPC cert
 	// fingerprint check. Reserved for management-plane services whose
 	// trust comes from a higher layer (session cookies + sudo for the
@@ -226,6 +233,7 @@ func loadConfig() (config, error) {
 		AdminMirrorDir:          envStr("ATL_MIRROR_DIR", "schema"),
 		AdminAllowApplyMutation: envBool("ATL_ALLOW_APPLY_MUTATION", true),
 		RequireApacheTimescale:  envBool("ATL_REQUIRE_APACHE_TIMESCALE", false),
+		RequireTenantIsolation:  envBool("ATL_REQUIRE_TENANT_ISOLATION", false),
 		// Default exempts the console CN so it can keep calling admin
 		// RPCs after the cert-binding rollout without an operator
 		// step. Add more via comma-separated env.

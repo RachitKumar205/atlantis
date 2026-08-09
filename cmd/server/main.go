@@ -149,6 +149,37 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		}
 	}
 
+	// Whether row-level security means anything at all, checked once at boot.
+	//
+	// `partition by` delegates tenant isolation to PostgreSQL precisely so that
+	// a forgotten call site cannot leak and caller-authored SQL is covered by
+	// the same guarantee as a generated read. All of that is void if the role
+	// we connect as bypasses RLS — and the failure is invisible: the policies
+	// exist, FORCE is set, the catalog agrees, and every read still returns
+	// every tenant's rows. internal/storage/pg has a live test that executes
+	// exactly that.
+	//
+	// Refusal is opt-in via ATL_REQUIRE_TENANT_ISOLATION, matching the
+	// Timescale check above. A deployment with no partitioned entities is
+	// unaffected either way, so defaulting to fatal would break every existing
+	// single-tenant install to protect a feature it does not use.
+	if privs, derr := pg.DetectRolePrivileges(ctx, pool); derr != nil {
+		log.Warn("could not determine whether the database role enforces "+
+			"row-level security", "err", derr)
+	} else if err := pg.RequireIsolatedRole(privs); err != nil {
+		if cfg.RequireTenantIsolation {
+			return fmt.Errorf("refusing to start: %w", err)
+		}
+		log.Warn("the database role bypasses row-level security, so `partition by` "+
+			"provides NO tenant isolation on this deployment — policies are attached "+
+			"and inert. Harmless without partitioned entities; a cross-tenant leak "+
+			"with them. Set ATL_REQUIRE_TENANT_ISOLATION=true to make this fatal",
+			"role", privs.Name, "superuser", privs.Superuser, "bypassrls", privs.BypassRLS)
+	} else {
+		log.Info("database role enforces row-level security",
+			"role", privs.Name)
+	}
+
 	obs.RegisterPoolStats(nil, pool.Raw())
 
 	// Auth allowlist is loaded once at startup and refreshed on its own
