@@ -1793,15 +1793,90 @@ func emitPartitionPolicy(b *sqlBuilder, e *dsl.Entity) {
 	table := qualifiedTable(e)
 	col := quoteIdent(e.PartitionField)
 
+	// The discriminator is text, so anything else needs a cast — and WHICH
+	// side is cast decides whether this is usable. Measured on PG 17.8 over
+	// 200k rows, as a role RLS applies to:
+	//
+	//   col = current_partition()          text col  0.29 ms,      16 buffers
+	//   col::text = current_partition()    uuid col   286 ms,  400182 buffers
+	//   col = current_partition()::uuid    uuid col  0.29 ms,      15 buffers
+	//
+	// Casting the COLUMN defeats the index: the comparison stops being an
+	// index key and becomes a per-row filter, and because current_partition()
+	// is a function call rather than a constant, it is then invoked once per
+	// row scanned. STABLE does not memoise it. Casting the FUNCTION keeps the
+	// whole thing an index condition and one call per query.
+	//
+	// Without any cast, a non-text column does not merely perform badly — the
+	// policy cannot be created at all: `operator does not exist: uuid = text`,
+	// surfacing at apply time as an opaque Postgres error against DDL nobody
+	// hand-wrote.
+	discriminator := "atlantis.current_partition()"
+	if ct := partitionCastType(e); ct != "" {
+		discriminator += "::" + ct
+	}
+
 	b.linef("ALTER TABLE %s ENABLE ROW LEVEL SECURITY;", table)
 	b.linef("ALTER TABLE %s FORCE ROW LEVEL SECURITY;", table)
 	// USING gates what a statement may read; WITH CHECK gates what it may
 	// write. Both are required: USING alone would let a caller INSERT a row
 	// attributed to another tenant, which it could then not see — a write leak
 	// rather than a read leak, and just as much a breach.
-	b.linef("CREATE POLICY %s ON %s USING (%s = atlantis.current_partition()) "+
-		"WITH CHECK (%s = atlantis.current_partition());",
-		quoteIdent(partitionPolicyName(e)), table, col, col)
+	b.linef("CREATE POLICY %s ON %s USING (%s = %s) WITH CHECK (%s = %s);",
+		quoteIdent(partitionPolicyName(e)), table, col, discriminator, col, discriminator)
+
+	// An index on the discriminator, unless the schema already leads one with
+	// it. The policy predicate is on every read of this table, and whether it
+	// lands in an Index Cond or a Filter is a ~1000x difference — 0.29 ms
+	// against 286 ms on 200k rows — because a Filter re-invokes
+	// current_partition() for every row scanned. Emitting it is the
+	// declarative behaviour: the author asked for tenant isolation, not for a
+	// lesson about scan keys.
+	if !partitionFieldIsIndexLeading(e) {
+		b.linef("CREATE INDEX IF NOT EXISTS %s ON %s (%s);",
+			quoteIdent(partitionIndexName(e)), table, col)
+	}
+}
+
+// partitionCastType returns the SQL type the discriminator must be cast to for
+// this entity, or "" when the column is already text-shaped.
+func partitionCastType(e *dsl.Entity) string {
+	f := e.FindField(e.PartitionField)
+	if f == nil {
+		return ""
+	}
+	t := strings.ToLower(sqlType(f.Type))
+	// text and varchar(n) compare to text directly; everything else does not.
+	if t == "text" || strings.HasPrefix(t, "varchar") || strings.HasPrefix(t, "character varying") {
+		return ""
+	}
+	return t
+}
+
+// partitionFieldIsIndexLeading reports whether a declared index already leads
+// with the partition column, in which case the policy predicate can use it and
+// emitting another index would be waste.
+func partitionFieldIsIndexLeading(e *dsl.Entity) bool {
+	for _, idx := range e.Indexes {
+		if len(idx.Fields) > 0 && !idx.Fields[0].IsExpr && idx.Fields[0].Name == e.PartitionField {
+			return true
+		}
+		if idx.Field == e.PartitionField {
+			return true
+		}
+	}
+	// A single-column primary key on the discriminator is already indexed.
+	for _, f := range e.Fields {
+		if f.Primary && f.Name == e.PartitionField {
+			return true
+		}
+	}
+	return false
+}
+
+// partitionIndexName is the index backing the policy predicate.
+func partitionIndexName(e *dsl.Entity) string {
+	return truncateIdent(tableName(e) + "_" + e.PartitionField + "_tenant_idx")
 }
 
 // partitionPolicyName is the policy identifier, derived so the differ can find
