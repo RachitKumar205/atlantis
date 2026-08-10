@@ -141,6 +141,19 @@ Two things bound a grant regardless of what it says. A caller may only mutate **
 > ON CONFLICT DO NOTHING;
 > ```
 
+## Database posture
+
+Two properties of the database atlantis connects to, checked once at startup.
+Both are reported either way; the variables decide whether a mismatch is fatal.
+Both default to off, because each guards a feature a deployment may not use,
+and defaulting to fatal would stop existing installs to protect something they
+do not have.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `ATL_REQUIRE_TENANT_ISOLATION` | `false` | Refuse to start on a deployment where `partition by` would not isolate. Two conditions, both reported either way. **The database role can bypass row-level security** — a superuser, or any role holding `BYPASSRLS`. Such a role sees through `FORCE ROW LEVEL SECURITY`, which leaves every policy attached and completely inert: the catalog looks correct and every read returns every tenant's rows. If the check itself cannot run — a locked-down `pg_roles`, a pooler rewriting `current_user` — the server refuses rather than continuing unchecked. **Or the stored schema contains SQL that can rebind the tenant**: `tide apply` rejects `set_config` and `atlantis.set_partition` in query bodies, procedure steps, `check` expressions and index predicates, but only from the moment that gate existed, so the checkpoint is re-audited at every boot. Set this on any deployment using [`partition by`](dsl-grammar.md). |
+| `ATL_REQUIRE_APACHE_TIMESCALE` | `false` | Refuse to start on a Community (TSL) TimescaleDB build. Self-hosting on the Community build is legitimate — the Timescale License restricts offering the software as a service, not running it — so this is opt-in and belongs on a hosted deployment. |
+
 ## Schema drift
 
 `ATLANTIS_ALLOW_INDEX_DRIFT` controls whether `tide apply` proceeds over an **undeclared unique index** — a live `CREATE UNIQUE INDEX` with no backing constraint, on columns the schema declares but never marks unique. Such an index silently rejects writes the schema considers legal, so apply refuses by default. A partial unique index isn't drift if the schema declares a matching `unique index partial` (same columns; predicate normalized through Postgres to the same expression). A non-partial unique index isn't drift if the columns are declared `unique` / `unique by`. See [Adopt an existing database](../guides/adopt-an-existing-database.md#legacy-unique-indexes-can-block-apply) for remediation.

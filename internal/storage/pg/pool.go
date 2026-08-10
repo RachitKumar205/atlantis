@@ -89,6 +89,36 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 		if _, err := conn.Exec(ctx, "SET TIME ZONE 'UTC'"); err != nil {
 			return fmt.Errorf("set timezone: %w", err)
 		}
+		// Start every connection with no tenant bound.
+		//
+		// atlantis.tenant is the discriminator every `partition by` policy
+		// compares against (migration 0024). atlantis only ever sets it
+		// transaction-locally, so it reverts on its own — but a value can also
+		// arrive from outside this process: a server-level or role-level
+		// default, a `SET` in the connection string's options parameter, or a
+		// connection pooler that hands back a backend somebody else used. A
+		// connection that starts with a tenant already bound would serve that
+		// tenant's rows to the first request that forgot to bind.
+		//
+		// Here rather than on release, and the difference is measured. A reset
+		// per release costs a round trip on every request: 92,821 tps against
+		// 46,648 on 8 connections, which is more than `partition by` costs in
+		// total. Once per physical connection is amortised to nothing over a
+		// pooled connection's life, and the case it cannot catch — a session
+		// value set mid-life — is closed twice over: sqlvalidate rejects
+		// set_config in caller SQL, and set_partition refuses to bind over an
+		// existing value rather than overwrite it.
+		//
+		// SET to the empty string, NOT `RESET`. RESET restores the parameter's
+		// session default, and an ALTER ROLE ... SET default IS that default —
+		// so RESET here restores precisely the value this is meant to clear. It
+		// was written as RESET first and TestTenantResetAtConnect caught it.
+		// The empty string reads back as NULL because current_partition() maps
+		// it through nullif (migration 0024), which is the same property that
+		// makes a transaction-local bind fail closed after it reverts.
+		if _, err := conn.Exec(ctx, `SET "atlantis.tenant" = ''`); err != nil {
+			return fmt.Errorf("clear tenant discriminator: %w", err)
+		}
 		if err := pgxvector.RegisterTypes(ctx, conn); err != nil {
 			return fmt.Errorf("register pgvector: %w", err)
 		}

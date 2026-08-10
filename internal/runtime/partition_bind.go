@@ -9,7 +9,7 @@ import (
 // transaction, so that row-level security enforces it.
 //
 // This is the join between the two halves of `partition by`. Codegen emits the
-// policy — `<col> = atlantis.current_partition()` — and migration 0021 supplies
+// policy — `<col> = atlantis.current_partition()` — and migration 0024 supplies
 // the discriminator. Neither does anything until something calls this, and
 // until it did, a partitioned entity returned zero rows to any role RLS applies
 // to: the correct failure direction, and not a working feature.
@@ -36,6 +36,38 @@ import (
 // The failure this prevents is the accidental one — a forgotten predicate, a
 // new handler, a custom query — which is the failure that actually happens.
 //
+// # Why the discriminator is a run-time parameter
+//
+// atlantis.set_partition writes atlantis.tenant transaction-locally, and every
+// policy compares against it (migration 0024). A custom GUC is PGC_USERSET, so
+// SQL that reaches the same transaction could reassign it — PostgreSQL offers
+// no lock, and REVOKE SET ON PARAMETER does not create so much as an ACL row
+// for a placeholder GUC. Two things close that, and this comment is the only
+// place they appear together:
+//
+//   - sqlvalidate rejects set_config() and set_partition() in every
+//     caller-authored SQL surface — query bodies, procedure steps, CHECK
+//     expressions, partial-index predicates — by an exhaustive reflection walk
+//     rather than a hand-listed one. Its statement gate already refused a bare
+//     SET. The first version covered only query and procedure bodies, and a
+//     CHECK expression walked straight through it.
+//   - internal/storage/pg clears the parameter as each connection is opened,
+//     so a value cannot arrive from a server default, a role default, or a
+//     pooler handing back somebody else's backend.
+//
+// Removing either one reopens a cross-tenant read.
+//
+// set_partition's refusal to bind twice is NOT a third defence and must not be
+// cited as one: set_config writes the parameter without going through the
+// setter, so the guard never sees it. It catches the accidental double bind,
+// which is a real defect and worth an error, and nothing more.
+//
+// The design this replaced — a locked table plus a SECURITY DEFINER setter —
+// needed neither of the two, and cost a transaction ID per request: measured at
+// 100 per 100 reads, which reaches the wraparound refusal in under two days at
+// the throughput the same benchmark sustained. Migration 0024 carries the
+// numbers and the arithmetic.
+//
 // # Fails closed
 //
 // With no tenant in context this returns ErrNoCallerPartition and the caller
@@ -57,8 +89,10 @@ func BindPartition(ctx context.Context, tx Tx) error {
 		// layer that produced it.
 		return fmt.Errorf("atlantis: caller partition is empty")
 	}
-	// Parameterised, not interpolated. The value comes from request metadata
-	// and reaches a SECURITY DEFINER function.
+	// Parameterised, not interpolated. The value comes from request metadata and
+	// is interpolated nowhere — set_partition is no longer SECURITY DEFINER
+	// (it writes a parameter, not a privileged table), so the reason is ordinary
+	// injection safety rather than privilege escalation.
 	if _, err := tx.Exec(ctx, `SELECT atlantis.set_partition($1)`, s); err != nil {
 		return fmt.Errorf("atlantis: bind caller partition: %w", err)
 	}

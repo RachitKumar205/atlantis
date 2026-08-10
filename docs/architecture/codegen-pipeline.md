@@ -32,14 +32,14 @@ The parser produces an AST per file. Files are parsed independently — there is
 
 ## Validator
 
-`internal/dsl/validate.go`. Walks the lowered IR and enforces:
+`internal/dsl/ir.go`. Walks the lowered IR and enforces:
 
 - Every `references <Entity>.<field>` resolves to a declared entity.
 - Every `$name` in a `query` or `procedure` body matches a declared input.
 - Every `touches(<Entity>, ...)` matches a declared entity.
 - Field types are in the supported set.
 - `composite_pk` members are all `not null`.
-- `partition by` fields exist on the entity.
+- `partition by` names an existing field, and that field is `not null`.
 
 `query` and `procedure` SQL bodies are validated through [`pg_query_go`](https://github.com/pganalyze/pg_query_go), which wraps the PostgreSQL parser. The validator runs `raw_parse` (syntactic check) plus a table-reference check against the merged schema; it does not run `parse_analyze` (full semantic analysis), so type-mismatch errors in expressions surface at migration runtime, not at apply time.
 

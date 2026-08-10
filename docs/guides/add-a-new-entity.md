@@ -75,23 +75,104 @@ The generated `Delete` RPC sets `deleted_at` to `now()` instead of dropping the 
 
 ### Per-tenant partition
 
-`partition by` is **disabled**. A schema declaring it is rejected.
+When one table holds rows for many tenants, name the column that says which
+tenant a row belongs to:
 
-It documented per-row tenant isolation — every generated read injecting
-`<field> = <caller-partition>`, with callers unable to override it — and the
-shipped server does none of that. The predicate was emitted by the previous
-code-generated server; that server was replaced by one dispatching from the IR
-at runtime, and the layer was never carried across. Reads returned every
-tenant's rows.
+```
+tenant_id varchar(8) not null
+partition by tenant_id
+```
 
-It is refused rather than left in place because the failure was silent and the
-documentation asserted the opposite. Anyone who had followed this section would
-have believed their data was partitioned when it was not.
+The column must be `not null`. A NULL in that column matches no tenant's
+policy, so the row becomes invisible to everyone — including whoever wrote it.
 
-Isolation returns via Postgres row-level security, which enforces it in the
-database rather than in each generated read, so a handler added later cannot
-forget the predicate. Until then, scope tenant reads explicitly in your own
-query predicates and treat that as the boundary.
+**Enforcement is PostgreSQL's, not atlantis's.** Applying this emits `ENABLE`
+and `FORCE ROW LEVEL SECURITY` on the table plus a policy comparing the column
+to the tenant bound for the current transaction, in both `USING` (what a
+statement may read) and `WITH CHECK` (what it may write). The discriminator is
+text, so on a `uuid` or `bigint` column the comparison casts the tenant value
+rather than the column — casting the column would drop the index and re-run the
+lookup for every row scanned.
+
+An index on the column is emitted too — always, even if you already declare
+one covering it. The policy's index belongs to the policy: anything else is
+droppable, and this index is not re-emitted, so tying its lifetime to your
+`unique by` would mean deleting that constraint silently removes tenant
+isolation's index through a migration classified additive. If you declared your
+own, you will have two; remove yours if you want one.
+
+It matters because the policy predicate runs on every read, and whether it
+lands in an index condition or a per-row filter decides how often the tenant
+lookup happens. Over 200k rows on PostgreSQL 17.8 the scan is about 5x
+(23.5 ms against 4.3 ms) and reads far more of the table. On a primary-key
+point read the index makes no difference at all — the plan is the same either
+way. The larger figures you may see quoted elsewhere were measured against the
+older table-backed discriminator, which cost a table lookup per row; the
+current one is a parameter read and much cheaper to get wrong.
+
+Enforcing in the database rather than in each generated read is the point. A
+predicate appended per read leaks the moment a handler is added without it, and
+a custom query body is opaque text with nowhere to inject one.
+
+**This happens on `CREATE TABLE` only.** The differ does not read `partition
+by`, so adding it to an entity that already exists emits no migration, no
+policy, and no plan output — the schema claims a partition the database has
+never heard of. Declare it when you create the entity, or add the policy by
+hand.
+
+**What is trusted.** Your service asserts which tenant a request is for, and
+atlantis does not derive or second-guess that. Once asserted, every statement in
+the transaction is confined to that tenant — which stops the accidental leak,
+not a caller naming the wrong tenant deliberately. The guarantee is narrower
+than "callers cannot lie", and more useful.
+
+**How the tenant reaches the policy.** The tenant is a transaction-local
+run-time parameter, `atlantis.tenant`, and the policy compares against it
+through `atlantis.current_partition()`. Transaction-local means it reverts when
+the transaction ends, so a value cannot outlive the request that set it on a
+pooled connection. (Reading on: the mechanism is in place and tested; the
+request-time call that sets it is not landed yet. See the runtime conditions
+below.)
+
+PostgreSQL will not lock a custom parameter — `REVOKE SET ON PARAMETER` has no
+effect on one — so SQL running in the same transaction could otherwise reassign
+it. Two things prevent that, and both are load-bearing:
+
+- `tide apply` rejects `set_config` and `atlantis.set_partition` in every piece
+  of SQL you write: query bodies, procedure steps, `check` expressions, and
+  partial-index predicates. A bare `SET` has always been rejected.
+- Each pooled connection is opened with the parameter cleared, so a value
+  cannot arrive from a role default or a connection pooler.
+
+`atlantis.set_partition` also refuses to bind twice in one transaction. That is
+not a third protection and should not be relied on as one — `set_config` writes
+the parameter without going through it. It catches a double bind, which is a
+bug worth an error.
+
+The residual exposure is worth stating: someone who can get a query body
+through `tide apply` might find a route the validator does not know about. That
+same person can drop the policy, redeclare the entity without `partition by`,
+or write a body that reads whatever they like. This protects against the
+accidental leak, which is the one that happens.
+
+**Two runtime conditions.** Neither is a schema property, so neither is checked
+at plan time:
+
+- The server must connect as a role that does not bypass row-level security. A
+  superuser sees through `FORCE`, and so does any role holding `BYPASSRLS` —
+  the policy stays attached and completely inert. Checked at boot; set
+  `ATL_REQUIRE_TENANT_ISOLATION=true` to make it refuse to start.
+- Something must bind the tenant for the request. **Nothing does yet.**
+
+Until that second condition is met, what a partitioned entity does depends
+entirely on the first. On a role row-level security applies to, reads return
+zero rows and **every insert fails** with `new row violates row-level security
+policy` — the right direction to fail in, but the entity is unusable. **On a
+role that bypasses RLS, including the superuser the default
+`docker-compose.yml` connects as, reads return every tenant's rows.**
+
+Treat `partition by` as not yet a working feature, and check which role your
+deployment uses before relying on it.
 
 ## Related
 

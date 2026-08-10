@@ -1,3 +1,11 @@
+-- SUPERSEDED BY 0024. The table this migration creates has been dropped and
+-- the discriminator is a run-time parameter again. The reasoning below about
+-- why a GUC is attackable is still correct and still worth reading; what it
+-- omits is the price, which nobody had measured: the table costs one
+-- transaction ID per bind, which exhausts the 32-bit space in under three days
+-- at load. 0024 carries the numbers and the three defences that make the
+-- parameter safe. Read this file as history, not as the mechanism.
+
 -- The tenant discriminator for row-level security, deliberately NOT a GUC.
 --
 -- The obvious RLS design is `SET LOCAL atlantis.partition = $1` with a policy

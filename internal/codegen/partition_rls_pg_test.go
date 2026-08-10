@@ -46,7 +46,13 @@ func TestPartitionRLSIsolatesTenantsAgainstHostileSQL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer admin.Close(ctx)
+	// t.Cleanup, not defer: deferred closes run when the test function
+	// returns, which is before any t.Cleanup registered later, so a cleanup
+	// that drops objects through this connection would run against a closed
+	// one and fail silently. That is how atlantis.rlst_doc and the rls_tenant
+	// role came to survive test runs. Cleanups run last-registered-first, so
+	// registering the close here puts it after the drops below.
+	t.Cleanup(func() { _ = admin.Close(context.Background()) })
 
 	// The migration this design lives in must be present, or every assertion
 	// below would pass by the policy erroring rather than by isolating.
@@ -84,9 +90,20 @@ SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronames
 			t.Fatalf("generated DDL is missing %q:\n%s", want, scripts.Up)
 		}
 	}
+	// The policy must go through atlantis.current_partition() and must not
+	// inline whatever that function currently reads.
+	//
+	// The indirection is what let migration 0024 move the discriminator from a
+	// table to a run-time parameter without touching a single policy. That
+	// matters more than it sounds: emitPartitionPolicy runs on CREATE TABLE
+	// only and no differ reads `partition by` (task #36), so a policy whose
+	// text had to change would be a policy on every existing partitioned table
+	// that nothing can migrate.
 	if strings.Contains(scripts.Up, "current_setting(") {
-		t.Errorf("the policy reads a GUC. A custom GUC is PGC_USERSET, so caller "+
-			"SQL can reassign it mid-transaction:\n%s", scripts.Up)
+		t.Errorf("the policy inlines current_setting() instead of calling "+
+			"atlantis.current_partition(). The mechanism then lives in every "+
+			"emitted policy, and policies are emitted once at CREATE TABLE with "+
+			"no differ that can revisit them:\n%s", scripts.Up)
 	}
 	if _, err := admin.Exec(ctx, scripts.Up); err != nil {
 		t.Fatalf("generated DDL did not apply:\n%s\n  %v", scripts.Up, err)
@@ -118,7 +135,11 @@ GRANT SELECT, INSERT ON atlantis.rlst_doc TO rls_tenant;`); err != nil {
 		t.Fatalf("create tenant role: %v", err)
 	}
 
-	tenantURL := strings.Replace(url, "atlantis:atlantis@", "rls_tenant:probe@", 1)
+	// Parsed, not substituted. See replaceUserInfo — the substitution this
+	// replaced returned the URL unchanged for any DSN not spelled exactly
+	// "atlantis:atlantis@", and every assertion below then ran as the admin
+	// role, which row-level security does not apply to.
+	tenantURL := replaceUserInfo(url, "rls_tenant:probe")
 	conn, err := pgx.Connect(ctx, tenantURL)
 	if err != nil {
 		t.Fatalf("connect as tenant: %v", err)
@@ -173,20 +194,37 @@ SELECT coalesce(string_agg(body, ','), '(none)') FROM atlantis.rlst_doc;`); got 
 	// custom-query bodies, CHECK expressions, backfill expressions.
 	// wantRefusal is the substring the refusal must contain, or "" when the
 	// attack is expected to reach the read and come back correctly scoped.
+	// Three outcomes, not two, and the third is the honest one.
+	//
+	// Migration 0024 moved the discriminator into a run-time parameter, and
+	// PostgreSQL will not lock a custom parameter — `REVOKE SET ON PARAMETER`
+	// does not create so much as a pg_parameter_acl row for a placeholder GUC,
+	// re-verified on 17.8. So one attack below DOES breach when the database is
+	// the only thing between it and the data.
+	//
+	// It is asserted as a breach rather than deleted. A suite that only lists
+	// what the database stops reads as though the database stops everything,
+	// and the layer that actually stops this one — sqlvalidate, see
+	// TestValidateCustomQuery_RejectsSetConfig — would then have nothing here
+	// pointing at it. If PostgreSQL ever gains a way to lock the parameter,
+	// this case fails and whoever sees it can move the defence down a layer.
 	for _, tc := range []struct {
 		name        string
 		script      string
 		wantRead    string
 		wantRefusal string
+		// wantDBLeak names the layer that stops an attack the database does
+		// not. Set only where the breach is real and deliberate.
+		wantDBLeak string
 	}{
 		{
-			// The attack that defeats the GUC design outright.
-			name:     "reassign the GUC the old design used",
-			wantRead: "acme-secret",
+			name: "reassign the parameter mid-transaction",
+			wantDBLeak: "sqlvalidate rejects set_config in caller SQL " +
+				"(TestValidateCustomQuery_RejectsSetConfig)",
 			script: `
 BEGIN;
 SELECT atlantis.set_partition('acme');
-SELECT set_config('atlantis.partition','victim',false);
+SELECT set_config('atlantis.tenant','victim',true);
 SELECT coalesce(string_agg(body, ','), '(none)') FROM atlantis.rlst_doc;`,
 		},
 		{
@@ -199,25 +237,9 @@ SELECT atlantis.set_partition('victim');
 SELECT coalesce(string_agg(body, ','), '(none)') FROM atlantis.rlst_doc;`,
 		},
 		{
-			name:        "write the discriminator table directly",
-			wantRefusal: "permission denied",
-			script: `
-BEGIN;
-SELECT atlantis.set_partition('acme');
-UPDATE atlantis.session_partition SET tenant='victim' WHERE pid = pg_backend_pid();
-SELECT coalesce(string_agg(body, ','), '(none)') FROM atlantis.rlst_doc;`,
-		},
-		{
-			name:        "delete the row and re-set",
-			wantRefusal: "permission denied",
-			script: `
-BEGIN;
-SELECT atlantis.set_partition('acme');
-DELETE FROM atlantis.session_partition WHERE pid = pg_backend_pid();
-SELECT atlantis.set_partition('victim');
-SELECT coalesce(string_agg(body, ','), '(none)') FROM atlantis.rlst_doc;`,
-		},
-		{
+			// The setter's guard reads the live parameter, so a savepoint that
+			// unwinds the SET also unwinds the guard's view of it. Both are
+			// transaction-scoped, so they cannot disagree.
 			name:        "escape the once-only guard through a savepoint",
 			wantRefusal: "partition already set",
 			script: `
@@ -230,9 +252,39 @@ SELECT atlantis.set_partition('victim');
 SELECT coalesce(string_agg(body, ','), '(none)') FROM atlantis.rlst_doc;`,
 		},
 		{
+			name:        "bind with an empty tenant",
+			wantRefusal: "non-empty",
+			script: `
+BEGIN;
+SELECT atlantis.set_partition('');
+SELECT coalesce(string_agg(body, ','), '(none)') FROM atlantis.rlst_doc;`,
+		},
+		{
 			name:     "read with no partition set at all",
 			wantRead: "(none)",
 			script: `
+BEGIN;
+SELECT coalesce(string_agg(body, ','), '(none)') FROM atlantis.rlst_doc;`,
+		},
+		{
+			// The pooling case, and the reason set_partition passes `true`: a
+			// transaction-local parameter reverts when its transaction ends, so
+			// the next request on this connection starts unbound.
+			//
+			// It does NOT cover the nullif in current_partition(), though an
+			// earlier version of this comment claimed it did. The revert lands
+			// on the empty string rather than NULL, but rlst_doc holds no row
+			// whose tenant is '', so `tenant = ''` and `tenant = NULL` both
+			// match nothing here — removing the nullif leaves this subtest
+			// green. TestPartitionDiscriminatorNeverReturnsEmptyString seeds
+			// exactly that row and is what makes the property fail when broken;
+			// TestTenantResetAtConnect catches it too.
+			name:     "a bind does not survive its own transaction",
+			wantRead: "(none)",
+			script: `
+BEGIN;
+SELECT atlantis.set_partition('acme');
+COMMIT;
 BEGIN;
 SELECT coalesce(string_agg(body, ','), '(none)') FROM atlantis.rlst_doc;`,
 		},
@@ -240,6 +292,18 @@ SELECT coalesce(string_agg(body, ','), '(none)') FROM atlantis.rlst_doc;`,
 		t.Run(tc.name, func(t *testing.T) {
 			got := read(t, tc.script)
 			_, _ = conn.Exec(ctx, "ROLLBACK")
+
+			if tc.wantDBLeak != "" {
+				// Assert the breach happens. If it stops happening, the comment
+				// above this table is out of date and somebody should know.
+				if !strings.Contains(got, "victim-secret") {
+					t.Errorf("this attack no longer reaches the victim's rows (got %q). "+
+						"PostgreSQL alone was not expected to stop it — the defence "+
+						"is %s. If the database now blocks it, move the defence down "+
+						"and delete this case.", got, tc.wantDBLeak)
+				}
+				return
+			}
 
 			if strings.Contains(got, "victim-secret") {
 				t.Fatalf("CROSS-TENANT LEAK: %q. The attack is ordinary SQL a caller "+
@@ -285,19 +349,32 @@ INSERT INTO atlantis.rlst_doc VALUES (99,'victim','planted');`)
 	})
 }
 
-// Demonstrates that the GUC design this one replaced actually leaks.
+// Demonstrates that a GUC-based policy leaks when nothing but PostgreSQL
+// stands behind it.
 //
-// It exists so the reason survives the reasoning. `SET LOCAL atlantis.partition`
-// with a policy on current_setting() is the obvious implementation, it is what
-// every RLS tutorial shows, and someone will eventually propose simplifying
-// back to it. This test is the answer, and it is executable rather than a
-// comment: it builds that exact policy and reads another tenant's row through
-// it, as a role holding NOSUPERUSER NOCREATEDB NOCREATEROLE and nothing but
-// SELECT.
+// It builds its OWN policy on its OWN parameter — atlantis.partition, USING
+// only, never touching atlantis.current_partition() — so it is a statement
+// about PostgreSQL, not about the shipped mechanism. That distinction was got
+// wrong once already: an earlier version of this comment claimed the test
+// executed a property of production, and a reviewer disproved it by replacing
+// atlantis.current_partition() with a constant, neutering the real mechanism
+// entirely, while this test carried on passing.
 //
-// If PostgreSQL ever changes so that a custom GUC is not PGC_USERSET, this test
-// fails — and that failure is the signal that the constraint has moved and the
-// simpler design is available again.
+// What it does establish is the premise everything else rests on: PostgreSQL
+// alone does not stop caller SQL from rebinding a custom parameter, and cannot
+// be made to — a custom GUC is PGC_USERSET and `REVOKE SET ON PARAMETER` does
+// not create so much as an ACL row for one.
+//
+// What stops it is internal/dsl/sqlvalidate, which refuses set_config and
+// set_partition in every caller-authored SQL surface: query bodies, procedure
+// steps, CHECK expressions and partial-index predicates. This test is the
+// standing evidence for why that validator may not be weakened or narrowed —
+// the first version of it covered only query bodies, and an adversarial review
+// walked a set_config through a CHECK expression in minutes.
+//
+// If PostgreSQL ever changes so that a custom GUC can be locked, this test
+// fails — and that failure is the signal that the defence can move down a
+// layer, into the database where it belongs.
 func TestTheGUCBasedPolicyLeaksAcrossTenants(t *testing.T) {
 	url := os.Getenv("ATLANTIS_TEST_PG")
 	if url == "" {
@@ -308,7 +385,13 @@ func TestTheGUCBasedPolicyLeaksAcrossTenants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer admin.Close(ctx)
+	// t.Cleanup, not defer: deferred closes run when the test function
+	// returns, which is before any t.Cleanup registered later, so a cleanup
+	// that drops objects through this connection would run against a closed
+	// one and fail silently. That is how atlantis.rlst_doc and the rls_tenant
+	// role came to survive test runs. Cleanups run last-registered-first, so
+	// registering the close here puts it after the drops below.
+	t.Cleanup(func() { _ = admin.Close(context.Background()) })
 
 	cleanup := func() {
 		_, _ = admin.Exec(ctx, `DROP TABLE IF EXISTS atlantis.guc_doc CASCADE`)
@@ -331,7 +414,12 @@ GRANT SELECT ON atlantis.guc_doc TO guc_tenant;`); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 
-	conn, err := pgx.Connect(ctx, strings.Replace(url, "atlantis:atlantis@", "guc_tenant:probe@", 1))
+	// Parsed, not substituted — see replaceUserInfo. The Replace form this
+	// used returned the URL unchanged for any DSN not spelled exactly
+	// "atlantis:atlantis@", which connected as the admin role instead. A test
+	// whose whole job is to demonstrate a leak would then have demonstrated it
+	// as a superuser, for whom row-level security never applies, and passed.
+	conn, err := pgx.Connect(ctx, replaceUserInfo(url, "guc_tenant:probe"))
 	if err != nil {
 		t.Fatalf("connect as tenant: %v", err)
 	}
@@ -365,9 +453,11 @@ GRANT SELECT ON atlantis.guc_doc TO guc_tenant;`); err != nil {
 	}
 
 	if !strings.Contains(after, "victim-secret") {
-		t.Errorf("the GUC-based policy did NOT leak (got %q).\n"+
-			"  If this is a PostgreSQL behaviour change rather than a broken "+
-			"fixture, the constraint that forced the table-based discriminator "+
-			"has moved, and migration 0021 can be reconsidered.", after)
+		t.Errorf("the parameter-based policy did NOT leak (got %q).\n"+
+			"  Check the fixture first: if this connected as a role row-level "+
+			"security does not apply to, the read proves nothing. If it is a "+
+			"genuine PostgreSQL behaviour change, then a custom parameter can "+
+			"now be locked, and the sqlvalidate gate that currently carries this "+
+			"defence could move into the database instead.", after)
 	}
 }

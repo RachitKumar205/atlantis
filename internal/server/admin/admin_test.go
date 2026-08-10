@@ -397,7 +397,7 @@ func parseSrc(t *testing.T, caller, src string) []*dsl.File {
 // would silently break if a refactor regresses them.
 
 func TestValidateCustomSQL_EmptyIR(t *testing.T) {
-	if msgs := validateCustomSQL(&dsl.IR{}, "consumer"); len(msgs) != 0 {
+	if msgs := validateCustomSQL(&dsl.IR{}, "consumer", nil); len(msgs) != 0 {
 		t.Errorf("empty IR should produce no errors, got %v", msgs)
 	}
 }
@@ -427,7 +427,7 @@ query OutfitsForConsumer for Account {
 	if err != nil {
 		t.Fatalf("lower: %v", err)
 	}
-	if msgs := validateCustomSQL(ir, "consumer"); len(msgs) != 0 {
+	if msgs := validateCustomSQL(ir, "consumer", nil); len(msgs) != 0 {
 		t.Errorf("expected no errors, got: %v", msgs)
 	}
 }
@@ -458,7 +458,7 @@ query BadTable for Account {
 	if err != nil {
 		t.Fatalf("lower: %v", err)
 	}
-	msgs := validateCustomSQL(ir, "consumer")
+	msgs := validateCustomSQL(ir, "consumer", nil)
 	if len(msgs) == 0 {
 		t.Fatal("expected at least one error for unknown table")
 	}
@@ -513,10 +513,10 @@ query Mine for Cart {
 	if err != nil {
 		t.Fatalf("lower: %v", err)
 	}
-	if msgs := validateCustomSQL(ir, "shop"); len(msgs) != 0 {
+	if msgs := validateCustomSQL(ir, "shop", nil); len(msgs) != 0 {
 		t.Errorf("submitting caller's content is clean; should be 0 errors, got: %v", msgs)
 	}
-	if msgs := validateCustomSQL(ir, "consumer"); len(msgs) == 0 {
+	if msgs := validateCustomSQL(ir, "consumer", nil); len(msgs) == 0 {
 		t.Fatal("when consumer submits, its own stale ref should be caught")
 	}
 }

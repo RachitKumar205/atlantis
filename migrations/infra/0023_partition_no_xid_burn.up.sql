@@ -1,3 +1,8 @@
+-- SUPERSEDED BY 0024. current_partition() no longer reads a table, so it calls
+-- no transaction-ID function at all. This migration remains the record of why
+-- the read path must not assign an ID; 0024 removed the write that was still
+-- assigning one on every bind.
+
 -- Stop the tenant discriminator from consuming a transaction ID on every read.
 --
 -- atlantis.current_partition() is called by every row-level security policy, so

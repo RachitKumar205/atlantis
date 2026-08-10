@@ -358,10 +358,12 @@ type Entity struct {
 	TouchOnUpdateField string `json:"touch_on_update_field,omitempty"`
 
 	// PartitionField is the column used for multi-tenant isolation. When
-	// non-empty, every generated QueryX handler unconditionally AND-joins
-	// `WHERE <PartitionField> = $callerPartition` onto the user filter.
-	// The auth layer supplies the value; the caller filter cannot override.
-	// Empty means no partition predicate is injected.
+	// non-empty, codegen emits ENABLE + FORCE ROW LEVEL SECURITY and a policy
+	// comparing this column to atlantis.current_partition(), so PostgreSQL
+	// enforces the scope rather than a predicate in each generated read.
+	// (An older design AND-joined the predicate in every generated QueryX
+	// handler. That emitter is dead code — nothing compiles it — and the
+	// predicate it wrote never ran.) Empty means no policy is emitted.
 	PartitionField string `json:"partition_field,omitempty"`
 
 	// TtlField is the timestamptz column that anchors row-level expiry.
@@ -1354,11 +1356,13 @@ func validateEntity(e *Entity, byID map[string]*Entity) []error {
 	// database is the entire point; predicate injection is what failed before,
 	// because it leaks the moment a handler is added without it.
 	//
-	// The discriminator deliberately is not a GUC. A custom GUC is PGC_USERSET,
-	// so caller-supplied SQL can set it to another tenant's value; migration
-	// 0021 replaces it with a locked table plus a SECURITY DEFINER setter that
-	// refuses to be overwritten inside a transaction. internal/codegen has a
-	// live test that attacks both designs and shows the GUC one leaking.
+	// The discriminator IS a run-time parameter, atlantis.tenant, set
+	// transaction-locally (migration 0024). A custom GUC is PGC_USERSET and
+	// PostgreSQL will not lock one, so what keeps it honest is a validator that
+	// rejects set_config and set_partition in every caller-authored SQL surface
+	// — see internal/dsl/sqlvalidate. Migration 0021 chose a locked table
+	// instead; that was safe without a validator and cost a transaction ID per
+	// request, which is why 0024 reversed it.
 	//
 	// Two things must hold at runtime for any of this to mean anything, and
 	// neither is checked here because neither is a schema property: the server
@@ -1547,19 +1551,9 @@ func validateEntity(e *Entity, byID map[string]*Entity) []error {
 		}
 	}
 
-	// Rule: partition by <field> must reference an existing NOT NULL column.
-	// A nullable partition column would let some rows escape tenant
-	// isolation (NULL = NULL is false), defeating the safety property.
-	if e.PartitionField != "" {
-		pf := e.FindField(e.PartitionField)
-		if pf == nil {
-			errs = append(errs, fmt.Errorf("%s: partition by references unknown field %q",
-				e.ID(), e.PartitionField))
-		} else if !pf.NotNull {
-			errs = append(errs, fmt.Errorf("%s: partition field %q must be NOT NULL (nullable partition columns break tenant isolation)",
-				e.ID(), e.PartitionField))
-		}
-	}
+	// `partition by` is checked once, further up this function. A second copy
+	// of the rule lived here and produced a second error saying the same thing
+	// in different words, so one mistake read as two problems.
 
 	// Rule: composite UNIQUE field names must exist on the entity.
 	for _, u := range e.Uniques {

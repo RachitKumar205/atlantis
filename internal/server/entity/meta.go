@@ -33,9 +33,26 @@ type entityMeta struct {
 	// cache id. See makeScanTargets.
 	inboundCols    []string
 	inboundColMeta []columnMeta
-	// cacheable is false when some procedure writes this entity. Procedures
-	// cannot invalidate row bodies — see procedureWrittenEntities — so serving
-	// this entity from the read cache would serve stale rows.
+	// cacheable is false when the read cache cannot safely serve this entity.
+	//
+	// Two reasons, and they fail differently:
+	//
+	//   - A procedure writes it. Procedures cannot invalidate row bodies — see
+	//     procedureWrittenEntities — so the cache would serve stale rows.
+	//
+	//   - It declares `partition by`. The cache sits ABOVE SQL: a hit never
+	//     reaches the database, so row-level security never runs. The key is
+	//     entity plus primary key with no tenant in it, so one tenant's cached
+	//     row would be served to another asking for the same id — a
+	//     cross-tenant read that the policy cannot prevent, because the policy
+	//     is never consulted.
+	//
+	// Putting the tenant in the key is the obvious repair and does not work
+	// yet: the asynchronous invalidation worker drains an outbox and has no
+	// request context, so it cannot construct a tenant-scoped key. Its
+	// invalidations would miss, and the entries would go stale permanently —
+	// worse than not caching. Making the outbox carry the tenant is the way
+	// back to a cache here.
 	cacheable bool
 	// sqlSelectInbound reads inboundCols for one row, FOR UPDATE. Used before
 	// an UPDATE to capture the pre-update parent key, so reparenting a child
@@ -128,7 +145,7 @@ func buildEntityMeta(e *dsl.Entity, ir *dsl.IR, inbound map[string][]inboundRule
 	meta.sqlGet = buildGetSQL(e)
 	meta.sqlBatchGet = buildBatchGetSQL(e)
 	meta.sqlQueryPrefix = buildQueryPrefix(e)
-	meta.cacheable = !procWritten[e.ID()]
+	meta.cacheable = !procWritten[e.ID()] && e.PartitionField == ""
 	meta.inbound = inbound[e.ID()]
 	meta.inboundCols = inboundColumns(meta.inbound)
 	for _, name := range meta.inboundCols {

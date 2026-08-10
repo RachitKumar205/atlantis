@@ -70,33 +70,76 @@ func TestPartitionPolicyCastsTheFunctionNotTheColumn(t *testing.T) {
 	}
 }
 
-// The policy predicate runs on every read. Whether it lands in an Index Cond or
-// a Filter is the difference between one function call per query and one per
-// row scanned.
-func TestPartitionFieldGetsAnIndexUnlessOneExists(t *testing.T) {
-	t.Run("emitted when nothing covers it", func(t *testing.T) {
-		out, err := EmitInitial(partIR("tenant", dsl.FieldType{Name: "text"}, nil))
-		if err != nil {
-			t.Fatalf("EmitInitial: %v", err)
-		}
-		if !strings.Contains(out.Up, `("tenant")`) || !strings.Contains(out.Up, "CREATE INDEX") {
-			t.Errorf("no index on the partition column. Without one the policy "+
-				"predicate becomes a per-row filter and every read of this table "+
-				"degrades by roughly a thousandfold:\n%s", out.Up)
-		}
-	})
+// The policy predicate runs on every read, so it needs an index — and the
+// index must be on the discriminator, which is the part a name check cannot
+// see. An earlier version of this test asserted only that something called
+// "_partition_idx" appeared; emitting it on the wrong column passed the entire
+// package, because an index on any column is valid DDL.
+func TestPartitionIndexIsOnTheDiscriminator(t *testing.T) {
+	out, err := EmitInitial(partIR("tenant", dsl.FieldType{Name: "text"}, nil))
+	if err != nil {
+		t.Fatalf("EmitInitial: %v", err)
+	}
+	line := indexLine(out.Up, "_partition_idx")
+	if line == "" {
+		t.Fatalf("no index backing the policy predicate. Without one every read "+
+			"of this table degrades roughly a thousandfold:\n%s", out.Up)
+	}
+	if !strings.Contains(line, `("tenant")`) {
+		t.Errorf("the policy's index is not on the partition column, so it cannot "+
+			"serve the predicate it exists for:\n%s", line)
+	}
+}
 
-	t.Run("not duplicated when the schema leads an index with it", func(t *testing.T) {
-		idx := []dsl.Index{{Kind: dsl.IndexBtree, Fields: []dsl.IndexField{{Name: "tenant"}}}}
-		out, err := EmitInitial(partIR("tenant", dsl.FieldType{Name: "text"}, idx))
-		if err != nil {
-			t.Fatalf("EmitInitial: %v", err)
+// It is emitted unconditionally, including when the schema already declares
+// something covering the column.
+//
+// Skipping in that case is what the previous version did, and it tied a
+// safety-critical index to a declaration somebody may reasonably delete:
+// emitPartitionPolicy runs only at entity creation, so dropping the `unique by`
+// took the index with it, via a migration classified ADDITIVE. A duplicate
+// btree is bounded and visible; a silently missing one is not.
+func TestPartitionIndexIsEmittedEvenWhenTheSchemaCoversTheColumn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mut  func(e *dsl.Entity)
+	}{
+		{"declared btree on the column", func(e *dsl.Entity) {
+			e.Indexes = []dsl.Index{{Kind: dsl.IndexBtree,
+				Fields: []dsl.IndexField{{Name: "tenant"}}}}
+		}},
+		{"unique by leading with it", func(e *dsl.Entity) {
+			e.Uniques = []dsl.UniqueSpec{{Fields: []string{"tenant", "body"}}}
+		}},
+		{"partial index leading with it", func(e *dsl.Entity) {
+			e.Indexes = []dsl.Index{{Kind: dsl.IndexPartial,
+				Fields: []dsl.IndexField{{Name: "tenant"}}}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ir := partIR("tenant", dsl.FieldType{Name: "text"}, nil)
+			tc.mut(&ir.Entities[0])
+			out, err := EmitInitial(ir)
+			if err != nil {
+				t.Fatalf("EmitInitial: %v", err)
+			}
+			if indexLine(out.Up, "_partition_idx") == "" {
+				t.Errorf("skipped the policy's own index because the schema declares "+
+					"%s. That construct is droppable and this index is never "+
+					"re-emitted, so removing it silently removes tenant isolation's "+
+					"index through an additive migration:\n%s", tc.name, out.Up)
+			}
+		})
+	}
+}
+
+func indexLine(sql, needle string) string {
+	for _, l := range strings.Split(sql, "\n") {
+		if strings.Contains(l, "CREATE INDEX") && strings.Contains(l, needle) {
+			return l
 		}
-		if strings.Count(out.Up, `("tenant")`) > 1 {
-			t.Errorf("emitted a second index on a column the schema already indexes:\n%s",
-				out.Up)
-		}
-	})
+	}
+	return ""
 }
 
 func policyLine(sql string) string {
@@ -126,10 +169,28 @@ func TestPartitionPolicyAppliesForEveryColumnType(t *testing.T) {
 	for _, ft := range []dsl.FieldType{
 		{Name: "text"},
 		{Name: "varchar", Len: 32},
+		{Name: "citext"},
 		{Name: "uuid"},
 		{Name: "bigint"},
+		{Name: "integer"},
+		{Name: "smallint"},
+		{Name: "boolean"},
+		{Name: "timestamptz"},
+		{Name: "date"},
+		{Name: "numeric", NumP: 10, NumS: 2, HasNumP: true},
+		{Name: "bytea"},
+		{Name: "jsonb"},
+		// Arrays are the shape that broke: "varchar(20)[]" matched the varchar
+		// prefix, skipped the cast, and emitted a policy PostgreSQL refuses.
+		{Name: "text", Array: true, Elem: &dsl.FieldType{Name: "text"}},
+		{Name: "varchar", Len: 20, Array: true,
+			Elem: &dsl.FieldType{Name: "varchar", Len: 20}},
 	} {
-		t.Run(ft.Name, func(t *testing.T) {
+		name := ft.Name
+		if ft.Array {
+			name += "_array"
+		}
+		t.Run(name, func(t *testing.T) {
 			_, _ = conn.Exec(ctx, `DROP TABLE IF EXISTS atlantis.part_doc CASCADE`)
 			t.Cleanup(func() {
 				_, _ = conn.Exec(ctx, `DROP TABLE IF EXISTS atlantis.part_doc CASCADE`)
@@ -143,6 +204,44 @@ func TestPartitionPolicyAppliesForEveryColumnType(t *testing.T) {
 				t.Fatalf("the emitted policy DDL for a %s discriminator does not "+
 					"apply: %v\n%s", ft.Name, err, out.Up)
 			}
+			// Twice. The initial script promises to be re-appliable after a
+			// partial failure, and CREATE POLICY has no IF NOT EXISTS — so
+			// without the DROP POLICY IF EXISTS ahead of it, the retry after a
+			// half-applied migration fails on the one statement that carries
+			// the tenant isolation.
+			if _, err := conn.Exec(ctx, out.Up); err != nil {
+				t.Fatalf("the emitted DDL for a %s discriminator is not "+
+					"re-appliable, so a retry after a partial apply cannot "+
+					"succeed: %v\n%s", ft.Name, err, out.Up)
+			}
 		})
+	}
+}
+
+// The same property without a database, because CI runs no Postgres and the
+// test above therefore skips there.
+//
+// Ordering, not mere presence: a DROP emitted after the CREATE would satisfy a
+// substring check and drop the policy it just created, leaving the table with
+// RLS enabled, no policy, and every read returning nothing.
+func TestPartitionPolicyDDLIsReappliable(t *testing.T) {
+	out, err := EmitInitial(partIR("tenant", dsl.FieldType{Name: "text"}, nil))
+	if err != nil {
+		t.Fatalf("EmitInitial: %v", err)
+	}
+	drop := strings.Index(out.Up, "DROP POLICY IF EXISTS")
+	create := strings.Index(out.Up, "CREATE POLICY")
+	switch {
+	case create < 0:
+		t.Fatal("no policy emitted for a partitioned entity")
+	case drop < 0:
+		t.Error("CREATE POLICY is emitted with no DROP POLICY IF EXISTS before " +
+			"it. CREATE POLICY has no IF NOT EXISTS, so re-applying the initial " +
+			"script after a partial failure fails on the statement that carries " +
+			"tenant isolation, and the operator is left hand-editing DDL nobody wrote")
+	case drop > create:
+		t.Errorf("DROP POLICY IF EXISTS is emitted AFTER CREATE POLICY, so applying "+
+			"the script drops the policy it just created: RLS stays enabled with "+
+			"no policy, and every read returns nothing\n%s", out.Up)
 	}
 }

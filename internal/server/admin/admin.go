@@ -485,7 +485,7 @@ func (s *Service) PlanSchema(ctx context.Context, req *adminpb.PlanSchemaRequest
 	// re-validated here. It was already validated when its owning caller
 	// submitted it; re-validating under whatever rules are in force now
 	// would block this caller's apply on drift in some unrelated caller.
-	customSQLErrs := validateCustomSQL(newIR, req.GetCaller())
+	customSQLErrs := validateCustomSQL(newIR, req.GetCaller(), ownership)
 
 	// Emit SQL and build the impact report.
 	var scripts codegen.SQLScripts
@@ -618,9 +618,33 @@ func translateBackfillFields(in []codegen.BackfillField) []BackfillFieldRef {
 // caller is the SubmittingCaller; SourcePath on every IR decl is
 // formatted as "<caller>:<file-path>" by parseSubmitted / loadOtherCallers,
 // so a strings.HasPrefix on "<caller>:" is the right ownership test.
-func validateCustomSQL(ir *dsl.IR, caller string) []string {
+func validateCustomSQL(ir *dsl.IR, caller string, owns map[string]string) []string {
 	prefix := caller + ":"
 	var msgs []string
+	// Entity-level SQL first: CHECK expressions and partial-index predicates
+	// are author-written and emitted verbatim into DDL, and a CHECK is not
+	// required to be IMMUTABLE — so a call planted there runs on every INSERT
+	// and UPDATE. Gating only query and procedure bodies left that open.
+	//
+	// Scoped through the ownership map rather than SourcePath, because
+	// dsl.Entity does not carry one. Same rationale as the query loop below:
+	// another caller's stored content was validated when its owner submitted
+	// it, and re-judging it here would let unrelated drift block this apply.
+	//
+	// A nil or empty map means ownership could not be established, and the gate
+	// then checks EVERYTHING rather than nothing. Scoping is an availability
+	// concession — it keeps one caller's drift from blocking another's apply —
+	// and an unknown owner is not a reason to skip a security check. Written
+	// the other way round, passing nil would disable the gate silently, which
+	// is how a control ends up present in the source and absent at runtime.
+	for i := range ir.Entities {
+		if len(owns) > 0 && owns[ir.Entities[i].ID()] != caller {
+			continue
+		}
+		if err := sqlvalidate.ValidateEntityExpressions(&ir.Entities[i]); err != nil {
+			msgs = append(msgs, err.Error())
+		}
+	}
 	for i := range ir.Queries {
 		if !strings.HasPrefix(ir.Queries[i].SourcePath, prefix) {
 			continue
@@ -711,7 +735,7 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 	// Re-validate inside the lock: another caller's apply between plan and apply
 	// can change which tables are visible. Same caller-scoping rationale as
 	// the PlanSchema call site above.
-	if msgs := validateCustomSQL(newIR, req.GetCaller()); len(msgs) > 0 {
+	if msgs := validateCustomSQL(newIR, req.GetCaller(), applyOwnership); len(msgs) > 0 {
 		return nil, fmt.Errorf("admin: custom SQL validation failed: %v", msgs)
 	}
 

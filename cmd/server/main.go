@@ -31,6 +31,7 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/cache/queryresult"
 	"github.com/rachitkumar205/atlantis/internal/cache/read"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/dsl/sqlvalidate"
 	"github.com/rachitkumar205/atlantis/internal/obs"
 	"github.com/rachitkumar205/atlantis/internal/server/admin"
 	"github.com/rachitkumar205/atlantis/internal/server/authz"
@@ -163,21 +164,22 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// Timescale check above. A deployment with no partitioned entities is
 	// unaffected either way, so defaulting to fatal would break every existing
 	// single-tenant install to protect a feature it does not use.
-	if privs, derr := pg.DetectRolePrivileges(ctx, pool); derr != nil {
+	privs, derr := pg.DetectRolePrivileges(ctx, pool)
+	if err := tenantIsolationError(privs, derr, cfg.RequireTenantIsolation); err != nil {
+		return err
+	}
+	switch {
+	case derr != nil:
 		log.Warn("could not determine whether the database role enforces "+
 			"row-level security", "err", derr)
-	} else if err := pg.RequireIsolatedRole(privs); err != nil {
-		if cfg.RequireTenantIsolation {
-			return fmt.Errorf("refusing to start: %w", err)
-		}
+	case !privs.CanEnforceRLS():
 		log.Warn("the database role bypasses row-level security, so `partition by` "+
 			"provides NO tenant isolation on this deployment — policies are attached "+
 			"and inert. Harmless without partitioned entities; a cross-tenant leak "+
 			"with them. Set ATL_REQUIRE_TENANT_ISOLATION=true to make this fatal",
 			"role", privs.Name, "superuser", privs.Superuser, "bypassrls", privs.BypassRLS)
-	} else {
-		log.Info("database role enforces row-level security",
-			"role", privs.Name)
+	default:
+		log.Info("database role enforces row-level security", "role", privs.Name)
 	}
 
 	obs.RegisterPoolStats(nil, pool.Raw())
@@ -635,6 +637,28 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	}
 	if irHash != "" {
 		log.Info("loaded IR checkpoint", "hash", irHash[:min(12, len(irHash))], "entities", len(ir.Entities))
+	}
+
+	// Audit the checkpoint for SQL that would defeat tenant isolation.
+	//
+	// The validator that rejects set_config and set_partition runs at plan and
+	// apply, so it is prospective only: anything stored before it existed has
+	// never been looked at and executes with the same authority as anything
+	// else. This is also the only place the deploy order can be enforced.
+	// Migration 0024 makes the tenant discriminator a PGC_USERSET parameter,
+	// and a binary predating the gate would happily serve a checkpoint
+	// containing a call the gate now refuses — nothing can stop that binary
+	// running, but this one can decline to serve what it let in.
+	auditFindings := sqlvalidate.AuditForbiddenCalls(ir)
+	if err := storedSQLAuditError(auditFindings, cfg.RequireTenantIsolation); err != nil {
+		return err
+	}
+	if len(auditFindings) > 0 {
+		for _, f := range auditFindings {
+			log.Warn("stored SQL can rebind the caller's tenant, so `partition by` "+
+				"provides no isolation against it. Remove it and re-apply; set "+
+				"ATL_REQUIRE_TENANT_ISOLATION=true to make this fatal", "finding", f.Error())
+		}
 	}
 
 	log.Debug("init: register entity services")

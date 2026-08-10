@@ -178,6 +178,14 @@ func atoiOrZero(s string) int {
 // goes near a real DB, this has run.
 func validateCustomSQL(ir *dsl.IR) error {
 	var errs []error
+	// CHECK expressions and partial-index predicates are author-written SQL
+	// emitted verbatim into DDL, and a CHECK is not required to be IMMUTABLE.
+	// They need the same gate as a query body.
+	for i := range ir.Entities {
+		if err := sqlvalidate.ValidateEntityExpressions(&ir.Entities[i]); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	for i := range ir.Queries {
 		if err := sqlvalidate.ValidateCustomQuery(ir, &ir.Queries[i]); err != nil {
 			errs = append(errs, err)

@@ -123,6 +123,9 @@ func validateBlock(sql string, mode Mode, tables map[string]string, context stri
 			errs = append(errs, fmt.Errorf("%s: statement %d: %w", context, i+1, err))
 			continue
 		}
+		// Before anything that only reports: a forbidden call is a security
+		// refusal, not a lint. See forbidden_calls.go.
+		errs = append(errs, checkForbiddenCalls(stmt, fmt.Sprintf("%s: statement %d", context, i+1))...)
 		ctes := collectCTENames(stmt)
 		refs := collectTableRefs(stmt)
 		for _, ref := range refs {

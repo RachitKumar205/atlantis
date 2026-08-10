@@ -1782,10 +1782,13 @@ func assertCheckNamesUnique(ir *dsl.IR) error {
 // atlantis owns the tables it creates, so the policy would apply to everyone
 // except the one role that actually connects.
 //
-// The predicate compares against atlantis.current_partition() rather than
-// current_setting('atlantis.partition'). A custom GUC is PGC_USERSET, so
-// caller-authored SQL can reassign it mid-transaction and read another tenant's
-// rows — verified against live PostgreSQL 16. See migration 0021.
+// The predicate goes through atlantis.current_partition() rather than inlining
+// whatever that function reads. That indirection is what let migration 0024
+// move the discriminator from a table to a run-time parameter without touching
+// a single policy — and it has to, because emitPartitionPolicy runs on CREATE
+// TABLE only and no differ reads `partition by` (task #36). A policy whose text
+// had to change would be a policy on every existing partitioned table that
+// nothing can migrate.
 func emitPartitionPolicy(b *sqlBuilder, e *dsl.Entity) {
 	if e.PartitionField == "" {
 		return
@@ -1822,20 +1825,42 @@ func emitPartitionPolicy(b *sqlBuilder, e *dsl.Entity) {
 	// write. Both are required: USING alone would let a caller INSERT a row
 	// attributed to another tenant, which it could then not see — a write leak
 	// rather than a read leak, and just as much a breach.
+	// CREATE POLICY has no IF NOT EXISTS, and the initial migration promises to
+	// be re-appliable after a partial failure. Dropping first keeps that true.
+	b.linef("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(partitionPolicyName(e)), table)
 	b.linef("CREATE POLICY %s ON %s USING (%s = %s) WITH CHECK (%s = %s);",
 		quoteIdent(partitionPolicyName(e)), table, col, discriminator, col, discriminator)
 
-	// An index on the discriminator, unless the schema already leads one with
-	// it. The policy predicate is on every read of this table, and whether it
-	// lands in an Index Cond or a Filter is a ~1000x difference — 0.29 ms
-	// against 286 ms on 200k rows — because a Filter re-invokes
-	// current_partition() for every row scanned. Emitting it is the
-	// declarative behaviour: the author asked for tenant isolation, not for a
-	// lesson about scan keys.
-	if !partitionFieldIsIndexLeading(e) {
-		b.linef("CREATE INDEX IF NOT EXISTS %s ON %s (%s);",
-			quoteIdent(partitionIndexName(e)), table, col)
-	}
+	// An index on the discriminator, always, owned by the policy.
+	//
+	// An earlier version of this skipped the index when the schema already
+	// declared something leading with the column — a btree, a unique, a
+	// composite primary key. That was wrong in the direction that matters, for
+	// two reasons found by executing it rather than reading it.
+	//
+	// First, the constructs it trusted are droppable and this index is not
+	// re-emitted. emitPartitionPolicy runs only when the entity is created, so
+	// removing the declaration the skip relied on takes the index with it —
+	// through a migration classified ADDITIVE, which is the class nobody looks
+	// twice at. (The skip inspected e.Indexes and single-column primaries, never
+	// e.Uniques, so `unique by` was never actually one of the constructs it
+	// trusted — an earlier version of this comment said it was. `index by` and
+	// `index partial by` were.) Measured on 200k rows, the end state is 590 ms and 201,673
+	// buffers against 0.046 ms and 7. A safety-critical index must not have its
+	// lifetime tied to an unrelated declaration somebody may reasonably delete.
+	//
+	// Second, "leads with the column" is not the same as "can answer
+	// col = value". A partial index covers only rows matching its predicate; a
+	// gin or hnsw index cannot serve equality at all. Both were accepted, and
+	// both measured as sequential scans — 590 ms and 670 ms respectively.
+	//
+	// The cost of always emitting is a duplicate btree when the author also
+	// declared one: bounded, visible in the migration, and removable by the
+	// author. The cost of the skip was a silent thousandfold read regression
+	// arriving through the safest migration class. IF NOT EXISTS keeps this
+	// re-appliable.
+	b.linef("CREATE INDEX IF NOT EXISTS %s ON %s (%s);",
+		quoteIdent(partitionIndexName(e)), table, col)
 }
 
 // partitionCastType returns the SQL type the discriminator must be cast to for
@@ -1845,38 +1870,38 @@ func partitionCastType(e *dsl.Entity) string {
 	if f == nil {
 		return ""
 	}
+	// An array is never text-shaped, whatever its element is. Checking the
+	// rendered string first matched "varchar(20)[]" on its varchar prefix, took
+	// the no-cast branch, and emitted a policy PostgreSQL refuses to create:
+	// `operator does not exist: character varying[] = text` — the exact failure
+	// the cast exists to prevent.
+	if f.Type.Array {
+		return strings.ToLower(sqlType(f.Type))
+	}
 	t := strings.ToLower(sqlType(f.Type))
-	// text and varchar(n) compare to text directly; everything else does not.
-	if t == "text" || strings.HasPrefix(t, "varchar") || strings.HasPrefix(t, "character varying") {
+	// text and varchar(n) need no cast. citext does have a citext = text
+	// operator, so it would compare without one — but casting the function
+	// side to citext is what makes the comparison case-insensitive, which is
+	// the whole reason somebody picks citext for a tenant column.
+	if t == "text" || strings.HasPrefix(t, "varchar(") || t == "varchar" ||
+		strings.HasPrefix(t, "character varying") {
 		return ""
 	}
 	return t
 }
 
-// partitionFieldIsIndexLeading reports whether a declared index already leads
-// with the partition column, in which case the policy predicate can use it and
-// emitting another index would be waste.
-func partitionFieldIsIndexLeading(e *dsl.Entity) bool {
-	for _, idx := range e.Indexes {
-		if len(idx.Fields) > 0 && !idx.Fields[0].IsExpr && idx.Fields[0].Name == e.PartitionField {
-			return true
-		}
-		if idx.Field == e.PartitionField {
-			return true
-		}
-	}
-	// A single-column primary key on the discriminator is already indexed.
-	for _, f := range e.Fields {
-		if f.Primary && f.Name == e.PartitionField {
-			return true
-		}
-	}
-	return false
-}
-
 // partitionIndexName is the index backing the policy predicate.
+//
+// Named for its purpose rather than its column, so it is recognisable as the
+// policy's own and not mistaken for one the author declared.
+//
+// Note the residual hazard, which is structural rather than specific to this
+// name: the CREATE above uses IF NOT EXISTS, so any collision drops this index
+// silently rather than failing. A field literally named `partition` would
+// collide, and is only unreachable because `partition` is a reserved token the
+// parser rejects.
 func partitionIndexName(e *dsl.Entity) string {
-	return truncateIdent(tableName(e) + "_" + e.PartitionField + "_tenant_idx")
+	return truncateIdent(tableName(e) + "_partition_idx")
 }
 
 // partitionPolicyName is the policy identifier, derived so the differ can find

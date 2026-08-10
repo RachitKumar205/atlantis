@@ -43,12 +43,30 @@ jobs:
         run: make codegen
 
       - name: go vet
-        # Skips cmd/server + gen/ — they only compile when caller .atl
-        # fixtures have been applied, which CI doesn't do.
-        run: go vet ./cmd/tide ./cmd/tidectl ./internal/...
+        # Skips gen/ — it only exists once codegen has run against caller
+        # .atl fixtures, which CI doesn't do. cmd/server used to be skipped
+        # for the same reason and no longer needs to be: it imports the
+        # runtime IR dispatcher (internal/server/entity), not gen/go/server,
+        # so `go list -deps ./cmd/server` names no gen package.
+        run: go vet ./cmd/server ./cmd/tide ./cmd/tidectl ./internal/...
 
       - name: unit tests with race detector
-        run: go test -race ./cmd/tide ./cmd/tidectl ./internal/...
+        # cmd/server carries the source-level tests for things only
+        # observable at boot: that built-in jobs are registered and
+        # scheduled, and that ATL_REQUIRE_TENANT_ISOLATION is reached and
+        # refuses. While this list omitted cmd/server they were written,
+        # passing, and never run by CI.
+        #
+        # -timeout because go's default is 10m PER PACKAGE and
+        # internal/runtime/sandbox/conformance takes 643-716s under -race on an
+        # M-series laptop across repeated runs — 43 to 116 seconds OVER the
+        # default, so on hardware like that it panics with a goroutine dump
+        # rather than failing honestly, and the same commit is green or red
+        # depending on which runner it lands on. The spread is the point: a
+        # package this close to a limit does not fail reproducibly.
+        # Raised rather than tuned to the current number, since the suite
+        # only grows.
+        run: go test -race -timeout=25m ./cmd/server ./cmd/tide ./cmd/tidectl ./internal/...
 
       - name: codegen freshness
         # Catches "edited .atl but forgot to regenerate." If make codegen
@@ -97,11 +115,10 @@ jobs:
           # resolved to a stale v1.64.8 cache (v1 series, built with
           # Go 1.24 — refused to analyse our Go 1.25.0 target).
           version: v2.12.2
-          # Explicit package list skips cmd/server, which imports the
-          # gen-less gen/go/server package — only populated when codegen
-          # runs against real caller .atl files (this repo ships none by
+          # Explicit package list skips gen/, which only exists once codegen
+          # has run against real caller .atl files (this repo ships none by
           # design). Same scoping the go-vet and go-test steps use.
-          args: ./cmd/tide/... ./cmd/tidectl/... ./internal/...
+          args: ./cmd/server/... ./cmd/tide/... ./cmd/tidectl/... ./internal/...
 
   migration-safety:
     name: migrate up/down/up

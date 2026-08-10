@@ -76,7 +76,7 @@ var entityCoverage = map[string]coverage{
 	"CompositePK":         {gap, "", "changing a composite PK rewrites the table; no differ reads it (task #12 follow-up)"},
 	"TouchOnUpdateField":  {gap, "", "emits a BEFORE UPDATE trigger; a change adds or drops it undetected (task #12 follow-up)"},
 	"SoftDeleteField":     {gap, "", "changes generated query predicates; not DDL, but a silent behaviour change (task #12 follow-up)"},
-	"PartitionField":      {gap, "", "tenant isolation; already fails open in the dispatcher and its RLS replacement is defeated — task #29"},
+	"PartitionField":      {gap, "", "tenant isolation; the RLS policy, FORCE and backing index are emitted on CREATE TABLE only, so adding or removing `partition by` on an existing entity changes nothing in the database — task #36"},
 	"TimeField":           {gap, "", "hypertable time column; embedded strips Timescale DDL anyway, so a change is doubly invisible (task #12 follow-up)"},
 	"ChunkTimeIntervalMS": {diffed, "diffChunkTimeInterval", ""},
 	"TtlField":            {gap, "", "drives the TTL sweeper, whose DELETE is MySQL syntax and silently deletes nothing (task #12 follow-up)"},
