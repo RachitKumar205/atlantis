@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/rachitkumar205/atlantis/internal/testsupport/pgcatalog"
 )
 
 // A pooled connection must never be handed out with a tenant already bound.
@@ -70,20 +72,30 @@ SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronames
 		t.Skip("partition migrations not applied to this database")
 	}
 
+	// Catalog writes — CREATE, GRANT and both DROPs — go through pgcatalog.
+	//
+	// The first version took the lock around CREATE ROLE only, released it with
+	// a defer, and dropped the role from t.Cleanup. Go runs a test function's
+	// defers BEFORE its cleanups, so the unlock happened first and two of the
+	// three catalog writes ran unprotected — in a test whose own comment named
+	// DROP ROLE as the hazard. The lock also lived in this package and could not
+	// be named by the other three that create roles.
 	cleanup := func() {
-		_, _ = admin.Exec(context.Background(), `DROP OWNED BY tenantreset_probe`)
-		_, _ = admin.Exec(context.Background(), `DROP ROLE IF EXISTS tenantreset_probe`)
+		pgcatalog.Exec(t, dsn,
+			`DROP OWNED BY tenantreset_probe`,
+			`DROP ROLE IF EXISTS tenantreset_probe`)
 	}
 	cleanup()
 	t.Cleanup(cleanup)
 
 	// The role default lands on a role nothing else connects as.
-	if _, err := admin.Exec(ctx, `
+	pgcatalog.Do(t, dsn, func(conn *pgx.Conn) error {
+		_, err := conn.Exec(context.Background(), `
 CREATE ROLE tenantreset_probe LOGIN PASSWORD 'probe' NOSUPERUSER NOCREATEDB NOCREATEROLE;
 GRANT USAGE ON SCHEMA atlantis TO tenantreset_probe;
-ALTER ROLE tenantreset_probe SET "atlantis.tenant" = 'sticky-tenant';`); err != nil {
-		t.Fatalf("create probe role: %v", err)
-	}
+ALTER ROLE tenantreset_probe SET "atlantis.tenant" = 'sticky-tenant';`)
+		return err
+	})
 
 	probeDSN := withUserInfo(dsn, "tenantreset_probe", "probe")
 

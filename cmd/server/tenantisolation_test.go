@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/storage/pg"
 )
 
@@ -144,6 +145,21 @@ func TestServerChecksTenantIsolationAtBoot(t *testing.T) {
 		"pg.DetectRolePrivileges":         false,
 		"pg.RequireIsolatedRole":          false,
 		"sqlvalidate.AuditForbiddenCalls": false,
+		// The policy check, and the hook that repeats it on every hot reload.
+		// Boot alone misses the case it exists for: a checkpoint adding
+		// `partition by` to an existing entity emits no DDL and arrives at a
+		// running server.
+		"pg.VerifyPartitionPolicies": false,
+		"pg.PartitionPolicyError":    false,
+		// Installing the hook is separate from defining it: boot can call the
+		// verification and never repeat it on reload.
+		"dynServer.SetOnReload": false,
+		// Nothing supplies the tenant unless this is chained in. The policy,
+		// the discriminator and the dispatcher's binding were all complete and
+		// correct for a while with no caller for WithCallerPartition anywhere
+		// in the tree, and every request on a partitioned entity failed.
+		"interceptors.NewPartition":       false,
+		"interceptors.NewPartitionStream": false,
 	}
 	// Package-local functions run() must reach. Tracked separately from the
 	// pkg.Fn set because these are bare identifiers, and because the walk
@@ -153,6 +169,8 @@ func TestServerChecksTenantIsolationAtBoot(t *testing.T) {
 	wantLocal := map[string]bool{
 		"tenantIsolationError": false,
 		"storedSQLAuditError":  false,
+		// Boot-only verification misses the delivery path the check exists for.
+		"verifyPartitions": false,
 	}
 	// Reached is not the same as obeyed. `_ = tenantIsolationError(...)` keeps
 	// the call on a live path while discarding the refusal, and that mutation
@@ -162,6 +180,10 @@ func TestServerChecksTenantIsolationAtBoot(t *testing.T) {
 	wantReturned := map[string]bool{
 		"tenantIsolationError": false,
 		"storedSQLAuditError":  false,
+		// Appears TWICE — at boot and in the reload hook — so a "was it
+		// reached" check is satisfied by either one while the other is
+		// discarded. Both must return.
+		"PartitionPolicyError": false,
 	}
 	seen := map[string]bool{}
 
@@ -209,41 +231,105 @@ func TestServerChecksTenantIsolationAtBoot(t *testing.T) {
 	}
 	walkFunc(funcs["run"])
 
-	// Second pass: reached is not obeyed. Look for each tracked decision inside
-	// an `if <call>; cond { return ... }` whose return is a DIRECT statement of
-	// the if body. Both evasions found by review are caught here — discarding
-	// the result with `_ =`, and burying the return under a second condition
-	// that can never hold.
+	// Second pass: reached is not obeyed, and EVERY call site must obey.
+	//
+	// Counting "is it returned somewhere" is not enough. PartitionPolicyError is
+	// called twice — at boot and in the reload hook — so a name-level check is
+	// satisfied by either one while the other discards its result, and both
+	// mutations survived until this became per-call-site.
+	//
+	// A call obeys if it sits in an `if <call>; cond { return ... }` whose
+	// return is a direct statement of the if body, or inside a return
+	// expression. Anything else — assignment to _, a bare statement, a return
+	// buried under a second condition — discards the refusal.
+	obeyed := map[ast.Node]bool{}
 	for name := range funcs {
 		if !seen[name] {
 			continue
 		}
 		ast.Inspect(funcs[name].Body, func(n ast.Node) bool {
-			ifs, ok := n.(*ast.IfStmt)
-			if !ok || ifs.Init == nil {
-				return true
-			}
-			var called string
-			ast.Inspect(ifs.Init, func(m ast.Node) bool {
-				call, ok := m.(*ast.CallExpr)
-				if !ok {
+			switch stmt := n.(type) {
+			case *ast.IfStmt:
+				if stmt.Init == nil {
 					return true
 				}
-				if id, ok := call.Fun.(*ast.Ident); ok {
-					if _, tracked := wantReturned[id.Name]; tracked {
-						called = id.Name
+				// The CONDITION and the RETURNED VALUE, not merely the
+				// presence of a return.
+				//
+				// This asked only "is there a ReturnStmt somewhere in the if
+				// body", and a review defeated it seven ways with the whole
+				// suite green — including making the entire boot policy gate
+				// inert. The two that this block now closes:
+				//
+				//	if err := ...; err != nil && false { return err }
+				//	if err := ...; err == nil { return err }
+				//
+				// Both have a direct return. Neither ever fires. The comment
+				// here used to claim a return "buried under a second condition"
+				// was caught; it was not — that is precisely the first shape.
+				errName := boundErrName(stmt.Init)
+				if errName == "" || !isNotNilCheck(stmt.Cond, errName) {
+					return true
+				}
+				direct := false
+				for _, s := range stmt.Body.List {
+					ret, isReturn := s.(*ast.ReturnStmt)
+					if !isReturn {
+						continue
+					}
+					// And it must return the error it just tested. A return of
+					// nil, or of some unrelated value, ends the function
+					// reporting success on a refusal.
+					for _, res := range ret.Results {
+						if mentionsIdent(res, errName) {
+							direct = true
+						}
 					}
 				}
-				return true
-			})
+				if !direct {
+					return true
+				}
+				ast.Inspect(stmt.Init, func(m ast.Node) bool {
+					if trackedCall(m, wantReturned) != "" {
+						obeyed[m] = true
+					}
+					return true
+				})
+			case *ast.ReturnStmt:
+				for _, res := range stmt.Results {
+					ast.Inspect(res, func(m ast.Node) bool {
+						if trackedCall(m, wantReturned) != "" {
+							obeyed[m] = true
+						}
+						return true
+					})
+				}
+			}
+			return true
+		})
+	}
+
+	// Now every call site of a tracked name, obeyed or not.
+	obeyingSites := map[string]int{}
+	for name := range funcs {
+		if !seen[name] {
+			continue
+		}
+		fnName := name
+		ast.Inspect(funcs[name].Body, func(n ast.Node) bool {
+			called := trackedCall(n, wantReturned)
 			if called == "" {
 				return true
 			}
-			for _, stmt := range ifs.Body.List {
-				if _, isReturn := stmt.(*ast.ReturnStmt); isReturn {
-					wantReturned[called] = true
-				}
+			if obeyed[n] {
+				wantReturned[called] = true
+				obeyingSites[called]++
+				return true
 			}
+			t.Errorf("%s calls %s and discards the result. The check runs and its "+
+				"answer is thrown away, so the server proceeds on a posture it "+
+				"just established was unsafe. Every call site has to return on it, "+
+				"not just one of them", fnName, called)
 			return true
 		})
 	}
@@ -259,6 +345,35 @@ func TestServerChecksTenantIsolationAtBoot(t *testing.T) {
 			"second condition, both look like this", name)
 	}
 
+	// How MANY call sites obey, not merely whether one does.
+	//
+	// Every check above is satisfied by a single surviving occurrence, so
+	// deleting one of two call sites passed. A review deleted the entire boot
+	// block, and separately replaced the reload hook body with `return nil`,
+	// and the suite stayed green each time: the other site kept the name-level
+	// entry satisfied. The comment claiming "Appears TWICE … Both must return"
+	// described an assertion that did not exist.
+	//
+	// Two sites, and they are not interchangeable. Boot alone misses the case
+	// the check exists for — a checkpoint that adds `partition by` to an
+	// existing entity emits no DDL and arrives at a RUNNING server — and the
+	// reload hook alone never examines the schema the server started with.
+	for name, atLeast := range map[string]int{
+		// trackedCall reports the bare selector, not the qualified name.
+		"PartitionPolicyError": 2,
+	} {
+		if obeyingSites[name] >= atLeast {
+			continue
+		}
+		t.Errorf("%s is returned on at %d call site(s); it must be at least %d. "+
+			"One is the boot check and one is the hot-reload hook, and neither "+
+			"covers the other: a `partition by` added to an existing entity emits "+
+			"no migration and reaches a running server, and a server that boots "+
+			"clean can be handed an unsafe checkpoint a second later. Deleting "+
+			"either leaves ATL_REQUIRE_TENANT_ISOLATION gating half of what it "+
+			"claims", name, obeyingSites[name], atLeast)
+	}
+
 	if !wantLocal["tenantIsolationError"] {
 		t.Error("cmd/server's run() never reaches tenantIsolationError, so the " +
 			"database-role posture is established and then ignored and " +
@@ -270,6 +385,21 @@ func TestServerChecksTenantIsolationAtBoot(t *testing.T) {
 			"A checkpoint containing SQL that rebinds the caller's tenant would " +
 			"be served, and ATL_REQUIRE_TENANT_ISOLATION would have nothing to " +
 			"gate on")
+	}
+	for _, name := range []string{
+		"interceptors.NewPartition", "interceptors.NewPartitionStream",
+		"pg.VerifyPartitionPolicies", "pg.PartitionPolicyError",
+		"dynServer.SetOnReload",
+	} {
+		if want[name] {
+			continue
+		}
+		t.Errorf("cmd/server's run() never reaches %s. Depending on which one "+
+			"this is: no request carries the caller's tenant and every "+
+			"`partition by` entity refuses everything, or nothing checks that "+
+			"the tables those entities name actually carry an enforced policy "+
+			"— which is the case where the server looks healthy and returns "+
+			"every tenant's rows", name)
 	}
 	if !want["sqlvalidate.AuditForbiddenCalls"] {
 		t.Error("cmd/server's run() never audits the loaded IR checkpoint for SQL " +
@@ -347,4 +477,110 @@ func TestStoredSQLAuditError(t *testing.T) {
 			}
 		})
 	}
+}
+
+// trackedCall returns the tracked name n calls, or "".
+//
+// Handles both spellings, because the boot decisions are a mix: two are
+// package-local identifiers and one is pg.PartitionPolicyError. Matching only
+// bare identifiers meant the tracked entry for the qualified one could never be
+// satisfied, so discarding its result passed.
+func trackedCall(n ast.Node, tracked map[string]bool) string {
+	call, ok := n.(*ast.CallExpr)
+	if !ok {
+		return ""
+	}
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		if _, ok := tracked[fun.Name]; ok {
+			return fun.Name
+		}
+	case *ast.SelectorExpr:
+		if _, ok := tracked[fun.Sel.Name]; ok {
+			return fun.Sel.Name
+		}
+	}
+	return ""
+}
+
+// A probe that could not run must not read as a clean bill of health.
+//
+// The role check has enforced this since it was extracted; the policy check did
+// not, and a review found both its boot and reload paths logging a warning and
+// continuing on a catalog error — under the very flag whose purpose is to
+// refuse. A locked-down pg_class, a statement timeout or a name mismatch each
+// produce that error.
+//
+// Scoped to schemas that have something to protect: a deployment with no
+// partitioned entity gains nothing from a failed probe stopping its start.
+func TestPartitionedEntities(t *testing.T) {
+	part := dsl.Entity{Name: "Doc", Namespace: "pt", PartitionField: "tenant"}
+	plain := dsl.Entity{Name: "Plain", Namespace: "pt"}
+
+	for _, tc := range []struct {
+		name string
+		ir   *dsl.IR
+		want int
+	}{
+		{"nil IR", nil, 0},
+		{"no entities", &dsl.IR{}, 0},
+		{"only unpartitioned", &dsl.IR{Entities: []dsl.Entity{plain}}, 0},
+		{"one partitioned", &dsl.IR{Entities: []dsl.Entity{plain, part}}, 1},
+		{"two partitioned", &dsl.IR{Entities: []dsl.Entity{part, part}}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := len(partitionedEntities(tc.ir)); got != tc.want {
+				t.Errorf("counted %d partitioned entities, want %d. This decides "+
+					"whether a failed catalog probe stops the server: too low and "+
+					"the guard is skipped on a schema that needs it", got, tc.want)
+			}
+		})
+	}
+}
+
+// boundErrName returns the single name an `if x := f(); ...` init binds.
+func boundErrName(init ast.Stmt) string {
+	assign, ok := init.(*ast.AssignStmt)
+	if !ok || len(assign.Lhs) == 0 {
+		return ""
+	}
+	// The error is conventionally last: `problems, err := f()`.
+	id, ok := assign.Lhs[len(assign.Lhs)-1].(*ast.Ident)
+	if !ok || id.Name == "_" {
+		return ""
+	}
+	return id.Name
+}
+
+// isNotNilCheck reports whether cond is exactly `name != nil`.
+//
+// Exactly, deliberately. `err != nil && <anything>` is rejected, because the
+// extra conjunct is the shape that made the refusal unreachable while looking
+// correct. A legitimate call site that genuinely needs a compound condition
+// will fail this test, and that is the right trade: it is a two-line change to
+// hoist the extra condition out, and the alternative is a check that cannot
+// tell a guard from a disabled guard.
+func isNotNilCheck(cond ast.Expr, name string) bool {
+	bin, ok := cond.(*ast.BinaryExpr)
+	if !ok || bin.Op != token.NEQ {
+		return false
+	}
+	lhs, ok := bin.X.(*ast.Ident)
+	if !ok || lhs.Name != name {
+		return false
+	}
+	rhs, ok := bin.Y.(*ast.Ident)
+	return ok && rhs.Name == "nil"
+}
+
+// mentionsIdent reports whether expr references name anywhere.
+func mentionsIdent(expr ast.Expr, name string) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && id.Name == name {
+			found = true
+		}
+		return !found
+	})
+	return found
 }

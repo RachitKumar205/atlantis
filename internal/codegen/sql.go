@@ -378,7 +378,7 @@ func buildPhaseSplit(d *Diff, newByID, oldByID map[string]*dsl.Entity) (pre, pre
 		f := e.FindField(fieldName)
 		pk := primaryKeyColumn(e)
 		if pk == "" || f == nil {
-			preIdx.linef("-- SKIPPED: %s has no single-column PK; chunked backfill requires a single-column PK for the cursor", qualifiedTable(e))
+			preIdx.commentf("SKIPPED: %s has no single-column PK; chunked backfill requires a single-column PK for the cursor", qualifiedTable(e))
 			continue
 		}
 		idxName := backfillIndexName(e, fieldName)
@@ -410,10 +410,10 @@ func emitPhaseSplitChange(ch Change, newByID, oldByID map[string]*dsl.Entity, pr
 	case KindFieldAdded:
 		f := e.FindField(ch.Field)
 		if f != nil && f.Backfill != "" && f.NotNull {
-			pre.linef("-- %s: %s (backfill-deferred; ADD nullable here, SET NOT NULL in post)", ch.Kind, ch.Detail)
+			pre.commentf("%s: %s (backfill-deferred; ADD nullable here, SET NOT NULL in post)", ch.Kind, ch.Detail)
 			emitFieldAddNullable(pre, e, f)
 			pre.blank()
-			post.linef("-- %s: %s (post-backfill SET NOT NULL)", ch.Kind, ch.Detail)
+			post.commentf("%s: %s (post-backfill SET NOT NULL)", ch.Kind, ch.Detail)
 			emitNotNull(post, e, ch.Field, true)
 			post.blank()
 			deferred[[2]string{ch.EntityID, ch.Field}] = e
@@ -423,7 +423,7 @@ func emitPhaseSplitChange(ch Change, newByID, oldByID map[string]*dsl.Entity, pr
 	case KindFieldNotNullTightened:
 		f := e.FindField(ch.Field)
 		if f != nil && f.Backfill != "" {
-			post.linef("-- %s: %s (post-backfill SET NOT NULL)", ch.Kind, ch.Detail)
+			post.commentf("%s: %s (post-backfill SET NOT NULL)", ch.Kind, ch.Detail)
 			emitNotNull(post, e, ch.Field, true)
 			post.blank()
 			deferred[[2]string{ch.EntityID, ch.Field}] = e
@@ -468,8 +468,8 @@ func emitClass(up, down *sqlBuilder, label string, changes []Change, newByID, ol
 	if len(changes) == 0 {
 		return
 	}
-	up.line("-- ==== " + label + " ====")
-	down.line("-- ==== " + label + " ====")
+	up.commentf("==== %s ====", label)
+	down.commentf("==== %s ====", label)
 	for _, ch := range reorderEntityAddsByFKDependency(changes, newByID) {
 		emitChange(up, down, ch, newByID, oldByID)
 	}
@@ -534,8 +534,8 @@ func reorderEntityAddsByFKDependency(changes []Change, newByID map[string]*dsl.E
 // sufficient because we never combine destructive + additive changes in the
 // same migration without explicit ceremony.)
 func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*dsl.Entity) {
-	up.linef("-- %s: %s", ch.Kind, ch.Detail)
-	down.linef("-- %s (reversed): %s", ch.Kind, ch.Detail)
+	up.commentf("%s: %s", ch.Kind, ch.Detail)
+	down.commentf("%s (reversed): %s", ch.Kind, ch.Detail)
 	switch ch.Kind {
 	case KindEntityAdded:
 		e := newByID[ch.EntityID]
@@ -724,8 +724,8 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 		// checkpoint IR, not migrated — no DDL. The comment keeps the
 		// migration file self-documenting and stops a custom-only apply
 		// from rendering as "(no schema changes)".
-		up.linef("-- (no SQL: %s)", ch.Detail)
-		down.linef("-- (no SQL: %s)", ch.Detail)
+		up.commentf("(no SQL: %s)", ch.Detail)
+		down.commentf("(no SQL: %s)", ch.Detail)
 	case KindFieldBackfillAdded, KindFieldBackfillRemoved, KindFieldBackfillChanged:
 		// The backfill modifier is metadata for `tide apply --backfill`;
 		// the schema doesn't change so no SQL is emitted in the legacy
@@ -743,8 +743,8 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 		// value moved, the operator runs ALTER TABLE RENAME themselves
 		// before re-applying. We surface the intent as a comment so the
 		// migration file is self-explaining.
-		up.linef("-- TABLE NAME CHANGED — manual ALTER TABLE RENAME required: %s", ch.Detail)
-		down.linef("-- TABLE NAME CHANGED — manual ALTER TABLE RENAME required: %s", ch.Detail)
+		up.commentf("TABLE NAME CHANGED — manual ALTER TABLE RENAME required: %s", ch.Detail)
+		down.commentf("TABLE NAME CHANGED — manual ALTER TABLE RENAME required: %s", ch.Detail)
 	}
 	up.blank()
 	down.blank()
@@ -1628,6 +1628,49 @@ func (s *sqlBuilder) line(line string) {
 
 func (s *sqlBuilder) linef(format string, args ...any) {
 	s.line(fmt.Sprintf(format, args...))
+}
+
+// commentf writes one `--` comment line, and guarantees it stays one line.
+//
+// # Why this is a security boundary and not formatting
+//
+// A `--` comment ends at the first newline, so ANY line terminator inside the
+// text ends the comment and puts whatever follows at top level, as SQL.
+//
+// The migration header says DO NOT EDIT BY HAND, and every comment here is
+// generated — but `Detail` carries author text verbatim: the CHECK expression,
+// the backfill expression, the index expression and its predicate. The DSL
+// lexer turns `\n` in a string literal into a real newline
+// (internal/dsl/lexer.go), so a declaration reaches this function already
+// carrying one. A review executed the whole chain on PostgreSQL 17.8:
+//
+//	total int check "total > 0 /*\n; DROP POLICY shop_doc_partition ON shop.doc; --*/"
+//
+// The expression parses as an ordinary CHECK — the newline is whitespace and
+// the block comment is stripped — so every validator in internal/dsl/sqlvalidate
+// passes it. Emitted, the second line was top-level SQL, and applying the
+// migration dropped the row-level security policy off the table.
+//
+// That is the exact capability the CHECK gate was written to remove, arriving
+// through the comment rather than through the constraint. So the neutralising
+// happens HERE, where every Detail channel converges, rather than in each
+// validator: a new `Kind` added later cannot forget it.
+//
+// Every control character goes, not just \n and \r: the set PostgreSQL's
+// scanner ends a comment on is not worth re-deriving, and nothing legitimate
+// in a schema declaration needs one.
+func (s *sqlBuilder) commentf(format string, args ...any) {
+	s.line("-- " + sanitizeComment(fmt.Sprintf(format, args...)))
+}
+
+// sanitizeComment replaces every control character with a space.
+func sanitizeComment(text string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, text)
 }
 
 func (s *sqlBuilder) blank() {

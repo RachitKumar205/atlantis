@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/storage/pg"
 )
 
@@ -58,4 +59,23 @@ func storedSQLAuditError(findings []error, require bool) error {
 	return fmt.Errorf("refusing to start: the stored schema contains SQL that can "+
 		"rebind the caller's tenant, and ATL_REQUIRE_TENANT_ISOLATION is set: %w",
 		errors.Join(findings...))
+}
+
+// partitionedEntities returns the ids of every entity declaring `partition by`.
+//
+// The boot and reload policy checks refuse when they cannot run, but only on a
+// schema that has something to protect: a deployment with no partitioned entity
+// gains nothing from a failed catalog probe stopping its start, and defaulting
+// to fatal there would break installs that use no such entity.
+func partitionedEntities(ir *dsl.IR) []string {
+	if ir == nil {
+		return nil
+	}
+	var out []string
+	for i := range ir.Entities {
+		if ir.Entities[i].PartitionField != "" {
+			out = append(out, ir.Entities[i].ID())
+		}
+	}
+	return out
 }

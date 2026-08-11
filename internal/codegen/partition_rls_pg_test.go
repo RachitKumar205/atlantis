@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+
+	"github.com/rachitkumar205/atlantis/internal/testsupport/pgcatalog"
 )
 
 // Executes the RLS the emitter generates for `partition by`, then attacks it
@@ -68,8 +70,9 @@ SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronames
 
 	cleanup := func() {
 		_, _ = admin.Exec(ctx, `DROP TABLE IF EXISTS atlantis.rlst_doc CASCADE`)
-		_, _ = admin.Exec(ctx, `DROP OWNED BY rls_tenant`)
-		_, _ = admin.Exec(ctx, `DROP ROLE IF EXISTS rls_tenant`)
+		pgcatalog.Exec(t, url,
+			`DROP OWNED BY rls_tenant`,
+			`DROP ROLE IF EXISTS rls_tenant`)
 	}
 	cleanup()
 	t.Cleanup(cleanup)
@@ -128,12 +131,13 @@ COMMIT;`); err != nil {
 
 	// A tenant role with the privileges a caller actually has: no superuser, no
 	// ownership, SELECT and INSERT on the table.
-	if _, err := admin.Exec(ctx, `
+	pgcatalog.Do(t, url, func(conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, `
 CREATE ROLE rls_tenant LOGIN PASSWORD 'probe' NOSUPERUSER NOCREATEDB NOCREATEROLE;
 GRANT USAGE ON SCHEMA atlantis TO rls_tenant;
-GRANT SELECT, INSERT ON atlantis.rlst_doc TO rls_tenant;`); err != nil {
-		t.Fatalf("create tenant role: %v", err)
-	}
+GRANT SELECT, INSERT ON atlantis.rlst_doc TO rls_tenant;`)
+		return err
+	})
 
 	// Parsed, not substituted. See replaceUserInfo — the substitution this
 	// replaced returned the URL unchanged for any DSN not spelled exactly
@@ -395,8 +399,9 @@ func TestTheGUCBasedPolicyLeaksAcrossTenants(t *testing.T) {
 
 	cleanup := func() {
 		_, _ = admin.Exec(ctx, `DROP TABLE IF EXISTS atlantis.guc_doc CASCADE`)
-		_, _ = admin.Exec(ctx, `DROP OWNED BY guc_tenant`)
-		_, _ = admin.Exec(ctx, `DROP ROLE IF EXISTS guc_tenant`)
+		pgcatalog.Exec(t, url,
+			`DROP OWNED BY guc_tenant`,
+			`DROP ROLE IF EXISTS guc_tenant`)
 	}
 	cleanup()
 	t.Cleanup(cleanup)

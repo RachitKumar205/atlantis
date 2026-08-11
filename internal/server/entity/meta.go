@@ -54,6 +54,20 @@ type entityMeta struct {
 	// worse than not caching. Making the outbox carry the tenant is the way
 	// back to a cache here.
 	cacheable bool
+	// partitioned is true when the entity declares `partition by`, so every
+	// statement against it must run inside a transaction with the caller's
+	// tenant bound.
+	//
+	// A resolved bool rather than a nil-check on entity: the first version of
+	// the dispatcher guarded on `meta.entity == nil`, a condition
+	// buildEntityMeta cannot produce, so the untaken branch silently disabled
+	// enforcement for an input that never arrives. A guard that cannot fire is
+	// indistinguishable from one that fires and finds nothing wrong.
+	partitioned bool
+	// sqlWriteBack reads a row back inside the transaction that wrote it.
+	// Same projection as sqlGet, without the soft-delete filter. See
+	// buildWriteBackSQL.
+	sqlWriteBack string
 	// sqlSelectInbound reads inboundCols for one row, FOR UPDATE. Used before
 	// an UPDATE to capture the pre-update parent key, so reparenting a child
 	// invalidates the parent it left as well as the one it joined.
@@ -143,9 +157,11 @@ func buildEntityMeta(e *dsl.Entity, ir *dsl.IR, inbound map[string][]inboundRule
 	meta.filterSpec = buildFilterSpec(e)
 
 	meta.sqlGet = buildGetSQL(e)
+	meta.sqlWriteBack = buildWriteBackSQL(e)
 	meta.sqlBatchGet = buildBatchGetSQL(e)
 	meta.sqlQueryPrefix = buildQueryPrefix(e)
 	meta.cacheable = !procWritten[e.ID()] && e.PartitionField == ""
+	meta.partitioned = e.PartitionField != ""
 	meta.inbound = inbound[e.ID()]
 	meta.inboundCols = inboundColumns(meta.inbound)
 	for _, name := range meta.inboundCols {

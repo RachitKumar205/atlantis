@@ -78,6 +78,8 @@ func buildSnapshot(ir *dsl.IR, contentHash string) (*entitySnapshot, error) {
 			inputCols: cq.Inputs,
 			argOrder:  argOrder,
 			timeoutMS: 2000,
+
+			partitioned: touchesPartitioned(ir, cq.Touches),
 		}
 
 		if cq.Output.AsEntityID != "" {
@@ -146,6 +148,7 @@ func buildSnapshot(ir *dsl.IR, contentHash string) (*entitySnapshot, error) {
 		}
 		pm.touched = sortedKeys(touched)
 		pm.invalidateParents = parentsOf(inbound, pm.touched)
+		pm.partitioned = touchesPartitioned(ir, pm.touched)
 
 		fd, err := buildCustomProcedureDescs(cp, ns)
 		if err != nil {
@@ -170,4 +173,23 @@ func sortedKeys(m map[string]struct{}) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// touchesPartitioned reports whether any of the named entities declares
+// `partition by`.
+//
+// Resolved once here rather than looked up per request, and deliberately an OR
+// across everything touched: a procedure that writes one partitioned entity and
+// one ordinary one still needs the tenant bound, because the policy on the
+// first applies to every statement in the transaction regardless of what else
+// the transaction does.
+func touchesPartitioned(ir *dsl.IR, ids []string) bool {
+	for _, id := range ids {
+		for i := range ir.Entities {
+			if ir.Entities[i].ID() == id && ir.Entities[i].PartitionField != "" {
+				return true
+			}
+		}
+	}
+	return false
 }

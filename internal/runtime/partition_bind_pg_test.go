@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/rachitkumar205/atlantis/internal/runtime"
+
+	"github.com/rachitkumar205/atlantis/internal/testsupport/pgcatalog"
 )
 
 // A thin adapter so the test can hand a real pgx transaction to BindPartition,
@@ -47,11 +49,20 @@ func TestBindPartitionConfinesEverythingInTheTransaction(t *testing.T) {
 
 	clean := func() {
 		_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS atlantis.bindpart_doc`)
-		_, _ = pool.Exec(ctx, `DROP OWNED BY bindpart_app`)
-		_, _ = pool.Exec(ctx, `DROP ROLE IF EXISTS bindpart_app`)
+		pgcatalog.Exec(t, url,
+			`DROP OWNED BY bindpart_app`,
+			`DROP ROLE IF EXISTS bindpart_app`)
 	}
 	clean()
 	t.Cleanup(clean)
+
+	// Catalog writes first, under the shared lock. CREATE ROLE and
+	// GRANT ON SCHEMA update pg_authid and pg_namespace; two packages
+	// doing that at once fail with `tuple concurrently updated`.
+	pgcatalog.Exec(t, url,
+		`CREATE ROLE bindpart_app NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`,
+		`GRANT USAGE ON SCHEMA atlantis TO bindpart_app`,
+	)
 
 	for _, sql := range []string{
 		`CREATE TABLE atlantis.bindpart_doc (id int primary key, tenant text not null, body text)`,
@@ -64,8 +75,6 @@ func TestBindPartitionConfinesEverythingInTheTransaction(t *testing.T) {
 		   WITH CHECK (tenant = atlantis.current_partition())`,
 		// Must be a role RLS applies to, or this measures nothing — the pool's
 		// own role is a superuser and sees straight through the policy.
-		`CREATE ROLE bindpart_app NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`,
-		`GRANT USAGE ON SCHEMA atlantis TO bindpart_app`,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON atlantis.bindpart_doc TO bindpart_app`,
 	} {
 		if _, err := pool.Exec(ctx, sql); err != nil {

@@ -40,18 +40,25 @@
 -- 0021 closed.
 --
 -- It does not ship alone. Two changes land with it and are what make it safe:
--- (the first covers three separate SQL surfaces, which is the part that was
--- got wrong first time round)
 --
 --   1. internal/dsl/sqlvalidate rejects set_config() and set_partition() in
---      EVERY caller-authored SQL surface: query bodies, procedure steps, CHECK
---      expressions and partial-index predicates. The statement gate is already
---      a permit-list, so `SET` was refused before this; the function-call form
---      was not. The first version of this gate covered only query and
---      procedure bodies, and an adversarial review broke it in minutes: a
---      CHECK expression is emitted verbatim into DDL, PostgreSQL does not
---      require it to be IMMUTABLE, and a set_config planted there fires on
---      every INSERT and rebinds a transaction that was correctly bound.
+--      five caller-authored SQL surfaces: query bodies, procedure steps, CHECK
+--      expressions (table-level and per-field), partial-index predicates, and
+--      `default raw`. The statement gate is already a permit-list, so `SET` was
+--      refused before this; the function-call form was not. The first version
+--      covered two of the five, and a review broke it in minutes: a CHECK
+--      expression is emitted verbatim into DDL, PostgreSQL does not require it
+--      to be IMMUTABLE, and a set_config planted there fires on every INSERT
+--      and rebinds a transaction that was correctly bound.
+--
+--      Seven, in fact: `backfill` expressions, spliced verbatim into a live
+--      UPDATE by internal/backfill/splicer.go, and `index by expr`, emitted
+--      verbatim into CREATE INDEX. Both are gated now. The second was the worst
+--      of the seven — its escape appended whole statements, one of which
+--      dropped the very policy every other check here protects.
+--
+--      Do not read this list as exhaustive. It has been called exhaustive three
+--      times and been wrong three times.
 --   2. internal/storage/pg clears the parameter as each connection is opened,
 --      so a value cannot arrive from a server default, a role default, or a
 --      pooler handing back a backend somebody else used. (Transaction-locality

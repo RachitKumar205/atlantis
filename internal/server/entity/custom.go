@@ -29,6 +29,10 @@ type customQueryMeta struct {
 	outputCols []dsl.QueryParam // populated when Output.Columns is set
 	asEntity   bool             // true when Output.AsEntityID is set
 
+	// partitioned is true when any touched entity declares `partition by`, so
+	// the query must run inside a tenant-bound transaction.
+	partitioned bool
+
 	// Proto descriptors for the request/response messages.
 	requestDesc  protoreflect.MessageDescriptor
 	responseDesc protoreflect.MessageDescriptor
@@ -75,6 +79,10 @@ type customProcMeta struct {
 	responseDesc protoreflect.MessageDescriptor
 
 	timeoutMS int
+
+	// partitioned is true when any touched entity declares `partition by`, so
+	// the procedure's transaction must carry the caller's tenant.
+	partitioned bool
 }
 
 // buildCustomProcedureDescs builds proto descriptors for one procedure.
@@ -190,6 +198,17 @@ func (s *Server) executeCustomProcedureWithReq(ctx context.Context, pm *customPr
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	// Bind before the first step. A procedure's steps are caller-authored SQL
+	// running in one transaction, which is exactly the surface `partition by`
+	// delegates to the database so that no step has to remember a predicate —
+	// and that delegation is void unless the tenant is bound before any step
+	// executes.
+	if pm.partitioned {
+		if err := runtime.BindPartition(ctx, tx); err != nil {
+			return nil, err
+		}
+	}
 
 	var rowsAffected int64
 	for _, step := range pm.steps {
@@ -429,45 +448,50 @@ func (s *Server) executeCustomQueryWithReq(ctx context.Context, cqm *customQuery
 		args = append(args, customBindValue(req, fd, inputType))
 	}
 
-	rows, err := s.pool.Query(ctx, cqm.sql, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	resp := dynamicpb.NewMessage(cqm.responseDesc)
 
-	if cqm.asEntity && cqm.entityMeta != nil {
-		// Entity output: scan into entity messages.
-		entitiesFD := cqm.responseDesc.Fields().ByName("entities")
-		if entitiesFD == nil {
-			return resp, nil
+	// The whole read and scan run inside one scope. A custom query body is
+	// opaque author text with nowhere to inject a tenant predicate, which is
+	// the case `partition by` exists to cover — so it must reach the database
+	// with the tenant already bound, or the policy is the only thing standing
+	// between it and every tenant's rows.
+	if err := s.scopedReadIf(ctx, cqm.partitioned, func(q querier) error {
+		rows, err := q.Query(ctx, cqm.sql, args...)
+		if err != nil {
+			return err
 		}
-		entities := resp.Mutable(entitiesFD).List()
-		for rows.Next() {
-			entity, err := scanRow(cqm.entityMeta, rows)
-			if err != nil {
-				return nil, err
-			}
-			entities.Append(protoreflect.ValueOfMessage(entity))
-		}
-	} else if cqm.rowDesc != nil {
-		// Column output: scan into Row messages.
-		rowsFD := cqm.responseDesc.Fields().ByName("rows")
-		if rowsFD == nil {
-			return resp, nil
-		}
-		rowList := resp.Mutable(rowsFD).List()
-		for rows.Next() {
-			row, err := scanCustomRow(cqm, rows)
-			if err != nil {
-				return nil, err
-			}
-			rowList.Append(protoreflect.ValueOfMessage(row))
-		}
-	}
+		defer rows.Close()
 
-	if err := rows.Err(); err != nil {
+		switch {
+		case cqm.asEntity && cqm.entityMeta != nil:
+			entitiesFD := cqm.responseDesc.Fields().ByName("entities")
+			if entitiesFD == nil {
+				return nil
+			}
+			entities := resp.Mutable(entitiesFD).List()
+			for rows.Next() {
+				entity, err := scanRow(cqm.entityMeta, rows)
+				if err != nil {
+					return err
+				}
+				entities.Append(protoreflect.ValueOfMessage(entity))
+			}
+		case cqm.rowDesc != nil:
+			rowsFD := cqm.responseDesc.Fields().ByName("rows")
+			if rowsFD == nil {
+				return nil
+			}
+			rowList := resp.Mutable(rowsFD).List()
+			for rows.Next() {
+				row, err := scanCustomRow(cqm, rows)
+				if err != nil {
+					return err
+				}
+				rowList.Append(protoreflect.ValueOfMessage(row))
+			}
+		}
+		return rows.Err()
+	}); err != nil {
 		return nil, err
 	}
 	return resp, nil

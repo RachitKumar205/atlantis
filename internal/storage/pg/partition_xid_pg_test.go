@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/rachitkumar205/atlantis/internal/testsupport/pgcatalog"
 )
 
 // Reading a partitioned entity must not consume a transaction ID.
@@ -42,11 +44,20 @@ func TestPartitionReadDoesNotConsumeTransactionIDs(t *testing.T) {
 
 	clean := func() {
 		_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS atlantis.xidburn`)
-		_, _ = pool.Exec(ctx, `DROP OWNED BY xidburn_reader`)
-		_, _ = pool.Exec(ctx, `DROP ROLE IF EXISTS xidburn_reader`)
+		pgcatalog.Exec(t, testDSN(t),
+			`DROP OWNED BY xidburn_reader`,
+			`DROP ROLE IF EXISTS xidburn_reader`)
 	}
 	clean()
 	t.Cleanup(clean)
+
+	// Catalog writes first, under the shared lock. CREATE ROLE and
+	// GRANT ON SCHEMA update pg_authid and pg_namespace; two packages
+	// doing that at once fail with `tuple concurrently updated`.
+	pgcatalog.Exec(t, testDSN(t),
+		`CREATE ROLE xidburn_reader NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`,
+		`GRANT USAGE ON SCHEMA atlantis TO xidburn_reader`,
+	)
 
 	for _, sql := range []string{
 		`CREATE TABLE atlantis.xidburn (id int primary key, tenant text not null)`,
@@ -60,8 +71,6 @@ func TestPartitionReadDoesNotConsumeTransactionIDs(t *testing.T) {
 		// current_partition() is never called, and the measurement is zero
 		// whether or not the bug is present. That is not a hypothetical: the
 		// first version of this test passed with the defect reintroduced.
-		`CREATE ROLE xidburn_reader NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`,
-		`GRANT USAGE ON SCHEMA atlantis TO xidburn_reader`,
 		`GRANT SELECT ON atlantis.xidburn TO xidburn_reader`,
 	} {
 		if _, err := pool.Exec(ctx, sql); err != nil {

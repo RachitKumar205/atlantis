@@ -20,6 +20,38 @@ jobs:
     name: build + test
     runs-on: ubuntu-latest
 
+    # PostgreSQL for the pg-gated tests.
+    #
+    # Without it, ATLANTIS_TEST_PG is unset, every _pg_test.go calls t.Skip, and
+    # a skip counts as a pass. That is not a small gap: the live proof that
+    # `partition by` isolates tenants at all — the hostile-SQL suite, the
+    # zero-transaction-ID property, the connect-time clear, the re-appliability
+    # of the emitted DDL — ran only when somebody ran it by hand. Three
+    # adversarial reviews found defects in that work; none of them could have
+    # been caught by CI as it stood.
+    #
+    # -oss is the Apache-2.0 build, matching the migration-safety job and
+    # production. pg17 rather than pg16: every measurement these tests assert
+    # was taken on 17.8, and a claim verified on one major version is not
+    # evidence about another.
+    services:
+      postgres:
+        image: timescale/timescaledb-ha:pg17-oss
+        env:
+          POSTGRES_USER: atlantis
+          POSTGRES_PASSWORD: atlantis
+          POSTGRES_DB: atlantis
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      ATLANTIS_TEST_PG: postgres://atlantis:atlantis@localhost:5432/atlantis?sslmode=disable
+      PG_URL: postgres://atlantis:atlantis@localhost:5432/atlantis?sslmode=disable
+
     steps:
       - uses: actions/checkout@v4
 
@@ -48,7 +80,67 @@ jobs:
         # for the same reason and no longer needs to be: it imports the
         # runtime IR dispatcher (internal/server/entity), not gen/go/server,
         # so `go list -deps ./cmd/server` names no gen package.
-        run: go vet ./cmd/server ./cmd/tide ./cmd/tidectl ./internal/...
+        run: go vet ./cmd/server ./cmd/tide ./cmd/tidectl ./internal/... ./jobs/...
+
+      - name: apply infra migrations
+        # The pg-gated tests need atlantis.current_partition() and the rest of
+        # the infra schema. Without this they skip on a database that exists,
+        # which is the same silent pass as having no database at all.
+        run: |
+          curl -sSL https://github.com/golang-migrate/migrate/releases/latest/download/migrate.linux-amd64.tar.gz | tar xz
+          sudo mv migrate /usr/local/bin/migrate
+          migrate -path ./migrations/infra -database "$PG_URL&x-migrations-table=atlantis_schema_migrations_infra" up
+
+      - name: confirm the database tests are not skipping
+        # A skip is a pass, so "the suite is green" says nothing about whether
+        # any of this ran.
+        #
+        # Naming one test was not enough: a review counted 26 files gated on
+        # ATLANTIS_TEST_PG, and the two that prove this feature end to end were
+        # not among the pinned ones. Both could skip with CI green.
+        #
+        # So: the fixture must be present, every named test must report PASS,
+        # and the whole gated set must record ZERO skips. The last one is what
+        # keeps this honest as tests are added — a new pg test that silently
+        # skips fails the build instead of being invisible.
+        run: |
+          set -euo pipefail
+          psql "$PG_URL" -tAc "SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname='atlantis' AND p.proname='current_partition'" | grep -q 1
+
+          for spec in \
+            "./internal/codegen/:TestPartitionRLSIsolatesTenantsAgainstHostileSQL" \
+            "./internal/codegen/:TestPartitionBindConsumesNoTransactionID" \
+            "./internal/codegen/:TestPartitionDiscriminatorNeverReturnsEmptyString" \
+            "./internal/server/entity/:TestPartitionEndToEnd" \
+            "./internal/storage/pg/:TestVerifyPartitionPolicies" \
+            "./internal/storage/pg/:TestTenantResetAtConnect" \
+            "./internal/runtime/:TestBindPartitionConfinesEverythingInTheTransaction" ; do
+            pkg="${spec%%:*}"; test="${spec##*:}"
+            echo "== $pkg $test"
+            go test "$pkg" -run "^${test}$" -count=1 -v 2>&1 | tee /tmp/pin.txt
+            grep -q -- "--- PASS: ${test}" /tmp/pin.txt
+          done
+
+          # No test may skip FOR WANT OF THE DATABASE. A skip counts as a pass,
+          # so a new pg-gated test that silently skips has to fail the build
+          # rather than be invisible.
+          #
+          # Scoped to the database reason, not to every skip. A blanket
+          # `grep -- "--- SKIP:"` was written first and would have failed on
+          # every runner from the first push: /schema/ is gitignored with zero
+          # tracked files, so the .atl-corpus tests skip on a fresh checkout and
+          # not on a dev machine that has the directory. It looked verified
+          # locally and could never have passed in CI — and the cheapest repair
+          # would have been deleting this check, which is the one part of the
+          # database work that keeps CI honest as tests are added.
+          go test ./cmd/server ./cmd/tide ./cmd/tidectl ./internal/... ./jobs/... -count=1 -v 2>&1 | tee /tmp/all.txt
+          if grep -A2 -- "--- SKIP:" /tmp/all.txt | grep -q "ATLANTIS_TEST_PG"; then
+            echo "::error::a test skipped for want of the database, with the database available"
+            grep -B1 -A2 -- "--- SKIP:" /tmp/all.txt | grep -B2 "ATLANTIS_TEST_PG"
+            exit 1
+          fi
+          echo "skips for want of the database: none"
+          grep -c -- "--- SKIP:" /tmp/all.txt || true
 
       - name: unit tests with race detector
         # cmd/server carries the source-level tests for things only
@@ -66,7 +158,7 @@ jobs:
         # package this close to a limit does not fail reproducibly.
         # Raised rather than tuned to the current number, since the suite
         # only grows.
-        run: go test -race -timeout=25m ./cmd/server ./cmd/tide ./cmd/tidectl ./internal/...
+        run: go test -race -timeout=25m ./cmd/server ./cmd/tide ./cmd/tidectl ./internal/... ./jobs/...
 
       - name: codegen freshness
         # Catches "edited .atl but forgot to regenerate." If make codegen

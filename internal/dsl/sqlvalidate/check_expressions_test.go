@@ -110,6 +110,71 @@ func TestValidateEntityExpressions_AcceptsOrdinaryChecks(t *testing.T) {
 	}
 }
 
+// Declarations PostgreSQL accepts, through the real entry point.
+//
+// The gate refuses anything it cannot parse, and AuditForbiddenCalls runs it
+// over the ALREADY-STORED IR at boot, where a refusal is fatal under
+// ATL_REQUIRE_TENANT_ISOLATION. So a false rejection does not fail a `tide
+// apply` — it stops a server that started yesterday from starting today, over
+// a constraint the database has been enforcing for months. Both shapes below
+// were rejected: named-parameter rewriting is applied before the parse, and it
+// was not aware of dollar-quoting or of comments.
+//
+// Note the contrast with auditBody, which deliberately SKIPS an unparseable
+// stored query body for exactly this reason. The entity path did not.
+//
+// A trailing `--` comment is NOT in this list: see the test below.
+func TestValidateEntityExpressions_AcceptsDollarQuotesAndComments(t *testing.T) {
+	e := &dsl.Entity{
+		Name: "Person", Namespace: "hr",
+		Fields: []dsl.Field{
+			{Name: "email", Type: dsl.FieldType{Name: "text"}},
+			{Name: "age", Type: dsl.FieldType{Name: "int"}, Check: "age > 0"},
+		},
+		Checks: []dsl.TableCheck{
+			{Name: "ck_at", Expr: "position($tag$@$tag$ in email) > 0"},
+			{Name: "ck_dd", Expr: "email <> $$$$"},
+			{Name: "ck_cmt", Expr: "length(email) > 3 /* don't allow stubs */"},
+		},
+		Indexes: []dsl.Index{{
+			Kind:   dsl.IndexBtree,
+			Fields: []dsl.IndexField{{Expr: "position($tag$@$tag$ in email)", IsExpr: true}},
+		}},
+	}
+	if err := ValidateEntityExpressions(e); err != nil {
+		t.Errorf("rejected constraints PostgreSQL accepts: %v.\nThis refuses boot "+
+			"and every hot reload on a healthy deployment", err)
+	}
+}
+
+// A trailing `--` comment is rejected, and that is correct.
+//
+// It looks like the same false-rejection class as the dollar-quote above, and
+// it is not. The check is emitted inline — `CHECK (<expr>)` on one line — so
+// the comment swallows the closing parenthesis. PostgreSQL rejects the emitted
+// text with the identical "syntax error at end of input":
+//
+//	CREATE TABLE t (age int, CONSTRAINT ck CHECK (age > 0 -- nope));
+//	ERROR:  syntax error at end of input
+//
+// The gate is agreeing with the database rather than contradicting it, which
+// is the whole point of parsing in the emitted shape. Block comments are
+// accepted because they close.
+func TestValidateEntityExpressions_RejectsTrailingLineComment(t *testing.T) {
+	e := &dsl.Entity{
+		Name: "Person", Namespace: "hr",
+		Fields: []dsl.Field{
+			{Name: "age", Type: dsl.FieldType{Name: "int"},
+				Check: "age > 0 -- don't allow zero"},
+		},
+	}
+	if err := ValidateEntityExpressions(e); err == nil {
+		t.Error("accepted a check whose trailing line comment removes the closing " +
+			"parenthesis. PostgreSQL rejects the emitted DDL, so accepting it here " +
+			"moves the failure from `tide apply` to the migration")
+	}
+}
+
 // An entity with nothing to check must not error.
 func TestValidateEntityExpressions_QuietOnEmpty(t *testing.T) {
 	if err := ValidateEntityExpressions(&dsl.Entity{Name: "E", Namespace: "n"}); err != nil {
@@ -172,5 +237,115 @@ func TestValidateEntityExpressions_RejectsExpressionsThatEscapeTheConstraint(t *
 					tc.expr)
 			}
 		})
+	}
+}
+
+// `default raw "<sql>"` is the fifth caller-authored SQL surface.
+//
+// codegen emits it into the column definition, and internal/server/entity
+// inlines it into every generated INSERT as `COALESCE($n::type, <raw expr>)`.
+// So it runs on every insert that omits the column, not only at CREATE TABLE.
+// An adversarial review put set_config in one and rebound the tenant
+// mid-transaction on PostgreSQL 17.8 while this gate reported nothing.
+func TestValidateEntityExpressions_RejectsSetConfigInRawDefaults(t *testing.T) {
+	for _, expr := range []string{
+		`set_config('atlantis.tenant','victim',true)`,
+		`coalesce(set_config('atlantis.tenant','victim',true), 'x')`,
+		`atlantis.set_partition('victim')`,
+	} {
+		e := &dsl.Entity{
+			Name: "Doc", Namespace: "shop", PartitionField: "tenant",
+			Fields: []dsl.Field{
+				{Name: "tenant", Type: dsl.FieldType{Name: "text"}, NotNull: true},
+				{
+					Name: "body", Type: dsl.FieldType{Name: "text"},
+					Default: &dsl.Default{Kind: dsl.DefaultIRRaw, Str: expr},
+				},
+			},
+		}
+		assertRejected(t, ValidateEntityExpressions(e), expr)
+	}
+}
+
+// Ordinary raw defaults must still pass, or the gate is a grammar restriction.
+func TestValidateEntityExpressions_AcceptsOrdinaryRawDefaults(t *testing.T) {
+	for _, expr := range []string{"now()", "gen_random_uuid()", "0", "''::text"} {
+		e := &dsl.Entity{
+			Name: "Doc", Namespace: "shop",
+			Fields: []dsl.Field{{
+				Name: "created_at", Type: dsl.FieldType{Name: "timestamptz"},
+				Default: &dsl.Default{Kind: dsl.DefaultIRRaw, Str: expr},
+			}},
+		}
+		if err := ValidateEntityExpressions(e); err != nil {
+			t.Errorf("rejected an ordinary raw default %q: %v", expr, err)
+		}
+	}
+}
+
+// `index by expr "<sql>"` is emitted verbatim into CREATE INDEX and was gated
+// by nothing at all.
+//
+// internal/dsl/ir.go says outright that PostgreSQL validates it at migration
+// time. That is not a gate: the escape is a STATEMENT boundary, not a bad
+// expression, so PostgreSQL applies it happily. A review closed the emitted
+// parenthesis and appended DDL that drops the tenant-isolation policy — the
+// policy every other check in this package exists to protect.
+func TestValidateEntityExpressions_RejectsIndexExpressionEscapes(t *testing.T) {
+	for _, tc := range []struct{ name, expr string }{
+		{
+			// The reviewer's payload, generalised.
+			name: "closes CREATE INDEX and drops the policy",
+			expr: `lower(email)); DROP POLICY IF EXISTS p ON atlantis.doc; CREATE INDEX zz ON atlantis.doc ((1`,
+		},
+		{
+			name: "closes CREATE INDEX and appends any DDL",
+			expr: `lower(email)); ALTER TABLE atlantis.doc DISABLE ROW LEVEL SECURITY; CREATE INDEX zz ON atlantis.doc ((1`,
+		},
+		{
+			name: "rebinds the tenant from an index expression",
+			expr: `coalesce(set_config('atlantis.tenant','victim',true), email)`,
+		},
+		{
+			name: "plain syntax error",
+			expr: `lower(email`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &dsl.Entity{
+				Name: "Doc", Namespace: "shop",
+				Fields: []dsl.Field{{Name: "email", Type: dsl.FieldType{Name: "text"}}},
+				Indexes: []dsl.Index{{
+					Kind:   dsl.IndexBtree,
+					Fields: []dsl.IndexField{{Expr: tc.expr, IsExpr: true}},
+				}},
+			}
+			if err := ValidateEntityExpressions(e); err == nil {
+				t.Errorf("accepted an index expression that does not stay inside its "+
+					"own CREATE INDEX. atlantis emits it verbatim:\n  %s", tc.expr)
+			}
+		})
+	}
+}
+
+// Ordinary index expressions must still pass.
+func TestValidateEntityExpressions_AcceptsOrdinaryIndexExpressions(t *testing.T) {
+	for _, expr := range []string{
+		`lower(email)`,
+		`(email || '-' || status)`,
+		`coalesce(status, 'draft')`,
+		`date_trunc('day', created_at)`,
+	} {
+		e := &dsl.Entity{
+			Name: "Doc", Namespace: "shop",
+			Fields: []dsl.Field{{Name: "email", Type: dsl.FieldType{Name: "text"}}},
+			Indexes: []dsl.Index{{
+				Kind:   dsl.IndexBtree,
+				Fields: []dsl.IndexField{{Expr: expr, IsExpr: true}},
+			}},
+		}
+		if err := ValidateEntityExpressions(e); err != nil {
+			t.Errorf("rejected an ordinary index expression %q: %v", expr, err)
+		}
 	}
 }

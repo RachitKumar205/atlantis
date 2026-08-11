@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/rachitkumar205/atlantis/internal/testsupport/pgcatalog"
 )
 
 // replaceUserInfo swaps the credentials in a libpq URL, keeping everything
@@ -152,8 +154,9 @@ func TestPartitionDiscriminatorNeverReturnsEmptyString(t *testing.T) {
 
 	cleanup := func() {
 		_, _ = conn.Exec(ctx, `DROP TABLE IF EXISTS atlantis.emptytenant_doc CASCADE`)
-		_, _ = conn.Exec(ctx, `DROP OWNED BY emptytenant_probe`)
-		_, _ = conn.Exec(ctx, `DROP ROLE IF EXISTS emptytenant_probe`)
+		pgcatalog.Exec(t, url,
+			`DROP OWNED BY emptytenant_probe`,
+			`DROP ROLE IF EXISTS emptytenant_probe`)
 	}
 	cleanup()
 	t.Cleanup(cleanup)
@@ -174,12 +177,13 @@ CREATE POLICY p ON atlantis.emptytenant_doc
 		t.Fatalf("seed: %v", err)
 	}
 
-	if _, err := conn.Exec(ctx, `
+	pgcatalog.Do(t, url, func(lc *pgx.Conn) error {
+		_, err := lc.Exec(ctx, `
 CREATE ROLE emptytenant_probe LOGIN PASSWORD 'probe' NOSUPERUSER NOBYPASSRLS;
 GRANT USAGE ON SCHEMA atlantis TO emptytenant_probe;
-GRANT SELECT ON atlantis.emptytenant_doc TO emptytenant_probe;`); err != nil {
-		t.Fatalf("create role: %v", err)
-	}
+GRANT SELECT ON atlantis.emptytenant_doc TO emptytenant_probe;`)
+		return err
+	})
 
 	probeURL := replaceUserInfo(url, "emptytenant_probe:probe")
 	probe, err := pgx.Connect(ctx, probeURL)

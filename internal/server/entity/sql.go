@@ -22,6 +22,23 @@ func buildGetSQL(e *dsl.Entity) string {
 	return fmt.Sprintf("SELECT %s FROM %s WHERE %s%s", selectList, table, pkWhere, softFilter)
 }
 
+// buildWriteBackSQL renders the same projection as buildGetSQL with NO
+// soft-delete filter.
+//
+// Create and Update read the row back inside their own transaction, and they
+// read a row they just wrote — so its existence is not in question and the
+// soft-delete filter has nothing to decide. Applying it here loses writes:
+// sqlUpdate carries no such filter and the soft-delete column is not excluded
+// from the update set, so updating an already-soft-deleted row (or soft-deleting
+// through Update) made the read-back return nothing, and the error propagated
+// before the commit. The write was rolled back, the caller saw an error, and a
+// client that retries on error looped forever.
+func buildWriteBackSQL(e *dsl.Entity) string {
+	selectList := strings.Join(schema.QuoteAll(schema.FieldColumns(e)), ", ")
+	return fmt.Sprintf("SELECT %s FROM %s WHERE %s",
+		selectList, schema.QualifiedTable(e), pkWhereClause(e, 1))
+}
+
 // buildBatchGetSQL renders:
 //
 //	SELECT "col1", "col2", ... FROM "schema"."table" WHERE "pk" = ANY($1) [AND "deleted_at" IS NULL]
@@ -120,7 +137,27 @@ func buildUpdateSQL(e *dsl.Entity, extraReturning []string) string {
 	setClause := strings.Join(sets, ", ")
 	pkWhere := pkWhereClause(e, idx+1)
 
-	stmt := fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, setClause, pkWhere)
+	// Soft-deleted rows are not updatable, for the same reason they are not
+	// readable: `soft_delete by` means the row is gone as far as the API is
+	// concerned, and every generated read already filters it out.
+	//
+	// Without this, Update was an undelete. The soft-delete column is in the
+	// SET list above, so a caller holding the primary key could clear it and
+	// bring back a row that Delete had removed — on entities where soft-delete
+	// means revoked or deactivated, that is a privilege-restore primitive. It
+	// became reachable when the post-write read-back moved inside the
+	// transaction and stopped filtering: before, the filtered read-back
+	// returned nothing and the whole transaction rolled back, so the row
+	// stayed deleted by accident rather than by rule.
+	//
+	// handleUpdate already maps zero rows affected to ErrNotFound, so a caller
+	// updating a deleted row now gets the same answer Get gives it.
+	softFilter := ""
+	if e.SoftDeleteField != "" {
+		softFilter = " AND " + schema.QuoteIdent(e.SoftDeleteField) + " IS NULL"
+	}
+
+	stmt := fmt.Sprintf("UPDATE %s SET %s WHERE %s%s", table, setClause, pkWhere, softFilter)
 	if len(extraReturning) > 0 {
 		stmt += " RETURNING " + strings.Join(schema.QuoteAll(extraReturning), ", ")
 	}

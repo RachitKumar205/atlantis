@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/rachitkumar205/atlantis/internal/testsupport/pgcatalog"
 )
 
 // The claim `partition by` makes is that PostgreSQL enforces tenant isolation,
@@ -22,6 +24,17 @@ import (
 //
 //	ATLANTIS_TEST_PG=postgres://atlantis:atlantis@localhost:5432/atlantis?sslmode=disable \
 //	  go test ./internal/storage/pg/ -run RolePriv -v
+
+// testDSN returns the database URL, or skips. The catalog-lock helper needs it
+// by value, and rolePrivPool only hands back a pool.
+func testDSN(t *testing.T) string {
+	t.Helper()
+	url := os.Getenv("ATLANTIS_TEST_PG")
+	if url == "" {
+		t.Skip("set ATLANTIS_TEST_PG to exercise this test")
+	}
+	return url
+}
 
 func rolePrivPool(t *testing.T) (*pgxpool.Pool, context.Context) {
 	t.Helper()
@@ -50,10 +63,24 @@ func TestRolePrivilegesDecideWhetherForcedRLSMeansAnything(t *testing.T) {
 
 	clean := func() {
 		_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS atlantis.rolepriv_docs`)
-		_, _ = pool.Exec(ctx, `DROP ROLE IF EXISTS rolepriv_tenant`)
+		// DROP OWNED BY first, or the DROP fails while the role still holds
+		// the schema-level USAGE grant. pgcatalog.Exec LOGS a failure rather
+		// than failing the test, so without this a LOGIN role with USAGE on
+		// atlantis is left in the shared database and the test reports PASS.
+		pgcatalog.Exec(t, testDSN(t),
+			`DROP OWNED BY rolepriv_tenant`,
+			`DROP ROLE IF EXISTS rolepriv_tenant`)
 	}
 	clean()
 	t.Cleanup(clean)
+
+	// Catalog writes first, under the shared lock. CREATE ROLE and
+	// GRANT ON SCHEMA update pg_authid and pg_namespace; two packages
+	// doing that at once fail with `tuple concurrently updated`.
+	pgcatalog.Exec(t, testDSN(t),
+		`CREATE ROLE rolepriv_tenant LOGIN PASSWORD 'x' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`,
+		`GRANT USAGE ON SCHEMA atlantis TO rolepriv_tenant`,
+	)
 
 	for _, sql := range []string{
 		`CREATE TABLE atlantis.rolepriv_docs (id int primary key, tenant text not null, body text)`,
@@ -130,21 +157,28 @@ func TestRestrictedRoleIsIsolatedByTheSamePolicy(t *testing.T) {
 
 	clean := func() {
 		_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS atlantis.rolepriv_iso`)
-		_, _ = pool.Exec(ctx, `DROP OWNED BY rolepriv_tenant`)
-		_, _ = pool.Exec(ctx, `DROP ROLE IF EXISTS rolepriv_tenant`)
+		pgcatalog.Exec(t, testDSN(t),
+			`DROP OWNED BY rolepriv_tenant`,
+			`DROP ROLE IF EXISTS rolepriv_tenant`)
 	}
 	clean()
 	t.Cleanup(clean)
 
-	for _, sql := range []string{
+	// Catalog writes under the shared lock; the table DDL below does not need
+	// it. Each test creates the roles it uses, in its own body — hoisting them
+	// somewhere shared is what broke this file once already.
+	pgcatalog.Exec(t, testDSN(t),
 		`CREATE ROLE rolepriv_tenant LOGIN PASSWORD 'x' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`,
+		`GRANT USAGE ON SCHEMA atlantis TO rolepriv_tenant`,
+	)
+
+	for _, sql := range []string{
 		`CREATE TABLE atlantis.rolepriv_iso (id int primary key, tenant text not null, body text)`,
 		`INSERT INTO atlantis.rolepriv_iso VALUES (1,'acme','acme secret'), (2,'globex','globex secret')`,
 		`ALTER TABLE atlantis.rolepriv_iso ENABLE ROW LEVEL SECURITY`,
 		`ALTER TABLE atlantis.rolepriv_iso FORCE ROW LEVEL SECURITY`,
 		`CREATE POLICY rolepriv_iso_pol ON atlantis.rolepriv_iso
 		   USING (tenant = atlantis.current_partition())`,
-		`GRANT USAGE ON SCHEMA atlantis TO rolepriv_tenant`,
 		`GRANT SELECT ON atlantis.rolepriv_iso TO rolepriv_tenant`,
 	} {
 		if _, err := pool.Exec(ctx, sql); err != nil {
@@ -230,21 +264,25 @@ func TestBypassRLSAloneIsCaught(t *testing.T) {
 		// DROP OWNED BY first: DROP ROLE refuses while the role holds any
 		// grant, and the schema-level USAGE outlives the table. Skipping this
 		// leaves the role behind and the next run fails on "already exists".
-		_, _ = pool.Exec(ctx, `DROP OWNED BY rolepriv_bypasser`)
-		_, _ = pool.Exec(ctx, `DROP ROLE IF EXISTS rolepriv_bypasser`)
+		pgcatalog.Exec(t, testDSN(t),
+			`DROP OWNED BY rolepriv_bypasser`,
+			`DROP ROLE IF EXISTS rolepriv_bypasser`)
 	}
 	clean()
 	t.Cleanup(clean)
 
-	for _, sql := range []string{
+	pgcatalog.Exec(t, testDSN(t),
 		`CREATE ROLE rolepriv_bypasser LOGIN PASSWORD 'x' NOSUPERUSER BYPASSRLS NOCREATEDB NOCREATEROLE`,
+		`GRANT USAGE ON SCHEMA atlantis TO rolepriv_bypasser`,
+	)
+
+	for _, sql := range []string{
 		`CREATE TABLE atlantis.rolepriv_byp (id int primary key, tenant text not null)`,
 		`INSERT INTO atlantis.rolepriv_byp VALUES (1,'acme'), (2,'globex')`,
 		`ALTER TABLE atlantis.rolepriv_byp ENABLE ROW LEVEL SECURITY`,
 		`ALTER TABLE atlantis.rolepriv_byp FORCE ROW LEVEL SECURITY`,
 		`CREATE POLICY rolepriv_byp_pol ON atlantis.rolepriv_byp
 		   USING (tenant = atlantis.current_partition())`,
-		`GRANT USAGE ON SCHEMA atlantis TO rolepriv_bypasser`,
 		`GRANT SELECT ON atlantis.rolepriv_byp TO rolepriv_bypasser`,
 	} {
 		if _, err := pool.Exec(ctx, sql); err != nil {

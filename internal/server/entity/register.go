@@ -21,6 +21,8 @@ type Server struct {
 	cache      runtime.Cache
 	outbox     runtime.Outbox
 	queryCache *queryresult.Cache
+	// onReload verifies a new IR before it becomes live. See Reload.
+	onReload func(*dsl.IR) error
 	// reader is the read-through cache path. Nil disables caching entirely,
 	// which is what the sandbox and most tests want.
 	//
@@ -76,16 +78,45 @@ func (s *Server) Register(grpcSrv *grpc.Server, ir *dsl.IR) error {
 	return nil
 }
 
+// OnReload, when set, is called with the new IR before the snapshot is swapped
+// in. A non-nil error abandons the reload and leaves the old snapshot serving.
+//
+// It exists for the partition-policy check. That check runs at boot and asks
+// the database whether every entity declaring `partition by` has an enforced
+// policy on its table — a question the schema cannot answer, because the clause
+// is emitted on CREATE TABLE only and no differ reads it. Boot is not enough:
+// a checkpoint that adds `partition by` to an existing entity arrives at a
+// RUNNING server through LISTEN/NOTIFY, and the reload turns on `partitioned`
+// for it. A review delivered exactly that and read another tenant's rows, while
+// the one signal an operator can see — omit the tenant, get refused — reported
+// healthy throughout.
+//
+// A func field rather than a direct call because this package must not import
+// internal/storage/pg: pg already depends on runtime, and the check belongs
+// next to the other catalog probes.
 // Reload builds a new snapshot from the IR and swaps it atomically.
 // In-flight requests on the old snapshot complete unaffected.
+//
+// The OnReload hook runs first and can refuse: a schema that would turn on
+// tenant isolation the database is not enforcing must not become live just
+// because it arrived after boot.
 func (s *Server) Reload(ir *dsl.IR, contentHash string) error {
 	snap, err := buildSnapshot(ir, contentHash)
 	if err != nil {
 		return fmt.Errorf("entity.Reload: %w", err)
 	}
+	if s.onReload != nil {
+		if err := s.onReload(ir); err != nil {
+			return fmt.Errorf("entity.Reload: refusing the new schema: %w", err)
+		}
+	}
 	s.snapshot.Store(snap)
 	return nil
 }
+
+// SetOnReload installs the hook. Not a constructor argument because most
+// callers (sandbox, tests) have nothing to verify.
+func (s *Server) SetOnReload(fn func(*dsl.IR) error) { s.onReload = fn }
 
 // ContentHash returns the content hash of the currently loaded snapshot.
 func (s *Server) ContentHash() string {

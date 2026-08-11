@@ -33,6 +33,7 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/dsl/sqlvalidate"
 	"github.com/rachitkumar205/atlantis/internal/obs"
+	"github.com/rachitkumar205/atlantis/internal/schema"
 	"github.com/rachitkumar205/atlantis/internal/server/admin"
 	"github.com/rachitkumar205/atlantis/internal/server/authz"
 	"github.com/rachitkumar205/atlantis/internal/server/entity"
@@ -391,6 +392,10 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		resolveCallerInterceptor(fwdAuth),
 		certBindingChecker.Unary(),
 		authChecker.Unary(),
+		// After identity is established, before any handler runs. `partition by`
+		// binds this value to the transaction, and a handler that had to read
+		// the header itself is a handler a later one can forget to add.
+		interceptors.NewPartition(),
 	}
 	// Capability enforcement goes after identity is resolved and the cert is
 	// bound, and before any work happens.
@@ -434,6 +439,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 			resolveCallerStreamInterceptor(fwdAuth),
 			certBindingChecker.Stream(),
 			authChecker.Stream(),
+			interceptors.NewPartitionStream(),
 			loggingStreamInterceptor(log),
 		),
 	)
@@ -653,6 +659,62 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	if err := storedSQLAuditError(auditFindings, cfg.RequireTenantIsolation); err != nil {
 		return err
 	}
+
+	// Ask the database whether every partitioned entity's table actually
+	// carries an enforced policy.
+	//
+	// The clause is emitted on CREATE TABLE only and no differ reads it, so
+	// adding `partition by` to an entity that already exists produces an empty
+	// plan. Once the server binds the tenant per request, the one signal an
+	// operator can see — omit the tenant, get refused — works whether or not a
+	// policy exists, so the schema can claim a partition the database has never
+	// heard of and look correct doing it.
+	// One closure, used at boot AND on every hot reload.
+	//
+	// Boot alone is not enough: a checkpoint adding `partition by` to an entity
+	// that already exists emits no DDL (the differ does not read the clause) and
+	// arrives at a running server through LISTEN/NOTIFY. The reload turns on
+	// enforcement in the dispatcher for a table that has no policy, and the only
+	// signal an operator can see — omit the tenant, get refused — keeps
+	// reporting healthy.
+	verifyPartitions := func(ctx context.Context, ir *dsl.IR) ([]string, error) {
+		var tables []pg.PartitionedTable
+		for i := range ir.Entities {
+			e := &ir.Entities[i]
+			if e.PartitionField == "" {
+				continue
+			}
+			tables = append(tables, pg.PartitionedTable{
+				EntityID: e.ID(),
+				Schema:   schema.EntitySchema(e),
+				Table:    schema.EntityPhysicalTable(e),
+				Column:   e.PartitionField,
+			})
+		}
+		return pg.VerifyPartitionPolicies(ctx, pool, tables)
+	}
+
+	policyProblems, perr := verifyPartitions(ctx, ir)
+	if perr != nil {
+		// A check that could not run is not a check that passed — the same rule
+		// tenantIsolationError applies to a failed role probe. Without this,
+		// a locked-down pg_class, a statement timeout or a name mismatch let the
+		// server boot with the guard nominally on and never actually asked.
+		if cfg.RequireTenantIsolation && len(partitionedEntities(ir)) > 0 {
+			return fmt.Errorf("refusing to start: could not determine whether "+
+				"partitioned entities carry an enforced row-level security policy, "+
+				"and ATL_REQUIRE_TENANT_ISOLATION is set: %w", perr)
+		}
+		log.Warn("could not verify that partitioned entities carry a policy", "err", perr)
+	}
+	if err := pg.PartitionPolicyError(policyProblems, cfg.RequireTenantIsolation); err != nil {
+		return err
+	}
+	for _, p := range policyProblems {
+		log.Warn("a partitioned entity has no enforced row-level security; reads "+
+			"return every tenant's rows. Set ATL_REQUIRE_TENANT_ISOLATION=true to "+
+			"make this fatal", "problem", p)
+	}
 	if len(auditFindings) > 0 {
 		for _, f := range auditFindings {
 			log.Warn("stored SQL can rebind the caller's tenant, so `partition by` "+
@@ -666,6 +728,32 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	if err := dynServer.Register(srv, ir); err != nil {
 		return fmt.Errorf("register entity services: %w", err)
 	}
+
+	// The same verification on every hot reload, refusing a schema that would
+	// turn on enforcement the database is not providing.
+	//
+	// Refuses only when ATL_REQUIRE_TENANT_ISOLATION is set, matching boot: a
+	// deployment that tolerates the warning at startup should not have a reload
+	// fail on it, and a reload that fails leaves the OLD schema serving, which
+	// is its own surprise.
+	dynServer.SetOnReload(func(newIR *dsl.IR) error {
+		problems, err := verifyPartitions(context.WithoutCancel(ctx), newIR)
+		if err != nil {
+			// Same rule as boot: unknown is not clean. A reload that cannot be
+			// checked must not become live under the flag — refusing leaves the
+			// previous schema serving, which is the safe direction.
+			if cfg.RequireTenantIsolation && len(partitionedEntities(newIR)) > 0 {
+				return fmt.Errorf("could not verify partitioned entities: %w", err)
+			}
+			log.Warn("could not verify partitioned entities on reload", "err", err)
+			return nil
+		}
+		for _, p := range problems {
+			log.Warn("a reloaded schema declares `partition by` on a table with no "+
+				"enforced row-level security", "problem", p)
+		}
+		return pg.PartitionPolicyError(problems, cfg.RequireTenantIsolation)
+	})
 
 	log.Debug("init: schema listener")
 	schemaListener := entity.NewSchemaListener(pool.Raw(), dynServer, func(ctx context.Context) (*dsl.IR, string, error) {

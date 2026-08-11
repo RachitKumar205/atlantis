@@ -96,8 +96,15 @@ func (s *Server) handleGet(ctx context.Context, meta *entityMeta, dec func(any) 
 	// !meta.cacheable: a procedure writes this entity and cannot invalidate the
 	// row bodies it changes, so caching it would serve stale rows.
 	loadRow := func(ctx context.Context) (*dynamicpb.Message, error) {
-		row := s.pool.QueryRow(ctx, meta.sqlGet, pkArgs...)
-		e, err := scanRow(meta, row)
+		var e *dynamicpb.Message
+		// The scan runs INSIDE the scope. A runtime.Row is only valid while its
+		// transaction is open, so reading it after the scope closed would be a
+		// use-after-commit that compiles cleanly and fails at run time.
+		err := s.scopedRead(ctx, meta, func(q querier) error {
+			var serr error
+			e, serr = scanRow(meta, q.QueryRow(ctx, meta.sqlGet, pkArgs...))
+			return serr
+		})
 		if err != nil {
 			if runtime.IsNoRows(err) {
 				return nil, runtime.ErrNotFound
@@ -173,6 +180,14 @@ func (s *Server) handleCreate(ctx context.Context, meta *entityMeta, dec func(an
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
+	// Bind before any statement runs in this transaction: the policy applies
+	// from the first statement, so anything issued ahead of the bind is
+	// unscoped. A partitioned entity with no tenant in context is refused here
+	// rather than reaching the database.
+	if err := s.bindWrite(ctx, meta, tx); err != nil {
+		return nil, err
+	}
+
 	// INSERT RETURNING pk, then any cross-entity invalidation columns. They
 	// ride the same RETURNING clause, so learning the parent key costs no
 	// extra round trip.
@@ -202,14 +217,20 @@ func (s *Server) handleCreate(ctx context.Context, meta *entityMeta, dec func(an
 	if err := s.enqueueParents(ctx, tx, meta, inboundVals); err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	// Read the row back BEFORE committing, inside this transaction.
+	//
+	// It used to be read afterwards on the bare pool. For a partitioned entity
+	// that is a different, unbound transaction: current_partition() is NULL
+	// there, the policy matches nothing, and the refetch returns no rows — so
+	// Create reported failure on a write that had already committed, and the
+	// caller's retry hit a primary-key conflict. Reading inside is also simply
+	// more correct: the row is returned from the same snapshot that wrote it.
+	entity, err := scanRow(meta, tx.QueryRow(ctx, meta.sqlWriteBack, pkValues...))
+	if err != nil {
 		return nil, err
 	}
 
-	// Load fresh row.
-	freshRow := s.pool.QueryRow(ctx, meta.sqlGet, pkValues...)
-	entity, err := scanRow(meta, freshRow)
-	if err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 
@@ -255,6 +276,14 @@ func (s *Server) handleUpdate(ctx context.Context, meta *entityMeta, dec func(an
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
+	// Bind before any statement runs in this transaction: the policy applies
+	// from the first statement, so anything issued ahead of the bind is
+	// unscoped. A partitioned entity with no tenant in context is refused here
+	// rather than reaching the database.
+	if err := s.bindWrite(ctx, meta, tx); err != nil {
+		return nil, err
+	}
+
 	// The parent key as it stands BEFORE the update, read under FOR UPDATE.
 	// Reparenting a child — moving a CartItem from cart 1 to cart 2 — has to
 	// invalidate the cart it left as well as the one it joined, and the
@@ -298,14 +327,15 @@ func (s *Server) handleUpdate(ctx context.Context, meta *entityMeta, dec func(an
 	if err := s.enqueueParents(ctx, tx, meta, oldInbound, inboundVals); err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	// Read back inside the transaction, for the same reason as handleCreate:
+	// on a partitioned entity a post-commit read on the pool is unbound and
+	// returns nothing, so Update reported failure on a successful write.
+	entity, err := scanRow(meta, tx.QueryRow(ctx, meta.sqlWriteBack, pkValues...))
+	if err != nil {
 		return nil, err
 	}
 
-	// Load fresh row.
-	freshRow := s.pool.QueryRow(ctx, meta.sqlGet, pkValues...)
-	entity, err := scanRow(meta, freshRow)
-	if err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
 
@@ -340,6 +370,14 @@ func (s *Server) handleDelete(ctx context.Context, meta *entityMeta, dec func(an
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	// Bind before any statement runs in this transaction: the policy applies
+	// from the first statement, so anything issued ahead of the bind is
+	// unscoped. A partitioned entity with no tenant in context is refused here
+	// rather than reaching the database.
+	if err := s.bindWrite(ctx, meta, tx); err != nil {
+		return nil, err
+	}
 
 	var delInbound []any
 	if len(meta.inboundCols) == 0 {
@@ -401,11 +439,35 @@ func (s *Server) handleBatchGet(ctx context.Context, meta *entityMeta, dec func(
 
 	composite := len(meta.pkCols) > 1
 
+	// One scope around both branches, not one per id. The composite-PK branch
+	// below reads one row per id and has no cap on how many, so a partitioned
+	// BatchGet would otherwise open a transaction per id — and they would not
+	// share a snapshot, so the same call could see a row through one and not
+	// another. (The 200 cap applies only to the single-PK branch, which issues
+	// one query.)
+	if err := s.scopedRead(ctx, meta, func(q querier) error {
+		return s.batchGetInto(ctx, q, meta, req, resp, entitiesFD, composite)
+	}); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+// batchGetInto fills resp's entity list. Split out so the whole read runs in
+// one scope; see handleBatchGet.
+func (s *Server) batchGetInto(
+	ctx context.Context,
+	q querier,
+	meta *entityMeta,
+	req, resp *dynamicpb.Message,
+	entitiesFD protoreflect.FieldDescriptor,
+	composite bool,
+) error {
 	if composite {
 		// Composite PK: individual gets.
 		idsFD := meta.batchGetRequestDesc.Fields().ByName("ids")
 		if idsFD == nil {
-			return resp, nil
+			return nil
 		}
 		list := req.Get(idsFD).List()
 		entities := resp.Mutable(entitiesFD).List()
@@ -418,13 +480,13 @@ func (s *Server) handleBatchGet(ctx context.Context, meta *entityMeta, dec func(
 					pkArgs[j] = goValueFromProtoReflect(pkMsg, pkFD, meta.pkCols[j])
 				}
 			}
-			row := s.pool.QueryRow(ctx, meta.sqlGet, pkArgs...)
+			row := q.QueryRow(ctx, meta.sqlGet, pkArgs...)
 			entity, err := scanRow(meta, row)
 			if err != nil {
 				if runtime.IsNoRows(err) {
 					continue
 				}
-				return nil, err
+				return err
 			}
 			entities.Append(protoreflect.ValueOfMessage(entity))
 		}
@@ -432,23 +494,23 @@ func (s *Server) handleBatchGet(ctx context.Context, meta *entityMeta, dec func(
 		// Single PK: use ANY($1).
 		pkField := meta.batchGetRequestDesc.Fields().Get(0) // first field is the repeated PK
 		if pkField == nil {
-			return resp, nil
+			return nil
 		}
 		list := req.Get(pkField).List()
 		if list.Len() == 0 {
-			return resp, nil
+			return nil
 		}
 		if list.Len() > 200 {
-			return nil, status.Errorf(codes.InvalidArgument,
+			return status.Errorf(codes.InvalidArgument,
 				"BatchGet%s: at most 200 ids per call (got %d)", meta.entity.Name, list.Len())
 		}
 
 		// Build the array arg.
 		pkSlice := buildPKArray(meta.pkCols[0], list)
 
-		rows, err := s.pool.Query(ctx, meta.sqlBatchGet, pkSlice)
+		rows, err := q.Query(ctx, meta.sqlBatchGet, pkSlice)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		defer rows.Close()
 
@@ -456,16 +518,16 @@ func (s *Server) handleBatchGet(ctx context.Context, meta *entityMeta, dec func(
 		for rows.Next() {
 			entity, err := scanRow(meta, rows)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			entities.Append(protoreflect.ValueOfMessage(entity))
 		}
 		if err := rows.Err(); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
-	return resp, nil
+	return nil
 }
 
 // handleQuery applies TranslateFilter + keyset pagination.
@@ -555,12 +617,6 @@ func (s *Server) handleQuery(ctx context.Context, meta *entityMeta, dec func(any
 	fmt.Fprintf(&b, " LIMIT $%d", len(args))
 	sqlText := b.String()
 
-	rows, err := s.pool.Query(ctx, sqlText, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	resp := dynamicpb.NewMessage(meta.queryResponseDesc)
 	entitiesFD := meta.queryResponseDesc.Fields().ByName("entities")
 	if entitiesFD == nil {
@@ -568,14 +624,24 @@ func (s *Server) handleQuery(ctx context.Context, meta *entityMeta, dec func(any
 	}
 	entities := resp.Mutable(entitiesFD).List()
 
-	for rows.Next() {
-		entity, err := scanRow(meta, rows)
+	// Rows are scanned inside the scope. runtime.Rows is only valid while its
+	// transaction is open, and the pagination below reads `entities`, which is
+	// already materialised by then.
+	if err := s.scopedRead(ctx, meta, func(q querier) error {
+		rows, err := q.Query(ctx, sqlText, args...)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		entities.Append(protoreflect.ValueOfMessage(entity))
-	}
-	if err := rows.Err(); err != nil {
+		defer rows.Close()
+		for rows.Next() {
+			entity, err := scanRow(meta, rows)
+			if err != nil {
+				return err
+			}
+			entities.Append(protoreflect.ValueOfMessage(entity))
+		}
+		return rows.Err()
+	}); err != nil {
 		return nil, err
 	}
 
