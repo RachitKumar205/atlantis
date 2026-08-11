@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/rachitkumar205/atlantis/internal/runtime"
+	"github.com/rachitkumar205/atlantis/internal/schema"
+	"github.com/rachitkumar205/atlantis/internal/storage/pg"
+	"sort"
 	"strings"
 	"time"
 
@@ -268,6 +272,31 @@ func (s *Service) BeginBackfillPlan(ctx context.Context, req *adminpb.BeginBackf
 				"Split the field into a single-PK entity or backfill it manually")
 		}
 		return nil, errors.New("admin: this plan requires no backfill — run `tide apply` without --backfill")
+	}
+
+	// A partitioned entity cannot be backfilled by this worker, and must be
+	// refused rather than run.
+	//
+	// The chunked UPDATE runs as the atlantis role, which owns the table and is
+	// therefore subject to FORCE ROW LEVEL SECURITY, with no tenant bound. So
+	// the chunk SELECT matches nothing: the worker reports every chunk as a
+	// success having written zero rows, marks the field complete, and the
+	// follow-on SET NOT NULL then fails on the rows the backfill never touched.
+	// Silent, and it fails at the point furthest from the cause.
+	//
+	// Binding a tenant here would be wrong, not merely incomplete: a backfill
+	// has to cover every tenant, so there is no single correct value to bind.
+	// The mechanisms that would work each conflict with something. A BYPASSRLS
+	// role is what pg.RequireIsolatedRole refuses at boot. Iterating per tenant
+	// needs the tenant list, which is itself a cross-tenant read, and the
+	// worker's cursor is a primary key rather than a tenant.
+	//
+	// That is a design decision, not a mechanical fix, and it is deferred. What
+	// is correct under every version of it is this: do not run. An upfront
+	// refusal naming the entity is strictly better than a backfill that reports
+	// success and writes nothing.
+	if err := s.refuseBackfillOnBlockedTables(ctx, newIR, scripts.BackfillFields); err != nil {
+		return nil, err
 	}
 
 	// Purity-check every expression before a single one is persisted.
@@ -567,4 +596,124 @@ func submittedFilesToPB(in []SubmittedFile) []*adminpb.SubmittedFile {
 		out = append(out, &adminpb.SubmittedFile{Path: f.Path, Content: f.Content})
 	}
 	return out
+}
+
+// refuseBackfillOnBlockedTables refuses a plan whose backfill would silently
+// write nothing.
+//
+// # What actually goes wrong
+//
+// The chunked UPDATE runs as the atlantis role with no tenant bound. Where the
+// TABLE has row-level security enabled and forced, and the role does not bypass
+// it, the chunk SELECT matches nothing. The worker reports each chunk a
+// success, marks the field complete, and the follow-on SET NOT NULL then fails
+// on rows nothing ever touched — a failure as far from its cause as this
+// pipeline allows. Executed end to end against PostgreSQL 17.
+//
+// # Why this asks the database and not the schema
+//
+// The first version tested `e.PartitionField != ""`, and a review executed
+// three cases where that refuses a backfill which works:
+//
+//   - `partition by` declared with NO policy on the table. This is the MODAL
+//     case — no differ emits the policy when the clause is added to an entity
+//     that already exists, which is the exact gap the feature exists to detect.
+//   - a role holding BYPASSRLS, and a superuser role. RequireIsolatedRole
+//     rejects that posture only under ATL_REQUIRE_TENANT_ISOLATION, so it is a
+//     supported deployment and the policy does not apply to it.
+//
+// And it missed the mirror case entirely: an entity that DROPPED `partition by`
+// keeps its policy, because removal emits nothing either. The schema says
+// unpartitioned, the table still hides every row.
+//
+// So the question is asked of the catalog, which cannot disagree with what the
+// statement will do. It is also no longer scoped to partitioned entities — any
+// table that would hide its rows is caught, whatever the schema says about it.
+//
+// # What was NOT tried, and why the earlier note here was wrong
+//
+// An earlier version of this comment said binding was "a design decision, not a
+// mechanical fix", and gave two reasons. A review executed both on PostgreSQL
+// 17.8 and both are wrong:
+//
+//   - "A BYPASSRLS role is what pg.RequireIsolatedRole refuses at boot." That
+//     check inspects current_user on the SERVER's pool. A SECURITY DEFINER
+//     function owned by a separate BYPASSRLS role bypasses the policy with the
+//     login role still NOBYPASSRLS, so no conflict exists as stated. It is a
+//     real escalation surface and needs REVOKE EXECUTE FROM PUBLIC, but it is a
+//     mechanism, not a contradiction.
+//   - "Iterating per tenant needs the tenant list." True, and beside the point,
+//     because the option below needs no tenant list at all.
+//
+// The mechanism that works, and that nobody had considered: a SECOND permissive
+// policy, `FOR ALL TO <backfill_role> USING (true)`. Measured — the worker sees
+// and updates every row, and the request path, connecting as the table owner,
+// still sees none. No BYPASSRLS anywhere, no tenant list, no cross-tenant
+// primitive exposed to request handling. Its costs are a second role and pool,
+// one extra emitted line per partitioned table, and teaching
+// VerifyPartitionPolicies to read polroles — which today cannot tell
+// `TO worker USING (true)` from a global `USING (true)` and would reject it.
+//
+// That is the shape a fix should take. Refusing remains correct until it exists.
+//
+// # This asks with the SERVER's role, and the failure belongs to the WORKER's
+//
+// They are the same role today, so the answer is right by coincidence. The
+// moment the worker gets its own role — which the mechanism above requires —
+// this probes the wrong principal and will refuse backfills that work.
+//
+// # A probe that fails refuses
+//
+// Same rule as the boot gate. Proceeding on an unknown answer risks the silent
+// zero-row backfill this exists to prevent, and a backfill is restartable.
+func (s *Service) refuseBackfillOnBlockedTables(ctx context.Context, ir *dsl.IR, fields []codegen.BackfillField) error {
+	if ir == nil || len(fields) == 0 {
+		return nil
+	}
+	// Unquoted names, because that is what pg_class holds. BackfillField's own
+	// TableName is quoted for splicing into SQL and will never match.
+	nameToFields := map[string][]string{}
+	var names []string
+	for _, f := range fields {
+		for i := range ir.Entities {
+			e := &ir.Entities[i]
+			if e.ID() != f.EntityID {
+				continue
+			}
+			qualified := schema.EntitySchema(e) + "." + schema.EntityPhysicalTable(e)
+			if _, seen := nameToFields[qualified]; !seen {
+				names = append(names, qualified)
+			}
+			nameToFields[qualified] = append(nameToFields[qualified], f.EntityID+"."+f.Field)
+		}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+
+	blockedTables, err := pg.RLSBlockedTables(ctx, poolQuerier{s.pool}, names)
+	if err != nil {
+		return fmt.Errorf("admin: could not determine whether the backfill would "+
+			"be able to see its rows: %w", err)
+	}
+	var blocked []string
+	for _, t := range blockedTables {
+		blocked = append(blocked, nameToFields[t]...)
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+	sort.Strings(blocked)
+	return fmt.Errorf("admin: %s cannot be backfilled: row-level security is "+
+		"enforced on the table and the backfill worker binds no tenant, so every "+
+		"chunk would match zero rows and report success. Apply this change "+
+		"without the NOT NULL, backfill the column per tenant yourself, then add "+
+		"NOT NULL in a follow-up change", strings.Join(blocked, ", "))
+}
+
+// poolQuerier adapts the pgx pool to the interface internal/storage/pg takes.
+type poolQuerier struct{ p *pgxpool.Pool }
+
+func (q poolQuerier) Query(ctx context.Context, sql string, args ...any) (runtime.Rows, error) {
+	return q.p.Query(ctx, sql, args...)
 }

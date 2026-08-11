@@ -150,7 +150,6 @@ func TestServerChecksTenantIsolationAtBoot(t *testing.T) {
 		// `partition by` to an existing entity emits no DDL and arrives at a
 		// running server.
 		"pg.VerifyPartitionPolicies": false,
-		"pg.PartitionPolicyError":    false,
 		// Installing the hook is separate from defining it: boot can call the
 		// verification and never repeat it on reload.
 		"dynServer.SetOnReload": false,
@@ -171,6 +170,10 @@ func TestServerChecksTenantIsolationAtBoot(t *testing.T) {
 		"storedSQLAuditError":  false,
 		// Boot-only verification misses the delivery path the check exists for.
 		"verifyPartitions": false,
+		// The shared decision. pg.PartitionPolicyError is called only from
+		// inside it now, so tracking that name would follow the logic rather
+		// than the wiring — and the logic has its own behavioural test.
+		"partitionGate": false,
 	}
 	// Reached is not the same as obeyed. `_ = tenantIsolationError(...)` keeps
 	// the call on a live path while discarding the refusal, and that mutation
@@ -182,8 +185,8 @@ func TestServerChecksTenantIsolationAtBoot(t *testing.T) {
 		"storedSQLAuditError":  false,
 		// Appears TWICE — at boot and in the reload hook — so a "was it
 		// reached" check is satisfied by either one while the other is
-		// discarded. Both must return.
-		"PartitionPolicyError": false,
+		// discarded. Both must return, which the call-site count below asserts.
+		"partitionGate": false,
 	}
 	seen := map[string]bool{}
 
@@ -360,7 +363,7 @@ func TestServerChecksTenantIsolationAtBoot(t *testing.T) {
 	// reload hook alone never examines the schema the server started with.
 	for name, atLeast := range map[string]int{
 		// trackedCall reports the bare selector, not the qualified name.
-		"PartitionPolicyError": 2,
+		"partitionGate": 2,
 	} {
 		if obeyingSites[name] >= atLeast {
 			continue
@@ -374,6 +377,12 @@ func TestServerChecksTenantIsolationAtBoot(t *testing.T) {
 			"claims", name, obeyingSites[name], atLeast)
 	}
 
+	if !wantLocal["partitionGate"] {
+		t.Error("cmd/server's run() never reaches partitionGate, so nothing " +
+			"decides whether a schema declaring `partition by` may be served. " +
+			"The decision itself is tested in TestPartitionGate; what this " +
+			"asserts is only that it is wired in")
+	}
 	if !wantLocal["tenantIsolationError"] {
 		t.Error("cmd/server's run() never reaches tenantIsolationError, so the " +
 			"database-role posture is established and then ignored and " +
@@ -388,7 +397,7 @@ func TestServerChecksTenantIsolationAtBoot(t *testing.T) {
 	}
 	for _, name := range []string{
 		"interceptors.NewPartition", "interceptors.NewPartitionStream",
-		"pg.VerifyPartitionPolicies", "pg.PartitionPolicyError",
+		"pg.VerifyPartitionPolicies",
 		"dynServer.SetOnReload",
 	} {
 		if want[name] {
@@ -583,4 +592,139 @@ func mentionsIdent(expr ast.Expr, name string) bool {
 		return !found
 	})
 	return found
+}
+
+// The boot gate, tested by behaviour rather than by reading main.go's AST.
+//
+// # Why this replaces a source-level test
+//
+// The AST test in this file proves a call site exists. It cannot prove the call
+// works, and a review demonstrated that at length: seven mutations made the
+// whole gate inert with the entire suite green — a second condition that can
+// never hold, an inverted condition, a return of nil, and deleting either call
+// site outright. Four rounds of hardening each closed the escape just used and
+// left the next one open.
+//
+// The decision now lives in one pure function, so every branch is reachable
+// here. What the AST test still owns is narrow and appropriate: is that
+// function reached from BOTH the boot path and the reload hook.
+// KNOWN LIMIT, stated rather than papered over.
+//
+// This proves the decision. The AST test below proves the call sites exist and
+// return. Neither checks the ARGUMENTS, and a review confirmed six mutations
+// that survive because of it — replacing cfg.RequireTenantIsolation with false,
+// policyProblems with nil, or perr with nil at either call site makes the gate
+// inert with the whole suite green.
+//
+// A fifth AST rule would close those four and leave the fifth. That loop has
+// run four times already and each round hardened against the escape just used.
+// What actually closes it is a test that boots run() against a real database
+// with a partitioned entity and no policy, and asserts the process refuses —
+// tracked as its own task. Until that exists, this limit is real and is written
+// down here rather than implied to be covered.
+func TestPartitionGate(t *testing.T) {
+	probeFailed := errors.New("permission denied for table pg_policy")
+	findings := []string{"shop.Doc declares `partition by` but has no policy"}
+
+	for _, tc := range []struct {
+		name        string
+		problems    []string
+		probeErr    error
+		require     bool
+		partitioned int
+		wantErr     bool
+		why         string
+	}{
+		{
+			name: "clean schema starts", require: true, partitioned: 1,
+			wantErr: false,
+			why:     "a schema whose tables carry the policy must serve",
+		},
+		{
+			name:     "findings refuse under the flag",
+			problems: findings, require: true, partitioned: 1, wantErr: true,
+			why: "this is the whole purpose of ATL_REQUIRE_TENANT_ISOLATION",
+		},
+		{
+			name:     "findings warn without the flag",
+			problems: findings, require: false, partitioned: 1, wantErr: false,
+			why: "an operator must be able to see the problem before making it fatal",
+		},
+		{
+			// A check that could not run is not a check that passed.
+			name:     "a failed probe refuses under the flag",
+			probeErr: probeFailed, require: true, partitioned: 1, wantErr: true,
+			why: "a locked-down pg_class or a statement timeout would otherwise " +
+				"let the server boot with the guard nominally on and never asked",
+		},
+		{
+			name:     "a failed probe warns without the flag",
+			probeErr: probeFailed, require: false, partitioned: 1, wantErr: false,
+			why: "without the flag nothing is fatal",
+		},
+		{
+			name:     "a failed probe with no partitioned entities starts",
+			probeErr: probeFailed, require: true, partitioned: 0, wantErr: false,
+			why: "there is nothing to enforce, so a briefly unreadable database " +
+				"must not stop a deployment that declares no partition",
+		},
+		{
+			// The probe error wins: its findings are not trustworthy.
+			name:     "a failed probe refuses even with an empty problem list",
+			problems: nil, probeErr: probeFailed, require: true, partitioned: 2,
+			wantErr: true,
+			why:     "an empty list from a failed probe means unknown, not clean",
+		},
+		{
+			// Precedence, which no case exercised. The comment on the case
+			// above claimed to test it and did not: its problems list was nil,
+			// so it was input-identical to the case before it. Two mutations
+			// lived in that gap — swapping the two checks, and reporting only
+			// the first of several findings.
+			name:     "a failed probe AND findings refuses, naming the probe",
+			problems: findings, probeErr: probeFailed, require: true, partitioned: 1,
+			wantErr: true,
+			why:     "findings gathered by a probe that failed are not trustworthy",
+		},
+		{
+			// More than one finding. A single-element list left every
+			// multi-finding path untested, including whether any are dropped.
+			name: "several findings all refuse and are all reported",
+			problems: []string{
+				"shop.Doc declares partition by but has no policy",
+				"shop.Line declares partition by but has no policy",
+			},
+			require: true, partitioned: 2, wantErr: true,
+			why: "a plan is refused as a unit; reporting one of several sends the " +
+				"operator round the loop once per entity",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := partitionGate(tc.problems, tc.probeErr, tc.require, tc.partitioned)
+			if tc.wantErr && err == nil {
+				t.Fatalf("served the schema and should have refused. %s", tc.why)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("refused with %v and should have served. %s", err, tc.why)
+			}
+			// The message must carry the finding text, or an operator learns
+			// only that something is wrong. A gate returning the probe error
+			// bare, or only the first of several findings, passed every
+			// assertion here until this was added.
+			if err != nil && tc.probeErr == nil {
+				for _, p := range tc.problems {
+					if !strings.Contains(err.Error(), p) {
+						t.Errorf("the refusal drops the finding %q, so the operator "+
+							"cannot see which entity is unprotected: %v", p, err)
+					}
+				}
+			}
+			// A refusal has to say which condition fired, or an operator cannot
+			// act on it.
+			if tc.wantErr && tc.probeErr != nil && !errors.Is(err, probeFailed) {
+				t.Errorf("the refusal does not wrap the probe error, so the "+
+					"operator cannot see WHY the check could not run: %v", err)
+			}
+		})
+	}
 }

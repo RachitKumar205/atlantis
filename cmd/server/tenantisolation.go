@@ -79,3 +79,49 @@ func partitionedEntities(ir *dsl.IR) []string {
 	}
 	return out
 }
+
+// partitionGate answers the one question the boot check and the hot-reload hook
+// both ask: may this schema be served?
+//
+// # Why this is a function and not two inline blocks
+//
+// It was two inline blocks, and they were verified by a test that read main.go's
+// AST — it looked for the call, then for a return, then for the condition, then
+// for the returned value, and a review defeated it at every stage. Seven
+// mutations made the whole gate inert with the suite green, including deleting
+// the boot block outright. Each round of hardening was aimed at the escape the
+// previous round had used.
+//
+// An AST test proves a call site EXISTS. It cannot prove the call WORKS, and
+// four attempts to make it do so produced a test nobody could reason about. So
+// the decision moved here, where it is a pure function of its inputs and every
+// branch is reachable from a test that asserts behaviour. What is left for the
+// source-level test is only "is this reached from both places", which is the
+// one thing an AST test is actually good at.
+//
+// # The rules
+//
+// A probe that FAILED is not a probe that passed. A locked-down pg_class, a
+// statement timeout or a name mismatch would otherwise let the server boot with
+// the guard nominally on and never actually asked. Under the flag, with at
+// least one partitioned entity, that refuses.
+//
+// With no partitioned entities there is nothing to enforce, so a probe failure
+// is a warning even under the flag — otherwise a deployment that declares no
+// partition at all cannot start when the database is briefly unreadable.
+//
+// Findings themselves refuse only under the flag. Without it they are warnings,
+// which is what lets an operator see the problem before making it fatal.
+func partitionGate(problems []string, probeErr error, require bool, partitioned int) error {
+	if probeErr != nil {
+		if require && partitioned > 0 {
+			return fmt.Errorf("could not determine whether partitioned entities "+
+				"carry an enforced row-level security policy, and "+
+				"ATL_REQUIRE_TENANT_ISOLATION is set: %w", probeErr)
+		}
+		// Nothing to enforce, or the operator has not asked for enforcement.
+		// The caller logs; returning nil here means "serve it".
+		return nil
+	}
+	return pg.PartitionPolicyError(problems, require)
+}

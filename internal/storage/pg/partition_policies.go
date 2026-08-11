@@ -249,8 +249,11 @@ func PartitionPolicyError(problems []string, require bool) error {
 	if len(problems) == 0 || !require {
 		return nil
 	}
-	return fmt.Errorf("refusing to start: %d partitioned entit%s have no enforced "+
-		"row-level security, and ATL_REQUIRE_TENANT_ISOLATION is set:\n  %s",
+	// No "refusing to start" here. This is also reached from the hot-reload
+	// hook, where the server is already running and telling its operator it
+	// refuses to start is simply false. The caller supplies that framing.
+	return fmt.Errorf("%d partitioned entit%s have no enforced row-level "+
+		"security, and ATL_REQUIRE_TENANT_ISOLATION is set:\n  %s",
 		len(problems), plural(len(problems)), strings.Join(problems, "\n  "))
 }
 
@@ -335,4 +338,64 @@ func containsIdentifier(qual, column string) bool {
 		return true
 	}
 	return false
+}
+
+// RLSBlockedTables reports which of the named tables would hide their rows from
+// an unbound statement issued by the CURRENT role.
+//
+// # Why this asks the database rather than the schema
+//
+// The caller wants to know whether a maintenance statement that binds no tenant
+// will silently match nothing. That is a property of the TABLE and the ROLE, not
+// of the schema text, and a first version of the backfill guard got this wrong
+// in three ways at once — all three executed against a live database:
+//
+//   - `partition by` declared, no policy on the table. This is the MODAL case,
+//     because no differ emits the policy when the clause is added to an entity
+//     that already exists — the gap this whole feature exists to detect. The
+//     backfill works fine there, and the guard refused it.
+//   - a role holding BYPASSRLS or superuser. pg.RequireIsolatedRole rejects that
+//     posture only under ATL_REQUIRE_TENANT_ISOLATION, so it is a supported
+//     deployment, and the policy simply does not apply to it.
+//   - the mirror case, missed entirely: an entity that DROPPED `partition by`
+//     keeps its policy, because removal emits nothing either. The schema says
+//     unpartitioned, the table still hides every row, and the backfill silently
+//     wrote nothing.
+//
+// relrowsecurity and relforcerowsecurity are catalog facts. rolsuper and
+// rolbypassrls are catalog facts. Asking them costs one round trip and cannot
+// disagree with what the statement will actually do.
+func RLSBlockedTables(ctx context.Context, q interface {
+	Query(ctx context.Context, sql string, args ...any) (runtime.Rows, error)
+}, qualifiedNames []string) ([]string, error) {
+	if len(qualifiedNames) == 0 {
+		return nil, nil
+	}
+	rows, err := q.Query(ctx, `
+SELECT n.nspname || '.' || c.relname
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+ WHERE n.nspname || '.' || c.relname = ANY($1)
+   AND c.relrowsecurity
+   AND c.relforcerowsecurity
+   AND NOT (SELECT bool_or(r.rolsuper OR r.rolbypassrls)
+              FROM pg_roles r WHERE r.rolname = current_user)`, qualifiedNames)
+	if err != nil {
+		return nil, fmt.Errorf("pg: probe row-level security: %w", err)
+	}
+	defer rows.Close()
+
+	var blocked []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("pg: scan row-level security probe: %w", err)
+		}
+		blocked = append(blocked, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pg: iterate row-level security probe: %w", err)
+	}
+	sort.Strings(blocked)
+	return blocked, nil
 }

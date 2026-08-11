@@ -677,7 +677,13 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// enforcement in the dispatcher for a table that has no policy, and the only
 	// signal an operator can see — omit the tenant, get refused — keeps
 	// reporting healthy.
-	verifyPartitions := func(ctx context.Context, ir *dsl.IR) ([]string, error) {
+	// Returns the table count alongside the findings, so the gate is not handed
+	// a second, independently computed answer to "how many partitioned entities
+	// are there". It was `len(partitionedEntities(ir))` at both call sites — a
+	// separate walk over the same IR — and a review turned the probe-failure
+	// refusal off at both by replacing that expression with 0, with the suite
+	// green. One walk, one answer.
+	verifyPartitions := func(ctx context.Context, ir *dsl.IR) ([]string, int, error) {
 		var tables []pg.PartitionedTable
 		for i := range ir.Entities {
 			e := &ir.Entities[i]
@@ -691,24 +697,17 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 				Column:   e.PartitionField,
 			})
 		}
-		return pg.VerifyPartitionPolicies(ctx, pool, tables)
+		problems, err := pg.VerifyPartitionPolicies(ctx, pool, tables)
+		return problems, len(tables), err
 	}
 
-	policyProblems, perr := verifyPartitions(ctx, ir)
+	policyProblems, partitionedTables, perr := verifyPartitions(ctx, ir)
 	if perr != nil {
-		// A check that could not run is not a check that passed — the same rule
-		// tenantIsolationError applies to a failed role probe. Without this,
-		// a locked-down pg_class, a statement timeout or a name mismatch let the
-		// server boot with the guard nominally on and never actually asked.
-		if cfg.RequireTenantIsolation && len(partitionedEntities(ir)) > 0 {
-			return fmt.Errorf("refusing to start: could not determine whether "+
-				"partitioned entities carry an enforced row-level security policy, "+
-				"and ATL_REQUIRE_TENANT_ISOLATION is set: %w", perr)
-		}
 		log.Warn("could not verify that partitioned entities carry a policy", "err", perr)
 	}
-	if err := pg.PartitionPolicyError(policyProblems, cfg.RequireTenantIsolation); err != nil {
-		return err
+	if err := partitionGate(policyProblems, perr, cfg.RequireTenantIsolation,
+		partitionedTables); err != nil {
+		return fmt.Errorf("refusing to start: %w", err)
 	}
 	for _, p := range policyProblems {
 		log.Warn("a partitioned entity has no enforced row-level security; reads "+
@@ -737,22 +736,23 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// fail on it, and a reload that fails leaves the OLD schema serving, which
 	// is its own surprise.
 	dynServer.SetOnReload(func(newIR *dsl.IR) error {
-		problems, err := verifyPartitions(context.WithoutCancel(ctx), newIR)
+		problems, partitionedTables, err := verifyPartitions(context.WithoutCancel(ctx), newIR)
 		if err != nil {
-			// Same rule as boot: unknown is not clean. A reload that cannot be
-			// checked must not become live under the flag — refusing leaves the
-			// previous schema serving, which is the safe direction.
-			if cfg.RequireTenantIsolation && len(partitionedEntities(newIR)) > 0 {
-				return fmt.Errorf("could not verify partitioned entities: %w", err)
-			}
 			log.Warn("could not verify partitioned entities on reload", "err", err)
-			return nil
 		}
 		for _, p := range problems {
 			log.Warn("a reloaded schema declares `partition by` on a table with no "+
 				"enforced row-level security", "problem", p)
 		}
-		return pg.PartitionPolicyError(problems, cfg.RequireTenantIsolation)
+		// The SAME decision as boot, from the same function. These were two
+		// inline copies of one rule, and a review turned each off separately.
+		if gateErr := partitionGate(problems, err, cfg.RequireTenantIsolation,
+			partitionedTables); gateErr != nil {
+			// Not "refusing to start" — this server is already running. A
+			// failed reload leaves the PREVIOUS schema serving.
+			return fmt.Errorf("refusing to serve the reloaded schema: %w", gateErr)
+		}
+		return nil
 	})
 
 	log.Debug("init: schema listener")
