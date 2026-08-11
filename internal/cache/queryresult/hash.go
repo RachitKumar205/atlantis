@@ -14,22 +14,46 @@ import (
 // with the codegen-side hash construction.
 //
 // Inputs:
+//
 //   - entityID:   "namespace.Entity" (e.g. "consumer.Account")
+//
+//   - partition:  the caller's tenant for an entity declaring `partition by`,
+//     empty for every other entity. Its own segment, and NOT
+//     folded into entityID, so a tenant literally named
+//     "x" cannot collide with an entity suffix.
+//
+//     This is a correctness boundary, not a tuning knob. The
+//     cached value is a list of primary keys, and the fetch
+//     that follows a hit is `WHERE id = ANY($1)` — the PK
+//     fetch is not the filtered query. Without this segment,
+//     tenant A runs a filter, its PKs are stored, and tenant B
+//     running the identical filter hits the entry and fetches
+//     A's rows by primary key. On a role that obeys row-level
+//     security those rows are then filtered away, so the
+//     result is merely wrong; on a role that does not, it is a
+//     cross-tenant read.
+//
 //   - filter:     the request's <Entity>Filter proto. Nil → no-filter
 //     contribution (the bytes "0:" appear in the hash).
+//
 //   - orders:     repeated <Entity>OrderBy proto messages. Each one's
 //     deterministic-marshaled bytes contribute to the hash
 //     in the caller-supplied order. The caller-supplied
 //     order matters — orderby is semantically ordered.
+//
 //   - limit:      varint-encoded request limit.
+//
 //   - pageToken:  raw bytes of the opaque cursor (treated as []byte).
+//
 //   - fields:     google.protobuf.FieldMask proto. Nil → no-mask
 //     contribution (which the form treats as
 //     "all fields"; codegen produces a default empty mask
 //     for that case so the hash is stable).
+//
 //   - includes:   the request's `repeated <Entity>Include includes` —
 //     sorted by numeric value before hashing for canonical
 //     stability.
+//
 //   - generation: the per-entity counter value from
 //     (*Cache).Generation. Folding the counter into the
 //     hash key is what makes a generation-bump invalidate
@@ -40,6 +64,7 @@ import (
 // cache size in play; truncation keeps memcached keys short.
 func Hash(
 	entityID string,
+	partition string,
 	filter proto.Message,
 	orders []proto.Message,
 	limit int32,
@@ -55,6 +80,9 @@ func Hash(
 	// can't hash to the same value (canonical-form rule).
 	if err := writeSegmentString(h, entityID); err != nil {
 		return "", err
+	}
+	if err := writeSegmentString(h, partition); err != nil {
+		return "", fmt.Errorf("hash partition: %w", err)
 	}
 	if err := writeSegmentProto(h, filter); err != nil {
 		return "", fmt.Errorf("hash filter: %w", err)

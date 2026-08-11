@@ -184,12 +184,8 @@ func sortedKeys(m map[string]struct{}) []string {
 // first applies to every statement in the transaction regardless of what else
 // the transaction does.
 func touchesPartitioned(ir *dsl.IR, ids []string) bool {
-	for _, id := range ids {
-		for i := range ir.Entities {
-			if ir.Entities[i].ID() == id && ir.Entities[i].PartitionField != "" {
-				return true
-			}
-		}
-	}
-	return false
+	// Delegates to the IR so the code generator reaches the same answer. The
+	// emitter had no equivalent of this at all and emitted unbound custom
+	// handlers.
+	return ir.TouchesPartitioned(ids)
 }

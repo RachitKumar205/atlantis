@@ -2,7 +2,6 @@ package entity
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/rachitkumar205/atlantis/internal/runtime"
 )
@@ -62,48 +61,14 @@ func (s *Server) scopedRead(ctx context.Context, meta *entityMeta, fn func(q que
 // paths that are not scoped to a single entity: a custom query names its own
 // touched set, and any one of them declaring `partition by` is enough.
 func (s *Server) scopedReadIf(ctx context.Context, partitioned bool, fn func(q querier) error) error {
-	if !partitioned {
-		return fn(s.pool)
-	}
-
-	tx, err := s.pool.BeginTx(ctx)
-	if err != nil {
-		return fmt.Errorf("partitioned read: begin: %w", err)
-	}
-	committed := false
-	defer func() {
-		if committed {
-			return
-		}
-		// context.Background(), not ctx. pgx calls conn.die() when the rollback
-		// Exec fails, so rolling back on a cancelled context destroys the
-		// pooled connection instead of returning it — turning every client
-		// disconnect into a connection churn.
-		_ = tx.Rollback(context.Background())
-	}()
-
-	if err := runtime.BindPartition(ctx, tx); err != nil {
-		return err
-	}
-	if err := fn(tx); err != nil {
-		return err
-	}
-	// Committing a read-only transaction releases its snapshot. Rollback would
-	// do as well; commit is what says "this completed".
-	//
-	// context.Background(), for the same reason as the rollback above and then
-	// some. Committing on the request context fails every read whose client
-	// disconnected — after the rows were already materialised — and destroys
-	// the pooled connection on the way out. Measured over 30 reads cancelled
-	// immediately after the last row: 30 of 30 failed and 29 new connections
-	// were opened, against 0 and 0 for the same shape committing on
-	// Background. The rows are already in hand by this point; there is nothing
-	// left for cancellation to save.
-	if err := tx.Commit(context.Background()); err != nil {
-		return fmt.Errorf("partitioned read: commit: %w", err)
-	}
-	committed = true
-	return nil
+	// Delegates to runtime.ScopedRead, which the code-generated caller server
+	// also calls. This used to be the implementation, and the emitter had no
+	// equivalent at all — the feature was correct in the surface that is easy
+	// to test and absent from the surface callers deploy. One function, two
+	// callers, no drift.
+	return runtime.ScopedRead(ctx, s.pool, partitioned, func(q runtime.Querier) error {
+		return fn(q)
+	})
 }
 
 // bindWrite binds the tenant on a transaction a write path has already opened.
@@ -117,8 +82,5 @@ func (s *Server) scopedReadIf(ctx context.Context, partitioned bool, fn func(q q
 // from the moment a statement runs, so a read or write issued ahead of the bind
 // is unscoped.
 func (s *Server) bindWrite(ctx context.Context, meta *entityMeta, tx runtime.Tx) error {
-	if !meta.partitioned {
-		return nil
-	}
-	return runtime.BindPartition(ctx, tx)
+	return runtime.BindWrite(ctx, meta.partitioned, tx)
 }

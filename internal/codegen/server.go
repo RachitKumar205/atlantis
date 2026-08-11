@@ -557,28 +557,34 @@ func (s *%s) BatchGet%s(ctx context.Context, req *pb.BatchGet%sRequest) (*pb.Bat
 	ctx, cancel := runtime.Deadline(ctx, %sQueryTimeoutMS)
 	defer cancel()
 
-	rows, err := s.DB.Query(ctx, sqlBatchGet%s, %s)
-	if err != nil {
+	resp := &pb.BatchGet%sResponse{}
+	if err := runtime.ScopedRead(ctx, s.DB, %t, func(q runtime.Querier) error {
+		rows, err := q.Query(ctx, sqlBatchGet%s, %s)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			entity := &pb.%s{}
+			if err := scanInto%s(rows, entity); err != nil {
+				return err
+			}
+			resp.Entities = append(resp.Entities, entity)
+		}
+		return rows.Err()
+	}); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	resp := &pb.BatchGet%sResponse{}
-	for rows.Next() {
-		entity := &pb.%s{}
-		if err := scanInto%s(rows, entity); err != nil {
-			return nil, err
-		}
-		resp.Entities = append(resp.Entities, entity)
-	}
-	return resp, rows.Err()
+	return resp, nil
 }
 
 `, e.Name, e.Name,
 			srv, e.Name, e.Name, e.Name,
 			lowerFirst(e.Name),
+			e.Name,                 // resp type, declared before the scope
+			e.PartitionField != "", // ScopedRead
 			e.Name, pkGetter,
-			e.Name, e.Name, e.Name)
+			e.Name, e.Name)
 		return
 	}
 
@@ -640,19 +646,27 @@ func (s *%s) BatchGet%s(ctx context.Context, req *pb.BatchGet%sRequest) (*pb.Bat
 	defer cancel()
 
 	resp := &pb.BatchGet%sResponse{}
-	for _, pk := range req.GetIds() {
-		if pk == nil {
-			continue
-		}
-		entity := &pb.%s{}
-		err := scanInto%s(s.DB.QueryRow(ctx, sqlGet%s, %s), entity)
-		if err != nil {
-			if runtime.IsNoRows(err) {
+	// One scope for the whole loop, not one per key. A transaction per
+	// primary key would bind correctly and cost N round trips for a call
+	// whose entire purpose is to avoid them.
+	if err := runtime.ScopedRead(ctx, s.DB, %t, func(q runtime.Querier) error {
+		for _, pk := range req.GetIds() {
+			if pk == nil {
 				continue
 			}
-			return nil, err
+			entity := &pb.%s{}
+			err := scanInto%s(q.QueryRow(ctx, sqlGet%s, %s), entity)
+			if err != nil {
+				if runtime.IsNoRows(err) {
+					continue
+				}
+				return err
+			}
+			resp.Entities = append(resp.Entities, entity)
 		}
-		resp.Entities = append(resp.Entities, entity)
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return resp, nil
 }
@@ -660,7 +674,8 @@ func (s *%s) BatchGet%s(ctx context.Context, req *pb.BatchGet%sRequest) (*pb.Bat
 `, e.Name, e.Name,
 		srv, e.Name, e.Name, e.Name,
 		lowerFirst(e.Name),
-		e.Name,
+		e.Name,                 // resp type
+		e.PartitionField != "", // ScopedRead: one scope for the whole loop
 		e.Name, e.Name, e.Name, pkArgs.String())
 }
 
@@ -684,6 +699,14 @@ func (s *%s) Create%s(ctx context.Context, req *pb.Create%sRequest) (*pb.Create%
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
+	// Bound before ANY statement in this transaction. The policy applies from
+	// the moment a statement runs, so a write issued ahead of the bind is
+	// unscoped — and on a partitioned entity, unscoped means a caller can
+	// write a row stamped with another tenant.
+	if err := runtime.BindWrite(ctx, %t, tx); err != nil {
+		return nil, err
+	}
+
 	args := bindFor%sInsert(in)
 	var newPK %s
 	if err := tx.QueryRow(ctx, sqlInsert%s, args...).Scan(&newPK); err != nil {
@@ -703,7 +726,12 @@ func (s *%s) Create%s(ctx context.Context, req *pb.Create%sRequest) (*pb.Create%
 	}
 
 	out := &pb.%s{}
-	if err := scanInto%s(s.DB.QueryRow(ctx, sqlGet%s, newPK), out); err != nil {
+	// The read-back binds too. It runs after the commit on the bare pool, so
+	// on a partitioned entity an unbound read sees nothing and a successful
+	// write is reported as a failure — the same defect the dispatcher had.
+	if err := runtime.ScopedRead(ctx, s.DB, %t, func(q runtime.Querier) error {
+		return scanInto%s(q.QueryRow(ctx, sqlGet%s, newPK), out)
+	}); err != nil {
 		return nil, err
 	}
 	return &pb.Create%sResponse{Entity: out}, nil
@@ -712,13 +740,16 @@ func (s *%s) Create%s(ctx context.Context, req *pb.Create%sRequest) (*pb.Create%
 `, e.Name, e.Name,
 		srv, e.Name, e.Name, e.Name,
 		lowerFirst(e.Name),
-		e.Name,
-		e.Name,
+		e.Name,                 // Create<E>: entity is required
+		e.PartitionField != "", // BindWrite
+		e.Name,                 // bindFor<E>Insert
 		pkGoType,
-		e.Name,
+		e.Name, // sqlInsert<E>
 		e.ID(), e.ID(), e.ID(),
-		e.Name, e.Name, e.Name,
-		e.Name)
+		e.Name,                 // out := &pb.<E>{}
+		e.PartitionField != "", // ScopedRead on the read-back
+		e.Name, e.Name,         // scanInto<E>, sqlGet<E>
+		e.Name) // Create<E>Response
 }
 
 func emitProtoUpdateMethod(b *strings.Builder, e *dsl.Entity, srv string, spec *pkSpec) {
@@ -752,6 +783,14 @@ func (s *%s) Update%s(ctx context.Context, req *pb.Update%sRequest) (*pb.Update%
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
+	// Bound before ANY statement in this transaction. The policy applies from
+	// the moment a statement runs, so a write issued ahead of the bind is
+	// unscoped — and on a partitioned entity, unscoped means a caller can
+	// write a row stamped with another tenant.
+	if err := runtime.BindWrite(ctx, %t, tx); err != nil {
+		return nil, err
+	}
+
 	args := bindFor%sUpdate(in, id...)
 	tag, err := tx.Exec(ctx, sqlUpdate%s, args...)
 	if err != nil {
@@ -774,7 +813,9 @@ func (s *%s) Update%s(ctx context.Context, req *pb.Update%sRequest) (*pb.Update%
 	}
 
 	out := &pb.%s{}
-	if err := scanInto%s(s.DB.QueryRow(ctx, sqlGet%s, id...), out); err != nil {
+	if err := runtime.ScopedRead(ctx, s.DB, %t, func(q runtime.Querier) error {
+		return scanInto%s(q.QueryRow(ctx, sqlGet%s, id...), out)
+	}); err != nil {
 		return nil, err
 	}
 	return &pb.Update%sResponse{Entity: out}, nil
@@ -783,12 +824,15 @@ func (s *%s) Update%s(ctx context.Context, req *pb.Update%sRequest) (*pb.Update%
 `, e.Name, e.Name,
 		srv, e.Name, e.Name, e.Name,
 		lowerFirst(e.Name),
-		e.Name,
+		e.Name, // Update<E>: entity is required
 		pkEntityAccess(spec),
-		e.Name, e.Name,
+		e.PartitionField != "", // BindWrite
+		e.Name, e.Name,         // bindFor<E>Update, sqlUpdate<E>
 		e.ID(), e.ID(), e.ID(),
-		e.Name, e.Name, e.Name,
-		e.Name)
+		e.Name,                 // out := &pb.<E>{}
+		e.PartitionField != "", // ScopedRead on the read-back
+		e.Name, e.Name,         // scanInto<E>, sqlGet<E>
+		e.Name) // Update<E>Response
 }
 
 func emitProtoDeleteMethod(b *strings.Builder, e *dsl.Entity, srv string, spec *pkSpec) {
@@ -813,6 +857,14 @@ func (s *%s) Delete%s(ctx context.Context, req *pb.Delete%sRequest) (*pb.Delete%
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	// Bound before ANY statement in this transaction. The policy applies from
+	// the moment a statement runs, so a write issued ahead of the bind is
+	// unscoped — and on a partitioned entity, unscoped means a caller can
+	// write a row stamped with another tenant.
+	if err := runtime.BindWrite(ctx, %t, tx); err != nil {
+		return nil, err
+	}
 
 	tag, err := tx.Exec(ctx, sqlDelete%s, id...)
 	if err != nil {
@@ -840,9 +892,10 @@ func (s *%s) Delete%s(ctx context.Context, req *pb.Delete%sRequest) (*pb.Delete%
 		srv, e.Name, e.Name, e.Name,
 		lowerFirst(e.Name),
 		pkRequestAccess(spec),
-		e.Name,
+		e.PartitionField != "", // BindWrite
+		e.Name,                 // sqlDelete<E>
 		e.ID(), e.ID(), e.ID(),
-		e.Name)
+		e.Name) // Delete<E>Response
 }
 
 func emitProtoVectorSearchMethod(b *strings.Builder, e *dsl.Entity, srv string, idx dsl.Index) {
@@ -861,30 +914,35 @@ func (s *%s) %s(ctx context.Context, req *pb.%sRequest) (*pb.%sResponse, error) 
 	defer cancel()
 
 	queryVec := pgvector.NewVector(req.GetQueryVector())
-	rows, err := s.DB.Query(ctx, %s, queryVec, req.GetLimit())
-	if err != nil {
+	resp := &pb.%sResponse{}
+	if err := runtime.ScopedRead(ctx, s.DB, %t, func(q runtime.Querier) error {
+		rows, err := q.Query(ctx, %s, queryVec, req.GetLimit())
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			entity := &pb.%s{}
+			var dist float32
+			if err := scanInto%sWithDistance(rows, entity, &dist); err != nil {
+				return err
+			}
+			resp.Entities = append(resp.Entities, entity)
+			resp.Distances = append(resp.Distances, dist)
+		}
+		return rows.Err()
+	}); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	resp := &pb.%sResponse{}
-	for rows.Next() {
-		entity := &pb.%s{}
-		var dist float32
-		if err := scanInto%sWithDistance(rows, entity, &dist); err != nil {
-			return nil, err
-		}
-		resp.Entities = append(resp.Entities, entity)
-		resp.Distances = append(resp.Distances, dist)
-	}
-	return resp, rows.Err()
+	return resp, nil
 }
 
 `, method, e.Name,
 		srv, method, method, method,
 		lowerFirst(e.Name),
+		method,                 // resp type, now declared before the scope
+		e.PartitionField != "", // ScopedRead: bind the vector search too
 		sqlConst,
-		method,
 		e.Name, e.Name)
 }
 

@@ -2589,3 +2589,72 @@ func lowerEphemeral(path string, d *EphemeralDecl) (*Ephemeral, []error) {
 	}
 	return eph, errs
 }
+
+// TouchesPartitioned reports whether any entity in ids declares `partition by`.
+//
+// Custom SQL names the entities it touches rather than being tied to one, so
+// the question "must this statement bind a tenant" is answered over the whole
+// touched set. One partitioned entity anywhere in it is enough: the statement
+// will read or write that table, and an unbound statement against it is either
+// a cross-tenant read or a silent zero-row write.
+//
+// Shared by the dynamic dispatcher and the code generator. Both serve custom
+// SQL and both have to reach the same answer. The dispatcher had this logic and
+// the emitter had none, so `tidectl codegen` emitted custom-query and
+// custom-procedure handlers that ran on the bare pool — the surface the whole
+// row-level-security design exists to protect, because a custom body is opaque
+// author text with nowhere to inject a predicate.
+func (ir *IR) TouchesPartitioned(ids []string) bool {
+	if ir == nil {
+		return false
+	}
+	for _, id := range ids {
+		for i := range ir.Entities {
+			if ir.Entities[i].ID() == id && ir.Entities[i].PartitionField != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TouchedEntities returns every entity id the procedure reads or writes.
+//
+// The union across all step kinds, not just the raw ones. A raw step declares
+// `touches(...)`; a typed step names its target directly. Both reach a table.
+//
+// Callers use this to decide whether the procedure's transaction must bind a
+// tenant, so a step kind omitted here is a step that runs unscoped. New step
+// kinds must be added — and until they are, a procedure containing one is
+// treated as touching whatever the other steps touch, which is why the enqueue
+// step below is listed even though it writes only atlantis.jobs.
+func (p *CustomProcedure) TouchedEntities() []string {
+	if p == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(id string) {
+		if id == "" {
+			return
+		}
+		if _, dup := seen[id]; dup {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	for i := range p.Steps {
+		step := p.Steps[i]
+		switch {
+		case step.Raw != nil:
+			for _, t := range step.Raw.Touches {
+				add(t)
+			}
+		case step.Typed != nil:
+			add(step.Typed.TargetID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}

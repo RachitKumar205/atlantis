@@ -76,13 +76,9 @@ import (
 // rows for a restricted role, it silently returns everything to a role that
 // bypasses RLS. Refusing is the only behaviour that is safe under both.
 func BindPartition(ctx context.Context, tx Tx) error {
-	v, err := CallerPartition(ctx)
+	s, err := PartitionKey(ctx)
 	if err != nil {
 		return err
-	}
-	s, ok := partitionString(v)
-	if !ok {
-		return fmt.Errorf("atlantis: caller partition has unusable type %T", v)
 	}
 	if s == "" {
 		// set_partition rejects this too, but the message from here names the
@@ -102,6 +98,32 @@ func BindPartition(ctx context.Context, tx Tx) error {
 // partitionString renders a partition value as the text the discriminator
 // stores. The column may be uuid or bigint — the policy casts the function
 // side to match — but the discriminator itself is always text.
+// PartitionKey returns the caller's tenant rendered EXACTLY as BindPartition
+// renders it for set_partition.
+//
+// The code-generated server needs the tenant as a string in two places: the
+// query-result cache key, and the defence-in-depth predicate. Rendering it
+// there independently would be a second implementation of this conversion, and
+// two renderings of one tenant is a permanent cache miss — every request
+// stores an entry under a key the next request does not compute.
+//
+// It is also what makes the emitted code compile. The emitter passed the `any`
+// from CallerPartition straight into queryresult.Hash, whose parameter is a
+// string, so every generated server for a partitioned entity failed to build.
+// Nothing in this repository caught it: the emitter tests only PARSE the output
+// and no generated server is compiled anywhere in CI.
+func PartitionKey(ctx context.Context) (string, error) {
+	v, err := CallerPartition(ctx)
+	if err != nil {
+		return "", err
+	}
+	s, ok := partitionString(v)
+	if !ok {
+		return "", fmt.Errorf("atlantis: caller partition has unusable type %T", v)
+	}
+	return s, nil
+}
+
 func partitionString(v any) (string, bool) {
 	switch t := v.(type) {
 	case string:

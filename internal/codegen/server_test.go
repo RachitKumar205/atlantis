@@ -488,7 +488,11 @@ func TestEmitGoServer_BatchGetFallsBackForUnsupportedPK(t *testing.T) {
 
 	// Fallback emits the direct-PG ANY($1) form on sqlBatchGet rather
 	// than the QueryX wrapper.
-	assertContains(t, c, "rows, err := s.DB.Query(ctx, sqlBatchGetSnapshot,")
+	//
+	// The receiver is `q`, not `s.DB`: every read now runs through
+	// runtime.ScopedRead so a partitioned entity binds its tenant first. What
+	// this test pins is the SQL form, not who issues it.
+	assertContains(t, c, "rows, err := q.Query(ctx, sqlBatchGetSnapshot,")
 	assertNotContains(t, c, "BatchGetSnapshot: at most 200")
 }
 
@@ -855,7 +859,11 @@ func TestEmitGoServer_PartitionEmitterStillRendersThePredicate(t *testing.T) {
 	files, _ := EmitGoServer(ir)
 	c := entityServerFile(t, files)
 	// Partition predicate uses $1; caller filter placeholders start at $2.
-	assertContains(t, c, "runtime.CallerPartition(ctx)")
+	// PartitionKey, not CallerPartition. CallerPartition returns `any`; the
+	// cache key and the predicate both need the tenant rendered exactly as
+	// BindPartition renders it for set_partition. Passing the `any` straight
+	// into queryresult.Hash made every generated server fail to compile.
+	assertContains(t, c, "runtime.PartitionKey(ctx)")
 	assertContains(t, c, `extras = append(extras, "\"consumer_id\" = $1")`)
 	assertContains(t, c, "args = append([]any{partitionVal}, args...)")
 	// placeholderStart should be 2 when partition is set.

@@ -147,14 +147,24 @@ func emitProtoQueryMethod(b *strings.Builder, e *dsl.Entity, srv string, inbound
 		fmt.Fprintf(&extrasInit, "\textras = append(extras, %q)\n",
 			quoteIdent(e.SoftDeleteField)+" IS NULL")
 	}
+	// The tenant is resolved ONCE, at the top of the handler, because two
+	// separate things need it and only one of them used to have it.
+	//
+	// The predicate below is defence in depth, not the enforcement: the
+	// row-level security policy is. A predicate is what the emitter can forget,
+	// and it did — a review found this Query path was the ONLY one of seven
+	// that scoped at all, while Get, List, BatchGet, Create, Update and Delete
+	// had nothing. The binding added further down is what covers them.
+	partitioned := e.PartitionField != ""
+	partitionDecl := ""
+	partitionHashArg := `""`
 	partitionArgInsert := ""
-	if e.PartitionField != "" {
+	if partitioned {
 		// $1 is reserved for the partition value, so TranslateFilter is
 		// told placeholderStart=2.
-		fmt.Fprintf(&extrasInit, "\tpartitionVal, err := runtime.CallerPartition(ctx)\n")
-		extrasInit.WriteString("\tif err != nil {\n")
-		extrasInit.WriteString("\t\treturn nil, err\n")
-		extrasInit.WriteString("\t}\n")
+		partitionDecl = "\tpartitionVal, err := runtime.PartitionKey(ctx)\n" +
+			"\tif err != nil {\n\t\treturn nil, err\n\t}\n"
+		partitionHashArg = "partitionVal"
 		fmt.Fprintf(&extrasInit, "\textras = append(extras, %q)\n",
 			quoteIdent(e.PartitionField)+" = $1")
 		partitionArgInsert = "\targs = append([]any{partitionVal}, args...)\n"
@@ -168,7 +178,7 @@ func emitProtoQueryMethod(b *strings.Builder, e *dsl.Entity, srv string, inbound
 func (s *%s) Query%s(ctx context.Context, req *pb.Query%sRequest) (*pb.Query%sResponse, error) {
 	ctx, cancel := runtime.Deadline(ctx, %sQueryTimeoutMS)
 	defer cancel()
-
+%s
 	limit := req.GetLimit()
 	if limit <= 0 {
 		limit = %d
@@ -188,6 +198,7 @@ func (s *%s) Query%s(ctx context.Context, req *pb.Query%sRequest) (*pb.Query%sRe
 	}
 	cacheHash, hashErr := queryresult.Hash(
 		%q,
+		%s,
 		req.GetFilter(),
 		orderMsgs,
 		req.GetLimit(),
@@ -240,21 +251,22 @@ func (s *%s) Query%s(ctx context.Context, req *pb.Query%sRequest) (*pb.Query%sRe
 	fmt.Fprintf(&b, " LIMIT $%%d", len(args))
 	sqlText := b.String()
 
-	rows, err := s.DB.Query(ctx, sqlText, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	resp := &pb.Query%sResponse{}
-	for rows.Next() {
-		entity := &pb.%s{}
-		if err := scanInto%s(rows, entity); err != nil {
-			return nil, err
+	if err := runtime.ScopedRead(ctx, s.DB, %t, func(q runtime.Querier) error {
+		rows, err := q.Query(ctx, sqlText, args...)
+		if err != nil {
+			return err
 		}
-		resp.Entities = append(resp.Entities, entity)
-	}
-	if err := rows.Err(); err != nil {
+		defer rows.Close()
+		for rows.Next() {
+			entity := &pb.%s{}
+			if err := scanInto%s(rows, entity); err != nil {
+				return err
+			}
+			resp.Entities = append(resp.Entities, entity)
+		}
+		return rows.Err()
+	}); err != nil {
 		return nil, err
 	}
 
@@ -283,19 +295,25 @@ func (s *%s) assembleQuery%sFromPKs(ctx context.Context, pks []string, nextPageT
 	if len(pks) == 0 {
 		return resp, nil
 	}
-	rows, err := s.DB.Query(ctx, sqlBatchGet%s, pks)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		entity := &pb.%s{}
-		if err := scanInto%s(rows, entity); err != nil {
-			return nil, err
+	// A cache HIT lands here with primary keys and nothing else, and the fetch
+	// is WHERE id = ANY($1) — no filter, no tenant predicate. Unbound, this
+	// is where a cross-tenant read happens even when the filtered query that
+	// produced those keys was correctly scoped.
+	if err := runtime.ScopedRead(ctx, s.DB, %t, func(q runtime.Querier) error {
+		rows, err := q.Query(ctx, sqlBatchGet%s, pks)
+		if err != nil {
+			return err
 		}
-		resp.Entities = append(resp.Entities, entity)
-	}
-	if err := rows.Err(); err != nil {
+		defer rows.Close()
+		for rows.Next() {
+			entity := &pb.%s{}
+			if err := scanInto%s(rows, entity); err != nil {
+				return err
+			}
+			resp.Entities = append(resp.Entities, entity)
+		}
+		return rows.Err()
+	}); err != nil {
 		return nil, err
 	}
 	return resp, nil
@@ -337,20 +355,23 @@ func extract%sCursor(ent *pb.%s, orders []*pb.%sOrderBy) []any {
 		e.Name, e.Name, // Query<E> implements pb.<E>ServiceServer (in doc)
 		srv, e.Name, e.Name, e.Name, // func sig
 		lowerFirst(e.Name), // <e>QueryTimeoutMS
+		partitionDecl,      // resolve the caller's tenant once, up front
 		queryDefaultLimit,
 		queryMaxLimit,
 		queryMaxLimit,
-		e.ID(), // Generation entity
-		e.ID(), // Hash entity
-		e.ID(), // Lookup entity
-		e.Name, // assembleQuery<E>FromPKs (hit-path call)
-		e.Name, // build<E>KeysetCols
-		e.ID(), // DecodePageToken expectedEntityID
+		e.ID(),           // Generation entity
+		e.ID(),           // Hash entity
+		partitionHashArg, // Hash tenant segment
+		e.ID(),           // Lookup entity
+		e.Name,           // assembleQuery<E>FromPKs (hit-path call)
+		e.Name,           // build<E>KeysetCols
+		e.ID(),           // DecodePageToken expectedEntityID
 		extrasInit.String(),
 		specVar, startingPH,
 		partitionArgInsert,
 		e.Name,                   // sqlQuery<E>Prefix
 		e.Name,                   // resp type Query<E>Response
+		partitioned,              // ScopedRead: bind before the filtered read
 		e.Name,                   // pb.<E>{}
 		e.Name,                   // scanInto<E>
 		e.Name,                   // extract<E>Cursor (boundary call)
@@ -361,10 +382,11 @@ func extract%sCursor(ent *pb.%s, orders []*pb.%sOrderBy) []any {
 		lowerFirst(e.Name),       // <e>QueryCacheTTL
 		// assembleQuery<E>FromPKs helper
 		srv, e.Name, e.Name, // func sig
-		e.Name, // resp type Query<E>Response
-		e.Name, // sqlBatchGet<E>
-		e.Name, // pb.<E>{}
-		e.Name, // scanInto<E>
+		e.Name,      // resp type Query<E>Response
+		partitioned, // ScopedRead: bind before the PK fetch
+		e.Name,      // sqlBatchGet<E>
+		e.Name,      // pb.<E>{}
+		e.Name,      // scanInto<E>
 		// build<E>KeysetCols
 		srv, e.Name, e.Name,
 		keysetCases.String(),
@@ -432,21 +454,32 @@ func emitIncludeAttachFuncs(b *strings.Builder, target *dsl.Entity, srv string, 
 	for _, p := range parents {
 		parentKeys = append(parentKeys, fmt.Sprintf("%%v", p.Get%s()))
 	}
-	rows, err := s.DB.Query(ctx, %s, parentKeys)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
+	// Bound on the CHILD entity, which is the table this reads.
+	//
+	// This helper filters only by foreign key, so unbound it returns every
+	// tenant's children of the given parent keys. A review executed it: a note
+	// belonging to tenant B, whose doc_id points at tenant A's doc, was
+	// returned and stamped onto tenant A's parent in tenant A's response.
+	// Nothing in a schema forbids that foreign key. On a role that obeys
+	// row-level security the same helper instead returns nothing, so the whole
+	// include feature yields empty lists forever.
 	grouped := map[string][]*pb.%s{}
-	for rows.Next() {
-		child := &pb.%s{}
-		if err := scanInto%s(rows, child); err != nil {
+	if err := runtime.ScopedRead(ctx, s.DB, %t, func(q runtime.Querier) error {
+		rows, err := q.Query(ctx, %s, parentKeys)
+		if err != nil {
 			return err
 		}
-		key := fmt.Sprintf("%%v", child.Get%s())
-		grouped[key] = append(grouped[key], child)
-	}
-	if err := rows.Err(); err != nil {
+		defer rows.Close()
+		for rows.Next() {
+			child := &pb.%s{}
+			if err := scanInto%s(rows, child); err != nil {
+				return err
+			}
+			key := fmt.Sprintf("%%v", child.Get%s())
+			grouped[key] = append(grouped[key], child)
+		}
+		return rows.Err()
+	}); err != nil {
 		return err
 	}
 	for _, p := range parents {
@@ -459,8 +492,9 @@ func emitIncludeAttachFuncs(b *strings.Builder, target *dsl.Entity, srv string, 
 `,
 			srv, helperName, target.Name,
 			pkGoName,
+			src.Name,                 // grouped map, declared before the scope
+			src.PartitionField != "", // ScopedRead: bind on the CHILD table
 			sqlConstName,
-			src.Name,
 			src.Name,
 			src.Name,
 			fkGoName,

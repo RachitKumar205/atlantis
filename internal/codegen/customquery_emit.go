@@ -437,7 +437,16 @@ func emitCustomQueryHandler(b *strings.Builder, ir *dsl.IR, q *dsl.CustomQuery) 
 		b.WriteString("\tvar args []any\n\n")
 	}
 
-	fmt.Fprintf(b, "\trows, err := s.DB.Query(ctx, sqlCustom_%s, args...)\n", q.Name)
+	// Bound before the read. This handler used to run on the bare pool, which
+	// is the worst surface to leave unbound: a custom body is opaque author
+	// text with nowhere to inject a tenant predicate, and that is exactly why
+	// the design delegates to row-level security. The dispatcher scoped this
+	// path; the emitter had no equivalent at all.
+	fmt.Fprintf(b, "\tcq, cqRelease, cqErr := runtime.ScopedQuerier(ctx, s.DB, %t)\n",
+		ir.TouchesPartitioned(q.Touches))
+	b.WriteString("\tif cqErr != nil {\n\t\treturn nil, cqErr\n\t}\n")
+	b.WriteString("\tdefer cqRelease()\n")
+	fmt.Fprintf(b, "\trows, err := cq.Query(ctx, sqlCustom_%s, args...)\n", q.Name)
 	b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
 	b.WriteString("\tdefer rows.Close()\n\n")
 
@@ -535,6 +544,13 @@ func emitCustomProcedureHandler(b *strings.Builder, ir *dsl.IR, p *dsl.CustomPro
 	b.WriteString("\ttx, err := s.DB.BeginTx(ctx)\n")
 	b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
 	b.WriteString("\tdefer func() { _ = tx.Rollback(context.Background()) }()\n\n")
+
+	// Bound before the first step, or every step runs unscoped. An unbound
+	// UPDATE on a partitioned table blanks another tenant's row on a role that
+	// bypasses row-level security, and silently affects zero rows on a role
+	// that does not — which this handler then reports as success.
+	fmt.Fprintf(b, "\tif err := runtime.BindWrite(ctx, %t, tx); err != nil {\n\t\treturn nil, err\n\t}\n\n",
+		ir.TouchesPartitioned(p.TouchedEntities()))
 
 	b.WriteString("\tvar rowsAffected int64\n")
 

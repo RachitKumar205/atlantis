@@ -299,11 +299,11 @@ func TestCodec_RejectsOversizedToken(t *testing.T) {
 
 func TestHash_DeterministicAcrossCalls(t *testing.T) {
 	f := &commonv1.StringPredicate{Op: &commonv1.StringPredicate_Eq{Eq: "alice"}}
-	h1, err := Hash("consumer.Account", f, nil, 100, nil, nil, []int32{1, 2}, 7)
+	h1, err := Hash("consumer.Account", "", f, nil, 100, nil, nil, []int32{1, 2}, 7)
 	if err != nil {
 		t.Fatalf("Hash: %v", err)
 	}
-	h2, _ := Hash("consumer.Account", f, nil, 100, nil, nil, []int32{1, 2}, 7)
+	h2, _ := Hash("consumer.Account", "", f, nil, 100, nil, nil, []int32{1, 2}, 7)
 	if h1 != h2 {
 		t.Errorf("hashes diverged: %q vs %q", h1, h2)
 	}
@@ -314,24 +314,24 @@ func TestHash_DeterministicAcrossCalls(t *testing.T) {
 
 func TestHash_IncludesOrderInsensitive(t *testing.T) {
 	// `includes` is a Set conceptually — canonical form sorts before hash.
-	a, _ := Hash("e", nil, nil, 0, nil, nil, []int32{3, 1, 2}, 0)
-	b, _ := Hash("e", nil, nil, 0, nil, nil, []int32{1, 2, 3}, 0)
+	a, _ := Hash("e", "", nil, nil, 0, nil, nil, []int32{3, 1, 2}, 0)
+	b, _ := Hash("e", "", nil, nil, 0, nil, nil, []int32{1, 2, 3}, 0)
 	if a != b {
 		t.Errorf("includes order should be canonicalized: %q vs %q", a, b)
 	}
 }
 
 func TestHash_DifferentGenerationsProduceDifferentHashes(t *testing.T) {
-	a, _ := Hash("e", nil, nil, 0, nil, nil, nil, 0)
-	b, _ := Hash("e", nil, nil, 0, nil, nil, nil, 1)
+	a, _ := Hash("e", "", nil, nil, 0, nil, nil, nil, 0)
+	b, _ := Hash("e", "", nil, nil, 0, nil, nil, nil, 1)
 	if a == b {
 		t.Errorf("generation bump should change hash")
 	}
 }
 
 func TestHash_DifferentEntitiesProduceDifferentHashes(t *testing.T) {
-	a, _ := Hash("consumer.Account", nil, nil, 0, nil, nil, nil, 0)
-	b, _ := Hash("vendor.Product", nil, nil, 0, nil, nil, nil, 0)
+	a, _ := Hash("consumer.Account", "", nil, nil, 0, nil, nil, nil, 0)
+	b, _ := Hash("vendor.Product", "", nil, nil, 0, nil, nil, nil, 0)
 	if a == b {
 		t.Errorf("different entities should differ in hash")
 	}
@@ -339,8 +339,8 @@ func TestHash_DifferentEntitiesProduceDifferentHashes(t *testing.T) {
 
 func TestHash_NilFilterStable(t *testing.T) {
 	// Two callers both omitting filter → same hash.
-	a, _ := Hash("e", nil, nil, 100, nil, nil, nil, 0)
-	b, _ := Hash("e", nil, nil, 100, nil, nil, nil, 0)
+	a, _ := Hash("e", "", nil, nil, 100, nil, nil, nil, 0)
+	b, _ := Hash("e", "", nil, nil, 100, nil, nil, nil, 0)
 	if a != b {
 		t.Errorf("nil filter not stable")
 	}
@@ -349,8 +349,8 @@ func TestHash_NilFilterStable(t *testing.T) {
 func TestHash_FieldMaskAffectsHash(t *testing.T) {
 	m1 := &fieldmaskpb.FieldMask{Paths: []string{"id"}}
 	m2 := &fieldmaskpb.FieldMask{Paths: []string{"id", "name"}}
-	a, _ := Hash("e", nil, nil, 0, nil, m1, nil, 0)
-	b, _ := Hash("e", nil, nil, 0, nil, m2, nil, 0)
+	a, _ := Hash("e", "", nil, nil, 0, nil, m1, nil, 0)
+	b, _ := Hash("e", "", nil, nil, 0, nil, m2, nil, 0)
 	if a == b {
 		t.Errorf("different field masks should differ in hash")
 	}
@@ -361,9 +361,66 @@ func TestHash_OrderOrderMatters(t *testing.T) {
 	// is not the same as `ORDER BY b, a`.
 	o1 := &commonv1.Int32Range{Lo: 1, Hi: 2} // any proto message will do as a stand-in
 	o2 := &commonv1.Int32Range{Lo: 3, Hi: 4}
-	a, _ := Hash("e", nil, []proto.Message{o1, o2}, 0, nil, nil, nil, 0)
-	b, _ := Hash("e", nil, []proto.Message{o2, o1}, 0, nil, nil, nil, 0)
+	a, _ := Hash("e", "", nil, []proto.Message{o1, o2}, 0, nil, nil, nil, 0)
+	b, _ := Hash("e", "", nil, []proto.Message{o2, o1}, 0, nil, nil, nil, 0)
 	if a == b {
 		t.Errorf("orders order should affect hash")
+	}
+}
+
+// Two tenants running the identical query must not share a cache entry.
+//
+// The cached value is a list of primary keys, and the fetch that follows a hit
+// is `WHERE id = ANY($1)` — the primary-key fetch is not the filtered query. So
+// a shared key means tenant B receives tenant A's keys and fetches those rows
+// directly. On a database role that obeys row-level security the rows are then
+// filtered away and the answer is merely wrong. On a role that does not, it is
+// a cross-tenant read.
+func TestHash_SeparatesTenants(t *testing.T) {
+	// EQUAL-LENGTH tenants. The first version of this test used "acme" (4) and
+	// "globex" (6), and a review passed it with a Hash that folded only
+	// len(partition) — every pair of equal-length tenants then shares one key,
+	// which is exactly the condition this test exists to forbid.
+	a, err := Hash("shop.Doc", "acme", nil, nil, 100, nil, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("hash acme: %v", err)
+	}
+	b, err := Hash("shop.Doc", "beta", nil, nil, 100, nil, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("hash beta: %v", err)
+	}
+	if a == b {
+		t.Error("two tenants share one cache key for the same query. The entry " +
+			"holds primary keys, and the fetch after a hit carries no tenant " +
+			"predicate, so the second tenant reads the first tenant's rows")
+	}
+
+	// One tenant name a prefix of another. A segment written without its
+	// length prefix makes these two indistinguishable once the next segment
+	// begins; the entity id is framed by pre-existing code, so a probe that
+	// varies only the entity id proves nothing about THIS segment.
+	c, _ := Hash("shop.Doc", "a", nil, nil, 100, nil, nil, nil, 0)
+	d, _ := Hash("shop.Doc", "ab", nil, nil, 100, nil, nil, nil, 0)
+	if c == d {
+		t.Error("two tenants whose names share a prefix produce one cache key")
+	}
+
+	// And the tenant must not be foldable into the entity id.
+	e, _ := Hash("shop.Doc", "acme", nil, nil, 100, nil, nil, nil, 0)
+	f, _ := Hash("shop.Docacme", "", nil, nil, 100, nil, nil, nil, 0)
+	if e == f {
+		t.Error("an entity name and a tenant name can be split at the wrong " +
+			"place and collide")
+	}
+
+	// And an unpartitioned entity keeps one key for all callers, or every
+	// unpartitioned query loses its cache.
+	u1, err := Hash("consumer.Account", "", nil, nil, 100, nil, nil, nil, 0)
+	if err != nil {
+		t.Fatalf("an unpartitioned entity must still hash: %v", err)
+	}
+	u2, _ := Hash("consumer.Account", "", nil, nil, 100, nil, nil, nil, 0)
+	if u1 != u2 {
+		t.Error("an unpartitioned entity does not produce a stable key")
 	}
 }
