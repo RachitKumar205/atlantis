@@ -188,37 +188,31 @@ export const CHANGE_CLASS_DISPLAY: ReadonlyArray<{
   { bucket: 'destructive', glyph: '✗', badge: 'destroy' },
 ]
 
-// A plan class reaches this console under two different spellings, and the
-// difference is not cosmetic — it decides whether a badge renders.
+// Plan classes arrive HYPHENATED, and the lookup tables below are keyed with
+// underscores. Normalising at lookup is what bridges them.
 //
-//   underscored   from a live plan preview. /api/plan and /api/rollback/preview
-//                 run the proto enum through shortPlanClass, which lowercases
-//                 PLAN_CLASS_CROSS_CALLER_BREAKING to "cross_caller_breaking".
+// Every plan_class the BFF serves is proxied from the admin server, and every
+// one of those is written by codegen.ChangeClass.String(): "additive",
+// "backfill-required", "cross-caller-breaking", "destructive". The pages used
+// to compare against the underscored spelling with ===, so every breaking and
+// backfill-required version in the history timeline rendered with the grey
+// "plain" badge — the styling that means nothing notable happened. Nothing
+// failed loudly, because the label beside the badge is the class name itself:
+// the text was right and only the colour was wrong.
 //
-//   hyphenated    from schema history. /api/history proxies the proto through
-//                 untouched, and its plan_class is the schema_versions column,
-//                 written from codegen.ChangeClass.String() — which spells the
-//                 same class "cross-caller-breaking".
-//
-// The pages compared against the underscored form only, so every breaking and
-// backfill-required version in the history timeline has been rendering with
-// the grey "plain" badge — the styling that means nothing notable happened.
-// Nothing failed loudly because the label beside the badge is the class name
-// itself, so the text was right and only the colour was wrong.
-//
-// Normalising at lookup rather than picking a winner: both spellings are load
-// bearing where they are, the column has years of rows in the hyphenated form,
-// and a reconciliation is its own change. This makes the console read both.
+// The underscored spelling was real until 2026-08-13, when the schema-edit
+// preview — the one response the BFF assembled itself, via shortPlanClass —
+// was removed with the GitHub flow. Accepting both is kept deliberately: these
+// strings cross a process boundary this code does not control, the
+// schema_versions column holds rows in the hyphenated form indefinitely, and a
+// lookup that silently returns nothing is the failure this whole comment is
+// about.
 function normalizeClass(planClass: string): string {
   return planClass.replace(/-/g, '_')
 }
 
 export function planClassBadge(planClass: string): string {
   return PLAN_CLASS_BADGE[normalizeClass(planClass)] ?? 'plain'
-}
-
-export function planClassPreview(planClass: string) {
-  return PLAN_CLASS_PREVIEW[normalizeClass(planClass)]
 }
 
 // plan_class values mapped to badge modifiers. Keyed in the underscored
@@ -236,21 +230,14 @@ export const PLAN_CLASS_BADGE: Readonly<Record<string, string>> = {
   unparseable: 'break',
 }
 
-// The one-line verdict on a schema preview.
+// PLAN_CLASS_PREVIEW lived here — the one-line verdict rendered above a schema
+// preview on the Schema page. That page no longer previews anything: the
+// console does not author schema, so it has nothing to plan.
 //
-// Glyphs match `tide plan`: "!" warns, "✗" deletes. The console used "✗" for
-// breaking, which left nothing to distinguish it from destructive once that
-// class became visible — so breaking moves to "!" and the two now read the
-// same way in the terminal and in the browser.
-export const PLAN_CLASS_PREVIEW: Readonly<
-  Record<string, { cls: string; text: string; showCount?: boolean }>
-> = {
-  additive: { cls: 'pl-add', text: '+ additive', showCount: true },
-  backfill_required: { cls: 'pl-back', text: '~ backfill required' },
-  cross_caller_breaking: { cls: 'pl-break', text: '! breaking — blocks merge' },
-  destructive: { cls: 'pl-destroy', text: '✗ destructive — destroys data' },
-  unparseable: { cls: 'pl-break', text: '! unparseable — the schema did not compile' },
-}
+// Deleted rather than kept for step 5's Approvals page, which will want
+// something like it. A five-entry lookup is cheap to write when there is a
+// consumer, and an exported table with tests and no caller is the shape that
+// reads as covered while proving nothing.
 
 export interface DiffVersionsResponse {
   from_version: number
@@ -324,56 +311,13 @@ export interface ParkedObjectsResponse {
 // Schema editing types
 // ---------------------------------------------------------------------------
 
-export type EditOp = 'add' | 'replace' | 'remove'
-
-export interface EditPreviewRequest {
-  namespace: string
-  entity: string
-  field?: string
-  op: EditOp
-  field_text?: string
-}
-
-export interface EditPreviewResponse {
-  owner_path: string
-  caller: string
-  old_content: string
-  new_content: string
-  plan_class: string
-  up_sql: string
-  down_sql?: string
-  impact?: unknown[]
-  breaking?: string[]
-  parse_errors?: string[]
-  checkpoint_hash: string
-}
-
-export interface EditPRRequest extends EditPreviewRequest {
-  title?: string
-  body?: string
-  base_checkpoint_hash?: string
-}
-
-export interface EditPRResponse {
-  pr_url: string
-  number: number
-}
-
-// ---------------------------------------------------------------------------
-// Caller repo mapping types
-// ---------------------------------------------------------------------------
-
-export interface CallerRepo {
-  caller: string
-  owner: string
-  repo: string
-  default_branch: string
-  schema_path_prefix: string
-}
-
-export interface CallerReposResponse {
-  repos: CallerRepo[]
-}
+// The schema-edit and caller→repo types lived here.
+//
+// They described a flow where the console composed a field edit against a
+// caller's .atl source and opened a GitHub pull request with the result, with
+// console.caller_repos holding each caller's owner/repo/branch. Both are gone:
+// schema files live in the customer's own git repo and reach the database
+// through `tide apply`. The console observes, approves and audits.
 
 // ---------------------------------------------------------------------------
 // Callers types
@@ -741,31 +685,6 @@ export const api = {
       apiFetch(`/api/admin/workers/${encodeURIComponent(sessionID)}/evict`, { method: 'POST' }),
   },
 
-  schemaEdit: {
-    preview: (req: EditPreviewRequest): Promise<EditPreviewResponse> =>
-      apiFetch<EditPreviewResponse>('/api/schema/edit/preview', {
-        method: 'POST',
-        body: JSON.stringify(req),
-      }),
-
-    openPR: (req: EditPRRequest): Promise<EditPRResponse> =>
-      apiFetch<EditPRResponse>('/api/schema/edit/pr', {
-        method: 'POST',
-        body: JSON.stringify(req),
-      }),
-  },
-
-  callerRepos: {
-    list: (): Promise<CallerReposResponse> =>
-      apiFetch<CallerReposResponse>('/api/callers/repos'),
-
-    upsert: (caller: string, data: Omit<CallerRepo, 'caller'>): Promise<{ ok: boolean }> =>
-      apiFetch<{ ok: boolean }>(`/api/callers/repos/${encodeURIComponent(caller)}`, {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-  },
-
   callers: {
     list: (): Promise<GetCallersResponse> =>
       apiFetch<GetCallersResponse>('/api/callers'),
@@ -1126,11 +1045,6 @@ export const queries = {
     refetchInterval: 30_000,
   }),
 
-  callerRepos: () => ({
-    queryKey: ['callerRepos'] as const,
-    queryFn: () => api.callerRepos.list(),
-    staleTime: 60_000,
-  }),
 
   callers: () => ({
     queryKey: ['callers'] as const,

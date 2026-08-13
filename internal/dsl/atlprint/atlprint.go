@@ -4,10 +4,30 @@
 // The atlantis pipeline is one-way: .atl source → AST → validated IR →
 // SQL/codegen. There is no IR→.atl printer, and re-emitting a whole file
 // from the AST would discard comments, alignment, and blank lines that
-// callers care about. The console's schema editor needs the opposite: take
-// the caller's existing .atl verbatim, change exactly one declaration, and
-// leave every other byte untouched so the resulting git diff is minimal and
-// reviewable.
+// callers care about. This package does the opposite: take an existing .atl
+// verbatim, change exactly one declaration, and leave every other byte
+// untouched so the resulting git diff is minimal and reviewable.
+//
+// # Why this is kept with no caller
+//
+// Its one non-test consumer was the console's schema editor, removed on
+// 2026-08-13 along with the GitHub pull-request flow it fed. Nothing in the
+// binary calls this today.
+//
+// It stays because deleting it would not stop at this package. The spans it
+// splices on — Position.Byte and EndByte, recorded per entity and per field —
+// exist in internal/dsl/ast.go for this and nothing else, so the next person
+// tidying dead code removes those too, and with them the only mechanism by
+// which anything can edit .atl without reformatting it. That machinery is
+// subtle, it is tested (see internal/dsl/check_placement_test.go, whose
+// multi-line-field case depends on the spans being right), and it is needed
+// again by anything that edits schema text rather than regenerating it — a
+// `tide fmt`, a codemod, an agent proposing a field.
+//
+// Rebuilding a byte-splicing editor is expensive; keeping a tested one that
+// nothing calls is close to free. If that trade stops holding, delete the
+// package and the spans together, deliberately, rather than one then the
+// other.
 //
 // The approach is a byte-level splice. The parser records a start byte
 // (Position.Byte) and an end byte (EndByte) for entities and fields; an edit

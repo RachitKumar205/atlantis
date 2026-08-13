@@ -9,7 +9,7 @@ review for every change.
 
 | File | Triggers on | Runs |
 |---|---|---|
-| `atlantis-plan.yml` | PR opened / synchronize (touching `**/*.atl`) | `tide plan` — read-only impact report; non-zero exit on breaking → blocks merge via branch protection |
+| `atlantis-plan.yml` | PR opened / synchronize (touching `**/*.atl`) | `tide plan` — read-only impact report; exit 2 on breaking and exit 4 on destructive → blocks merge via branch protection |
 | `atlantis-apply.yml` | Push to `main` (touching `**/*.atl`) | `tide apply` — the only path schema reaches prod |
 
 ## Setup, step by step

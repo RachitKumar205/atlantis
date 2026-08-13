@@ -95,9 +95,14 @@ Swap `linux-amd64` for `linux-arm64` per host. SHA256SUMS for every tarball is a
 Leave `ATL_ALLOW_APPLY_MUTATION=true`. The opt-out exists only for regulated workloads.
 
 - **`true` (default)** — callers run `tide apply --against=<prod>` from their CI. The server validates against the live IR, acquires an advisory lock, applies the DDL, writes the new `atlantis.ir_checkpoint` row under content-hash CAS, and inserts an audit row into `atlantis.schema_versions` — all in one Postgres transaction. `NOTIFY atl_schema_changed` fires from a Postgres trigger after commit and the server's listener rebuilds entity metadata. Editing an existing entity, custom query, or procedure takes effect within seconds (hot-reload). A brand-new entity, custom query, or procedure needs a rolling restart, because each gRPC method registers at startup only — hot-reload swaps the schema snapshot but can't add a method to the running server.
-- **`false` (regulated opt-in)** — the server rejects every `tide apply` mutation. Schema changes route through a PR against the atlantis deployment repo: update `atlantis.workspace.yaml`, regenerate migrations with `tidectl plan` + `tidectl approve`, deploy. Use this only when a regulator requires literal SQL review before any production database change (SOX, HIPAA, PCI). The default flow already provides cross-caller safety, reversibility, atomic IR writes, and a per-apply audit row.
+- **`false` (regulated opt-in)** — the server rejects every `tide apply` mutation. Schema changes route through your own version control instead: update `atlantis.workspace.yaml`, regenerate migrations with `tidectl plan` + `tidectl approve`, review the materialised SQL, deploy. Use this only when a regulator requires literal SQL review before any production database change (SOX, HIPAA, PCI). The default flow already provides cross-caller safety, reversibility, atomic IR writes, and a per-apply audit row.
 
-Two boundaries gate every apply in the default flow: mTLS pins the connecting caller to its client cert (the server requires `req.Caller` to match the CN, so a caller can only submit `.atl` files under its own namespace), and the diff classifier refuses any change that would break another caller's schema. GitHub branch protection on the caller repo is the human-review gate — reviewers read the `tide plan` output CI posted on the PR.
+Two boundaries gate every apply in the default flow, and both are enforced by the server:
+
+- **mTLS pins the connecting caller to its client cert.** The server requires `req.Caller` to match the CN, so a caller can only submit `.atl` files under its own namespace.
+- **The diff classifier refuses any change that breaks another caller or destroys data.** `ApplyMigration` rejects `cross_caller_breaking` and `destructive` plans itself, so a direct gRPC client holding `CAPABILITY_SCHEMA_APPLY` cannot route around it.
+
+Review the change in your own repository as well — most teams gate merges on the `tide plan` exit code, and `tide plan` is read-only precisely so CI can run it on every pull request. But that review is your practice, not atlantis's gate: the server refuses a breaking or destructive plan however it arrives, including from a runner with no review at all.
 
 A minimal production environment:
 

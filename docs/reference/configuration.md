@@ -207,7 +207,6 @@ Read by `cmd/console`, not the Atlantis server. The self-host compose bundle wir
 | `ATL_TLS_CERT`, `ATL_TLS_KEY`, `ATL_TLS_CA` | (unset) | Client cert / key / CA for the BFF's mTLS connection to atlantis-server. |
 | `ATL_HEALTH_LISTEN` | `localhost:8081` | atlantis-server HTTP health endpoint the BFF surfaces on the console's Health page. |
 | `ATL_SIGNER_ADDR` | (unset) | Signer HTTP endpoint for cert issuance from the console's Callers page. |
-| `GITHUB_TOKEN` | (unset) | Fine-grained PAT for the "Open PR" button on the Schema page. Needs `contents:write` + `pull_requests:write` on each caller repo. Unset disables the button (preview still works). |
 | `SANDBOX_PER_USER_LIMIT` | `3` | Maximum concurrent sandboxes per authenticated user. A boot beyond this returns HTTP `429`. The limit also caps fork count — forking N children requires `N + parent` headroom. |
 | `SANDBOX_TTL` | `30m` | Idle window after which the BFF's janitor evicts a sandbox. Go duration syntax. Set lower (`10s`) for CI; higher (`2h`) for long agent loops. |
 

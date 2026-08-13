@@ -181,9 +181,11 @@ func (s *Service) guardOperatorTransport(ctx context.Context) error {
 // This is not authorization and does not overlap with the capability check: it
 // is one operator decision about whether this atlantis accepts schema change
 // over the wire at all. ATL_ALLOW_APPLY_MUTATION=false is the regulated posture
-// documented in docs/architecture/schema-flow.md — SQL is reviewed on a
-// deployment-repo PR and applied by tidectl, and no grant, however broad, may
-// route around that. It is also the switch to reach for during an incident,
+// documented in docs/architecture/schema-flow.md — tidectl materialises the SQL
+// into files that are reviewed in the operator's own version control before it
+// applies them, and no grant, however broad, may route around that. Note this
+// is the operator's review process, in their repository; atlantis neither opens
+// nor observes it. It is also the switch to reach for during an incident,
 // which a per-caller grant cannot express because it would have to be revoked
 // caller by caller and restored the same way.
 //

@@ -29,9 +29,6 @@ import (
 
 	"github.com/rachitkumar205/atlantis/clients/go/adminjson"
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
-	"github.com/rachitkumar205/atlantis/internal/console/vcs"
-	"github.com/rachitkumar205/atlantis/internal/dsl"
-	"github.com/rachitkumar205/atlantis/internal/dsl/atlprint"
 )
 
 const (
@@ -47,7 +44,6 @@ type Server struct {
 	handler  http.Handler // mux wrapped with security headers
 	log      *slog.Logger
 	spaFS    fs.FS
-	vcs      vcs.VCSProvider // nil when GITHUB_TOKEN is not set
 	loginLim *loginLimiter
 
 	// sandboxes owns the in-process sandbox runtime + per-user meta.
@@ -83,14 +79,9 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 		return nil, fmt.Errorf("console db migrate: %w", err)
 	}
 
-	var provider vcs.VCSProvider
-	if cfg.GitHubToken != "" {
-		provider = vcs.NewTokenProvider(cfg.GitHubToken)
-	}
-
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	s := &Server{
-		cfg: cfg, atl: atl, db: db, log: log, spaFS: spaFS, vcs: provider,
+		cfg: cfg, atl: atl, db: db, log: log, spaFS: spaFS,
 		loginLim:  newLoginLimiter(),
 		sandboxes: newSandboxLayer(cfg.SandboxPerUserLimit, cfg.SandboxTTL),
 		bgCtx:     bgCtx, bgCancel: bgCancel,
@@ -213,24 +204,31 @@ func (s *Server) buildMux() {
 	mux.HandleFunc("GET /api/parked", s.auth(s.handleListParkedObjects))
 	mux.HandleFunc("GET /api/health", s.auth(s.handleHealth))
 
-	// Schema editing — preview is read-only (any authenticated user); PR is admin-only.
-	mux.HandleFunc("POST /api/schema/edit/preview", s.auth(s.csrf(s.handleEditPreview)))
-	mux.HandleFunc("POST /api/schema/edit/pr", s.auth(s.requireRole("admin", s.csrf(s.handleEditPR))))
-
-	// Caller→repo mapping management (admin-only mutations).
-	mux.HandleFunc("GET /api/callers/repos", s.auth(s.handleListCallerRepos))
-	mux.HandleFunc("PUT /api/callers/repos/{caller}", s.auth(s.requireRole("admin", s.csrf(s.handleUpsertCallerRepo))))
+	// The console does not edit schema.
+	//
+	// /api/schema/edit/preview and /api/schema/edit/pr used to live here. They
+	// composed a field edit against the caller's .atl source and opened a
+	// GitHub pull request with the result — a mechanism a hosted customer does
+	// not have, and one that put a second authoring path beside the customer's
+	// own git repo. `.atl` files are edited in that repo and applied by
+	// `tide apply`; this console observes, approves and audits.
+	//
+	// The caller→repo mapping endpoints went with them, along with
+	// console.caller_repos, which baked owner/repo/default_branch into the
+	// product's data model.
 
 	// Caller management.
 	mux.HandleFunc("GET /api/callers", s.auth(s.handleGetCallers))
 	mux.HandleFunc("POST /api/callers", s.auth(s.requireRole("admin", s.csrf(s.handleRegisterCaller))))
 	mux.HandleFunc("DELETE /api/callers/{caller}", s.auth(s.requireRole("admin", s.csrf(s.handleRevokeCaller))))
 	mux.HandleFunc("POST /api/callers/{caller}/cert/issue", s.auth(s.requireRole("admin", s.csrf(s.handleIssueCert))))
-	// Caller aliases. Mounted under /api/admin/callers/... to avoid the
-	// ServeMux ambiguity with PUT /api/callers/repos/{caller} (both
-	// would match /api/callers/repos/aliases and Go 1.22+ refuses to
-	// register that). Same admin+sudo gating as the rest of the
-	// /api/admin/... surface (workers, etc).
+	// Caller aliases. Mounted under /api/admin/callers/... originally to avoid
+	// a ServeMux ambiguity with PUT /api/callers/repos/{caller} — both would
+	// have matched /api/callers/repos/aliases, which Go 1.22+ refuses to
+	// register. That route is gone, so the constraint is too; the path stays
+	// because it is a published URL the SPA calls and moving it would break
+	// every console mid-upgrade for no gain. Same admin+sudo gating as the rest
+	// of the /api/admin/... surface (workers, etc).
 	mux.HandleFunc("GET /api/admin/callers/{caller}/aliases",
 		s.auth(s.requireRole("admin", s.handleGetCallerAliases)))
 	mux.HandleFunc("PUT /api/admin/callers/{caller}/aliases",
@@ -923,345 +921,6 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-// ── schema editing ─────────────────────────────────────────────────────────────
-
-// editRequest is the JSON body for /api/schema/edit/preview and /pr.
-type editRequest struct {
-	Namespace string `json:"namespace"`
-	Entity    string `json:"entity"`
-	Field     string `json:"field"`
-	Op        string `json:"op"`         // "add" | "replace" | "remove"
-	FieldText string `json:"field_text"` // used for add/replace
-}
-
-// resolvedSource is the result of locating an entity's .atl source.
-type resolvedSource struct {
-	caller    string
-	ownerPath string       // server-stored file path that declares the entity
-	files     []callerFile // full set of the caller's files (path + content)
-	ownerIdx  int          // index into files for the owning file
-}
-
-type callerFile struct {
-	path    string
-	content []byte
-}
-
-// resolveEntitySource finds which caller owns the entity and which of its
-// files declares it. Returns the caller's full file set so PlanSchema gets
-// all files (not just the edited one).
-func (s *Server) resolveEntitySource(ctx context.Context, namespace, entity string) (*resolvedSource, error) {
-	// GetEntityOwners returns all ownership; filter client-side.
-	owners, err := s.atl.GetEntityOwners(ctx, &adminpb.GetEntityOwnersRequest{})
-	if err != nil {
-		return nil, fmt.Errorf("GetEntityOwners: %w", err)
-	}
-
-	entityID := namespace + "." + entity
-	var caller string
-	for _, o := range owners.GetOwners() {
-		if o.GetEntityId() == entityID {
-			caller = o.GetIntroducedBy()
-			break
-		}
-	}
-	if caller == "" {
-		return nil, fmt.Errorf("entity %s not found in ownership data", entityID)
-	}
-
-	// Fetch all of this caller's files.
-	cf, err := s.atl.GetCallerFiles(ctx, &adminpb.GetCallerFilesRequest{Caller: caller})
-	if err != nil {
-		return nil, fmt.Errorf("GetCallerFiles: %w", err)
-	}
-	if len(cf.GetFiles()) == 0 {
-		return nil, fmt.Errorf("caller %s has no registered files", caller)
-	}
-
-	files := make([]callerFile, len(cf.GetFiles()))
-	for i, f := range cf.GetFiles() {
-		files[i] = callerFile{path: f.GetPath(), content: []byte(f.GetContent())}
-	}
-
-	// Parse each file to find the one declaring this entity.
-	ownerIdx := -1
-	var ownerPath string
-	for i, f := range files {
-		parsed, err := dsl.Parse(f.path, f.content)
-		if err != nil {
-			continue
-		}
-		for _, d := range parsed.Decls {
-			if e, ok := d.(*dsl.EntityDecl); ok && e.Namespace == namespace && e.Name == entity {
-				if ownerIdx >= 0 {
-					return nil, fmt.Errorf("entity %s declared in multiple files (%s and %s)", entityID, ownerPath, f.path)
-				}
-				ownerIdx = i
-				ownerPath = f.path
-			}
-		}
-	}
-	if ownerIdx < 0 {
-		return nil, fmt.Errorf("entity %s not found in caller %s's files", entityID, caller)
-	}
-
-	return &resolvedSource{
-		caller:    caller,
-		ownerPath: ownerPath,
-		files:     files,
-		ownerIdx:  ownerIdx,
-	}, nil
-}
-
-// applyEdit applies the requested field operation to src and returns the result.
-func applyEdit(src []byte, namespace, entity, field, op, fieldText string) ([]byte, error) {
-	switch op {
-	case "add":
-		return atlprint.AddField(src, namespace, entity, fieldText)
-	case "replace":
-		return atlprint.ReplaceField(src, namespace, entity, field, fieldText)
-	case "remove":
-		return atlprint.RemoveField(src, namespace, entity, field)
-	default:
-		return nil, fmt.Errorf("unknown op %q: must be add, replace, or remove", op)
-	}
-}
-
-// handleEditPreview returns a read-only plan preview for a proposed field edit.
-// It never mutates server state.
-func (s *Server) handleEditPreview(w http.ResponseWriter, r *http.Request) {
-	var req editRequest
-	if err := readJSON(r, &req); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-	if req.Namespace == "" || req.Entity == "" || req.Op == "" {
-		jsonError(w, "namespace, entity, and op are required", http.StatusBadRequest)
-		return
-	}
-
-	src, err := s.resolveEntitySource(r.Context(), req.Namespace, req.Entity)
-	if err != nil {
-		s.log.Error("resolve entity source", "err", err)
-		jsonError(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-
-	oldContent := src.files[src.ownerIdx].content
-	newContent, err := applyEdit(oldContent, req.Namespace, req.Entity, req.Field, req.Op, req.FieldText)
-	if err != nil {
-		jsonError(w, err.Error(), http.StatusUnprocessableEntity)
-		return
-	}
-
-	// Build the full file set for PlanSchema, swapping the edited file.
-	planFiles := make([]*adminpb.SubmittedFile, len(src.files))
-	for i, f := range src.files {
-		planFiles[i] = &adminpb.SubmittedFile{Path: f.path, Content: f.content}
-	}
-	planFiles[src.ownerIdx].Content = newContent
-
-	// Call PlanSchema read-only.
-	plan, err := s.atl.PlanSchema(r.Context(), &adminpb.PlanSchemaRequest{
-		Caller: src.caller,
-		Files:  planFiles,
-	})
-	if err != nil {
-		s.log.Error("PlanSchema", "err", err)
-		jsonError(w, "plan failed: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-
-	// plan_class is the short form ("additive"), not the enum's wire name.
-	//
-	// This response is assembled here rather than proxied — it mixes plan
-	// output with file contents the BFF holds — so the choice is ours. The
-	// short form is the right one because the SPA reads `plan_class` from two
-	// places: here, and PreviewRollbackResponse, where the proto declares it as
-	// a plain string carrying "additive". Emitting the enum name from one and
-	// the string from the other would give the same field two spellings
-	// depending on which endpoint the page called.
-	//
-	// The asymmetry is in the proto — PlanSchemaResponse.class is an enum while
-	// SchemaVersionSummary.plan_class and PreviewRollbackResponse.plan_class
-	// are strings. Worth reconciling there; not worth papering over here.
-	jsonOK(w, map[string]any{
-		"owner_path":      src.ownerPath,
-		"caller":          src.caller,
-		"old_content":     string(oldContent),
-		"new_content":     string(newContent),
-		"plan_class":      shortPlanClass(plan.GetClass()),
-		"up_sql":          plan.GetUpSql(),
-		"down_sql":        plan.GetDownSql(),
-		"impact":          plan.GetImpactReport(),
-		"breaking":        plan.GetBreakingDetail(),
-		"parse_errors":    plan.GetParseErrors(),
-		"checkpoint_hash": plan.GetCheckpointHash(),
-	})
-}
-
-// handleEditPR opens a GitHub PR with the proposed field edit.
-func (s *Server) handleEditPR(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		editRequest
-		Title              string `json:"title"`
-		Body               string `json:"body"`
-		BaseCheckpointHash string `json:"base_checkpoint_hash"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-	if req.Namespace == "" || req.Entity == "" || req.Op == "" {
-		jsonError(w, "namespace, entity, and op are required", http.StatusBadRequest)
-		return
-	}
-	if req.Title == "" {
-		req.Title = fmt.Sprintf("schema: %s %s.%s.%s", req.Op, req.Namespace, req.Entity, req.Field)
-	}
-
-	if s.vcs == nil {
-		jsonError(w, "GitHub not configured: set GITHUB_TOKEN in environment", http.StatusBadRequest)
-		return
-	}
-
-	src, err := s.resolveEntitySource(r.Context(), req.Namespace, req.Entity)
-	if err != nil {
-		s.log.Error("resolve entity source", "err", err)
-		jsonError(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-
-	// Look up the caller→repo mapping (acts as an allowlist).
-	repoMapping, err := s.db.getCallerRepo(r.Context(), src.caller)
-	if errors.Is(err, ErrNotFound) {
-		jsonError(w, fmt.Sprintf("no repo mapping for caller %q — configure it in Settings", src.caller), http.StatusConflict)
-		return
-	}
-	if err != nil {
-		s.log.Error("get caller repo", "err", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	repo := vcs.RepoRef{
-		Owner:  repoMapping.Owner,
-		Repo:   repoMapping.Repo,
-		Branch: repoMapping.DefaultBranch,
-	}
-
-	// Map server-stored file path to repo-relative path using path_prefix.
-	repoPath := src.ownerPath
-	if repoMapping.SchemaPathPrefix != "" {
-		repoPath = strings.TrimPrefix(repoPath, repoMapping.SchemaPathPrefix)
-		repoPath = strings.TrimPrefix(repoPath, "/")
-	}
-
-	// Fetch the file from the repo's actual HEAD so the PR diff is minimal.
-	repoContent, err := s.vcs.GetFileContent(r.Context(), repo, repoPath)
-	if err != nil {
-		s.log.Error("fetch repo file", "path", repoPath, "err", err)
-		jsonError(w, fmt.Sprintf("could not fetch %s from GitHub: %s", repoPath, err), http.StatusBadGateway)
-		return
-	}
-
-	newContent, err := applyEdit(repoContent, req.Namespace, req.Entity, req.Field, req.Op, req.FieldText)
-	if err != nil {
-		jsonError(w, err.Error(), http.StatusUnprocessableEntity)
-		return
-	}
-
-	// Branch name: atlantis/console/<entity>-<timestamp-ms>
-	branch := fmt.Sprintf("atlantis/console/%s-%d", strings.ToLower(req.Entity), time.Now().UnixMilli())
-
-	result, err := s.vcs.OpenPR(r.Context(), repo, branch, []vcs.FileChange{
-		{Path: repoPath, Content: newContent},
-	}, req.Title, req.Body)
-	if err != nil {
-		s.log.Error("open PR", "err", err)
-		jsonError(w, "failed to open PR: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-
-	s.log.Info("PR opened",
-		"pr_url", result.URL,
-		"caller", src.caller,
-		"entity", req.Namespace+"."+req.Entity,
-		"op", req.Op,
-	)
-
-	jsonOK(w, map[string]any{
-		"pr_url": result.URL,
-		"number": result.Number,
-	})
-}
-
-// ── caller→repo mapping endpoints ─────────────────────────────────────────────
-
-func (s *Server) handleListCallerRepos(w http.ResponseWriter, r *http.Request) {
-	repos, err := s.db.listCallerRepos(r.Context())
-	if err != nil {
-		s.log.Error("list caller repos", "err", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	type wire struct {
-		Caller           string `json:"caller"`
-		Owner            string `json:"owner"`
-		Repo             string `json:"repo"`
-		DefaultBranch    string `json:"default_branch"`
-		SchemaPathPrefix string `json:"schema_path_prefix"`
-	}
-	out := make([]wire, 0, len(repos))
-	for _, r := range repos {
-		out = append(out, wire{
-			Caller:           r.Caller,
-			Owner:            r.Owner,
-			Repo:             r.Repo,
-			DefaultBranch:    r.DefaultBranch,
-			SchemaPathPrefix: r.SchemaPathPrefix,
-		})
-	}
-	jsonOK(w, map[string]any{"repos": out})
-}
-
-func (s *Server) handleUpsertCallerRepo(w http.ResponseWriter, r *http.Request) {
-	caller := r.PathValue("caller")
-	if caller == "" {
-		jsonError(w, "caller is required", http.StatusBadRequest)
-		return
-	}
-	var body struct {
-		Owner            string `json:"owner"`
-		Repo             string `json:"repo"`
-		DefaultBranch    string `json:"default_branch"`
-		SchemaPathPrefix string `json:"schema_path_prefix"`
-	}
-	if err := readJSON(r, &body); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-	if body.Owner == "" || body.Repo == "" {
-		jsonError(w, "owner and repo are required", http.StatusBadRequest)
-		return
-	}
-	if body.DefaultBranch == "" {
-		body.DefaultBranch = "main"
-	}
-	if err := s.db.upsertCallerRepo(r.Context(), &CallerRepo{
-		Caller:           caller,
-		Owner:            body.Owner,
-		Repo:             body.Repo,
-		DefaultBranch:    body.DefaultBranch,
-		SchemaPathPrefix: body.SchemaPathPrefix,
-	}); err != nil {
-		s.log.Error("upsert caller repo", "err", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	jsonOK(w, map[string]bool{"ok": true})
 }
 
 // ── User management ──────────────────────────────────────────────────
@@ -2075,12 +1734,19 @@ func (s *Server) proxyProto(w http.ResponseWriter, name string, resp proto.Messa
 	_, _ = w.Write(b)
 }
 
-// shortPlanClass renders a PlanClass without the enum prefix the wire carries.
-// "PLAN_CLASS_BACKFILL_REQUIRED" is right on the wire and wrong in a browser
-// that is comparing against "backfill_required".
-func shortPlanClass(c adminpb.PlanClass) string {
-	return strings.ToLower(strings.TrimPrefix(c.String(), "PLAN_CLASS_"))
-}
+// shortPlanClass lived here. It lowercased PLAN_CLASS_BACKFILL_REQUIRED to
+// "backfill_required" for the one response this BFF assembled itself — the
+// schema-edit preview, now removed.
+//
+// Its absence changes what the browser sees. Every plan_class the console
+// serves is now proxied straight from the admin server, and every one of those
+// is written by codegen.ChangeClass.String(), which spells the same classes
+// with HYPHENS: "backfill-required", "cross-caller-breaking". There is no
+// longer a second spelling in flight.
+//
+// The SPA still normalises separators (see planClassBadge in
+// web/console/src/api/client.ts) because its lookup tables are keyed with
+// underscores, and because a proxied string is not something this BFF controls.
 
 func jsonOK(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")

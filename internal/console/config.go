@@ -19,7 +19,6 @@ type Config struct {
 	SessionSecret string // CONSOLE_SESSION_SECRET — required, ≥32 chars
 	CookieSecure  bool   // CONSOLE_COOKIE_SECURE — default false
 	HealthListen  string // ATL_HEALTH_LISTEN — atlantis health HTTP addr, default :8081
-	GitHubToken   string // GITHUB_TOKEN — optional; PR flow requires it
 	SignerAddr    string // ATL_SIGNER_ADDR — optional; cert issuance requires it
 
 	// AuditRetentionDays controls how long operator-action audit rows
@@ -51,7 +50,6 @@ func ConfigFromEnv() (Config, error) {
 		SessionSecret: os.Getenv("CONSOLE_SESSION_SECRET"),
 		CookieSecure:  os.Getenv("CONSOLE_COOKIE_SECURE") == "true",
 		HealthListen:  envOr("ATL_HEALTH_LISTEN", "localhost:8081"),
-		GitHubToken:   os.Getenv("GITHUB_TOKEN"),
 		SignerAddr:    os.Getenv("ATL_SIGNER_ADDR"),
 
 		AuditRetentionDays: envInt("CONSOLE_AUDIT_RETENTION_DAYS", 365),

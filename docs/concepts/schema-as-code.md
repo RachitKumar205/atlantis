@@ -43,7 +43,9 @@ The `.atl` files are checked into git. The `pb/` directory is regenerated on eve
 
 There is no UI to drag-and-drop a column, and no API endpoint that adds a field outside the `tide apply` path. This is a permanent design choice.
 
-A schema editor would let the server and the repo diverge: PRs would no longer reflect what runs in production, and `git blame` would describe a different history than the live tables.
+A schema editor would let the server and the repo diverge: your pull requests would no longer reflect what runs in production, and `git blame` would describe a different history than the live tables.
+
+The web console is read-only about schema for this reason. It shows you the current schema, what changed and when, who applied it, and what is waiting on approval — but it does not author `.atl` files. Editing happens in your repository, with your review process, and reaches the database through `tide apply`.
 
 ## What the position costs
 

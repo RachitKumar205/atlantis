@@ -267,9 +267,6 @@ services:
       # the env override.
       SANDBOX_PER_USER_LIMIT: "${SANDBOX_PER_USER_LIMIT:-100}"
       SANDBOX_TTL: "${SANDBOX_TTL:-30m}"
-      # Optional: enable schema PR generation. Fine-grained PAT needs
-      # contents:write + pull_requests:write on each caller's repo.
-      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
     ports:
       - "${CONSOLE_PORT:-3000}:3000"
     volumes:

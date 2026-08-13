@@ -1,10 +1,9 @@
-import { useMemo, useEffect, useState } from 'react'
-import { useQuery, useMutation } from '@tanstack/react-query'
+import { useMemo, useEffect } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useSearch, useNavigate } from '@tanstack/react-router'
-import { Box, Pencil, Link as LinkIcon, GitPullRequest } from 'lucide-react'
-import { queries, api, planClassPreview, type EditPreviewResponse } from '@/api/client'
+import { Box, Link as LinkIcon } from 'lucide-react'
+import { queries } from '@/api/client'
 import { PageShell } from '@/components/PageShell'
-import { Sql } from '@/components/Sql'
 
 // ── IR shapes (mirror internal/dsl/ir.go) ──────────────────────────────────
 interface IRFieldType {
@@ -135,11 +134,18 @@ export function Schema() {
   const handleSelectEntity = (id: string) =>
     navigate({ to: '/schema', search: { namespace: selectedNS, entity: id } })
 
-  // Schema editing is dormant — the Edit button and EditPanel are kept
-  // in this file as commented blocks below so the wiring can be restored
-  // when the editing surface is brought back. Backend endpoints
-  // (api.schemaEdit.preview / openPR) and the corresponding admin RPC
-  // are unaffected — only the UI access is removed.
+  // This page is read-only, and that is the design rather than a gap.
+  //
+  // It carried an EditPanel that composed a field edit and opened a GitHub pull
+  // request with the result. Both the panel and the endpoints behind it are
+  // gone: a hosted customer has no such repository wired to this console, and a
+  // second authoring path beside their own git repo is a second place for the
+  // schema to diverge from what is applied.
+  //
+  // What replaces it is not an editor. Step 5 of the approval work adds a
+  // per-entity "pending changes" strip fed by /api/plans, which turns this from
+  // "browse a schema you cannot change" into "current state, plus everything in
+  // flight" — the question an operator actually opens this page to answer.
 
   const ver = (canonical?.ir as IRRoot | undefined)?.version
   const sub = `${entities.length} entit${entities.length === 1 ? 'y' : 'ies'} · ${namespaces.length} namespace${namespaces.length === 1 ? '' : 's'}${ver ? ` · server v${String(ver).padStart(4, '0')}` : ''}`
@@ -337,32 +343,6 @@ export function Schema() {
     </PageShell>
   )
 }
-
-// The one-line verdict on a preview.
-//
-// This was three `preview.plan_class === '...' &&` blocks covering additive,
-// backfill_required and cross_caller_breaking. A destructive preview matched
-// none of them and rendered NOTHING — the panel showed the SQL that drops the
-// column with no verdict above it, which reads as a preview that found no
-// problem. A lookup with an explicit fallback cannot fail that way: a class
-// nobody has styled still prints its own name.
-function PlanClassLine({ planClass, changes }: { planClass: string; changes: number }) {
-  const p = planClassPreview(planClass)
-  if (!p) {
-    return (
-      <div>
-        <span className="pl-plain">{planClass}</span> · {changes} change(s)
-      </div>
-    )
-  }
-  return (
-    <div>
-      <span className={p.cls}>{p.text}</span>
-      {p.showCount && <> · {changes} change(s)</>}
-    </div>
-  )
-}
-
 function SkeletonRows() {
   return (
     <>
@@ -373,123 +353,3 @@ function SkeletonRows() {
   )
 }
 
-// Inline edit panel — design's .editpanel with a preview .plan block.
-// Exported so it is not an unused local: the component is deliberately
-// dormant, not dead, and the typecheck gate has to be able to run.
-export function EditPanel({ entity, onClose }: { entity: EntityDecl; onClose: () => void }) {
-  const [op, setOp] = useState<'add' | 'replace' | 'remove'>('add')
-  const [field, setField] = useState('')
-  const [fieldText, setFieldText] = useState('')
-  const [preview, setPreview] = useState<EditPreviewResponse | null>(null)
-
-  const previewM = useMutation({
-    mutationFn: () =>
-      api.schemaEdit.preview({
-        namespace: entity.namespace,
-        entity: entity.name,
-        op,
-        field,
-        field_text: fieldText,
-      }),
-    onSuccess: setPreview,
-  })
-
-  const prM = useMutation({
-    mutationFn: () =>
-      api.schemaEdit.openPR({
-        namespace: entity.namespace,
-        entity: entity.name,
-        op,
-        field,
-        field_text: fieldText,
-        title: `schema: ${op} ${entity.namespace}.${entity.name}.${field}`,
-      }),
-  })
-
-  return (
-    <div className="editpanel">
-      <div className="editpanel__head">
-        <Pencil size={17} />
-        <h4>Edit {entity.namespace}.{entity.name}</h4>
-        <span className="badge badge--plain" style={{ marginLeft: 'auto' }}>draft</span>
-      </div>
-      <div className="editpanel__body">
-        <div className="row" style={{ gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
-          <div className="seg">
-            {(['add', 'replace', 'remove'] as const).map(o => (
-              <button key={o} className={op === o ? 'is-active' : ''} onClick={() => setOp(o)}>
-                {o}
-              </button>
-            ))}
-          </div>
-          <input
-            className="input--boxed"
-            placeholder="field name"
-            value={field}
-            onChange={e => setField(e.target.value)}
-            style={{ minWidth: 160 }}
-          />
-          {op !== 'remove' && (
-            <input
-              className="input--boxed mono"
-              placeholder="varchar(120) not null default ''"
-              value={fieldText}
-              onChange={e => setFieldText(e.target.value)}
-              style={{ flex: 1, minWidth: 240 }}
-            />
-          )}
-        </div>
-
-        <div className="section-label" style={{ marginBottom: 10 }}>tide plan — impact preview</div>
-        <div className="plan">
-          {!preview && (
-            <div className="pl-mut">
-              Type a field, then click <span className="brass">Preview</span> to compute the
-              impact via <span className="mono">PlanSchema</span>.
-            </div>
-          )}
-          {preview && (
-            <>
-              <PlanClassLine planClass={preview.plan_class} changes={preview.impact?.length ?? 0} />
-              {preview.up_sql && (
-                <Sql style={{ marginTop: 10 }}>{preview.up_sql.slice(0, 600)}</Sql>
-              )}
-            </>
-          )}
-        </div>
-
-        <div className="row" style={{ marginTop: 16, justifyContent: 'flex-end', gap: 8 }}>
-          <button className="btn" onClick={onClose}>Discard</button>
-          <button
-            className="btn"
-            onClick={() => previewM.mutate()}
-            disabled={!field || previewM.isPending}
-          >
-            {previewM.isPending ? 'Previewing…' : 'Preview'}
-          </button>
-          <button
-            className="btn btn--brass"
-            disabled={!preview || preview.plan_class === 'unparseable' || prM.isPending}
-            onClick={() => prM.mutate()}
-          >
-            <GitPullRequest size={14} />
-            <span>{prM.isPending ? 'Opening…' : 'Open PR on GitHub'}</span>
-          </button>
-        </div>
-
-        {prM.isError && (
-          <div className="banner banner--error" style={{ marginTop: 12 }}>
-            {(prM.error as Error).message}
-          </div>
-        )}
-        {prM.data && (
-          <div className="banner banner--ok" style={{ marginTop: 12 }}>
-            <a className="brass mono" href={prM.data.pr_url} target="_blank" rel="noreferrer">
-              {prM.data.pr_url}
-            </a>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}

@@ -29,11 +29,11 @@ const (
 	// populated table.
 	ClassBackfillRequired
 
-	// ClassCrossCallerBreaking opens a PR in atlantis. Examples: drop a
-	// field other callers may read, remove an entity, rename a field/entity.
-	// The diff engine does not know which callers are pinned — the Admin
-	// service composes that knowledge with this classification to decide
-	// whether to auto-apply or escalate.
+	// ClassCrossCallerBreaking is refused by the server and needs a human.
+	// Examples: drop a field other callers may read, remove an entity, rename a
+	// field/entity. The diff engine does not know which callers are pinned —
+	// the Admin service composes that knowledge with this classification to
+	// decide whether to auto-apply or escalate.
 	ClassCrossCallerBreaking
 
 	// ClassDestructive removes something that may hold data: a column, a

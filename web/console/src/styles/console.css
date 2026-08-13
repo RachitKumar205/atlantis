@@ -288,7 +288,7 @@ a { color: inherit; text-decoration: none; }
   text-transform: uppercase; padding: 2px 7px; border-radius: var(--radius-sm);
   height: 18px; white-space: nowrap;
 }
-.card__head > svg, .editpanel__head > svg, .modal__head svg { width: 17px; height: 17px; color: var(--ink-2); flex-shrink: 0; }
+.card__head > svg, .modal__head svg { width: 17px; height: 17px; color: var(--ink-2); flex-shrink: 0; }
 .banner__icon { width: 16px; height: 16px; flex-shrink: 0; }
 .badge::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .badge--add   { color: var(--sage);  background: var(--sage-tint); }

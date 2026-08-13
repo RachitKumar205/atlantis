@@ -39,15 +39,6 @@ const sessionTouchThreshold = 0.5
 // Short window so a logged-in laptop walked-away-from can't escalate.
 const sudoTTL = 5 * time.Minute
 
-// CallerRepo maps a caller name to its GitHub repository.
-type CallerRepo struct {
-	Caller           string
-	Owner            string
-	Repo             string
-	DefaultBranch    string
-	SchemaPathPrefix string
-}
-
 // ErrNotFound is returned when a user or session is not found, or when
 // credentials are invalid. Callers must not distinguish the two cases to
 // avoid user enumeration.
@@ -114,14 +105,21 @@ func (s *store) migrate(ctx context.Context) error {
 		CREATE INDEX IF NOT EXISTS console_sessions_expires_idx
 			ON console.sessions(expires_at);
 
-		CREATE TABLE IF NOT EXISTS console.caller_repos (
-			caller              TEXT        PRIMARY KEY,
-			owner               TEXT        NOT NULL,
-			repo                TEXT        NOT NULL,
-			default_branch      TEXT        NOT NULL DEFAULT 'main',
-			schema_path_prefix  TEXT        NOT NULL DEFAULT '',
-			updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		);
+		-- Added 2026-08-13. Drops console.caller_repos, which mapped each
+		-- caller to a GitHub owner/repo/branch for the console's "Open PR"
+		-- button. That flow is gone: .atl files live in the customer's own git
+		-- repo and migrations apply through tide apply, so the console has no
+		-- reason to know a repository exists.
+		--
+		-- A DROP inside migrate() rather than a numbered migration because this
+		-- package has no migration framework — migrate() is CREATE TABLE IF NOT
+		-- EXISTS re-run on every boot, so a one-shot statement has nowhere else
+		-- to live. IF EXISTS keeps it a no-op from the second boot onward.
+		--
+		-- Safe to delete this statement once every install has booted past this
+		-- version. Leaving it costs one catalogue lookup per boot; deleting it
+		-- early on an install that never upgraded leaves the table orphaned.
+		DROP TABLE IF EXISTS console.caller_repos;
 
 		-- audit_log is range-partitioned on created_at, one partition per
 		-- calendar month, so the retention worker can DROP whole months
@@ -302,51 +300,6 @@ type auditEntry struct {
 	Action    string
 	Detail    []byte
 	CreatedAt time.Time
-}
-
-func (s *store) listCallerRepos(ctx context.Context) ([]*CallerRepo, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT caller, owner, repo, default_branch, schema_path_prefix
-		FROM console.caller_repos ORDER BY caller`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*CallerRepo
-	for rows.Next() {
-		r := &CallerRepo{}
-		if err := rows.Scan(&r.Caller, &r.Owner, &r.Repo, &r.DefaultBranch, &r.SchemaPathPrefix); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
-func (s *store) getCallerRepo(ctx context.Context, caller string) (*CallerRepo, error) {
-	r := &CallerRepo{}
-	err := s.pool.QueryRow(ctx, `
-		SELECT caller, owner, repo, default_branch, schema_path_prefix
-		FROM console.caller_repos WHERE caller = $1`, caller).
-		Scan(&r.Caller, &r.Owner, &r.Repo, &r.DefaultBranch, &r.SchemaPathPrefix)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	return r, err
-}
-
-func (s *store) upsertCallerRepo(ctx context.Context, r *CallerRepo) error {
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO console.caller_repos (caller, owner, repo, default_branch, schema_path_prefix, updated_at)
-		VALUES ($1, $2, $3, $4, $5, NOW())
-		ON CONFLICT (caller) DO UPDATE SET
-			owner              = EXCLUDED.owner,
-			repo               = EXCLUDED.repo,
-			default_branch     = EXCLUDED.default_branch,
-			schema_path_prefix = EXCLUDED.schema_path_prefix,
-			updated_at         = NOW()
-	`, r.Caller, r.Owner, r.Repo, r.DefaultBranch, r.SchemaPathPrefix)
-	return err
 }
 
 func (s *store) hasAnyUser(ctx context.Context) (bool, error) {

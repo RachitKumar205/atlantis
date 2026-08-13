@@ -1,11 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import {
   CHANGE_CLASS_DISPLAY,
-  PLAN_CLASS_BADGE,
   parseRawDiff,
   orderedBuckets,
   planClassBadge,
-  planClassPreview,
 } from './client'
 
 // The console's half of "a change class must never render as nothing".
@@ -44,20 +42,18 @@ describe('parseRawDiff', () => {
 })
 
 describe('planClassBadge', () => {
-  // A plan class reaches this console in two spellings. /api/plan lowercases
-  // the proto enum to "cross_caller_breaking"; /api/history proxies the
-  // schema_versions column through untouched, where the same class is written
-  // "cross-caller-breaking" by codegen.ChangeClass.String().
-  //
-  // The pages matched the underscored form only, so every breaking and
-  // backfill-required version in the history timeline rendered with the grey
-  // "plain" badge — the styling that means nothing notable happened.
-  it('accepts the underscored spelling from a live plan', () => {
+  // Plan classes arrive hyphenated — every one is proxied from the admin
+  // server, where codegen.ChangeClass.String() writes "cross-caller-breaking".
+  // The lookup table is keyed with underscores, and the pages used to compare
+  // with === against that form, so every breaking and backfill-required version
+  // in the history timeline rendered with the grey "plain" badge: the styling
+  // that means nothing notable happened.
+  it('accepts the underscored spelling the table is keyed with', () => {
     expect(planClassBadge('cross_caller_breaking')).toBe('break')
     expect(planClassBadge('backfill_required')).toBe('back')
   })
 
-  it('accepts the hyphenated spelling from schema history', () => {
+  it('accepts the hyphenated spelling the server actually sends', () => {
     expect(planClassBadge('cross-caller-breaking')).toBe('break')
     expect(planClassBadge('backfill-required')).toBe('back')
   })
@@ -73,29 +69,6 @@ describe('planClassBadge', () => {
     // styling at all.
     expect(planClassBadge('some_future_class')).toBe('plain')
     expect(planClassBadge('')).toBe('plain')
-  })
-})
-
-describe('planClassPreview', () => {
-  it('has a line for every class a plan can come back as', () => {
-    // Schema.tsx rendered three classes with `===` and nothing for the rest, so
-    // a destructive preview showed the SQL that drops the column with no
-    // verdict above it — which reads as a preview that found no problem.
-    for (const cls of Object.keys(PLAN_CLASS_BADGE)) {
-      expect(planClassPreview(cls), `${cls} has no preview line`).toBeDefined()
-    }
-  })
-
-  it('accepts both spellings, like planClassBadge', () => {
-    expect(planClassPreview('cross-caller-breaking')).toEqual(
-      planClassPreview('cross_caller_breaking'),
-    )
-  })
-
-  it('distinguishes destructive from breaking in the text a human reads', () => {
-    expect(planClassPreview('destructive')?.text).not.toEqual(
-      planClassPreview('cross_caller_breaking')?.text,
-    )
   })
 })
 

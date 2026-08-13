@@ -4,12 +4,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
   Building2,
-  Check,
   Copy,
   Fingerprint,
-  Github,
-  GitBranch,
-  Link as LinkIcon,
   Lock,
   LogOut,
   Mail,
@@ -20,20 +16,19 @@ import {
   Trash2,
   Users,
 } from 'lucide-react'
-import { api, queries, type CallerRepo, type OperatorUser, type UserRole } from '@/api/client'
+import { api, queries, type OperatorUser, type UserRole } from '@/api/client'
 import { useMe } from '@/hooks/useAuth'
 import { PageShell } from '@/components/PageShell'
 
 // Sectioned IA: left sub-nav (General / Members / Security / Danger
-// zone) drives the right panel. Integrations is wired but absent from
-// SECTIONS — see the dormancy note below. Every panel uses the .setrow
-// pattern: label + help text on the left, control on the right.
-
-// 'integrations' is intentionally absent — the panel exists below
-// (IntegrationsPanel + MappingDialog) but isn't shown in the nav or
-// rendered yet. Reintroduce by adding `'integrations'` back to the
-// SectionId union, the SECTIONS array, the panel render in Settings(),
-// and re-enabling the callerRepos query / upsert mutation.
+// zone) drives the right panel. Every panel uses the .setrow pattern:
+// label + help text on the left, control on the right.
+//
+// There was a fifth section, Integrations, which mapped each caller to a
+// GitHub owner/repo/branch for the console's "Open PR" button. It was written,
+// never shown in the nav, and is now deleted along with the flow it served —
+// the console does not author schema, so it has no reason to hold a repository
+// address. Schema files live in the customer's own git repo.
 type SectionId = 'general' | 'members' | 'security' | 'danger'
 
 interface Section {
@@ -59,17 +54,6 @@ export function Settings() {
   const [active, setActive] = useState<SectionId>('general')
   const [toast, setToast] = useState<string | null>(null)
   const fire = (msg: string) => { setToast(msg); setTimeout(() => setToast(null), 2200) }
-
-  // ── dormant Integrations wiring (restore alongside the panel render) ──
-  // const { data: repos, isLoading: rLoading } = useQuery(queries.callerRepos())
-  // const upsert = useMutation({
-  //   mutationFn: ({ caller, data }: { caller: string; data: Omit<CallerRepo, 'caller'> }) =>
-  //     api.callerRepos.upsert(caller, data),
-  //   onSuccess: (_, vars) => {
-  //     qc.invalidateQueries({ queryKey: ['callerRepos'] })
-  //     fire(`Mapping updated → ${vars.caller}`)
-  //   },
-  // })
 
   const setRole = useMutation({
     mutationFn: ({ id, role }: { id: number; role: UserRole }) => api.users.setRole(id, role),
@@ -137,11 +121,6 @@ export function Settings() {
                 saving={setRole.isPending || createUser.isPending || deleteUser.isPending}
               />
             </div>
-            {/* Integrations panel is currently dormant — see SECTIONS comment.
-                Restore by re-enabling repos/upsert above and reinstating:
-                <div className={`set-panel ${active === 'integrations' ? 'is-active' : ''}`}>
-                  <IntegrationsPanel ... />
-                </div> */}
             <div className={`set-panel ${active === 'security' ? 'is-active' : ''}`}>
               <SecurityPanel
                 onToast={fire}
@@ -386,112 +365,6 @@ function MembersPanel({
             onDelete(confirmRemove.id)
             setConfirmRemove(null)
           }}
-        />
-      )}
-    </>
-  )
-}
-
-// ── Integrations ─────────────────────────────────────────────────────────
-// Exported so it is not an unused local: the component is deliberately
-// dormant, not dead, and the typecheck gate has to be able to run.
-export function IntegrationsPanel({
-  repos, loading, onSave, saving, onToast,
-}: {
-  repos: CallerRepo[]
-  loading: boolean
-  onSave: (caller: string, data: Omit<CallerRepo, 'caller'>) => void
-  saving: boolean
-  onToast: (msg: string) => void
-}) {
-  const [editing, setEditing] = useState<CallerRepo | null>(null)
-  const [adding, setAdding] = useState(false)
-
-  return (
-    <>
-      <div className="set-head">
-        <h2>Integrations</h2>
-        <p>Connect Atlantis to your source of truth. Each caller is mapped to the repository and path Atlantis watches for schema files.</p>
-      </div>
-
-      <section className="card">
-        <div className="connstrip">
-          <span className="connstrip__logo"><Github /></span>
-          <div className="connstrip__main">
-            <div className="connstrip__title">GitHub</div>
-            <div className="connstrip__status">
-              <span className="dot" />
-              Connected to <span className="mono" style={{ color: 'var(--ink-1)' }}>acme</span> · {repos.length} repositor{repos.length === 1 ? 'y' : 'ies'}
-            </div>
-          </div>
-          <button className="btn btn--sm" onClick={() => onToast('Opening GitHub app settings…')}>Manage</button>
-        </div>
-      </section>
-
-      <section className="card">
-        <div className="card__head">
-          <LinkIcon size={14} />
-          <span className="card__title">Caller → repository mappings</span>
-          <button
-            className="btn btn--sm btn--ghost"
-            style={{ marginLeft: 'auto' }}
-            onClick={() => setAdding(true)}
-          >
-            <Plus size={12} />
-            <span>Add mapping</span>
-          </button>
-        </div>
-        <div className="card__body" style={{ padding: 0 }}>
-          {loading ? (
-            <div style={{ padding: 18 }}>
-              {[0, 1].map(i => (
-                <div key={i} className="sk" style={{ height: 40, marginBottom: 8 }} />
-              ))}
-            </div>
-          ) : repos.length === 0 ? (
-            <div className="empty">
-              <div className="empty__title">No mappings yet</div>
-              <div className="empty__sub">
-                Click <span className="brass">Add mapping</span> to point a caller at a repository.
-              </div>
-            </div>
-          ) : (
-            repos.map(m => (
-              <div key={m.caller} className="maprow">
-                <span className="maprow__caller">{m.caller}</span>
-                <span className="maprow__repo">
-                  <Github />
-                  {m.owner}/{m.repo}
-                  {m.schema_path_prefix && (
-                    <span className="faint">/{m.schema_path_prefix}</span>
-                  )}
-                </span>
-                <span className="maprow__meta">
-                  <GitBranch />
-                  {m.default_branch}
-                </span>
-                <button
-                  className="btn btn--sm btn--ghost maprow__edit"
-                  onClick={() => setEditing(m)}
-                >
-                  <span>Edit</span>
-                </button>
-              </div>
-            ))
-          )}
-        </div>
-      </section>
-
-      {(editing || adding) && (
-        <MappingDialog
-          repo={editing}
-          onCancel={() => { setEditing(null); setAdding(false) }}
-          onSave={(caller, data) => {
-            onSave(caller, data)
-            setEditing(null)
-            setAdding(false)
-          }}
-          saving={saving}
         />
       )}
     </>
@@ -1059,98 +932,6 @@ function InviteDialog({
           >
             <Mail size={13} />
             <span>{saving ? 'Inviting…' : 'Send invite'}</span>
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function MappingDialog({
-  repo, onCancel, onSave, saving,
-}: {
-  repo: CallerRepo | null
-  onCancel: () => void
-  onSave: (caller: string, data: Omit<CallerRepo, 'caller'>) => void
-  saving: boolean
-}) {
-  const [caller, setCaller] = useState(repo?.caller ?? '')
-  const [ownerRepo, setOwnerRepo] = useState(repo ? `${repo.owner}/${repo.repo}` : '')
-  const [path, setPath] = useState(repo?.schema_path_prefix ?? '')
-  const [branch, setBranch] = useState(repo?.default_branch ?? 'main')
-
-  const handleSave = () => {
-    const [owner, repoName] = ownerRepo.split('/')
-    if (!owner || !repoName) return
-    onSave(caller, {
-      owner,
-      repo: repoName,
-      default_branch: branch,
-      schema_path_prefix: path,
-    })
-  }
-
-  return (
-    <div className="overlay is-open" onMouseDown={e => { if (e.target === e.currentTarget) onCancel() }}>
-      <div className="modal" role="dialog" aria-modal>
-        <div className="modal__head">
-          <div className="modal__title">{repo ? 'Edit mapping' : 'Add mapping'}</div>
-          <div className="modal__sub">
-            {repo
-              ? `Update where Atlantis watches for ${repo.caller}'s schema.`
-              : 'Point a caller at a repository path.'}
-          </div>
-        </div>
-        <div className="modal__body">
-          <div className="field">
-            <label className="field__label">Caller</label>
-            <input
-              className="input mono"
-              value={caller}
-              placeholder="backend"
-              disabled={!!repo}
-              onChange={e => setCaller(e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label className="field__label">Repository</label>
-            <input
-              className="input mono"
-              value={ownerRepo}
-              placeholder="acme/service"
-              onChange={e => setOwnerRepo(e.target.value)}
-            />
-          </div>
-          <div className="row" style={{ gap: 18 }}>
-            <div className="field" style={{ flex: 1 }}>
-              <label className="field__label">Path</label>
-              <input
-                className="input mono"
-                value={path}
-                placeholder="schema/*.atl"
-                onChange={e => setPath(e.target.value)}
-              />
-            </div>
-            <div className="field" style={{ flex: 1 }}>
-              <label className="field__label">Branch</label>
-              <input
-                className="input mono"
-                value={branch}
-                placeholder="main"
-                onChange={e => setBranch(e.target.value)}
-              />
-            </div>
-          </div>
-        </div>
-        <div className="modal__foot">
-          <button className="btn btn--ghost" onClick={onCancel}>Cancel</button>
-          <button
-            className="btn btn--brass"
-            disabled={!caller || !ownerRepo.includes('/') || saving}
-            onClick={handleSave}
-          >
-            <Check size={13} />
-            <span>{repo ? 'Save mapping' : 'Add mapping'}</span>
           </button>
         </div>
       </div>
