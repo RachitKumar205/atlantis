@@ -267,16 +267,17 @@ func PartitionPolicyError(problems []string, require bool) error {
 	// No "refusing to start" here. This is also reached from the hot-reload
 	// hook, where the server is already running and telling its operator it
 	// refuses to start is simply false. The caller supplies that framing.
-	return fmt.Errorf("%d partitioned entit%s have no enforced row-level "+
-		"security, and ATL_REQUIRE_TENANT_ISOLATION is set:\n  %s",
-		len(problems), plural(len(problems)), strings.Join(problems, "\n  "))
-}
-
-func plural(n int) string {
-	if n == 1 {
-		return "y"
+	// "1 partitioned entity HAS", not "1 partitioned entity have". The noun was
+	// pluralised and the verb was not, so the single-entity case — the common
+	// one — read as broken English in the first thing an operator sees when the
+	// server refuses to start.
+	noun, verb := "entities", "have"
+	if len(problems) == 1 {
+		noun, verb = "entity", "has"
 	}
-	return "ies"
+	return fmt.Errorf("%d partitioned %s %s no enforced row-level "+
+		"security, and ATL_REQUIRE_TENANT_ISOLATION is set:\n  %s",
+		len(problems), noun, verb, strings.Join(problems, "\n  "))
 }
 
 // governsRead and governsWrite classify a policy's command.

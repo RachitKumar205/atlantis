@@ -616,12 +616,17 @@ func mentionsIdent(expr ast.Expr, name string) bool {
 // policyProblems with nil, or perr with nil at either call site makes the gate
 // inert with the whole suite green.
 //
-// A fifth AST rule would close those four and leave the fifth. That loop has
-// run four times already and each round hardened against the escape just used.
-// What actually closes it is a test that boots run() against a real database
-// with a partitioned entity and no policy, and asserts the process refuses —
-// tracked as its own task. Until that exists, this limit is real and is written
-// down here rather than implied to be covered.
+// A fifth AST rule would have closed some and left the rest; that loop had run
+// four times, each round hardening against the escape just used. What closed it
+// instead is TestServerRefusesToBootWhenAPartitionedTableHasNoPolicy in
+// boot_pg_test.go, which boots run() against a real database as a non-superuser
+// role and asserts whether the process starts. Arguments are not observable in
+// source and are unavoidable in behaviour.
+//
+// Still open, and worth stating rather than implying coverage: the reload
+// hook's call site, and `perr` (the probe-failure path) at either. The boot
+// test drives the boot call site only, and inducing a probe failure needs a
+// database that answers pg_class but not pg_policy.
 func TestPartitionGate(t *testing.T) {
 	probeFailed := errors.New("permission denied for table pg_policy")
 	findings := []string{"shop.Doc declares `partition by` but has no policy"}
