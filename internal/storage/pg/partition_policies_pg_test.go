@@ -29,126 +29,150 @@ func TestVerifyPartitionPolicies(t *testing.T) {
 
 	drop := func() {
 		for _, tbl := range []string{"ppv_none", "ppv_noforce", "ppv_good", "ppv_disabled",
-			"ppv_true", "ppv_wrongcol", "ppv_insertonly", "ppv_nopolicy", "ppv_offonly",
-			"ppv_checktrue", "ppv_secondperm", "ppv_pipe", "ppv_restrictonly"} {
+			"ppv_permonly", "ppv_rbac", "ppv_wrongcol", "ppv_insertonly", "ppv_nopolicy", "ppv_offonly",
+			"ppv_checktrue", "ppv_pipe", "ppv_restrictonly"} {
 			_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS atlantis.`+tbl+` CASCADE`)
 		}
 	}
 	drop()
 	t.Cleanup(drop)
 
+	// Every fixture is built in the CURRENT model: the tenant boundary is a
+	// RESTRICTIVE policy, and a PERMISSIVE grant sits beside it so the table
+	// admits anything at all.
+	//
+	// The set is chosen so each entity trips exactly ONE condition. ppv_none
+	// trips three at once and ppv_disabled two, which is how deleting a
+	// diagnostic used to go unnoticed — a surviving branch covered for it.
 	if _, err := pool.Exec(ctx, `
-CREATE TABLE atlantis.ppv_none    (id bigint primary key, tenant text not null);
-CREATE TABLE atlantis.ppv_noforce (id bigint primary key, tenant text not null);
-CREATE TABLE atlantis.ppv_good    (id bigint primary key, tenant text not null);
-CREATE TABLE atlantis.ppv_disabled(id bigint primary key, tenant text not null);
-
-ALTER TABLE atlantis.ppv_noforce ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ppv_noforce USING (tenant = atlantis.current_partition());
-
+-- Correct. Restrictive boundary on both halves, plus the replaceable grant.
+CREATE TABLE atlantis.ppv_good (id bigint primary key, tenant text not null);
 ALTER TABLE atlantis.ppv_good ENABLE ROW LEVEL SECURITY;
 ALTER TABLE atlantis.ppv_good FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ppv_good USING (tenant = atlantis.current_partition());
+CREATE POLICY p ON atlantis.ppv_good AS RESTRICTIVE
+  USING (tenant = atlantis.current_partition())
+  WITH CHECK (tenant = atlantis.current_partition());
+CREATE POLICY g ON atlantis.ppv_good AS PERMISSIVE USING (true) WITH CHECK (true);
 
-CREATE POLICY p ON atlantis.ppv_disabled USING (tenant = atlantis.current_partition());
-
--- Three shapes that pass a policy COUNT and isolate nothing.
-CREATE TABLE atlantis.ppv_true       (id bigint primary key, tenant text not null);
-CREATE TABLE atlantis.ppv_wrongcol   (id bigint primary key, tenant text not null, other text);
-CREATE TABLE atlantis.ppv_insertonly (id bigint primary key, tenant text not null);
-
-ALTER TABLE atlantis.ppv_true ENABLE ROW LEVEL SECURITY;
-ALTER TABLE atlantis.ppv_true FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ppv_true USING (true);
-
-ALTER TABLE atlantis.ppv_wrongcol ENABLE ROW LEVEL SECURITY;
-ALTER TABLE atlantis.ppv_wrongcol FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ppv_wrongcol USING (other = atlantis.current_partition());
-
-ALTER TABLE atlantis.ppv_insertonly ENABLE ROW LEVEL SECURITY;
-ALTER TABLE atlantis.ppv_insertonly FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ppv_insertonly FOR INSERT
+-- THE CASE THAT INVERTED. This is what "correct" looked like before the
+-- boundary moved: one permissive policy scoping the column. It is now a
+-- finding, because any second permissive policy ORs past it.
+CREATE TABLE atlantis.ppv_permonly (id bigint primary key, tenant text not null);
+ALTER TABLE atlantis.ppv_permonly ENABLE ROW LEVEL SECURITY;
+ALTER TABLE atlantis.ppv_permonly FORCE ROW LEVEL SECURITY;
+CREATE POLICY p ON atlantis.ppv_permonly
+  USING (tenant = atlantis.current_partition())
   WITH CHECK (tenant = atlantis.current_partition());
 
--- One condition each, so no branch can stand in for another. ppv_none trips
--- three at once and ppv_disabled two, which is why deleting a branch used to go
--- unnoticed.
+-- THE OTHER CASE THAT INVERTED. A hostile permissive policy beside a correct
+-- restrictive boundary. This was the SecondPerm finding; it is now a supported
+-- configuration, and it is what makes user-defined access control possible.
+CREATE TABLE atlantis.ppv_rbac (id bigint primary key, tenant text not null);
+ALTER TABLE atlantis.ppv_rbac ENABLE ROW LEVEL SECURITY;
+ALTER TABLE atlantis.ppv_rbac FORCE ROW LEVEL SECURITY;
+CREATE POLICY p ON atlantis.ppv_rbac AS RESTRICTIVE
+  USING (tenant = atlantis.current_partition())
+  WITH CHECK (tenant = atlantis.current_partition());
+CREATE POLICY g ON atlantis.ppv_rbac AS PERMISSIVE USING (true) WITH CHECK (true);
+CREATE POLICY user_rbac ON atlantis.ppv_rbac AS PERMISSIVE USING (true) WITH CHECK (true);
+
+-- Nothing at all.
+CREATE TABLE atlantis.ppv_none (id bigint primary key, tenant text not null);
+
+-- Enabled, not forced: the owner is exempt and atlantis owns its tables.
+CREATE TABLE atlantis.ppv_noforce (id bigint primary key, tenant text not null);
+ALTER TABLE atlantis.ppv_noforce ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON atlantis.ppv_noforce AS RESTRICTIVE
+  USING (tenant = atlantis.current_partition())
+  WITH CHECK (tenant = atlantis.current_partition());
+CREATE POLICY g ON atlantis.ppv_noforce AS PERMISSIVE USING (true) WITH CHECK (true);
+
+-- Policies present, row-level security switched off, so all of it is inert.
+CREATE TABLE atlantis.ppv_disabled (id bigint primary key, tenant text not null);
+CREATE POLICY p ON atlantis.ppv_disabled AS RESTRICTIVE
+  USING (tenant = atlantis.current_partition())
+  WITH CHECK (tenant = atlantis.current_partition());
+
+-- FORCE without ENABLE, which is also inert.
+CREATE TABLE atlantis.ppv_offonly (id bigint primary key, tenant text not null);
+ALTER TABLE atlantis.ppv_offonly FORCE ROW LEVEL SECURITY;
+CREATE POLICY p ON atlantis.ppv_offonly AS RESTRICTIVE
+  USING (tenant = atlantis.current_partition())
+  WITH CHECK (tenant = atlantis.current_partition());
+
+-- Enabled and forced, simply no policy.
 CREATE TABLE atlantis.ppv_nopolicy (id bigint primary key, tenant text not null);
 ALTER TABLE atlantis.ppv_nopolicy ENABLE ROW LEVEL SECURITY;
 ALTER TABLE atlantis.ppv_nopolicy FORCE ROW LEVEL SECURITY;
 
-CREATE TABLE atlantis.ppv_offonly (id bigint primary key, tenant text not null);
-ALTER TABLE atlantis.ppv_offonly FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ppv_offonly USING (tenant = atlantis.current_partition());
+-- A restrictive boundary on the WRONG column bounds nothing that matters.
+CREATE TABLE atlantis.ppv_wrongcol (id bigint primary key, tenant text not null, other text);
+ALTER TABLE atlantis.ppv_wrongcol ENABLE ROW LEVEL SECURITY;
+ALTER TABLE atlantis.ppv_wrongcol FORCE ROW LEVEL SECURITY;
+CREATE POLICY p ON atlantis.ppv_wrongcol AS RESTRICTIVE
+  USING (other = atlantis.current_partition())
+  WITH CHECK (other = atlantis.current_partition());
+CREATE POLICY g ON atlantis.ppv_wrongcol AS PERMISSIVE USING (true) WITH CHECK (true);
 
--- Reads scoped, writes not. A check reading only polqual calls this healthy,
--- and a request bound to one tenant INSERTs a row stamped with another.
+-- A boundary that governs only INSERT is not a weak read boundary; it is the
+-- absence of one.
+CREATE TABLE atlantis.ppv_insertonly (id bigint primary key, tenant text not null);
+ALTER TABLE atlantis.ppv_insertonly ENABLE ROW LEVEL SECURITY;
+ALTER TABLE atlantis.ppv_insertonly FORCE ROW LEVEL SECURITY;
+CREATE POLICY p ON atlantis.ppv_insertonly AS RESTRICTIVE FOR INSERT
+  WITH CHECK (tenant = atlantis.current_partition());
+CREATE POLICY g ON atlantis.ppv_insertonly AS PERMISSIVE USING (true) WITH CHECK (true);
+
+-- Reads bounded, writes wide open: a caller bound to one tenant can write a row
+-- stamped with another, which it then cannot see.
 CREATE TABLE atlantis.ppv_checktrue (id bigint primary key, tenant text not null);
 ALTER TABLE atlantis.ppv_checktrue ENABLE ROW LEVEL SECURITY;
 ALTER TABLE atlantis.ppv_checktrue FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ppv_checktrue
+CREATE POLICY p ON atlantis.ppv_checktrue AS RESTRICTIVE
   USING (tenant = atlantis.current_partition()) WITH CHECK (true);
+CREATE POLICY g ON atlantis.ppv_checktrue AS PERMISSIVE USING (true) WITH CHECK (true);
 
--- A CORRECT policy beside a permissive USING (true). Permissive policies are
--- OR'd, so the pair is USING (true); a check that accepted any matching policy
--- reported this table healthy while it returned every tenant's rows.
-CREATE TABLE atlantis.ppv_secondperm (id bigint primary key, tenant text not null);
-ALTER TABLE atlantis.ppv_secondperm ENABLE ROW LEVEL SECURITY;
-ALTER TABLE atlantis.ppv_secondperm FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ppv_secondperm
-  USING (tenant = atlantis.current_partition())
-  WITH CHECK (tenant = atlantis.current_partition());
-CREATE POLICY leak_all ON atlantis.ppv_secondperm USING (true) WITH CHECK (true);
-
--- Correctly isolated, with a pipe character in the predicate. A FALSE
--- NEGATIVE probe: the previous aggregate split on the first pipe, so this table — the
--- only correctly isolated one in its group — was the only one reported broken,
--- refusing boot and every hot reload on a healthy deployment.
-CREATE TABLE atlantis.ppv_pipe (id bigint primary key, tenant text not null, a text, b text);
-ALTER TABLE atlantis.ppv_pipe ENABLE ROW LEVEL SECURITY;
-ALTER TABLE atlantis.ppv_pipe FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ppv_pipe
-  USING (coalesce(a || b, '') <> 'x|y' AND tenant = atlantis.current_partition())
-  WITH CHECK (coalesce(a || b, '') <> 'x|y' AND tenant = atlantis.current_partition());
-
--- RESTRICTIVE only. Restrictive policies AND with the permissive set, and with
--- no permissive policy PostgreSQL denies everything. Fail-closed, but it is
--- another shape that passes a count and isolates nothing.
+-- A boundary and no grant. Restrictive policies only ever narrow, so this table
+-- denies every row to every caller — fail-closed, and still worth reporting,
+-- because "every read returns zero" with no error is hard to attribute.
 CREATE TABLE atlantis.ppv_restrictonly (id bigint primary key, tenant text not null);
 ALTER TABLE atlantis.ppv_restrictonly ENABLE ROW LEVEL SECURITY;
 ALTER TABLE atlantis.ppv_restrictonly FORCE ROW LEVEL SECURITY;
 CREATE POLICY p ON atlantis.ppv_restrictonly AS RESTRICTIVE
-  USING (tenant = atlantis.current_partition());`); err != nil {
+  USING (tenant = atlantis.current_partition())
+  WITH CHECK (tenant = atlantis.current_partition());
+
+-- Correct, with a predicate whose text defeats naive string matching.
+CREATE TABLE atlantis.ppv_pipe (id bigint primary key, tenant text not null, a text, b text);
+ALTER TABLE atlantis.ppv_pipe ENABLE ROW LEVEL SECURITY;
+ALTER TABLE atlantis.ppv_pipe FORCE ROW LEVEL SECURITY;
+CREATE POLICY p ON atlantis.ppv_pipe AS RESTRICTIVE
+  USING (coalesce(a || b, '') <> 'x|y' AND tenant = atlantis.current_partition())
+  WITH CHECK (coalesce(a || b, '') <> 'x|y' AND tenant = atlantis.current_partition());
+CREATE POLICY g ON atlantis.ppv_pipe AS PERMISSIVE USING (true) WITH CHECK (true);`); err != nil {
 		t.Fatalf("fixture: %v", err)
 	}
 
 	tables := []PartitionedTable{
+		{EntityID: "t.Good", Schema: "atlantis", Table: "ppv_good", Column: "tenant"},
+		// Was the correct shape; is now a finding.
+		{EntityID: "t.PermOnly", Schema: "atlantis", Table: "ppv_permonly", Column: "tenant"},
+		// Was a finding; is now supported, and is the point of the whole change.
+		{EntityID: "t.RBAC", Schema: "atlantis", Table: "ppv_rbac", Column: "tenant"},
 		{EntityID: "t.None", Schema: "atlantis", Table: "ppv_none", Column: "tenant"},
 		{EntityID: "t.NoForce", Schema: "atlantis", Table: "ppv_noforce", Column: "tenant"},
-		{EntityID: "t.Good", Schema: "atlantis", Table: "ppv_good", Column: "tenant"},
 		{EntityID: "t.Disabled", Schema: "atlantis", Table: "ppv_disabled", Column: "tenant"},
-		// A policy can exist, be enabled and be forced while filtering nothing.
-		// Counting rows in pg_policy says yes to all three of these.
-		{EntityID: "t.True", Schema: "atlantis", Table: "ppv_true", Column: "tenant"},
+		{EntityID: "t.OffOnly", Schema: "atlantis", Table: "ppv_offonly", Column: "tenant"},
+		{EntityID: "t.NoPolicy", Schema: "atlantis", Table: "ppv_nopolicy", Column: "tenant"},
 		{EntityID: "t.WrongCol", Schema: "atlantis", Table: "ppv_wrongcol", Column: "tenant"},
 		{EntityID: "t.InsertOnly", Schema: "atlantis", Table: "ppv_insertonly", Column: "tenant"},
-		// Isolated: enabled and forced, simply no policy.
-		{EntityID: "t.NoPolicy", Schema: "atlantis", Table: "ppv_nopolicy", Column: "tenant"},
-		// Isolated: a correct policy, forced, with RLS switched off.
-		{EntityID: "t.OffOnly", Schema: "atlantis", Table: "ppv_offonly", Column: "tenant"},
-		// A table that is named in the checkpoint and does not exist IS a
-		// problem: only ApplyMigration writes the checkpoint, so the table
-		// should be there. Treating absence as fine turned a wrong-name bug
-		// into a clean report.
-		{EntityID: "t.Absent", Schema: "atlantis", Table: "ppv_absent", Column: "tenant"},
-		// Reads scoped, writes wide open.
 		{EntityID: "t.CheckTrue", Schema: "atlantis", Table: "ppv_checktrue", Column: "tenant"},
-		// A correct policy is present; a second permissive one defeats it.
-		{EntityID: "t.SecondPerm", Schema: "atlantis", Table: "ppv_secondperm", Column: "tenant"},
-		// Correctly isolated. Reporting this is a false NEGATIVE that refuses a
-		// healthy deployment, which is the more expensive direction here.
-		{EntityID: "t.Pipe", Schema: "atlantis", Table: "ppv_pipe", Column: "tenant"},
 		{EntityID: "t.RestrictOnly", Schema: "atlantis", Table: "ppv_restrictonly", Column: "tenant"},
+		{EntityID: "t.Pipe", Schema: "atlantis", Table: "ppv_pipe", Column: "tenant"},
+		// A table named in the checkpoint that does not exist IS a problem: only
+		// ApplyMigration writes the checkpoint, so it should be there. Treating
+		// absence as fine turned a wrong-name bug into a clean report.
+		{EntityID: "t.Absent", Schema: "atlantis", Table: "ppv_absent", Column: "tenant"},
 	}
 
 	problems, err := VerifyPartitionPolicies(ctx, pool, tables)
@@ -166,19 +190,19 @@ CREATE POLICY p ON atlantis.ppv_restrictonly AS RESTRICTIVE
 	// check was written for — was the least pinned of the four.
 	for _, want := range []struct{ entity, reason string }{
 		{"t.None", "carries no row-level security policy"},
+		{"t.NoPolicy", "carries no row-level security policy"},
 		{"t.NoForce", "without FORCE"},
 		{"t.Disabled", "row-level security is disabled"},
-		{"t.True", "does not compare that column"},
-		{"t.WrongCol", "does not compare that column"},
-		// Reported for the sharper reason now: a FOR INSERT policy is not a
-		// weak read policy, it is the absence of one.
-		{"t.InsertOnly", "none of them permissive"},
-		{"t.Absent", "no table"},
-		{"t.NoPolicy", "carries no row-level security policy"},
 		{"t.OffOnly", "row-level security is disabled"},
-		{"t.CheckTrue", "WITH CHECK does not compare"},
-		{"t.SecondPerm", "permissive read policy"},
-		{"t.RestrictOnly", "none of them permissive"},
+		{"t.Absent", "no table"},
+		// All three lack a restrictive boundary that scopes the column on reads.
+		// t.PermOnly is the one that matters: it is exactly what atlantis used to
+		// emit, and a permissive boundary is a grant any other grant ORs past.
+		{"t.PermOnly", "no RESTRICTIVE policy scoping that column on reads"},
+		{"t.WrongCol", "no RESTRICTIVE policy scoping that column on reads"},
+		{"t.InsertOnly", "no RESTRICTIVE policy scoping that column on reads"},
+		{"t.CheckTrue", "scoping reads but none scoping writes"},
+		{"t.RestrictOnly", "no PERMISSIVE policy"},
 	} {
 		found := false
 		for _, p := range problems {
@@ -195,7 +219,7 @@ CREATE POLICY p ON atlantis.ppv_restrictonly AS RESTRICTIVE
 	// A correctly isolated table must NOT be reported. t.Pipe is here because a
 	// false negative on this check refuses boot AND every hot reload on a healthy
 	// deployment — strictly worse than the false positive it was traded for.
-	for _, notWant := range []string{"t.Good", "t.Pipe"} {
+	for _, notWant := range []string{"t.Good", "t.Pipe", "t.RBAC"} {
 		if strings.Contains(joined, notWant) {
 			t.Errorf("%s was reported and should not be:\n%s", notWant, joined)
 		}

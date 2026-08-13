@@ -114,6 +114,36 @@ Enforcing in the database rather than in each generated read is the point. A
 predicate appended per read leaks the moment a handler is added without it, and
 a custom query body is opaque text with nowhere to inject one.
 
+### Two policies, and only one of them is yours
+
+`partition by` creates a pair:
+
+| Policy | Kind | Yours to change? |
+|---|---|---|
+| `<table>_tenant_isolation` | `RESTRICTIVE`, compares the column to `atlantis.current_partition()` | **No.** This is the tenant boundary. |
+| `<table>_default_access` | `PERMISSIVE USING (true)` | **Yes.** Replace it to add access control. |
+
+PostgreSQL admits a row when **any** permissive policy allows it **and every**
+restrictive policy allows it. The boundary is restrictive, so it ANDs with
+everything — no policy you write can read outside the tenant, however it is
+written. Restrictive policies only ever narrow, though, so a table needs at
+least one permissive policy or it returns nothing; `<table>_default_access` is
+that grant, and it is deliberately total so `partition by` behaves the same as
+it always did.
+
+To add your own access control, drop the default grant and write narrower
+permissive policies:
+
+```sql
+DROP POLICY invoice_default_access ON atlantis.billing_invoice;
+CREATE POLICY invoice_owner  ON atlantis.billing_invoice FOR SELECT USING (owner_id = current_user_id());
+CREATE POLICY invoice_admin  ON atlantis.billing_invoice FOR ALL    USING (is_admin());
+```
+
+Those two OR together, as grants should, and both stay inside the tenant.
+**Leaving the default grant in place makes narrower policies pointless** — it
+already allows everything they would allow.
+
 **Adding it later produces a migration.** `partition by` is diffed, so you can
 add it to an entity that already exists, move it to another column, or remove
 it. The plan is classified cross-caller breaking: enabling isolation means a

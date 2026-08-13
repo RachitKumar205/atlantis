@@ -148,29 +148,41 @@ SELECT n.nspname || '.' || c.relname, c.relrowsecurity, c.relforcerowsecurity,
 		// For ALL and UPDATE a null WITH CHECK means PostgreSQL reuses USING as
 		// the check, so an empty withCheck falls back rather than counting as a
 		// missing clause. DELETE has no check half; INSERT has no using half.
-		readable, writable := 0, 0
-		var unscopedRead, unscopedWrite []string
+		// The boundary is RESTRICTIVE, and only restrictive policies are asked
+		// about it.
+		//
+		// This used to inspect the permissive set and require EVERY permissive
+		// policy to scope the column, because the boundary lived there and
+		// permissive policies OR — so one unscoped policy beside a correct one
+		// returned every tenant's rows. That is a true statement about a
+		// permissive boundary and the reason the emitter refused to run on a
+		// table carrying foreign permissive policies at all.
+		//
+		// With the boundary restrictive it inverts. Restrictive policies AND, so
+		// isolation holds if ONE of them scopes the column, and no permissive
+		// policy can widen past it however written. Permissive policies become
+		// what a user's authorization model needs them to be — grants — and are
+		// not this function's business beyond the one thing below: at least one
+		// must exist, because a table with only restrictive policies admits no
+		// rows at all.
+		readable, writable, grants := 0, 0, 0
 		for _, pol := range st.policies {
-			if !pol.permissive {
-				// RESTRICTIVE policies AND with the permissive set; they can
-				// only narrow. They cannot supply the isolation, and a table
-				// with no permissive policy denies everything.
+			if pol.permissive {
+				grants++
 				continue
 			}
-			if governsRead(pol.cmd) {
+			if governsRead(pol.cmd) && t.Column != "" && predicateScopesColumn(pol.qual, t.Column) {
 				readable++
-				if t.Column != "" && !predicateScopesColumn(pol.qual, t.Column) {
-					unscopedRead = append(unscopedRead, pol.qual)
-				}
 			}
 			if governsWrite(pol.cmd) {
-				writable++
+				// For ALL and UPDATE a null WITH CHECK reuses USING as the
+				// check; DELETE has no check half, INSERT no using half.
 				check := pol.withCheck
 				if check == "" {
 					check = pol.qual
 				}
-				if t.Column != "" && !predicateScopesColumn(check, t.Column) {
-					unscopedWrite = append(unscopedWrite, check)
+				if t.Column != "" && predicateScopesColumn(check, t.Column) {
+					writable++
 				}
 			}
 		}
@@ -223,32 +235,34 @@ SELECT n.nspname || '.' || c.relname, c.relrowsecurity, c.relforcerowsecurity,
 				t.EntityID, qualified))
 		case readable == 0:
 			problems = append(problems, fmt.Sprintf(
-				"%s declares `partition by` and %s has policies, none of them "+
-					"permissive and governing reads. A table whose only policies are "+
-					"FOR INSERT, or are all RESTRICTIVE, denies every read rather "+
-					"than scoping it",
-				t.EntityID, qualified))
-		case len(unscopedRead) > 0:
-			problems = append(problems, fmt.Sprintf(
-				"%s declares `partition by %s` and %s has a permissive read policy "+
-					"that does not compare that column to atlantis.current_partition(). "+
-					"Permissive policies are OR'd, so ONE such policy beside a correct "+
-					"one returns every tenant's rows — a check that accepted any "+
-					"matching policy reported exactly that table healthy. Unscoped: %q",
-				t.EntityID, t.Column, qualified, unscopedRead))
+				"%s declares `partition by %s` and %s has no RESTRICTIVE policy "+
+					"scoping that column on reads. Tenant isolation lives in the "+
+					"restrictive slot, where it ANDs with every grant; without one "+
+					"the permissive policies on this table are the only thing "+
+					"deciding what is visible, and every caller reads every "+
+					"tenant's rows. Run `tide plan`",
+				t.EntityID, t.Column, qualified))
 		case writable == 0:
 			problems = append(problems, fmt.Sprintf(
-				"%s declares `partition by` and %s has no permissive policy governing "+
-					"writes, so every INSERT and UPDATE is refused",
-				t.EntityID, qualified))
-		case len(unscopedWrite) > 0:
+				"%s declares `partition by %s` and %s has a RESTRICTIVE policy "+
+					"scoping reads but none scoping writes. Reads are bounded and "+
+					"writes are not: a request bound to one tenant can INSERT or "+
+					"UPDATE a row stamped with another, which it then cannot see. "+
+					"The boundary needs WITH CHECK as well as USING",
+				t.EntityID, t.Column, qualified))
+		case grants == 0:
+			// Not an isolation failure — the opposite. Restrictive policies only
+			// subtract, so a table carrying the boundary and no grant admits
+			// nothing at all. Reported because "every read returns zero rows"
+			// with no error is the hardest kind of outage to attribute.
 			problems = append(problems, fmt.Sprintf(
-				"%s declares `partition by %s` and %s has a permissive write policy "+
-					"whose WITH CHECK does not compare that column to "+
-					"atlantis.current_partition(). Reads are scoped and writes are not: "+
-					"a request bound to one tenant can write a row stamped with "+
-					"another. Unscoped: %q",
-				t.EntityID, t.Column, qualified, unscopedWrite))
+				"%s declares `partition by` and %s has tenant isolation but no "+
+					"PERMISSIVE policy. Restrictive policies only ever narrow, so "+
+					"this table currently denies every row to every caller. atlantis "+
+					"emits a default grant beside the boundary; if it was dropped to "+
+					"make room for your own access control, at least one grant has "+
+					"to remain",
+				t.EntityID, qualified))
 		}
 	}
 	sort.Strings(problems)

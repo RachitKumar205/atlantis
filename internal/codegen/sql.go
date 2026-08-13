@@ -2042,10 +2042,51 @@ func emitPartitionPolicy(b *sqlBuilder, e *dsl.Entity) {
 	// CREATE POLICY has no IF NOT EXISTS, and the initial migration promises to
 	// be re-appliable after a partial failure. Dropping first keeps that true.
 	b.linef("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(partitionPolicyName(e)), table)
-	b.linef("CREATE POLICY %s ON %s USING (%s = %s) WITH CHECK (%s = %s);",
+	b.linef("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(partitionDefaultPolicyName(e)), table)
+
+	// TWO policies, and which is which is the whole design.
+	//
+	// PostgreSQL admits a row when ANY permissive policy allows it AND EVERY
+	// restrictive policy allows it. So the tenant boundary goes in the
+	// restrictive slot, where it ANDs with everything and nothing can widen
+	// past it, and the grant goes in the permissive slot, where it is one of
+	// possibly many.
+	//
+	// It used to be the other way round: one permissive policy carrying the
+	// boundary. That works only while it is the sole policy on the table,
+	// because a second permissive policy ORs with it — so a user adding
+	// `USING (true)` for their own access control silently exposed every
+	// tenant. The defence was to refuse the migration outright whenever
+	// another permissive policy existed, which held the line and made
+	// user-defined access control impossible: the first RBAC rule anyone wrote
+	// stopped `tide apply` working on that table.
+	//
+	// Restrictive inverts that. A user may add whatever permissive policies
+	// their authorization model needs; each is a grant, and none of them can
+	// reach outside the tenant. Verified against a deliberately hostile
+	// `AS PERMISSIVE USING (true) WITH CHECK (true)`: reads returned only the
+	// bound tenant's rows, an INSERT attributed to another tenant was refused
+	// naming this policy, and a cross-tenant UPDATE touched nothing.
+	//
+	// USING gates what a statement may read; WITH CHECK what it may write.
+	// Both are required on the boundary: USING alone lets a caller INSERT a row
+	// attributed to another tenant, which it then cannot see — a write leak
+	// rather than a read leak, and just as much a breach.
+	b.linef("CREATE POLICY %s ON %s AS RESTRICTIVE USING (%s = %s) WITH CHECK (%s = %s);",
 		quoteIdent(partitionPolicyName(e)), table, col, discriminator, col, discriminator)
 
-	emitForeignPolicyGuard(b, e)
+	// The default grant. Restrictive policies only ever subtract, so a table
+	// carrying the boundary alone admits nothing at all — RLS needs at least
+	// one permissive policy to let any row through.
+	//
+	// This one is deliberately total: it reproduces the behaviour of the single
+	// permissive policy it replaces, where the tenant check was the only
+	// constraint. It is also the policy a user REPLACES when they define their
+	// own access control — dropping it and writing narrower grants is the
+	// supported path, and doing so cannot weaken tenant isolation because that
+	// lives in the restrictive policy above.
+	b.linef("CREATE POLICY %s ON %s AS PERMISSIVE USING (true) WITH CHECK (true);",
+		quoteIdent(partitionDefaultPolicyName(e)), table)
 
 	// An index on the discriminator, always, owned by the policy.
 	//
@@ -2110,6 +2151,10 @@ func emitPartitionDisable(b *sqlBuilder, e *dsl.Entity) {
 	b.linef("ALTER TABLE %s NO FORCE ROW LEVEL SECURITY;", table)
 	b.linef("ALTER TABLE %s DISABLE ROW LEVEL SECURITY;", table)
 	b.linef("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(partitionPolicyName(e)), table)
+	// Both policies, because both were created. Leaving the default grant
+	// behind would be harmless while RLS is disabled and would become a
+	// permissive `USING (true)` the moment anything re-enabled it.
+	b.linef("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(partitionDefaultPolicyName(e)), table)
 	emitPartitionIndexDrop(b, e)
 }
 
@@ -2171,6 +2216,18 @@ func partitionIndexName(e *dsl.Entity) string {
 // it again. Length-capped for the same reason constraint names are.
 func partitionPolicyName(e *dsl.Entity) string {
 	return truncateIdent(tableName(e) + "_tenant_isolation")
+}
+
+// partitionDefaultPolicyName names the permissive grant that sits beside the
+// restrictive boundary.
+//
+// Named for what it is rather than after the mechanism: an operator reading
+// pg_policy should be able to tell at a glance which policy they may replace
+// (this one) and which is load-bearing (partitionPolicyName). Dropping this one
+// and writing narrower grants is the supported way to add access control;
+// dropping the other removes tenant isolation.
+func partitionDefaultPolicyName(e *dsl.Entity) string {
+	return truncateIdent(tableName(e) + "_default_access")
 }
 
 // partitionRebuild names an entity whose isolation policy must come down for
@@ -2247,62 +2304,24 @@ func altersColumn(d *Diff, entityID, column string) bool {
 	return false
 }
 
-// emitForeignPolicyGuard aborts the migration if another permissive policy
-// would OR itself alongside the isolation policy.
+// emitForeignPolicyGuard was here, and its deletion is the point of the
+// restrictive inversion rather than a side effect of it.
 //
-// # What it prevents
+// It aborted the migration when the table carried any permissive policy other
+// than atlantis's own, because permissive policies OR and a permissive tenant
+// boundary could therefore be widened past. That was the correct defence for
+// that design, and it made user-defined access control impossible: the first
+// RBAC grant anyone wrote stopped `tide apply` working on that table, and the
+// error's advice — make your grants RESTRICTIVE — inverts the logic, since
+// restrictive policies AND and so cannot express "admins OR auditors".
 //
-// PostgreSQL combines permissive policies with OR. A table carrying a legacy
-// `CREATE POLICY app_access ON t FOR ALL USING (true)` — the shape a database
-// being adopted FOR tenant isolation plausibly already has — applies this
-// migration cleanly, reports success, and isolates nothing. A review executed
-// it: the acme-bound caller read every tenant's rows and its forged
-// cross-tenant INSERT was accepted, while the plan text said "after this
-// applies, a request that carries no tenant reads nothing from this table".
-//
-// Every statement of that plan was false.
-//
-// # Why a guard and not a drop
-//
-// The migration cannot tell a legacy blanket policy from a deliberate one, and
-// dropping a policy the author did not mention would be a silent, unlogged
-// security change in the opposite direction. Refusing states the problem, names
-// the policy, and leaves the decision with the person who knows.
-//
-// # Why here and not only at boot
-//
-// pg.VerifyPartitionPolicies asks exactly this question and gets it right —
-// every permissive read policy must scope the column, not merely one of them.
-// But it is warn-only unless ATL_REQUIRE_TENANT_ISOLATION is set, and it runs
-// after the migration has already been applied and reported success. The
-// migration is where the operator is still deciding.
-//
-// Written as a DO block because a migration is a script, not a program: this
-// has to fail inside the same transaction that would otherwise commit the lie.
-func emitForeignPolicyGuard(b *sqlBuilder, e *dsl.Entity) {
-	schema, tbl := entitySchema(e), tableName(e)
-	b.line("DO $atl$")
-	b.line("DECLARE other text;")
-	b.line("BEGIN")
-	b.linef("  SELECT string_agg(p.polname, ', ') INTO other")
-	b.linef("    FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid")
-	b.linef("    JOIN pg_namespace n ON n.oid = c.relnamespace")
-	b.linef("   WHERE n.nspname = %s AND c.relname = %s", sqlLiteral(schema), sqlLiteral(tbl))
-	b.linef("     AND p.polpermissive AND p.polname <> %s;", sqlLiteral(partitionPolicyName(e)))
-	b.line("  IF other IS NOT NULL THEN")
-	b.linef("    RAISE EXCEPTION 'atlantis: %%.%% already carries permissive polic"+
-		"ies (%%). Permissive policies are OR''d, so tenant isolation would not "+
-		"apply. Drop or make them RESTRICTIVE, then re-apply.', %s, %s, other;",
-		sqlLiteral(schema), sqlLiteral(tbl))
-	b.line("  END IF;")
-	b.line("END")
-	b.line("$atl$;")
-}
+// With the boundary restrictive (see emitPartitionPolicy), a foreign permissive
+// policy is exactly what it should be: a grant, bounded by the tenant, and no
+// longer anything to refuse.
 
-// sqlLiteral renders a Go string as a single-quoted SQL literal.
-func sqlLiteral(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
-}
+// sqlLiteral went with it. Its only caller was that guard, which spliced schema
+// and policy names into a RAISE. Nothing emitted here needs a runtime string
+// literal any more — identifiers go through quoteIdent.
 
 // withoutBracketedPartitionChanges drops the partition changes whose policy the
 // prologue/epilogue bracket already owns.

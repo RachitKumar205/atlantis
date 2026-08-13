@@ -888,34 +888,35 @@ func loadPartitionPolicies(ctx context.Context, q Querier, pairs []physRef, exis
 		return out, nil
 	}
 
-	// EVERY permissive policy, ordered, not the first one that happens to match.
+	// EVERY policy, ordered, permissive and restrictive alike — the boundary is
+	// restrictive and the grants are permissive, and this has to tell them
+	// apart.
 	//
-	// Accepting a table on one matching policy was wrong in four ways, all
-	// executed by a review: a correct policy beside a second permissive
-	// `USING (true)`; a correct USING with `WITH CHECK (true)`, which admits
-	// forged cross-tenant writes; a policy scoped `TO` a role that is not the
-	// connecting one, which applies to nobody; and two policies on different
-	// columns, where the answer changed between runs because the loop was
-	// last-row-wins over an unordered query.
+	// It read only permissive policies when the boundary lived there, and
+	// required every one of them to scope the column, because permissive
+	// policies OR and a single unscoped one beside a correct one returns every
+	// tenant's rows. With the boundary restrictive that requirement is not just
+	// unnecessary but wrong: a user's access-control grants are permissive by
+	// nature and cannot widen past a restrictive policy, so demanding they
+	// mention the tenant column would report every RBAC-carrying table as
+	// broken.
 	//
-	// pg.VerifyPartitionPolicies asks the right question ten lines of import
-	// away — every permissive read policy must scope the column, and every
-	// write policy's WITH CHECK too. This asks the same one. The two must
-	// agree, or `tide adopt` reports a table healthy that the server then
-	// refuses to serve.
+	// pg.VerifyPartitionPolicies asks the same question ten lines of import
+	// away. The two must agree, or `tide adopt` reports a table healthy that
+	// the server then refuses to serve.
 	rows, err := q.Query(ctx, `
 SELECT n.nspname, c.relname,
        coalesce(pg_get_expr(p.polqual, p.polrelid), ''),
        coalesce(pg_get_expr(p.polwithcheck, p.polrelid), ''),
        p.polcmd::text,
-       p.polroles = '{0}'
+       p.polroles = '{0}',
+       p.polpermissive
   FROM pg_class c
   JOIN pg_namespace n ON n.oid = c.relnamespace
   JOIN pg_policy p ON p.polrelid = c.oid
  WHERE (n.nspname, c.relname) IN (SELECT * FROM unnest($1::text[], $2::text[]))
    AND c.relrowsecurity
    AND c.relforcerowsecurity
-   AND p.polpermissive
  ORDER BY n.nspname, c.relname, p.polname`, schemas, tables)
 	if err != nil {
 		return nil, err
@@ -923,47 +924,55 @@ SELECT n.nspname, c.relname,
 	defer rows.Close()
 
 	type state struct {
-		col               string
-		reads, writes     int
-		unscoped, toOther bool
+		cols          map[string]bool // columns scoped by restrictive read policies
+		reads, writes int             // restrictive policies that scope, by half
+		grants        int             // permissive policies of any shape
+		toOther       bool            // a boundary granted to some other role
 	}
 	seen := map[physRef]*state{}
 	for rows.Next() {
 		var schema, table, qual, withCheck, cmd string
-		var toPublic bool
-		if err := rows.Scan(&schema, &table, &qual, &withCheck, &cmd, &toPublic); err != nil {
+		var toPublic, permissive bool
+		if err := rows.Scan(&schema, &table, &qual, &withCheck, &cmd, &toPublic, &permissive); err != nil {
 			return nil, err
 		}
 		key := physRef{schema: schema, table: table}
 		st := seen[key]
 		if st == nil {
-			st = &state{}
+			st = &state{cols: map[string]bool{}}
 			seen[key] = st
 		}
-		// A policy granted only to some other role applies to nobody on the
-		// connecting role, so the table is not isolated by it — and with no
-		// policy that does apply, it denies every row.
+
+		// Permissive policies are grants. Their shape is the user's business —
+		// they cannot reach outside a restrictive boundary however they are
+		// written. Only their EXISTENCE matters here, because a table with no
+		// grant admits nothing.
+		if permissive {
+			st.grants++
+			continue
+		}
+
+		// A boundary granted only to some other role applies to nobody on the
+		// connecting role, so it bounds nothing.
 		if !toPublic {
 			st.toOther = true
+			continue
 		}
 		if governsReadCmd(cmd) {
-			st.reads++
-			col := partitionColumnFromQual(qual)
-			if col == "" || (st.col != "" && col != st.col) {
-				st.unscoped = true
-			} else {
-				st.col = col
+			if col := partitionColumnFromQual(qual); col != "" {
+				st.cols[col] = true
+				st.reads++
 			}
 		}
 		if governsWriteCmd(cmd) {
-			st.writes++
 			// For ALL and UPDATE a null WITH CHECK reuses USING as the check.
 			check := withCheck
 			if check == "" {
 				check = qual
 			}
-			if c := partitionColumnFromQual(check); c == "" || (st.col != "" && c != st.col) {
-				st.unscoped = true
+			if col := partitionColumnFromQual(check); col != "" {
+				st.cols[col] = true
+				st.writes++
 			}
 		}
 	}
@@ -972,10 +981,18 @@ SELECT n.nspname, c.relname,
 	}
 
 	for key, st := range seen {
-		if st.unscoped || st.toOther || st.reads == 0 || st.writes == 0 || st.col == "" {
+		// Both halves bounded, at least one grant so the table is reachable,
+		// and exactly one column named. More than one is not "more isolated" to
+		// report — restrictive policies AND, so two of them on different columns
+		// genuinely both apply, but there is no single answer to "which column
+		// is the partition column" and inventing one would put a wrong value in
+		// the live IR.
+		if st.toOther || st.reads == 0 || st.writes == 0 || st.grants == 0 || len(st.cols) != 1 {
 			continue
 		}
-		out[key] = st.col
+		for col := range st.cols {
+			out[key] = col
+		}
 	}
 	return out, nil
 }

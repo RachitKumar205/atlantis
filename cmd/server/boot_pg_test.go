@@ -331,12 +331,17 @@ CREATE TABLE atlantis.bootgate_doc (
 		t.Fatalf("fixture table: %v", err)
 	}
 	if withPolicy {
+		// The shape the emitter produces: a RESTRICTIVE boundary that ANDs with
+		// everything, plus the replaceable permissive grant without which a
+		// restrictive-only table admits nothing at all.
 		if _, err := pool.Exec(ctx, `
 ALTER TABLE atlantis.bootgate_doc ENABLE ROW LEVEL SECURITY;
 ALTER TABLE atlantis.bootgate_doc FORCE ROW LEVEL SECURITY;
-CREATE POLICY atlantis_partition_bootgate_doc ON atlantis.bootgate_doc
+CREATE POLICY bootgate_doc_tenant_isolation ON atlantis.bootgate_doc AS RESTRICTIVE
   USING (tenant = atlantis.current_partition())
-  WITH CHECK (tenant = atlantis.current_partition());`); err != nil {
+  WITH CHECK (tenant = atlantis.current_partition());
+CREATE POLICY bootgate_doc_default_access ON atlantis.bootgate_doc AS PERMISSIVE
+  USING (true) WITH CHECK (true);`); err != nil {
 			t.Fatalf("fixture policy: %v", err)
 		}
 	}

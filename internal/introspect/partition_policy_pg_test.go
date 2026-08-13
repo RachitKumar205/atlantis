@@ -53,18 +53,27 @@ func TestIntrospectReadsIsolationFromTheDatabase(t *testing.T) {
 CREATE TABLE atlantis.ipol_enforced (id bigint primary key, tenant text not null, org text not null);
 ALTER TABLE atlantis.ipol_enforced ENABLE ROW LEVEL SECURITY;
 ALTER TABLE atlantis.ipol_enforced FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ipol_enforced USING (tenant = atlantis.current_partition());
+CREATE POLICY p ON atlantis.ipol_enforced AS RESTRICTIVE
+  USING (tenant = atlantis.current_partition())
+  WITH CHECK (tenant = atlantis.current_partition());
+CREATE POLICY g ON atlantis.ipol_enforced AS PERMISSIVE USING (true) WITH CHECK (true);
 
 CREATE TABLE atlantis.ipol_nopolicy (id bigint primary key, tenant text not null, org text not null);
 
 CREATE TABLE atlantis.ipol_noforce (id bigint primary key, tenant text not null, org text not null);
 ALTER TABLE atlantis.ipol_noforce ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ipol_noforce USING (tenant = atlantis.current_partition());
+CREATE POLICY p ON atlantis.ipol_noforce AS RESTRICTIVE
+  USING (tenant = atlantis.current_partition())
+  WITH CHECK (tenant = atlantis.current_partition());
+CREATE POLICY g ON atlantis.ipol_noforce AS PERMISSIVE USING (true) WITH CHECK (true);
 
 CREATE TABLE atlantis.ipol_wrongcol (id bigint primary key, tenant text not null, org text not null);
 ALTER TABLE atlantis.ipol_wrongcol ENABLE ROW LEVEL SECURITY;
 ALTER TABLE atlantis.ipol_wrongcol FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ipol_wrongcol USING (org = atlantis.current_partition());
+CREATE POLICY p ON atlantis.ipol_wrongcol AS RESTRICTIVE
+  USING (org = atlantis.current_partition())
+  WITH CHECK (org = atlantis.current_partition());
+CREATE POLICY g ON atlantis.ipol_wrongcol AS PERMISSIVE USING (true) WITH CHECK (true);
 
 -- FORCE without ENABLE. PostgreSQL permits this and it leaves the policy
 -- inert: FORCE only says the owner is not exempt, ENABLE is what switches
@@ -72,7 +81,9 @@ CREATE POLICY p ON atlantis.ipol_wrongcol USING (org = atlantis.current_partitio
 -- survived a fixture that lacked this table.
 CREATE TABLE atlantis.ipol_forcenotenabled (id bigint primary key, tenant text not null, org text not null);
 ALTER TABLE atlantis.ipol_forcenotenabled FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ipol_forcenotenabled USING (tenant = atlantis.current_partition());
+CREATE POLICY p ON atlantis.ipol_forcenotenabled AS RESTRICTIVE
+  USING (tenant = atlantis.current_partition())
+  WITH CHECK (tenant = atlantis.current_partition());
 
 -- RESTRICTIVE only. Restrictive policies AND with the permissive set, and with
 -- no permissive policy the table denies every row rather than scoping it. That
@@ -81,7 +92,9 @@ CREATE POLICY p ON atlantis.ipol_forcenotenabled USING (tenant = atlantis.curren
 CREATE TABLE atlantis.ipol_restrictonly (id bigint primary key, tenant text not null, org text not null);
 ALTER TABLE atlantis.ipol_restrictonly ENABLE ROW LEVEL SECURITY;
 ALTER TABLE atlantis.ipol_restrictonly FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ipol_restrictonly AS RESTRICTIVE USING (tenant = atlantis.current_partition());
+CREATE POLICY p ON atlantis.ipol_restrictonly AS RESTRICTIVE
+  USING (tenant = atlantis.current_partition())
+  WITH CHECK (tenant = atlantis.current_partition());
 
 -- FOR DELETE only. This is the shape that tests the polcmd filter, not FOR
 -- INSERT: an INSERT policy has no USING clause at all, so pg_get_expr returns
@@ -91,32 +104,42 @@ CREATE POLICY p ON atlantis.ipol_restrictonly AS RESTRICTIVE USING (tenant = atl
 CREATE TABLE atlantis.ipol_deleteonly (id bigint primary key, tenant text not null, org text not null);
 ALTER TABLE atlantis.ipol_deleteonly ENABLE ROW LEVEL SECURITY;
 ALTER TABLE atlantis.ipol_deleteonly FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ipol_deleteonly FOR DELETE USING (tenant = atlantis.current_partition());
+CREATE POLICY p ON atlantis.ipol_deleteonly AS RESTRICTIVE FOR DELETE
+  USING (tenant = atlantis.current_partition());
+CREATE POLICY g ON atlantis.ipol_deleteonly AS PERMISSIVE USING (true) WITH CHECK (true);
 
--- A correct policy beside a SECOND permissive one. Permissive policies OR, so
--- the pair is USING (true) and the table leaks everything. Accepting a table on
--- the first matching policy reported this as isolated.
+-- A restrictive boundary beside a wide-open PERMISSIVE policy. This case
+-- INVERTED: while the boundary was permissive the pair ORd to USING (true) and
+-- the table leaked everything, so this fixture asserted "not isolated". A
+-- restrictive boundary ANDs with every grant, so the same shape is now a
+-- correctly isolated table carrying a user's access-control rule — and
+-- reporting it would refuse every RBAC-carrying deployment.
 CREATE TABLE atlantis.ipol_secondperm (id bigint primary key, tenant text not null, org text not null);
 ALTER TABLE atlantis.ipol_secondperm ENABLE ROW LEVEL SECURITY;
 ALTER TABLE atlantis.ipol_secondperm FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ipol_secondperm USING (tenant = atlantis.current_partition())
+CREATE POLICY p ON atlantis.ipol_secondperm AS RESTRICTIVE
+  USING (tenant = atlantis.current_partition())
   WITH CHECK (tenant = atlantis.current_partition());
-CREATE POLICY leak ON atlantis.ipol_secondperm FOR SELECT USING (true);
+CREATE POLICY g ON atlantis.ipol_secondperm AS PERMISSIVE USING (true) WITH CHECK (true);
+CREATE POLICY user_rbac ON atlantis.ipol_secondperm FOR SELECT USING (true);
 
 -- Reads scoped, writes wide open. Admits a caller bound to one tenant writing
 -- a row stamped with another.
 CREATE TABLE atlantis.ipol_checktrue (id bigint primary key, tenant text not null, org text not null);
 ALTER TABLE atlantis.ipol_checktrue ENABLE ROW LEVEL SECURITY;
 ALTER TABLE atlantis.ipol_checktrue FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ipol_checktrue USING (tenant = atlantis.current_partition()) WITH CHECK (true);
+CREATE POLICY p ON atlantis.ipol_checktrue AS RESTRICTIVE
+  USING (tenant = atlantis.current_partition()) WITH CHECK (true);
+CREATE POLICY g ON atlantis.ipol_checktrue AS PERMISSIVE USING (true) WITH CHECK (true);
 
 -- Granted TO a specific role rather than PUBLIC. It applies to nobody on the
 -- connecting role, so with no other policy the table denies every row.
 CREATE TABLE atlantis.ipol_toother (id bigint primary key, tenant text not null, org text not null);
 ALTER TABLE atlantis.ipol_toother ENABLE ROW LEVEL SECURITY;
 ALTER TABLE atlantis.ipol_toother FORCE ROW LEVEL SECURITY;
-CREATE POLICY p ON atlantis.ipol_toother FOR ALL TO pg_monitor
+CREATE POLICY p ON atlantis.ipol_toother AS RESTRICTIVE FOR ALL TO pg_monitor
   USING (tenant = atlantis.current_partition()) WITH CHECK (tenant = atlantis.current_partition());
+CREATE POLICY g ON atlantis.ipol_toother AS PERMISSIVE USING (true) WITH CHECK (true);
 
 -- Two isolation policies on DIFFERENT columns. Last-row-wins over an unordered
 -- query made this nondeterministic: four runs said "org", one said "tenant",
@@ -124,9 +147,10 @@ CREATE POLICY p ON atlantis.ipol_toother FOR ALL TO pg_monitor
 CREATE TABLE atlantis.ipol_twocols (id bigint primary key, tenant text not null, org text not null);
 ALTER TABLE atlantis.ipol_twocols ENABLE ROW LEVEL SECURITY;
 ALTER TABLE atlantis.ipol_twocols FORCE ROW LEVEL SECURITY;
-CREATE POLICY a_tenant ON atlantis.ipol_twocols USING (tenant = atlantis.current_partition())
+CREATE POLICY g ON atlantis.ipol_twocols AS PERMISSIVE USING (true) WITH CHECK (true);
+CREATE POLICY a_tenant ON atlantis.ipol_twocols AS RESTRICTIVE USING (tenant = atlantis.current_partition())
   WITH CHECK (tenant = atlantis.current_partition());
-CREATE POLICY b_org ON atlantis.ipol_twocols USING (org = atlantis.current_partition())
+CREATE POLICY b_org ON atlantis.ipol_twocols AS RESTRICTIVE USING (org = atlantis.current_partition())
   WITH CHECK (org = atlantis.current_partition());`); err != nil {
 		t.Fatalf("fixture: %v", err)
 	}
@@ -178,9 +202,15 @@ CREATE POLICY b_org ON atlantis.ipol_twocols USING (org = atlantis.current_parti
 			"restrictive policies AND with the permissive set; with none, the table " +
 				"denies every row rather than scoping it, which is an outage and not " +
 				"isolation"},
-		{"SecondPerm", "",
-			"permissive policies OR, so a correct policy beside a second one leaks " +
-				"everything. Accepting the first match reported this as isolated"},
+		// INVERTED with the boundary. While it was permissive this pair ORd to
+		// USING (true) and the expectation was "". A restrictive boundary ANDs
+		// with every grant, so a user's access-control rule sitting beside it is
+		// a correctly isolated table — and calling it unisolated would refuse
+		// every deployment that defines one.
+		{"SecondPerm", "tenant",
+			"a wide-open permissive grant cannot cross a restrictive boundary, so " +
+				"this is isolated and reporting otherwise breaks user-defined access " +
+				"control"},
 		{"CheckTrue", "",
 			"reads scoped and writes wide open admits a caller bound to one tenant " +
 				"writing a row stamped with another"},

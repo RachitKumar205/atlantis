@@ -312,7 +312,8 @@ entity Doc in pmove {
 SELECT coalesce(max(pg_get_expr(p.polqual, p.polrelid)), '')
   FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid
   JOIN pg_namespace n ON n.oid = c.relnamespace
- WHERE n.nspname = 'atlantis' AND c.relname = 'pmove_doc'`).Scan(&qual)
+ WHERE n.nspname = 'atlantis' AND c.relname = 'pmove_doc'
+   AND NOT p.polpermissive`).Scan(&qual)
 		_ = admin.QueryRow(ctx, `
 SELECT coalesce(max(indexdef), '') FROM pg_indexes
  WHERE schemaname = 'atlantis' AND tablename = 'pmove_doc'
@@ -551,7 +552,8 @@ entity Doc in ptype {
 SELECT coalesce(max(pg_get_expr(p.polqual, p.polrelid)), '')
   FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid
   JOIN pg_namespace n ON n.oid = c.relnamespace
- WHERE n.nspname = 'atlantis' AND c.relname = 'ptype_doc'`).Scan(&qual); err != nil {
+ WHERE n.nspname = 'atlantis' AND c.relname = 'ptype_doc'
+   AND NOT p.polpermissive`).Scan(&qual); err != nil {
 		t.Fatalf("read policy: %v", err)
 	}
 	if !strings.Contains(qual, "current_partition") || !strings.Contains(qual, "tenant") {
