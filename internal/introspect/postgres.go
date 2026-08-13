@@ -11,11 +11,17 @@
 // outweighs the value for the first cut. Those facts are surfaced as
 // advisory warnings instead so the operator can audit them out-of-band.
 //
-// Atlantis-only metadata (cache, partition_field, query_timeout,
-// proto_number ledgers, relations, soft_delete, touch_on_update) has
-// no SQL footprint. We copy those values verbatim from the declared
-// IR onto the output entity so a downstream diff treats them as equal
-// by construction.
+// Atlantis-only metadata (cache, query_timeout, proto_number ledgers,
+// relations, soft_delete, touch_on_update) has no SQL footprint. We
+// copy those values verbatim from the declared IR onto the output
+// entity so a downstream diff treats them as equal by construction.
+//
+// partition_field is NOT in that set, despite once being listed here.
+// It has a very real SQL footprint — ENABLE and FORCE ROW LEVEL
+// SECURITY plus a policy — and copying it verbatim made the live IR
+// agree with the schema by construction, so `tide adopt` could never
+// report a table whose isolation the database is not actually
+// enforcing. It is read from pg_policy; see loadPartitionPolicies.
 //
 // Introspection is restricted to the tables the declared IR claims:
 // every entity in declaredIR.Entities has a resolved physical
@@ -109,6 +115,32 @@ func FromPostgres(ctx context.Context, q Querier, declaredIR *dsl.IR) (*dsl.IR, 
 	cons, err := loadConstraints(ctx, q, pairs, existing)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("load constraints: %w", err)
+	}
+
+	// Tenant isolation, read from the catalog rather than copied off the
+	// declaration.
+	//
+	// PartitionField was assigned from the declared entity above, which made
+	// the live IR agree with the schema by construction: oldE.PartitionField
+	// always equalled newE.PartitionField, diffPartition returned on its first
+	// line, and `partition_added` / `partition_removed` could never reach the
+	// drift report. A review confirmed it by stripping the policy, FORCE and
+	// RLS off a live table whose declaration said `partition by tenant` —
+	// introspection reported the column as partitioned, with no warning, and
+	// the diff was empty.
+	//
+	// That is the one drift this feature most needs to surface. `tide adopt`
+	// exists to tell an operator what the database really looks like, and on
+	// this question it was telling them what the file said.
+	live, err := loadPartitionPolicies(ctx, q, pairs, existing)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("load partition policies: %w", err)
+	}
+	for p, i := range idx {
+		if !existing[p] {
+			continue
+		}
+		out.Entities[i].PartitionField = live[p]
 	}
 
 	// Lookup tables for FK target reconstruction:
@@ -813,4 +845,195 @@ func multiColUniqCount(us []uniqSpec) int {
 		}
 	}
 	return n
+}
+
+// loadPartitionPolicies reports, per table, which column the live database
+// actually enforces tenant isolation on — "" when it enforces none.
+//
+// # What counts as enforced
+//
+// All three of: row-level security ENABLED, FORCED, and a permissive policy
+// whose USING expression compares a column to atlantis.current_partition().
+// Any one missing and the table is not isolated, whatever the schema says:
+//
+//   - not ENABLED, the policy is inert
+//   - not FORCED, the table's owner is exempt, and atlantis owns the tables it
+//     creates and connects as their owner
+//   - no policy, nothing filters
+//
+// # Why the column comes out of the predicate
+//
+// Returning a boolean and reusing the declared name would report a policy on
+// the WRONG column as correct — reachable because moving `partition by` to
+// another column is a change the database does not apply by itself. The column
+// is read from pg_get_expr, so a policy scoping a column nobody declared shows
+// up as drift instead of agreement.
+//
+// A policy this cannot parse yields "", which reports as "not isolated". That
+// direction is deliberate: the resulting plan emits DROP POLICY IF EXISTS
+// followed by CREATE POLICY, which converges a hand-written policy onto the
+// declared one. The opposite default would silently accept it.
+func loadPartitionPolicies(ctx context.Context, q Querier, pairs []physRef, existing map[physRef]bool) (map[physRef]string, error) {
+	out := make(map[physRef]string, len(pairs))
+	schemas := make([]string, 0, len(pairs))
+	tables := make([]string, 0, len(pairs))
+	for _, p := range pairs {
+		if !existing[p] {
+			continue
+		}
+		schemas = append(schemas, p.schema)
+		tables = append(tables, p.table)
+	}
+	if len(schemas) == 0 {
+		return out, nil
+	}
+
+	// EVERY permissive policy, ordered, not the first one that happens to match.
+	//
+	// Accepting a table on one matching policy was wrong in four ways, all
+	// executed by a review: a correct policy beside a second permissive
+	// `USING (true)`; a correct USING with `WITH CHECK (true)`, which admits
+	// forged cross-tenant writes; a policy scoped `TO` a role that is not the
+	// connecting one, which applies to nobody; and two policies on different
+	// columns, where the answer changed between runs because the loop was
+	// last-row-wins over an unordered query.
+	//
+	// pg.VerifyPartitionPolicies asks the right question ten lines of import
+	// away — every permissive read policy must scope the column, and every
+	// write policy's WITH CHECK too. This asks the same one. The two must
+	// agree, or `tide adopt` reports a table healthy that the server then
+	// refuses to serve.
+	rows, err := q.Query(ctx, `
+SELECT n.nspname, c.relname,
+       coalesce(pg_get_expr(p.polqual, p.polrelid), ''),
+       coalesce(pg_get_expr(p.polwithcheck, p.polrelid), ''),
+       p.polcmd::text,
+       p.polroles = '{0}'
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  JOIN pg_policy p ON p.polrelid = c.oid
+ WHERE (n.nspname, c.relname) IN (SELECT * FROM unnest($1::text[], $2::text[]))
+   AND c.relrowsecurity
+   AND c.relforcerowsecurity
+   AND p.polpermissive
+ ORDER BY n.nspname, c.relname, p.polname`, schemas, tables)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type state struct {
+		col               string
+		reads, writes     int
+		unscoped, toOther bool
+	}
+	seen := map[physRef]*state{}
+	for rows.Next() {
+		var schema, table, qual, withCheck, cmd string
+		var toPublic bool
+		if err := rows.Scan(&schema, &table, &qual, &withCheck, &cmd, &toPublic); err != nil {
+			return nil, err
+		}
+		key := physRef{schema: schema, table: table}
+		st := seen[key]
+		if st == nil {
+			st = &state{}
+			seen[key] = st
+		}
+		// A policy granted only to some other role applies to nobody on the
+		// connecting role, so the table is not isolated by it — and with no
+		// policy that does apply, it denies every row.
+		if !toPublic {
+			st.toOther = true
+		}
+		if governsReadCmd(cmd) {
+			st.reads++
+			col := partitionColumnFromQual(qual)
+			if col == "" || (st.col != "" && col != st.col) {
+				st.unscoped = true
+			} else {
+				st.col = col
+			}
+		}
+		if governsWriteCmd(cmd) {
+			st.writes++
+			// For ALL and UPDATE a null WITH CHECK reuses USING as the check.
+			check := withCheck
+			if check == "" {
+				check = qual
+			}
+			if c := partitionColumnFromQual(check); c == "" || (st.col != "" && c != st.col) {
+				st.unscoped = true
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	for key, st := range seen {
+		if st.unscoped || st.toOther || st.reads == 0 || st.writes == 0 || st.col == "" {
+			continue
+		}
+		out[key] = st.col
+	}
+	return out, nil
+}
+
+// governsReadCmd and governsWriteCmd classify a policy's command.
+//
+// polcmd is '*' ALL, 'r' SELECT, 'a' INSERT, 'w' UPDATE, 'd' DELETE. UPDATE and
+// DELETE have a USING half, so they decide which rows are reachable; UPDATE and
+// INSERT have a WITH CHECK half, so they decide what may be written.
+func governsReadCmd(cmd string) bool {
+	return cmd == "*" || cmd == "r" || cmd == "w" || cmd == "d"
+}
+
+func governsWriteCmd(cmd string) bool {
+	return cmd == "*" || cmd == "a" || cmd == "w"
+}
+
+// partitionColumnFromQual extracts the column an isolation predicate scopes.
+//
+// The emitted shape is `(<col> = atlantis.current_partition()[::cast])`, which
+// pg_get_expr renders with the schema stripped and the column possibly cast:
+//
+//	((tenant)::text = NULLIF(current_setting('atlantis.tenant'::text, true), ''::text))
+//	(tenant = current_partition())
+//
+// Anything that does not mention current_partition or current_setting of the
+// tenant parameter is not an isolation policy and yields "". Anything that does
+// but cannot be parsed also yields "", which reports as "not isolated" — see
+// loadPartitionPolicies for why that direction is the safe one.
+func partitionColumnFromQual(qual string) string {
+	if !strings.Contains(qual, "current_partition") &&
+		!strings.Contains(qual, "atlantis.tenant") {
+		return ""
+	}
+	eq := strings.Index(qual, " = ")
+	if eq < 0 {
+		return ""
+	}
+	lhs := strings.TrimSpace(qual[:eq])
+	// Strip the wrapping parens and any cast pg_get_expr added: `((tenant)::text`
+	lhs = strings.TrimLeft(lhs, "(")
+	if cast := strings.Index(lhs, ")::"); cast >= 0 {
+		lhs = lhs[:cast]
+	}
+	// A CALL on the left is not a column, and trimming its parens away would
+	// turn it into one. `(current_partition() = tenant)` — the operands the
+	// other way round, entirely plausible in a hand-written policy — used to
+	// yield the string "current_partition" as the live partition column. The
+	// operator was then shown "tenant isolation moved from "current_partition"
+	// to "tenant"", and the down script would have created a policy against a
+	// column that does not exist.
+	if strings.Contains(lhs, "(") {
+		return ""
+	}
+	lhs = strings.Trim(lhs, `") `)
+	// A qualified or expression left-hand side is not a plain column.
+	if lhs == "" || strings.ContainsAny(lhs, ". ()'") {
+		return ""
+	}
+	return lhs
 }

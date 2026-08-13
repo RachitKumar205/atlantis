@@ -114,11 +114,12 @@ Enforcing in the database rather than in each generated read is the point. A
 predicate appended per read leaks the moment a handler is added without it, and
 a custom query body is opaque text with nowhere to inject one.
 
-**This happens on `CREATE TABLE` only.** The differ does not read `partition
-by`, so adding it to an entity that already exists emits no migration, no
-policy, and no plan output — the schema claims a partition the database has
-never heard of. Declare it when you create the entity, or add the policy by
-hand.
+**Adding it later produces a migration.** `partition by` is diffed, so you can
+add it to an entity that already exists, move it to another column, or remove
+it. The plan is classified cross-caller breaking: enabling isolation means a
+request that carries no tenant reads nothing from that table, and removing it
+means every caller reads every tenant's rows. Neither is applied without an
+explicit decision.
 
 **What is trusted.** Your service asserts which tenant a request is for, and
 atlantis does not derive or second-guess that. Once asserted, every statement in

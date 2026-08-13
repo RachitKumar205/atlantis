@@ -401,7 +401,20 @@ func classifyDriftSeverity(kind string) string {
 		"index_added",
 		"composite_unique_added",
 		"custom_query_added",
-		"procedure_added":
+		"procedure_added",
+		// Tenant isolation appearing. The judgement, since this test demands
+		// one rather than deriving it from the suffix: reconciling means
+		// CREATING a policy the live database does not have, so it is an
+		// addition in the same sense as index_added.
+		//
+		// Worth saying plainly that "addition" understates it. The live
+		// database currently serves every tenant's rows to every caller on
+		// this table while the schema claims otherwise, and adopting will
+		// change what every existing reader can see. There is no arm here that
+		// carries that weight — the three are addition, removal and
+		// modification — so this is filed by DDL direction and the severity
+		// lives in the plan class, which is ClassDestructive.
+		"partition_added":
 		return "addition"
 	case "entity_removed",
 		"field_removed",
@@ -413,7 +426,12 @@ func classifyDriftSeverity(kind string) string {
 		"index_removed",
 		"composite_unique_removed",
 		"custom_query_removed",
-		"procedure_removed":
+		"procedure_removed",
+		// Tenant isolation disappearing. Reconciling means DROPPING a policy
+		// the live database is enforcing, after which every caller reads every
+		// tenant's rows. A removal, and the most consequential one in this
+		// list.
+		"partition_removed":
 		return "removal"
 	}
 	return "mismatch"

@@ -123,6 +123,10 @@ const (
 	// which is worse than one that plainly does not.
 	KindChunkTimeIntervalChanged ChangeKind = "chunk_time_interval_changed"
 
+	KindPartitionAdded   ChangeKind = "partition_added"
+	KindPartitionRemoved ChangeKind = "partition_removed"
+	KindPartitionChanged ChangeKind = "partition_changed"
+
 	KindCheckAdded   ChangeKind = "check_added"
 	KindCheckRemoved ChangeKind = "check_removed"
 	KindCheckChanged ChangeKind = "check_changed"
@@ -484,6 +488,7 @@ func diffEntity(oldE, newE *dsl.Entity, d *Diff, ctx *diffCtx) {
 	diffIndexes(oldE, newE, d)
 	diffUniques(oldE, newE, d)
 	diffChecks(oldE, newE, d)
+	diffPartition(oldE, newE, d)
 	diffChunkTimeInterval(oldE, newE, d)
 	diffCache(oldE, newE, d)
 	diffQueryTimeout(oldE, newE, d)
@@ -1522,4 +1527,160 @@ func sliceEq(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// diffPartition detects `partition by` appearing, disappearing or moving to
+// another column on an entity that already exists.
+//
+// # Why this was a gap, and what the gap cost
+//
+// The policy, FORCE ROW LEVEL SECURITY and the backing index were emitted on
+// CREATE TABLE only. Adding `partition by` to an existing entity therefore
+// produced an empty plan: no migration, no policy, no output. The schema
+// claimed a partition the database had never heard of.
+//
+// That was survivable while the clause did nothing in either direction. It
+// stopped being survivable once the server began binding a tenant per request,
+// because the only signal an operator could observe — omit the tenant, get
+// refused — then worked whether or not a policy existed. A review executed
+// exactly that: the differ emitted nothing, the server refused an unbound
+// request, and a bound request returned every tenant's rows. Three separate
+// checks were built to detect the resulting drift; this removes the drift.
+//
+// # Why these are not additive
+//
+// `tide apply` auto-applies ClassAdditive without asking. Neither direction
+// here can be auto-applied.
+//
+// Adding the clause changes every read of the table for every caller: after
+// apply, a request that carries no tenant sees nothing. That is correct and it
+// is also a behaviour change no operator should discover from a migration that
+// applied itself.
+//
+// Removing it silently exposes every tenant's rows to every caller. Classifying
+// that as additive would route the single most dangerous change in this grammar
+// through the class nobody looks at twice.
+//
+// Filed through d.append, not by appending to a bucket directly.
+//
+// The bucket is only half the record. Change.Class is persisted inside the diff
+// JSON in atlantis.schema_versions, and appending to a slice by hand leaves it
+// at its zero value — which is ClassAdditive. A review read the stored plan
+// back: every partition change carried "class": 0 while the plan_class column
+// beside it said otherwise, so the durable audit record described the single
+// most consequential change in this grammar as additive.
+//
+// # Why CrossCallerBreaking and not Destructive
+//
+// Destructive was the first choice, on the reasoning that it is the class
+// requiring an explicit decision. A review showed that wrong three ways, all
+// executed:
+//
+//   - `translateClass` has no arm for ClassDestructive, so it falls through to
+//     ClassUnclean and the wire reports PLAN_CLASS_UNPARSEABLE. `tide apply`
+//     then prints "plan is unparseable — custom-query SQL validation failed",
+//     lists no errors and exits 3. There was no CLI path that could enable
+//     tenant isolation at all.
+//   - `tide rollback --dry-run` and `tide diff` decode only additive,
+//     backfill_required and breaking. A rollback across this change printed
+//     "(no changes — schemas are identical)" and then dropped the policy off a
+//     populated table.
+//   - `tidectl plan --destructive` gates BackfillRequired and
+//     CrossCallerBreaking, not Destructive, so the plan staged with no flag.
+//
+// The plumbing gap is older than this change — entity_removed already produced
+// ClassDestructive — but routing a new feature through it is what made the
+// feature unusable.
+//
+// CrossCallerBreaking is also the better description. Destructive asks "does
+// this destroy rows"; this destroys none. Breaking asks "does this break
+// somebody else", and enabling or removing tenant isolation changes what every
+// caller of the table can read. That is the question an operator needs asked.
+func diffPartition(oldE, newE *dsl.Entity, d *Diff) {
+	oldField, newField := oldE.PartitionField, newE.PartitionField
+
+	// The column's TYPE is part of the policy, not just its name.
+	//
+	// The emitted predicate casts atlantis.current_partition() to the column's
+	// type when the column is not text-shaped, so the policy TEXT is a function
+	// of the type. Returning early on `oldField == newField` therefore missed a
+	// real change, and missed it in the worst way: PostgreSQL refuses to alter
+	// a column a policy depends on —
+	//
+	//	ERROR: cannot alter type of a column used in a policy definition
+	//
+	// so `varchar(64)` to `uuid` emitted a bare ALTER COLUMN TYPE, the apply
+	// rolled back on DDL nobody hand-wrote, and no further schema edit could
+	// get past it. The schema was wedged until someone dropped the policy by
+	// hand. Found by execution, not by reading.
+	//
+	// Treated as a move from the column to itself: drop the policy and its
+	// index, then recreate both against the new type. The column change itself
+	// is emitted by diffFields, and the DESTRUCTIVE group runs before BREAKING,
+	// so the drop lands ahead of the ALTER.
+	if oldField != "" && oldField == newField {
+		if partitionColumnType(oldE) != partitionColumnType(newE) {
+			d.append(Change{
+				Class:    ClassCrossCallerBreaking,
+				Kind:     KindPartitionChanged,
+				EntityID: newE.ID(),
+				Field:    newField,
+				Detail: fmt.Sprintf("%s: the type of the tenant column %q changed, so "+
+					"the isolation policy must be rebuilt — PostgreSQL refuses to alter "+
+					"a column a policy depends on", newE.ID(), newField),
+			})
+		}
+		return
+	}
+	if oldField == newField {
+		return
+	}
+	switch {
+	case oldField == "" && newField != "":
+		d.append(Change{
+			Class:    ClassCrossCallerBreaking,
+			Kind:     KindPartitionAdded,
+			EntityID: newE.ID(),
+			Detail: fmt.Sprintf("%s: tenant isolation enabled on %q — after this "+
+				"applies, a request that carries no tenant reads nothing from this table",
+				newE.ID(), newField),
+			Field: newField,
+		})
+	case oldField != "" && newField == "":
+		d.append(Change{
+			Class:    ClassCrossCallerBreaking,
+			Kind:     KindPartitionRemoved,
+			EntityID: newE.ID(),
+			Detail: fmt.Sprintf("%s: tenant isolation REMOVED from %q — after this "+
+				"applies, every caller reads every tenant's rows", newE.ID(), oldField),
+			Field: oldField,
+		})
+	default:
+		d.append(Change{
+			Class:    ClassCrossCallerBreaking,
+			Kind:     KindPartitionChanged,
+			EntityID: newE.ID(),
+			Detail: fmt.Sprintf("%s: tenant isolation moved from %q to %q — rows are "+
+				"regrouped by a different column, so what each caller can see changes",
+				newE.ID(), oldField, newField),
+			Field: newField,
+		})
+	}
+}
+
+// partitionColumnType renders the partition column's SQL type, or "" when the
+// entity declares no partition or the column is missing.
+//
+// Used to decide whether a policy has to be rebuilt. It compares the RENDERED
+// type rather than the dsl.FieldType struct so that two spellings producing the
+// same SQL do not churn the migration.
+func partitionColumnType(e *dsl.Entity) string {
+	if e == nil || e.PartitionField == "" {
+		return ""
+	}
+	f := e.FindField(e.PartitionField)
+	if f == nil {
+		return ""
+	}
+	return strings.ToLower(sqlType(f.Type))
 }

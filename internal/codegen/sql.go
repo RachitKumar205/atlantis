@@ -105,9 +105,11 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 	up.line("-- atlantis migration (generated)")
 	up.line("-- DO NOT EDIT BY HAND. Re-run `tide plan` after editing .atl files.")
 	up.blank()
+	emitLockTimeout(up)
 	down.line("-- atlantis migration (generated, down)")
 	down.line("-- DO NOT EDIT BY HAND.")
 	down.blank()
+	emitLockTimeout(down)
 
 	// Ensure every Postgres schema referenced by a newly-added entity exists
 	// before any CREATE TABLE in that schema runs. CREATE SCHEMA IF NOT
@@ -143,6 +145,31 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 	//
 	// This is general, not specific to CHECKs: any dependency spanning two
 	// class groups has the same shape.
+	// Policies that must be rebuilt come down BEFORE any class group runs, and
+	// go back up after all of them.
+	//
+	// Not as a change competing for position. PostgreSQL refuses to alter a
+	// column a policy depends on, and the column change's own class varies with
+	// what kind of change it is — so ordering by class group is not a rule, it
+	// is a coincidence that holds until it does not. A rebuild is a constraint
+	// on the WHOLE migration: nothing may touch that column while the policy
+	// stands, and the policy must stand again when the migration ends.
+	//
+	// Bracketing it is also what makes the down script correct without a second
+	// rule, because the down groups are emitted in reverse.
+	rebuilt := partitionRebuilds(d, newByID, oldByID)
+	for _, r := range rebuilt {
+		up.commentf("rebuild tenant isolation on %s: PostgreSQL refuses to alter a column a policy depends on", r.entityID)
+		emitPartitionIndexDrop(up, r.oldE)
+		up.linef("DROP POLICY IF EXISTS %s ON %s;",
+			quoteIdent(partitionPolicyName(r.oldE)), qualifiedTable(r.oldE))
+		up.blank()
+		emitPartitionIndexDrop(down, r.newE)
+		down.linef("DROP POLICY IF EXISTS %s ON %s;",
+			quoteIdent(partitionPolicyName(r.newE)), qualifiedTable(r.newE))
+		down.blank()
+	}
+
 	downGroups := make([]*sqlBuilder, 0, 3)
 	for _, g := range []struct {
 		label   string
@@ -153,7 +180,14 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 		// Destructive before breaking: a parked object must be out of the way
 		// before anything that might recreate a name it still holds.
 		{"DESTRUCTIVE — PARKED, REAPED AFTER THE RETENTION WINDOW", d.Destructive},
-		{"BREAKING — REVIEW CAREFULLY", d.Breaking},
+		// Bracketed entities have their partition change removed from the
+		// group. The bracket owns the drop and the recreate for them, and
+		// leaving the change here as well emitted the policy twice — on the
+		// DOWN path the group's copy recreated it BEFORE the column was
+		// reverted, reproducing the exact SQLSTATE 0A000 the bracket removes.
+		// The same duplication was already fixed for the same-column arm; this
+		// makes it true for all three.
+		{"BREAKING — REVIEW CAREFULLY", withoutBracketedPartitionChanges(d.Breaking, rebuilt)},
 	} {
 		gd := &sqlBuilder{}
 		emitClass(up, gd, g.label, g.changes, newByID, oldByID)
@@ -161,6 +195,13 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 	}
 	for i := len(downGroups) - 1; i >= 0; i-- {
 		down.raw(downGroups[i].String())
+	}
+
+	for _, r := range rebuilt {
+		emitPartitionPolicy(up, r.newE)
+		up.blank()
+		emitPartitionPolicy(down, r.oldE)
+		down.blank()
 	}
 
 	// If nothing was emitted, the migration is genuinely empty (e.g., only
@@ -341,6 +382,7 @@ func buildPhaseSplit(d *Diff, newByID, oldByID map[string]*dsl.Entity) (pre, pre
 	pre.line("-- atlantis migration (pre-backfill phase)")
 	pre.line("-- Runs in the apply tx before `tide apply --backfill` kicks off the chunked UPDATE.")
 	pre.blank()
+	emitLockTimeout(pre)
 
 	// Mirror EmitSQL's CREATE SCHEMA prelude in the phase-split path so a
 	// backfill plan whose additive part introduces a new namespace can also
@@ -354,8 +396,24 @@ func buildPhaseSplit(d *Diff, newByID, oldByID map[string]*dsl.Entity) (pre, pre
 	post.line("-- atlantis migration (post-backfill phase)")
 	post.line("-- Runs after the chunked backfill completes — applies SET NOT NULL on backfilled fields.")
 	post.blank()
+	emitLockTimeout(post)
+
+	// The index scripts deliberately get no lock_timeout, for two reasons that
+	// both have to hold.
+	//
+	// SET LOCAL only takes effect inside a transaction block. These run outside
+	// one, so the statement would be accepted, emit a WARNING, and change
+	// nothing — a guard that reads as present and cannot fire, which is worse
+	// than an absent one because it stops anybody looking again.
+	//
+	// A session-level SET would take effect, and is still wrong here. CREATE
+	// INDEX CONCURRENTLY that hits its timeout mid-build leaves an INVALID
+	// index behind, which no later run cleans up and which every planner then
+	// ignores while it occupies the name. Waiting is the better failure.
 	preIdx.line("-- Partial-index lifecycle for the chunked backfill. CREATE INDEX CONCURRENTLY")
 	preIdx.line("-- runs OUTSIDE a transaction; each line is its own statement.")
+	preIdx.line("-- No lock_timeout here: SET LOCAL is inert outside a tx, and a timeout")
+	preIdx.line("-- mid-build would leave an INVALID index holding the name.")
 	preIdx.blank()
 	postIdx.line("-- Drop the partial indexes created pre-backfill. CONCURRENTLY for parity.")
 	postIdx.blank()
@@ -611,6 +669,51 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 		from, _ := ch.From.(int)
 		emitChunkInterval(up, to)
 		emitChunkInterval(down, from)
+	case KindPartitionAdded:
+		e := newByID[ch.EntityID]
+		if e == nil {
+			break
+		}
+		emitPartitionPolicy(up, e)
+		emitPartitionDisable(down, e)
+	case KindPartitionRemoved:
+		// The clause is gone from the new side, so the column, the policy name
+		// and the index name all have to come from the OLD entity — asking
+		// newByID would find PartitionField empty and emit nothing, which is
+		// the shape this whole task exists to remove.
+		e := oldByID[ch.EntityID]
+		if e == nil {
+			break
+		}
+		emitPartitionDisable(up, e)
+		emitPartitionPolicy(down, e)
+	case KindPartitionChanged:
+		newE, oldE := newByID[ch.EntityID], oldByID[ch.EntityID]
+		if newE == nil || oldE == nil {
+			break
+		}
+		// A same-column rebuild is owned by the prologue/epilogue bracket, not
+		// by this arm. Emitting it here as well created the policy twice, and
+		// the copy inside the class group could land BEFORE the column change
+		// it exists to make room for — re-creating the wedge the bracket
+		// removes. Only a genuine column MOVE is handled here.
+		if oldE.PartitionField == newE.PartitionField {
+			break
+		}
+		// The index is dropped explicitly before it is recreated. Both names
+		// derive from the TABLE, not the column, so the old index already
+		// occupies the new one's name — and emitPartitionPolicy writes
+		// CREATE INDEX IF NOT EXISTS, which would find it and leave the index
+		// pointing at the column the policy no longer uses. Every read would
+		// then be a sequential scan under a policy that looks correct.
+		//
+		// The policy needs no such care: emitPartitionPolicy writes DROP POLICY IF
+		// EXISTS under the same name before it creates one. (Third statement,
+		// not first — an earlier comment here said "opens with".)
+		emitPartitionIndexDrop(up, oldE)
+		emitPartitionPolicy(up, newE)
+		emitPartitionIndexDrop(down, newE)
+		emitPartitionPolicy(down, oldE)
 	case KindCheckAdded:
 		e := newByID[ch.EntityID]
 		if e == nil {
@@ -1619,6 +1722,14 @@ func snakeCase(s string) string {
 	return schema.SnakeCase(s)
 }
 
+// migrationLockTimeoutMS bounds how long a migration waits for a lock.
+//
+// Long enough that an ordinary short query in flight does not fail the
+// migration, short enough that a stuck one does not take the table down with
+// it. An operator who hits it retries; an operator who does not have it has no
+// signal at all until the table stops answering.
+const migrationLockTimeoutMS = 3000
+
 type sqlBuilder struct{ b strings.Builder }
 
 func (s *sqlBuilder) line(line string) {
@@ -1671,6 +1782,56 @@ func sanitizeComment(text string) string {
 		}
 		return r
 	}, text)
+}
+
+// emitLockTimeout bounds how long the migration will WAIT for a lock.
+//
+// # The failure this prevents
+//
+// ApplyMigration runs the whole script in one transaction. DDL here takes
+// ACCESS EXCLUSIVE — ALTER TABLE ... ENABLE ROW LEVEL SECURITY does, and so
+// does ADD COLUMN — and an ACCESS EXCLUSIVE request that cannot be granted
+// QUEUES. Every subsequent statement on that table, including plain SELECTs,
+// then queues behind the waiter. So a migration that would have taken
+// milliseconds turns into a full outage on the table for as long as one
+// unrelated long-running query holds its lock.
+//
+// Without a timeout there is no upper bound on that. With one, the migration
+// fails, rolls back, and can be retried when the table is quieter — which is
+// the outcome an operator would choose if asked.
+//
+// # Which scripts get it
+//
+// Every script that a caller executes inside a transaction, which is all four
+// of Up, Down, PreBackfillUp and PostBackfillUp. It went onto Up and Down
+// first, and the backfill path was left without it for a while — the same
+// exposure by a different route, since PreBackfillUp carries ADD COLUMN
+// (backfill.go runs it on the apply tx) and PostBackfillUp carries ALTER
+// COLUMN SET NOT NULL (internal/backfill/runner.go runs it on its own tx).
+// Both take ACCESS EXCLUSIVE. A migration is not bounded because the common
+// path is bounded.
+//
+// TestEveryTransactionalScriptBoundsItsLockWait asserts this over the fields of
+// SQLScripts by reflection, so a fifth script cannot ship without an answer.
+// The index scripts are excluded there for the reason stated at their emit
+// site: they run outside a transaction, where SET LOCAL is inert.
+//
+// # Why this is not a fix for the index build
+//
+// It bounds the WAIT, not the HOLD. Once granted, the lock is held for the rest
+// of the transaction, and CREATE INDEX (not CONCURRENTLY) inside it can run for
+// minutes on a large table with reads and writes blocked throughout. The
+// concurrent-index channel exists — buildPhaseSplit emits CREATE INDEX
+// CONCURRENTLY into a script that runs outside a transaction — but only for
+// backfill plans. Routing ordinary DDL through it needs an apply path that can
+// leave the transaction, which does not exist yet. Tracked as its own task; a
+// review measured 238 ms of blocked reads and writes at 31 MB, which scales.
+func emitLockTimeout(b *sqlBuilder) {
+	b.line("-- Bound the WAIT for locks. Without this an ACCESS EXCLUSIVE request")
+	b.line("-- queues behind any long-running query, and every later statement on")
+	b.line("-- the table queues behind the waiter — an outage rather than a wait.")
+	b.linef("SET LOCAL lock_timeout = '%dms';", migrationLockTimeoutMS)
+	b.blank()
 }
 
 func (s *sqlBuilder) blank() {
@@ -1874,6 +2035,8 @@ func emitPartitionPolicy(b *sqlBuilder, e *dsl.Entity) {
 	b.linef("CREATE POLICY %s ON %s USING (%s = %s) WITH CHECK (%s = %s);",
 		quoteIdent(partitionPolicyName(e)), table, col, discriminator, col, discriminator)
 
+	emitForeignPolicyGuard(b, e)
+
 	// An index on the discriminator, always, owned by the policy.
 	//
 	// An earlier version of this skipped the index when the schema already
@@ -1904,6 +2067,53 @@ func emitPartitionPolicy(b *sqlBuilder, e *dsl.Entity) {
 	// re-appliable.
 	b.linef("CREATE INDEX IF NOT EXISTS %s ON %s (%s);",
 		quoteIdent(partitionIndexName(e)), table, col)
+}
+
+// emitPartitionDisable removes tenant isolation from a table that has it.
+//
+// Not the exact inverse of emitPartitionPolicy, and not its reverse order —
+// an earlier version of this comment claimed both and neither was true. What it
+// is: the four statements that undo the four the policy emitter writes, ordered
+// so no intermediate state denies every statement.
+//
+// IF EXISTS throughout, because this is also the DOWN path of the migration
+// that added the policy, and a down migration has to survive being run against
+// a database where the up half only partly applied.
+func emitPartitionDisable(b *sqlBuilder, e *dsl.Entity) {
+	if e.PartitionField == "" {
+		return
+	}
+	table := qualifiedTable(e)
+	// The switches go BEFORE the policy, not after.
+	//
+	// An earlier version dropped the policy first and claimed in this comment
+	// that the table was "never left in a state where FORCE is on with no
+	// policy". A review replayed the statements one at a time and refuted it:
+	// after the DROP the table read enabled=true, forced=true, policies=0 — the
+	// deny-all state the comment said it avoided. Harmless during apply, which
+	// runs the whole script in one transaction, but down_sql is also handed to
+	// operators to run by hand.
+	//
+	// Lifting FORCE and then DISABLE first means the intermediate state is
+	// "isolation off, policy still present", which reads as the table did
+	// before the policy existed.
+	b.linef("ALTER TABLE %s NO FORCE ROW LEVEL SECURITY;", table)
+	b.linef("ALTER TABLE %s DISABLE ROW LEVEL SECURITY;", table)
+	b.linef("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(partitionPolicyName(e)), table)
+	emitPartitionIndexDrop(b, e)
+}
+
+// emitPartitionIndexDrop drops the index the policy owns.
+//
+// Separate from emitPartitionDisable because the changed-column case needs the
+// drop without the disable: the table keeps its isolation and only the column
+// underneath it moves.
+func emitPartitionIndexDrop(b *sqlBuilder, e *dsl.Entity) {
+	if e.PartitionField == "" {
+		return
+	}
+	b.linef("DROP INDEX IF EXISTS %s.%s;",
+		quoteIdent(entitySchema(e)), quoteIdent(partitionIndexName(e)))
 }
 
 // partitionCastType returns the SQL type the discriminator must be cast to for
@@ -1951,4 +2161,162 @@ func partitionIndexName(e *dsl.Entity) string {
 // it again. Length-capped for the same reason constraint names are.
 func partitionPolicyName(e *dsl.Entity) string {
 	return truncateIdent(tableName(e) + "_tenant_isolation")
+}
+
+// partitionRebuild names an entity whose isolation policy must come down for
+// the duration of the migration and go back up at the end.
+type partitionRebuild struct {
+	entityID   string
+	oldE, newE *dsl.Entity
+}
+
+// partitionRebuilds returns the entities whose policy must be bracketed.
+//
+// Only the same-column case. A column MOVE already drops and recreates within
+// its own change, and an add or remove has no policy on both sides to bracket.
+// What needs bracketing is the case where the policy survives the migration but
+// the column underneath it changes shape — PostgreSQL refuses to alter a column
+// a policy depends on, so the policy has to be out of the way while it happens.
+func partitionRebuilds(d *Diff, newByID, oldByID map[string]*dsl.Entity) []partitionRebuild {
+	// Keyed on the OLD partition column being touched, not on the kind of
+	// partition change.
+	//
+	// The first version bracketed only KindPartitionChanged with an unchanged
+	// column, and a review executed two shapes that fall outside it and both
+	// produce the identical SQLSTATE 0A000 the bracket exists to prevent:
+	//
+	//	remove `partition by` + widen the same column
+	//	move `partition by` to org + widen the OLD column
+	//
+	// PostgreSQL refuses to alter a column any policy depends on. The invariant
+	// is therefore not "the partition column's type changed" — it is NOTHING
+	// MAY TOUCH THE OLD PARTITION COLUMN WHILE ITS POLICY STANDS. Selecting on
+	// the change kind was picking the symptom that had been reproduced.
+	//
+	// So: bracket whenever the old side had a policy and this migration alters
+	// the column that policy names. What goes back up at the end is whatever
+	// the NEW side declares — nothing, if the clause was removed.
+	seen := map[string]bool{}
+	var out []partitionRebuild
+	consider := func(entityID string) {
+		if seen[entityID] {
+			return
+		}
+		oldE, newE := oldByID[entityID], newByID[entityID]
+		if oldE == nil || newE == nil || oldE.PartitionField == "" {
+			return
+		}
+		if !altersColumn(d, entityID, oldE.PartitionField) {
+			return
+		}
+		seen[entityID] = true
+		out = append(out, partitionRebuild{entityID: entityID, oldE: oldE, newE: newE})
+	}
+	for _, ch := range d.All() {
+		consider(ch.EntityID)
+	}
+	return out
+}
+
+// altersColumn reports whether the diff changes the named column of an entity
+// in a way PostgreSQL will refuse while a policy depends on it.
+//
+// A type change is the case that bites; dropping the column takes the policy
+// with it via CASCADE and needs no bracket, but is included because a dropped
+// partition column with a surviving policy is a state worth never producing.
+func altersColumn(d *Diff, entityID, column string) bool {
+	for _, ch := range d.All() {
+		if ch.EntityID != entityID || ch.Field != column {
+			continue
+		}
+		switch ch.Kind {
+		case KindFieldTypeChanged, KindFieldRemoved, KindPartitionChanged:
+			return true
+		}
+	}
+	return false
+}
+
+// emitForeignPolicyGuard aborts the migration if another permissive policy
+// would OR itself alongside the isolation policy.
+//
+// # What it prevents
+//
+// PostgreSQL combines permissive policies with OR. A table carrying a legacy
+// `CREATE POLICY app_access ON t FOR ALL USING (true)` — the shape a database
+// being adopted FOR tenant isolation plausibly already has — applies this
+// migration cleanly, reports success, and isolates nothing. A review executed
+// it: the acme-bound caller read every tenant's rows and its forged
+// cross-tenant INSERT was accepted, while the plan text said "after this
+// applies, a request that carries no tenant reads nothing from this table".
+//
+// Every statement of that plan was false.
+//
+// # Why a guard and not a drop
+//
+// The migration cannot tell a legacy blanket policy from a deliberate one, and
+// dropping a policy the author did not mention would be a silent, unlogged
+// security change in the opposite direction. Refusing states the problem, names
+// the policy, and leaves the decision with the person who knows.
+//
+// # Why here and not only at boot
+//
+// pg.VerifyPartitionPolicies asks exactly this question and gets it right —
+// every permissive read policy must scope the column, not merely one of them.
+// But it is warn-only unless ATL_REQUIRE_TENANT_ISOLATION is set, and it runs
+// after the migration has already been applied and reported success. The
+// migration is where the operator is still deciding.
+//
+// Written as a DO block because a migration is a script, not a program: this
+// has to fail inside the same transaction that would otherwise commit the lie.
+func emitForeignPolicyGuard(b *sqlBuilder, e *dsl.Entity) {
+	schema, tbl := entitySchema(e), tableName(e)
+	b.line("DO $atl$")
+	b.line("DECLARE other text;")
+	b.line("BEGIN")
+	b.linef("  SELECT string_agg(p.polname, ', ') INTO other")
+	b.linef("    FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid")
+	b.linef("    JOIN pg_namespace n ON n.oid = c.relnamespace")
+	b.linef("   WHERE n.nspname = %s AND c.relname = %s", sqlLiteral(schema), sqlLiteral(tbl))
+	b.linef("     AND p.polpermissive AND p.polname <> %s;", sqlLiteral(partitionPolicyName(e)))
+	b.line("  IF other IS NOT NULL THEN")
+	b.linef("    RAISE EXCEPTION 'atlantis: %%.%% already carries permissive polic"+
+		"ies (%%). Permissive policies are OR''d, so tenant isolation would not "+
+		"apply. Drop or make them RESTRICTIVE, then re-apply.', %s, %s, other;",
+		sqlLiteral(schema), sqlLiteral(tbl))
+	b.line("  END IF;")
+	b.line("END")
+	b.line("$atl$;")
+}
+
+// sqlLiteral renders a Go string as a single-quoted SQL literal.
+func sqlLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// withoutBracketedPartitionChanges drops the partition changes whose policy the
+// prologue/epilogue bracket already owns.
+//
+// The change stays in the plan and in the operator-facing summary — this only
+// removes it from SQL emission, because emitting it there as well produces the
+// policy twice and, on the down path, in the wrong order.
+func withoutBracketedPartitionChanges(changes []Change, rebuilt []partitionRebuild) []Change {
+	if len(rebuilt) == 0 {
+		return changes
+	}
+	bracketed := make(map[string]bool, len(rebuilt))
+	for _, r := range rebuilt {
+		bracketed[r.entityID] = true
+	}
+	out := make([]Change, 0, len(changes))
+	for _, ch := range changes {
+		switch ch.Kind {
+		case KindPartitionAdded, KindPartitionRemoved, KindPartitionChanged:
+			if bracketed[ch.EntityID] {
+				continue
+			}
+		}
+		out = append(out, ch)
+	}
+	return out
 }

@@ -220,10 +220,17 @@ func producesChange(all map[string]*ast.FuncDecl, root string, claimed map[strin
 		ast.Inspect(fn, func(n ast.Node) bool {
 			switch e := n.(type) {
 			case *ast.SelectorExpr:
-				// d.append(...) — the method, or d.Additive / d.Breaking /
-				// d.BackfillRequired on the left of an append.
+				// d.append(...) — the method, or any of the Diff's four slices
+				// on the left of an append.
+				//
+				// Destructive was missing from this list, so a differ that
+				// files ONLY destructive changes was invisible here and its
+				// attribute reported as uncovered. diffPartition is the first
+				// such differ: both adding and removing tenant isolation are
+				// decisions an operator must make explicitly, so neither is
+				// additive, and the checker could not see either.
 				switch e.Sel.Name {
-				case "append", "Additive", "BackfillRequired", "Breaking":
+				case "append", "Additive", "BackfillRequired", "Breaking", "Destructive":
 					found = true
 				}
 			case *ast.CallExpr:
