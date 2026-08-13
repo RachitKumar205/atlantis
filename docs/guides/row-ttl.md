@@ -49,6 +49,36 @@ SELECT count(*) FROM consumer.sessions WHERE expires_at < now();
 - A sweep that fails is reported to the job runtime, so it retries and eventually dead-letters rather than failing silently. Check `tide job dead` if rows are not disappearing.
 - Operators can tune the cadence by updating `atlantis.job_schedules` directly (`UPDATE ... SET cron_spec = '*/5 * * * *'`) or disable with `enabled = false`.
 
+## `ttl_field` and `partition by` do not work together
+
+An entity that declares both is **not swept**. Its expired rows stay.
+
+The sweeper is a background job with no request behind it, so it binds no tenant. On a table with tenant isolation, row-level security is enforced against the sweeper too — `atlantis.current_partition()` is `NULL`, the `DELETE` matches nothing, and it reports success. Binding some tenant would not fix it: expiry has to cover every tenant, and there is no single correct value to bind.
+
+Rather than delete nothing quietly, the sweeper skips the entity and says so:
+
+```
+WARN sweep: skipped, row-level security hides every row from the sweeper
+     entity=shop.Session table=atlantis.shop_session
+```
+
+and increments a counter you can alert on:
+
+```
+atlantis_sweeper_sweeps_blocked_total{entity="shop.Session"}
+```
+
+**Any non-zero value on that counter means expired rows are accumulating.** Alert on it.
+
+Two ways forward:
+
+| If you want | Do this |
+|---|---|
+| Tenant isolation on the table | Expire the rows from your own caller, which binds a tenant on every request and can issue the `DELETE` itself |
+| Automatic expiry | Drop `partition by` from the entity |
+
+The check asks the database, not your `.atl` file. An entity that declares `partition by` but whose policy has not been applied yet is still swept normally, because nothing is hiding its rows.
+
 ## Related
 
 - [Jobs and workflows concept](../concepts/jobs-and-workflows.md). The sweeper is itself a job running on the atlantis runtime.

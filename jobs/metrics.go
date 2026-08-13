@@ -65,11 +65,35 @@ var (
 	})
 
 	// sweptTotal counts rows the TTL sweeper deleted.
+	//
+	// Incremented on every sweep of every entity, including by zero. That is
+	// the point of it: a counter that only appears once something is deleted
+	// cannot distinguish "nothing has expired yet" from "this entity has not
+	// been swept in a month", because neither produces a series. Adding zero
+	// creates the series on the first sweep, so `rate() == 0` becomes a
+	// question an alert can ask.
 	sweptTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "atlantis",
 		Subsystem: "sweeper",
 		Name:      "rows_swept_total",
 		Help:      "Expired rows deleted by the TTL sweeper. Labels: entity.",
+	}, []string{"entity"})
+
+	// sweepBlockedTotal counts sweeps skipped because row-level security would
+	// have hidden every row from the statement.
+	//
+	// Separate from a failure count, because nothing fails: the DELETE is legal,
+	// it succeeds, and it matches nothing. Without its own series the condition
+	// is indistinguishable from an entity with nothing to expire — which is
+	// precisely how it went unnoticed. This is the series to alert on; any
+	// non-zero value means expired rows are accumulating and will not be
+	// removed until the schema or the role changes.
+	sweepBlockedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "atlantis",
+		Subsystem: "sweeper",
+		Name:      "sweeps_blocked_total",
+		Help: "Sweeps skipped because row-level security hides every row from " +
+			"the unbound sweeper. Labels: entity.",
 	}, []string{"entity"})
 
 	// scheduleFiresTotal counts jobs the scheduler enqueued.
