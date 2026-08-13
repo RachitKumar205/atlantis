@@ -270,8 +270,26 @@ tide version
 | 1 | Backfill required — `tide apply` or `tide plan` returned a backfill-required class |
 | 2 | Unknown subcommand passed to `tide` itself, **or** cross-caller breaking change returned by `apply`/`plan` |
 | 3 | Operational error: parse/validation failure, network error, config error, or unknown plan class |
+| 4 | Destructive change — the plan drops something that may hold data |
 
-`tide apply` and `tide plan` share their code map exactly. Code 2 covers two unrelated conditions: an unknown subcommand passed to `tide`, and a cross-caller breaking change. CI scripts that need to distinguish them must parse stderr.
+`tide apply` and `tide plan` share their code map exactly.
+
+Code 2 covers two unrelated conditions: an unknown subcommand passed to `tide`, and a cross-caller breaking change. CI scripts that need to distinguish them must parse stderr.
+
+Destructive plans exit 4 rather than joining code 2, because the two call for different responses. A breaking change is resolved by shipping the other callers' updates first; a destructive change is resolved by deciding whether losing those rows is intended. A CI script can gate on them separately:
+
+```bash
+tide plan
+case $? in
+  0) echo "additive — safe to merge" ;;
+  1) echo "needs --backfill" ;;
+  2) echo "blocked: breaks another caller" ;;
+  4) echo "blocked: destroys data" ;;
+  *) echo "tide failed"; exit 1 ;;
+esac
+```
+
+Dropped objects are parked rather than deleted, and reaped after the retention window. `tide parked` lists what is held and until when.
 
 ## Cache layout
 

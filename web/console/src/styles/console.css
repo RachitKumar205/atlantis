@@ -294,6 +294,12 @@ a { color: inherit; text-decoration: none; }
 .badge--add   { color: var(--sage);  background: var(--sage-tint); }
 .badge--break { color: var(--coral); background: var(--coral-tint); }
 .badge--back  { color: var(--accent); background: var(--accent-tint); }
+/* Destructive inverts rather than taking a new hue. The palette has one alarm
+   colour and both classes are at the top of the scale, so the fill — not the
+   hue — is what separates "this loses rows" from "this breaks a caller" at a
+   glance, and it still reads when the two sit side by side. */
+.badge--destroy { color: var(--canvas-0); background: var(--coral); }
+.badge--destroy::before { background: var(--canvas-0); }
 .badge--fk    { color: var(--slate); background: var(--slate-tint); }
 .badge--plain { color: var(--ink-2); background: var(--canvas-3); }
 .badge--plain::before { display: none; }

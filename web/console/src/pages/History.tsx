@@ -2,7 +2,14 @@ import { useState, useMemo, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { Box, ChevronRight } from 'lucide-react'
-import { queries, type SchemaVersionSummary, type DiffPayload, type SchemaVersionDetail } from '@/api/client'
+import {
+  queries,
+  parseRawDiff,
+  orderedBuckets,
+  planClassBadge,
+  type SchemaVersionSummary,
+  type SchemaVersionDetail,
+} from '@/api/client'
 import { PageShell } from '@/components/PageShell'
 import { Sql } from '@/components/Sql'
 
@@ -28,28 +35,21 @@ function dayKey(ts: string): string {
   return d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })
 }
 
-function parseRawDiff(raw: unknown): DiffPayload {
-  if (!raw || typeof raw !== 'object') return { additive: [], backfill_required: [], breaking: [] }
-  const d = raw as Record<string, unknown>
-  return {
-    additive: Array.isArray(d.additive) ? d.additive : [],
-    backfill_required: Array.isArray(d.backfill_required) ? d.backfill_required : [],
-    breaking: Array.isArray(d.breaking) ? d.breaking : [],
-  }
-}
-
-// One badge per non-additive change class in a version. Mirrors the
-// design's badge--add / badge--back / badge--break classes.
+// One badge per change class in a version.
+//
+// Looked up rather than matched arm by arm. A class with no arm fell through to
+// 'plain', the grey "nothing notable" badge, so the one version in the list
+// that destroyed data was the one styled to be ignored.
+//
+// planClassBadge, not a direct index: these summaries come from /api/history,
+// which carries the hyphenated spelling of the class. Indexing the map with it
+// misses — which is why breaking and backfill-required versions have been grey
+// here too, not only destructive ones.
 function ChangeBadges({ summary }: { summary: SchemaVersionSummary }) {
   const cls = summary.plan_class
   const count = summary.change_count
   if (count === 0) return null
-  const k =
-    cls === 'cross_caller_breaking' ? 'break' :
-    cls === 'backfill_required'     ? 'back'  :
-    cls === 'additive'              ? 'add'   :
-                                      'plain'
-  return <span className={`badge badge--${k}`}>{cls} · {count}</span>
+  return <span className={`badge badge--${planClassBadge(cls)}`}>{cls} · {count}</span>
 }
 
 // ── node ──────────────────────────────────────────────────────────────────
@@ -107,11 +107,10 @@ function VersionNode({ version }: { version: SchemaVersionSummary }) {
 
 function DiffSection({ detail }: { detail: SchemaVersionDetail }) {
   const diff = parseRawDiff(detail.diff)
-  const rows = [
-    ...diff.additive.map(c => ['+', 'add', c]),
-    ...diff.backfill_required.map(c => ['~', 'back', c]),
-    ...diff.breaking.map(c => ['!', 'break', c]),
-  ] as [string, 'add' | 'back' | 'break', DiffPayload['additive'][number]][]
+  // Built from whichever buckets the payload actually carries. Listing three
+  // by name is what hid destructive changes here for a release.
+  const rows = orderedBuckets(diff).flatMap(({ bucket, glyph, badge }) =>
+    diff[bucket].map(change => ({ glyph, badge, change })))
 
   return (
     <>
@@ -129,9 +128,9 @@ function DiffSection({ detail }: { detail: SchemaVersionDetail }) {
         {rows.length === 0 ? (
           <div className="diffrow"><span className="diffrow__sign">·</span><span>No structural changes.</span></div>
         ) : (
-          rows.map(([sign, k, c], i) => (
-            <div key={i} className={`diffrow d-${k}`}>
-              <span className="diffrow__sign">{sign}</span>
+          rows.map(({ glyph, badge, change: c }, i) => (
+            <div key={i} className={`diffrow d-${badge}`}>
+              <span className="diffrow__sign">{glyph}</span>
               <span>
                 <strong style={{ color: 'var(--ink-0)' }}>{c.entity_id}</strong>
                 {c.field && <> · {c.field}</>}

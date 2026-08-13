@@ -102,28 +102,47 @@ func cmdPlan(args []string) int {
 	return code
 }
 
+// classExitCode is the contract CI branches on.
+//
+// docs/guides/set-up-caller-ci.md tells readers to gate merges on these, so a
+// renumbering here changes whether other people's pull requests can merge. It
+// is a map rather than a switch so that completeness over the proto enum is
+// something a test can iterate; a switch's default arm answers for a class
+// nobody decided about, and answers plausibly, which is how destructive spent a
+// release reported as an operational failure.
+//
+// Codes 0-2 are plan outcomes. 3 is reserved for "this tide cannot act on it"
+// and is deliberately NOT in this map — see exitCodeForClass.
+var classExitCode = map[adminpb.PlanClass]int{
+	adminpb.PlanClass_PLAN_CLASS_ADDITIVE:              0,
+	adminpb.PlanClass_PLAN_CLASS_BACKFILL_REQUIRED:     1,
+	adminpb.PlanClass_PLAN_CLASS_CROSS_CALLER_BREAKING: 2,
+
+	// 4, not 2. Code 2 already means both "unknown subcommand" and "breaks
+	// another caller"; folding a third meaning in would leave CI unable to tell
+	// a change that destroys rows from one that merely needs another team's
+	// sign-off. Those call for different responses, and the change policy this
+	// is heading toward is per-class, so the exit code has to be too.
+	//
+	// 4 is additive to the contract: nothing that checks `-eq 2` today changes
+	// meaning.
+	adminpb.PlanClass_PLAN_CLASS_DESTRUCTIVE: 4,
+}
+
 // exitCodeForClass maps a plan class to tide's exit code.
 //
-// This is the contract CI branches on — docs/guides/set-up-caller-ci.md tells
-// readers to gate merges on it — so the mapping is stated once and tested,
-// rather than written inline where a mechanical edit could renumber a case
-// without anything noticing.
+// Unparseable and a class this binary does not recognize share exit 3 by
+// falling out of the map. Both mean "do not proceed", and both are operational
+// failures rather than plan outcomes: exiting 0 or 2 on a class whose risk this
+// tide cannot assess would be guessing.
 //
-// An unparseable plan shares the default arm with a class this binary does not
-// recognize. Both mean "do not proceed", and both are operational failures
-// rather than plan outcomes: exiting 0 or 2 on a class whose risk this tide
-// cannot assess would be guessing.
+// TestEveryDeclaredClassIsHandled asserts every class declared in admin.proto
+// has an entry here or an explicit decision to leave it out.
 func exitCodeForClass(c adminpb.PlanClass) int {
-	switch c {
-	case adminpb.PlanClass_PLAN_CLASS_ADDITIVE:
-		return 0
-	case adminpb.PlanClass_PLAN_CLASS_BACKFILL_REQUIRED:
-		return 1
-	case adminpb.PlanClass_PLAN_CLASS_CROSS_CALLER_BREAKING:
-		return 2
-	default:
-		return 3
+	if code, ok := classExitCode[c]; ok {
+		return code
 	}
+	return 3
 }
 
 // printPlanReport renders the plan to stdout in a shape friendly to PR
@@ -192,20 +211,36 @@ func printExtensions(exts []*adminpb.ExtensionStatus) {
 	}
 }
 
+// classPaint colours a plan class by severity.
+//
+// A map for the same reason classExitCode is one: a class with no entry here
+// used to print in the terminal's default colour, which reads as "nothing
+// notable" — the opposite of what a destructive plan is. Completeness is
+// asserted by TestEveryDeclaredClassHasAColour.
+//
+// Destructive and breaking share Coral+Bold, and that is a real answer rather
+// than an oversight. The palette has one alarm colour, both classes are at the
+// top of the severity scale, and the two are told apart by their names, which
+// colorClass paints rather than replaces.
+var classPaint = map[adminpb.PlanClass]func(string) string{
+	adminpb.PlanClass_PLAN_CLASS_ADDITIVE:          cliout.Sage,
+	adminpb.PlanClass_PLAN_CLASS_BACKFILL_REQUIRED: cliout.Brass,
+	adminpb.PlanClass_PLAN_CLASS_CROSS_CALLER_BREAKING: func(s string) string {
+		return cliout.Coral(cliout.Bold(s))
+	},
+	adminpb.PlanClass_PLAN_CLASS_DESTRUCTIVE: func(s string) string {
+		return cliout.Coral(cliout.Bold(s))
+	},
+	adminpb.PlanClass_PLAN_CLASS_UNPARSEABLE: cliout.Coral,
+}
+
 // colorClass paints the plan-class string by severity. Used in both
 // `tide plan` and the apply impact report so the eye picks up the
 // risk profile at a glance.
 func colorClass(class adminpb.PlanClass) string {
 	name := planClassName(class)
-	switch class {
-	case adminpb.PlanClass_PLAN_CLASS_ADDITIVE:
-		return cliout.Sage(name)
-	case adminpb.PlanClass_PLAN_CLASS_BACKFILL_REQUIRED:
-		return cliout.Brass(name)
-	case adminpb.PlanClass_PLAN_CLASS_CROSS_CALLER_BREAKING:
-		return cliout.Coral(cliout.Bold(name))
-	case adminpb.PlanClass_PLAN_CLASS_UNPARSEABLE:
-		return cliout.Coral(name)
+	if paint, ok := classPaint[class]; ok {
+		return paint(name)
 	}
 	return name
 }

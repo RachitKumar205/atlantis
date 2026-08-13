@@ -12,6 +12,7 @@ import (
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
+	"github.com/rachitkumar205/atlantis/internal/codegen"
 )
 
 // cmdDiff — `tide diff <from-version> <to-version>`
@@ -80,15 +81,6 @@ func cmdDiff(args []string) int {
 	return 0
 }
 
-type diffChange struct {
-	Kind     string `json:"kind"`
-	EntityID string `json:"entity_id"`
-	Field    string `json:"field,omitempty"`
-	Detail   string `json:"detail,omitempty"`
-	From     any    `json:"from,omitempty"`
-	To       any    `json:"to,omitempty"`
-}
-
 type irSchema struct {
 	Entities []irEntity `json:"entities"`
 }
@@ -155,21 +147,26 @@ func printDiffResult(resp *adminpb.DiffSchemaVersionsResponse) {
 		cliout.Grey("→"),
 		cliout.Green(fmt.Sprintf("v%d", resp.GetToVersion())))
 
-	var d struct {
-		Additive         []diffChange `json:"additive"`
-		BackfillRequired []diffChange `json:"backfill_required"`
-		Breaking         []diffChange `json:"breaking"`
-	}
+	// Decoded into the same type the server marshalled, and flattened with the
+	// same method the server uses.
+	//
+	// This was three named buckets — additive, backfill_required, breaking —
+	// and codegen.Diff has had a fourth since park-and-reap. A destructive-only
+	// diff therefore decoded to nothing and printed "(no changes)" for a
+	// migration that drops columns. Naming the buckets here meant this file had
+	// to be edited every time the differ grew one, and it was not.
+	//
 	// The diff and the two IRs travel as opaque bytes rather than structured
 	// messages: they are content-hash inputs, and a structured encoding would
 	// reorder keys and change a hash for a schema nobody edited. Decoding them
 	// here is the client's business.
+	var d codegen.Diff
 	if err := json.Unmarshal(resp.GetDiff(), &d); err != nil {
 		fmt.Println(string(resp.GetDiff()))
 		return
 	}
 
-	all := append(append(d.Additive, d.BackfillRequired...), d.Breaking...)
+	all := d.All()
 	if len(all) == 0 {
 		fmt.Println(cliout.Grey("(no changes)"))
 		return
@@ -190,7 +187,7 @@ func printDiffResult(resp *adminpb.DiffSchemaVersionsResponse) {
 		toEntities[e.ID()] = e
 	}
 
-	byEntity := map[string][]diffChange{}
+	byEntity := map[string][]codegen.Change{}
 	var entityOrder []string
 	for _, ch := range all {
 		if _, seen := byEntity[ch.EntityID]; !seen {
@@ -259,15 +256,41 @@ func printDiffResult(resp *adminpb.DiffSchemaVersionsResponse) {
 		fmt.Println()
 	}
 
+	counts := map[codegen.ChangeClass]int{}
+	for _, ch := range all {
+		counts[ch.Class]++
+	}
 	parts := []string{}
-	if len(d.Additive) > 0 {
-		parts = append(parts, cliout.Green(fmt.Sprintf("+%d additive", len(d.Additive))))
-	}
-	if len(d.BackfillRequired) > 0 {
-		parts = append(parts, cliout.Yellow(fmt.Sprintf("~%d backfill", len(d.BackfillRequired))))
-	}
-	if len(d.Breaking) > 0 {
-		parts = append(parts, cliout.Red(fmt.Sprintf("!%d breaking", len(d.Breaking))))
+	for _, s := range changeClassDisplay {
+		if n := counts[s.class]; n > 0 {
+			parts = append(parts, s.paint(fmt.Sprintf("%s%d %s", s.glyph, n, s.word)))
+		}
 	}
 	fmt.Println(strings.Join(parts, "  "))
+}
+
+// changeClassDisplay is how a change class reads in the tally under a diff,
+// in the order the tally lists them.
+//
+// Counted from Change.Class over d.All(), not from bucket lengths. The two
+// agree — Diff.append files a change into the bucket its class names — but
+// enumerating buckets by hand is exactly what left destructive off this line
+// and out of the change list above it, so the count comes from the changes.
+//
+// Ordered least to most severe, so the eye lands on the worst thing last and
+// nearest the prompt. TestEveryChangeClassIsDisplayable asserts this covers
+// every codegen.ChangeClass, so a fifth class cannot go uncounted.
+var changeClassDisplay = []struct {
+	class codegen.ChangeClass
+	glyph string
+	word  string
+	paint func(string) string
+}{
+	{codegen.ClassAdditive, "+", "additive", cliout.Green},
+	{codegen.ClassBackfillRequired, "~", "backfill", cliout.Yellow},
+	{codegen.ClassCrossCallerBreaking, "!", "breaking", cliout.Red},
+	// Last and glyphed apart from breaking: "!" is a warning, "✗" is a
+	// deletion, and the difference is what the reader needs to see without
+	// reading the word.
+	{codegen.ClassDestructive, "✗", "destructive", cliout.Red},
 }

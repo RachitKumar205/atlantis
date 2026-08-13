@@ -2,7 +2,7 @@ import { Component, useEffect, useState, type ErrorInfo, type ReactNode } from '
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
 import { AlertTriangle, Box, Check, ChevronRight, Inbox, RefreshCw, Search, Shield, Undo2 } from 'lucide-react'
-import { api, queries, type AuditEntry, type JobStatus } from '@/api/client'
+import { api, queries, planClassBadge, type AuditEntry, type JobStatus } from '@/api/client'
 import { useIsAdmin } from '@/hooks/useAuth'
 import { PageShell } from '@/components/PageShell'
 import { Sql } from '@/components/Sql'
@@ -210,11 +210,10 @@ function PreviewBlock({
   isAdmin: boolean
   result: { new_version: number; up_sql: string } | null
 }) {
-  const planClassKey =
-    data.plan_class === 'cross_caller_breaking' ? 'break' :
-    data.plan_class === 'backfill_required'     ? 'back'  :
-    data.plan_class === 'additive'              ? 'add'   :
-                                                  'plain'
+  // Looked up, not matched arm by arm. A class with no arm fell through to
+  // 'plain' — the grey badge that means "nothing notable" — so a destructive
+  // plan was the one result on this page styled to be scrolled past.
+  const planClassKey = planClassBadge(data.plan_class)
 
   return (
     <div style={{ marginTop: 20 }}>

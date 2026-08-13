@@ -247,3 +247,42 @@ jobs:
         # up → down → up against a fresh Postgres so a broken .down.sql
         # can't slip through. Exercises every migration in migrations/.
         run: make migrate-roundtrip
+
+  console:
+    name: web console
+    runs-on: ubuntu-latest
+
+    # The console had no CI job at all until now. It was never built, never
+    # type-checked and never tested on any push — which is how three pages came
+    # to silently drop the `destructive` change class, and how the plan-class
+    # badge lookup came to miss every hyphenated class name coming out of
+    # schema history. Neither breaks a build, so nothing was watching.
+
+    defaults:
+      run:
+        working-directory: web/console
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/console/package-lock.json
+
+      - name: install
+        # ci, not install: fails when package-lock.json and package.json
+        # disagree, rather than quietly resolving to something else.
+        run: npm ci
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: unit tests
+        run: npm test
+
+      - name: build
+        # The Go binary embeds this output, so a console that does not build is
+        # a server that ships a stale SPA.
+        run: npm run build

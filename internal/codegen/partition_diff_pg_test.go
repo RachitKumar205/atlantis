@@ -103,13 +103,19 @@ INSERT INTO atlantis.pdiff_doc VALUES (1, 'acme', 'acme-secret'), (2, 'globex', 
 			"No migration, no policy, no output — the schema claims a partition the " +
 			"database has never heard of, which is the defect this task exists to fix")
 	}
-	// CrossCallerBreaking, not Destructive. A review found ClassDestructive has
-	// no arm in translateClass, so it reaches the wire as PLAN_CLASS_UNPARSEABLE
-	// and `tide apply` reports the plan as a parse failure — there was no CLI
-	// path that could apply this at all. The CLI's rollback and diff commands
-	// also decode only additive, backfill_required and breaking, so a rollback
-	// across a Destructive change printed "(no changes)" and then dropped the
-	// policy off a populated table.
+	// CrossCallerBreaking, not Destructive — and the reason is about what this
+	// change MEANS, not about what the clients could render at the time.
+	//
+	// Adding tenant isolation does not destroy anything. It changes what every
+	// existing reader can see, which is the definition of breaking, and the
+	// rows stay exactly where they are. Destructive would be the wrong record
+	// even if it rendered perfectly everywhere.
+	//
+	// Worth keeping the history, because it is why this line was ever in doubt:
+	// when this was written ClassDestructive had no arm in translateClass, so it
+	// reached the wire as PLAN_CLASS_UNPARSEABLE, and the CLI's diff and
+	// rollback decoders read three buckets where the differ writes four. Both
+	// are fixed now. Neither should decide a classification.
 	if got := d.HighestClass(); got != ClassCrossCallerBreaking {
 		t.Errorf("adding tenant isolation classified %v, want ClassCrossCallerBreaking. "+
 			"It must not be auto-applied — after it applies, every request with no "+

@@ -134,8 +134,26 @@ func cmdApply(args []string) int {
 			fmt.Fprintln(os.Stderr, "  ", d)
 		}
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "tide: open a PR in the atlantis repo to coordinate the change.")
-		return 2
+		fmt.Fprintln(os.Stderr, "tide: the server refuses this while those callers still read the old shape.")
+		fmt.Fprintln(os.Stderr, "      Ship their changes first, then re-run `tide apply`.")
+		return exitCodeForClass(planResp.GetClass())
+
+	case adminpb.PlanClass_PLAN_CLASS_DESTRUCTIVE:
+		// Its own arm, not folded into the breaking one. The two need different
+		// things from the reader: breaking means somebody else's code stops
+		// working and is fixed by shipping their change first, while this means
+		// rows go away and is fixed by deciding whether that is intended. The
+		// detail list already distinguishes them — the server appends the
+		// destructive entries with their parked/reaped note.
+		fmt.Fprintln(os.Stderr, "tide: this change destroys data:")
+		for _, d := range planResp.GetBreakingDetail() {
+			fmt.Fprintln(os.Stderr, "  ", d)
+		}
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "tide: the server refuses to apply this unattended.")
+		fmt.Fprintln(os.Stderr, "      Dropped objects are parked, not deleted, and reaped after the")
+		fmt.Fprintln(os.Stderr, "      retention window — `tide parked` shows what is held and until when.")
+		return exitCodeForClass(planResp.GetClass())
 
 	case adminpb.PlanClass_PLAN_CLASS_UNPARSEABLE:
 		// Server marks the plan unparseable when pg_query_go validation on

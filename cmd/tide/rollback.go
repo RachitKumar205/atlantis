@@ -10,6 +10,7 @@ import (
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
+	"github.com/rachitkumar205/atlantis/internal/codegen"
 )
 
 // cmdRollback — `tide rollback --to=<version> [--dry-run] [--yes]`
@@ -121,18 +122,43 @@ func rollbackDryRun(cfg *tideConfig, toVersion int64, timeout time.Duration) int
 	fmt.Printf("%s v%d -> v%d\n\n",
 		cliout.Bold("Rollback preview:"), currentVersion, toVersion)
 
-	var d struct {
-		Additive         []json.RawMessage `json:"additive"`
-		BackfillRequired []json.RawMessage `json:"backfill_required"`
-		Breaking         []json.RawMessage `json:"breaking"`
-	}
-	if err := json.Unmarshal(diffResp.Diff, &d); err == nil {
-		total := len(d.Additive) + len(d.BackfillRequired) + len(d.Breaking)
-		if total == 0 {
+	// Decoded into codegen.Diff, the type the server marshalled.
+	//
+	// This counted three named buckets and codegen.Diff has four. Rolling back
+	// across a change that only dropped columns summed to zero and printed
+	// "(no changes — schemas are identical)" — to an operator who was about to
+	// run exactly that rollback. Of every place the missing bucket surfaced,
+	// this one told the most dangerous lie, because the preview is the last
+	// thing read before the rollback goes ahead.
+	var d codegen.Diff
+	if err := json.Unmarshal(diffResp.Diff, &d); err != nil {
+		// Said out loud rather than skipped. The old code decoded under
+		// `err == nil` and printed nothing at all on failure, so the preview
+		// for a rollback it could not read looked identical to the preview for
+		// a rollback with nothing in it — and the next line invites the
+		// operator to run it for real.
+		cliout.Warnf("could not decode the diff from the server: %v", err)
+		fmt.Println(cliout.Grey("(this preview is empty because the diff did not parse, " +
+			"not because the rollback is a no-op)"))
+	} else {
+		if d.IsEmpty() {
 			fmt.Println(cliout.Grey("(no changes — schemas are identical)"))
 			return 0
 		}
-		fmt.Printf("%d change(s) would be applied.\n", total)
+		fmt.Printf("%d change(s) would be applied.\n", d.Len())
+
+		// The tally, not just the total. A rollback that destroys rows and one
+		// that adds a nullable column both read as "4 change(s)", and the
+		// operator confirming this prompt is deciding between them.
+		counts := map[codegen.ChangeClass]int{}
+		for _, ch := range d.All() {
+			counts[ch.Class]++
+		}
+		for _, s := range changeClassDisplay {
+			if n := counts[s.class]; n > 0 {
+				fmt.Printf("  %s\n", s.paint(fmt.Sprintf("%s%d %s", s.glyph, n, s.word)))
+			}
+		}
 	}
 	fmt.Println(cliout.Grey("(use without --dry-run to execute)"))
 	return 0

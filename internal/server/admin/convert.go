@@ -23,9 +23,15 @@ func planClassToPB(c ClassName) adminpb.PlanClass {
 		return adminpb.PlanClass_PLAN_CLASS_BACKFILL_REQUIRED
 	case ClassBreaking:
 		return adminpb.PlanClass_PLAN_CLASS_CROSS_CALLER_BREAKING
+	case ClassDestructive:
+		return adminpb.PlanClass_PLAN_CLASS_DESTRUCTIVE
 	case ClassUnclean:
 		return adminpb.PlanClass_PLAN_CLASS_UNPARSEABLE
 	}
+	// The SECOND hop. translateClass maps codegen.ChangeClass to ClassName and
+	// this maps ClassName to the wire enum; a class needs an arm in both.
+	// Adding only the first moved destructive from UNPARSEABLE to UNSPECIFIED —
+	// still exit 3 at the CLI, just a different wrong message.
 	return adminpb.PlanClass_PLAN_CLASS_UNSPECIFIED
 }
 

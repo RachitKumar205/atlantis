@@ -318,10 +318,11 @@ type CustomDeclCount struct {
 type ClassName string
 
 const (
-	ClassAdditive ClassName = "additive"
-	ClassBackfill ClassName = "backfill_required"
-	ClassBreaking ClassName = "cross_caller_breaking"
-	ClassUnclean  ClassName = "unparseable" // returned when DSL itself doesn't parse
+	ClassAdditive    ClassName = "additive"
+	ClassBackfill    ClassName = "backfill_required"
+	ClassBreaking    ClassName = "cross_caller_breaking"
+	ClassDestructive ClassName = "destructive"
+	ClassUnclean     ClassName = "unparseable" // returned when DSL itself doesn't parse
 )
 
 // ImpactEntry describes how one caller is affected by a plan; includes the plan's own caller.
@@ -744,8 +745,20 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 		return nil, fmt.Errorf("admin: plan %s is stale; current plan is %s — re-run tide apply",
 			req.GetPlanId(), gotPlanID)
 	}
-	if d.HighestClass() == codegen.ClassCrossCallerBreaking {
-		return nil, fmt.Errorf("admin: plan is breaking and cannot be auto-applied")
+	// Destructive is refused HERE, not only in the CLI's switch.
+	//
+	// Until now the only class check was CrossCallerBreaking, so a destructive
+	// plan was stopped by `cmd/tide/apply.go` deciding not to call this RPC.
+	// Anything that skipped that switch — a script, a retry wrapper, a newer or
+	// older tide, any direct gRPC client holding CAPABILITY_SCHEMA_APPLY — could
+	// pass a valid plan_id and the DROP ran. A gate that lives in the client is
+	// not a gate.
+	//
+	// This is the interim shape. It becomes a lookup against the deployment's
+	// change policy, which decides per class whether a human must approve; the
+	// hole closes now rather than waiting for that.
+	if c := d.HighestClass(); c == codegen.ClassCrossCallerBreaking || c == codegen.ClassDestructive {
+		return nil, fmt.Errorf("admin: plan is %s and cannot be auto-applied", c)
 	}
 
 	var scripts codegen.SQLScripts
@@ -1179,7 +1192,18 @@ ON CONFLICT (id) DO UPDATE SET ir = EXCLUDED.ir, applied_at = now(), applied_by 
 			return 0, fmt.Errorf("marshal diff: %w", err)
 		}
 	} else {
-		diffJSON = []byte(`{"additive":[],"backfill_required":[],"breaking":[]}`)
+		// Marshalled from an empty Diff rather than written out as a literal.
+		//
+		// The literal here named three buckets and codegen.Diff has had four
+		// since park-and-reap, so the shape this wrote for a no-diff event had
+		// quietly stopped matching the shape the branch above writes for every
+		// other event. Nothing failed, because every reader treats a missing
+		// bucket as empty — which is why it went unnoticed, and why the fix is
+		// to stop hand-writing the shape rather than to add the fourth key.
+		diffJSON, err = json.Marshal(&codegen.Diff{})
+		if err != nil {
+			return 0, fmt.Errorf("marshal empty diff: %w", err)
+		}
 	}
 
 	var version int64
@@ -1247,7 +1271,18 @@ func translateClass(c codegen.ChangeClass) ClassName {
 		return ClassBackfill
 	case codegen.ClassCrossCallerBreaking:
 		return ClassBreaking
+	case codegen.ClassDestructive:
+		return ClassDestructive
 	}
+	// The fall-through means "the DSL did not compile", so a class landing here
+	// is reported to the caller as a parse failure. ClassDestructive had no arm
+	// and fell here: `tide apply` printed "plan is unparseable — custom-query
+	// SQL validation failed" with both error lists empty, for a plan that had
+	// parsed fine. There was no CLI path that could apply a destructive change,
+	// and the message named a subsystem that was not involved.
+	//
+	// TestEveryCodegenClassReachesADistinctPlanClass loops over every
+	// codegen.ChangeClass so a future class cannot arrive here silently.
 	return ClassUnclean
 }
 

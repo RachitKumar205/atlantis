@@ -178,15 +178,34 @@ service AdminService {
 // ---------------------------------------------------------------------------
 
 // PlanClass is the routing decision for a proposed schema change. It is the
-// entire caller-side mental model: additive applies, backfill_required needs
-// staged SQL, cross_caller_breaking needs a PR against atlantis itself, and
-// unparseable means the DSL or its custom SQL did not compile.
+// entire caller-side mental model:
+//
+//   additive          applies unattended
+//   backfill_required needs backfill SQL declared on the affected fields
+//   destructive        removes something that can hold rows
+//   cross_caller_breaking  changes something another caller reads
+//   unparseable       the DSL or its custom SQL did not compile
+//
+// destructive and cross_caller_breaking are decided by the deployment's change
+// policy, not by this enum: the server holds a per-class rule for whether a
+// human must approve and which role may do it. The class says what KIND of
+// change this is; the policy says what happens to it.
 enum PlanClass {
   PLAN_CLASS_UNSPECIFIED = 0;
   PLAN_CLASS_ADDITIVE = 1;
   PLAN_CLASS_BACKFILL_REQUIRED = 2;
   PLAN_CLASS_CROSS_CALLER_BREAKING = 3;
   PLAN_CLASS_UNPARSEABLE = 4;
+
+  // Appended, never renumbered. 4 is UNPARSEABLE and stays there: renumbering
+  // silently changes meaning for any client that has not been rebuilt, which
+  // during a rolling deploy is every client for a while.
+  //
+  // Its absence is why a destructive plan reached the CLI as UNPARSEABLE and
+  // printed "custom-query SQL validation failed" with no errors listed —
+  // naming a subsystem that was not involved, for a change that had parsed
+  // perfectly well.
+  PLAN_CLASS_DESTRUCTIVE = 5;
 }
 
 // SubmittedFile is one .atl source file as shipped by a caller. Content is

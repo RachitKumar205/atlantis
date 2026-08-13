@@ -16,8 +16,13 @@
 //
 //   - additive               → ApplyMigration, regenerate local client
 //   - backfill_required      → print expected backfill, exit 1
-//   - cross_caller_breaking  → print impact report, exit 2 (CLI hints
-//     that a PR in atlantis is required)
+//   - cross_caller_breaking  → print impact report, exit 2
+//   - destructive            → print what is destroyed, exit 4
+//   - unparseable            → print the validation errors, exit 3
+//
+// Destructive exits 4 rather than joining breaking on 2 so CI can gate on the
+// two separately: a breaking change is cleared by shipping the other callers'
+// updates, a destructive one by deciding whether losing the rows is intended.
 //
 // `tide apply` auto-runs `tide pull` first so cross-caller references resolve
 // against the freshest merged schema. Suppress with --no-pull when the

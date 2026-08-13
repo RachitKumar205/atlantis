@@ -464,9 +464,15 @@ type PreviewRollbackRequest struct {
 type PreviewRollbackResponse struct {
 	TargetVersion  int64  `json:"target_version"`
 	CurrentVersion int64  `json:"current_version"`
-	UpSQL          string `json:"up_sql"`     // SQL that would run on execute
-	PlanClass      string `json:"plan_class"` // additive / backfill_required / cross_caller_breaking
-	ChangeCount    int    `json:"change_count"`
+	UpSQL          string `json:"up_sql"` // SQL that would run on execute
+	// Spelled the way codegen.ChangeClass.String() spells it, which is
+	// HYPHENATED: additive / backfill-required / cross-caller-breaking /
+	// destructive, plus "adopt" and "seed" for the two non-plan events. Note
+	// this is not the underscored spelling the proto enum lowercases to —
+	// /api/history proxies this column through untouched, so anything matching
+	// on it has to accept the hyphens.
+	PlanClass   string `json:"plan_class"`
+	ChangeCount int    `json:"change_count"`
 }
 
 // PreviewRollback returns the SQL a RollbackSchema call would execute,

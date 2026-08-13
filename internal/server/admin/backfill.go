@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/rachitkumar205/atlantis/internal/runtime"
-	"github.com/rachitkumar205/atlantis/internal/schema"
-	"github.com/rachitkumar205/atlantis/internal/storage/pg"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/rachitkumar205/atlantis/internal/runtime"
+	"github.com/rachitkumar205/atlantis/internal/schema"
+	"github.com/rachitkumar205/atlantis/internal/storage/pg"
 
 	"github.com/jackc/pgx/v5"
 

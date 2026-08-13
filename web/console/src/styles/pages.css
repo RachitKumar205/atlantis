@@ -88,6 +88,8 @@
 .plan .pl-add { color: var(--sage); }
 .plan .pl-break { color: var(--coral); }
 .plan .pl-back { color: var(--accent); }
+.plan .pl-destroy { color: var(--coral); font-weight: 600; }
+.plan .pl-plain { color: var(--ink-2); }
 .plan .pl-mut { color: var(--ink-3); }
 
 /* ====== HEALTH ============================================================= */
@@ -186,6 +188,10 @@
 .diffrow.d-add { background: var(--sage-tint); } .diffrow.d-add .diffrow__sign { color: var(--sage); }
 .diffrow.d-break { background: var(--coral-tint); } .diffrow.d-break .diffrow__sign { color: var(--coral); }
 .diffrow.d-back { background: var(--accent-tint); } .diffrow.d-back .diffrow__sign { color: var(--accent); }
+/* Destructive shares breaking's tint — one alarm hue — and separates on the
+   sign, which is bolder and struck through the row's own colour. */
+.diffrow.d-destroy { background: var(--coral-tint); } .diffrow.d-destroy .diffrow__sign { color: var(--coral); font-weight: 700; }
+.diffrow.d-plain .diffrow__sign { color: var(--ink-2); }
 .sqlblock { margin-top: 12px; }
 .sqlblock summary { font-size: 11.5px; color: var(--ink-2); cursor: pointer; list-style: none; display: flex; align-items: center; gap: 7px; padding: 6px 0; }
 .sqlblock summary::-webkit-details-marker { display: none; }

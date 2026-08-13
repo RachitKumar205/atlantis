@@ -2,7 +2,7 @@ import { useMemo, useEffect, useState } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { useSearch, useNavigate } from '@tanstack/react-router'
 import { Box, Pencil, Link as LinkIcon, GitPullRequest } from 'lucide-react'
-import { queries, api, type EditPreviewResponse } from '@/api/client'
+import { queries, api, planClassPreview, type EditPreviewResponse } from '@/api/client'
 import { PageShell } from '@/components/PageShell'
 import { Sql } from '@/components/Sql'
 
@@ -338,6 +338,31 @@ export function Schema() {
   )
 }
 
+// The one-line verdict on a preview.
+//
+// This was three `preview.plan_class === '...' &&` blocks covering additive,
+// backfill_required and cross_caller_breaking. A destructive preview matched
+// none of them and rendered NOTHING — the panel showed the SQL that drops the
+// column with no verdict above it, which reads as a preview that found no
+// problem. A lookup with an explicit fallback cannot fail that way: a class
+// nobody has styled still prints its own name.
+function PlanClassLine({ planClass, changes }: { planClass: string; changes: number }) {
+  const p = planClassPreview(planClass)
+  if (!p) {
+    return (
+      <div>
+        <span className="pl-plain">{planClass}</span> · {changes} change(s)
+      </div>
+    )
+  }
+  return (
+    <div>
+      <span className={p.cls}>{p.text}</span>
+      {p.showCount && <> · {changes} change(s)</>}
+    </div>
+  )
+}
+
 function SkeletonRows() {
   return (
     <>
@@ -425,15 +450,7 @@ export function EditPanel({ entity, onClose }: { entity: EntityDecl; onClose: ()
           )}
           {preview && (
             <>
-              {preview.plan_class === 'additive' && (
-                <div><span className="pl-add">+ additive</span> · {preview.impact?.length ?? 0} change(s)</div>
-              )}
-              {preview.plan_class === 'backfill_required' && (
-                <div><span className="pl-back">~ backfill required</span></div>
-              )}
-              {preview.plan_class === 'cross_caller_breaking' && (
-                <div><span className="pl-break">✗ breaking — blocks merge</span></div>
-              )}
+              <PlanClassLine planClass={preview.plan_class} changes={preview.impact?.length ?? 0} />
               {preview.up_sql && (
                 <Sql style={{ marginTop: 10 }}>{preview.up_sql.slice(0, 600)}</Sql>
               )}

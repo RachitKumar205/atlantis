@@ -123,10 +123,133 @@ export interface DiffChange {
   kind?: string
 }
 
-export interface DiffPayload {
-  additive: DiffChange[]
-  backfill_required: DiffChange[]
-  breaking: DiffChange[]
+// One array of changes per change class, keyed by the class name the server
+// uses — "additive", "backfill_required", "breaking", "destructive".
+//
+// Keyed rather than a fixed set of three fields. It WAS three fields, and the
+// server has emitted a fourth since park-and-reap, so a version whose only
+// change dropped a column rendered in the console as no changes at all. A
+// record type means a class the console has not been taught about still
+// arrives, still counts, and renders under its own name instead of vanishing.
+//
+// CHANGE_CLASS_DISPLAY (pages/History.tsx) gives the known classes their order
+// and badge; anything outside it falls back to a plain badge rather than being
+// dropped.
+export type DiffPayload = Record<string, DiffChange[]>
+
+// Keeps every array-valued key, rather than copying named ones across.
+//
+// Lives here, beside the type it produces, rather than in the page that renders
+// it. It was a local helper in History.tsx that named three buckets and
+// silently dropped "destructive", which the server has emitted since
+// park-and-reap: a version whose only change dropped a column arrived with its
+// changes intact and rendered as an empty diff.
+//
+// Reading the keys off the payload means a class the console does not know
+// about is still counted and still listed, under whatever name the server gave
+// it. Non-array values are dropped so an unexpected scalar key cannot become a
+// bucket full of junk.
+export function parseRawDiff(raw: unknown): DiffPayload {
+  if (!raw || typeof raw !== 'object') return {}
+  const out: DiffPayload = {}
+  for (const [bucket, changes] of Object.entries(raw as Record<string, unknown>)) {
+    if (Array.isArray(changes)) out[bucket] = changes as DiffChange[]
+  }
+  return out
+}
+
+// Buckets in display order: the known classes first, in severity order, then
+// anything the server sent that this console predates. Sorting the unknowns
+// last keeps the familiar ones where the eye expects them.
+export function orderedBuckets(
+  diff: DiffPayload,
+): { bucket: string; glyph: string; badge: string }[] {
+  const known = new Set(CHANGE_CLASS_DISPLAY.map(c => c.bucket))
+  return [
+    ...CHANGE_CLASS_DISPLAY.filter(c => (diff[c.bucket]?.length ?? 0) > 0),
+    ...Object.keys(diff)
+      .filter(b => !known.has(b) && diff[b].length > 0)
+      .sort()
+      .map(bucket => ({ bucket, glyph: '?', badge: 'plain' })),
+  ]
+}
+
+// The order the console lists change classes in, least to most severe, with
+// the badge modifier each one carries. Kept beside the type it describes so a
+// new class is one edit, not a hunt through three pages.
+export const CHANGE_CLASS_DISPLAY: ReadonlyArray<{
+  bucket: string
+  glyph: string
+  badge: string
+}> = [
+  { bucket: 'additive', glyph: '+', badge: 'add' },
+  { bucket: 'backfill_required', glyph: '~', badge: 'back' },
+  { bucket: 'breaking', glyph: '!', badge: 'break' },
+  { bucket: 'destructive', glyph: '✗', badge: 'destroy' },
+]
+
+// A plan class reaches this console under two different spellings, and the
+// difference is not cosmetic — it decides whether a badge renders.
+//
+//   underscored   from a live plan preview. /api/plan and /api/rollback/preview
+//                 run the proto enum through shortPlanClass, which lowercases
+//                 PLAN_CLASS_CROSS_CALLER_BREAKING to "cross_caller_breaking".
+//
+//   hyphenated    from schema history. /api/history proxies the proto through
+//                 untouched, and its plan_class is the schema_versions column,
+//                 written from codegen.ChangeClass.String() — which spells the
+//                 same class "cross-caller-breaking".
+//
+// The pages compared against the underscored form only, so every breaking and
+// backfill-required version in the history timeline has been rendering with
+// the grey "plain" badge — the styling that means nothing notable happened.
+// Nothing failed loudly because the label beside the badge is the class name
+// itself, so the text was right and only the colour was wrong.
+//
+// Normalising at lookup rather than picking a winner: both spellings are load
+// bearing where they are, the column has years of rows in the hyphenated form,
+// and a reconciliation is its own change. This makes the console read both.
+function normalizeClass(planClass: string): string {
+  return planClass.replace(/-/g, '_')
+}
+
+export function planClassBadge(planClass: string): string {
+  return PLAN_CLASS_BADGE[normalizeClass(planClass)] ?? 'plain'
+}
+
+export function planClassPreview(planClass: string) {
+  return PLAN_CLASS_PREVIEW[normalizeClass(planClass)]
+}
+
+// plan_class values mapped to badge modifiers. Keyed in the underscored
+// spelling; reach it through planClassBadge, which accepts either.
+//
+// A separate map from CHANGE_CLASS_DISPLAY because this keys on the PLAN's
+// class — one value for the whole version — while that one keys on the bucket
+// an individual change sits in. The names differ: a plan is
+// "cross_caller_breaking" where its changes are in "breaking".
+export const PLAN_CLASS_BADGE: Readonly<Record<string, string>> = {
+  additive: 'add',
+  backfill_required: 'back',
+  cross_caller_breaking: 'break',
+  destructive: 'destroy',
+  unparseable: 'break',
+}
+
+// The one-line verdict on a schema preview.
+//
+// Glyphs match `tide plan`: "!" warns, "✗" deletes. The console used "✗" for
+// breaking, which left nothing to distinguish it from destructive once that
+// class became visible — so breaking moves to "!" and the two now read the
+// same way in the terminal and in the browser.
+export const PLAN_CLASS_PREVIEW: Readonly<
+  Record<string, { cls: string; text: string; showCount?: boolean }>
+> = {
+  additive: { cls: 'pl-add', text: '+ additive', showCount: true },
+  backfill_required: { cls: 'pl-back', text: '~ backfill required' },
+  cross_caller_breaking: { cls: 'pl-break', text: '! breaking — blocks merge' },
+  destructive: { cls: 'pl-destroy', text: '✗ destructive — destroys data' },
+  unparseable: { cls: 'pl-break', text: '! unparseable — the schema did not compile' },
 }
 
 export interface DiffVersionsResponse {
