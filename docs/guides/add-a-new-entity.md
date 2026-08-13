@@ -131,9 +131,7 @@ than "callers cannot lie", and more useful.
 run-time parameter, `atlantis.tenant`, and the policy compares against it
 through `atlantis.current_partition()`. Transaction-local means it reverts when
 the transaction ends, so a value cannot outlive the request that set it on a
-pooled connection. (Reading on: the mechanism is in place and tested; the
-request-time call that sets it is not landed yet. See the runtime conditions
-below.)
+pooled connection.
 
 PostgreSQL will not lock a custom parameter — `REVOKE SET ON PARAMETER` has no
 effect on one — so SQL running in the same transaction could otherwise reassign
@@ -163,17 +161,26 @@ at plan time:
   superuser sees through `FORCE`, and so does any role holding `BYPASSRLS` —
   the policy stays attached and completely inert. Checked at boot; set
   `ATL_REQUIRE_TENANT_ISOLATION=true` to make it refuse to start.
-- Something must bind the tenant for the request. **Nothing does yet.**
+- Something must bind the tenant for the request. atlantis does: every entity
+  RPC (get, batch get, query, create, update, delete), every custom query, and
+  every custom procedure bind before touching the database, on both the
+  dispatcher and the server `tide generate` emits.
 
-Until that second condition is met, what a partitioned entity does depends
-entirely on the first. On a role row-level security applies to, reads return
-zero rows and **every insert fails** with `new row violates row-level security
-policy` — the right direction to fail in, but the entity is unusable. **On a
-role that bypasses RLS, including the superuser the default
-`docker-compose.yml` connects as, reads return every tenant's rows.**
+**Set `ATL_REQUIRE_TENANT_ISOLATION=true`.** It defaults to `false`, which
+downgrades the boot check to a warning. On a role that bypasses RLS — including
+the superuser the default `docker-compose.yml` connects as — the policy is
+inert and every read returns every tenant's rows, with nothing in the
+application able to notice.
 
-Treat `partition by` as not yet a working feature, and check which role your
-deployment uses before relying on it.
+### What does not work on a partitioned entity yet
+
+Both are refused or reported rather than silently wrong, but plan around them:
+
+| | |
+|---|---|
+| **`ttl_field`** | Expired rows are not swept. The sweeper runs with no tenant bound, so its `DELETE` matches nothing. It skips the entity and increments `atlantis_sweeper_sweeps_blocked_total` — see [row TTL](row-ttl.md). |
+| **Backfills** | `tide apply --backfill` refuses a partitioned entity by name. A chunked backfill has to cover every tenant, and there is no single tenant to bind. |
+| **The sandbox** | Does not reproduce policy behaviour. Do not use it to test isolation. |
 
 ## Related
 

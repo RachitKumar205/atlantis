@@ -81,15 +81,19 @@ func (s *Server) Register(grpcSrv *grpc.Server, ir *dsl.IR) error {
 // OnReload, when set, is called with the new IR before the snapshot is swapped
 // in. A non-nil error abandons the reload and leaves the old snapshot serving.
 //
-// It exists for the partition-policy check. That check runs at boot and asks
-// the database whether every entity declaring `partition by` has an enforced
-// policy on its table — a question the schema cannot answer, because the clause
-// is emitted on CREATE TABLE only and no differ reads it. Boot is not enough:
-// a checkpoint that adds `partition by` to an existing entity arrives at a
-// RUNNING server through LISTEN/NOTIFY, and the reload turns on `partitioned`
-// for it. A review delivered exactly that and read another tenant's rows, while
-// the one signal an operator can see — omit the tenant, get refused — reported
-// healthy throughout.
+// It exists for the partition-policy check. That check asks the database
+// whether every entity declaring `partition by` has an enforced policy on its
+// table — a question no differ can answer, because a differ compares two
+// declarations and this compares a declaration against the live catalogue. A
+// policy can be missing from a correct declaration in several ways that are not
+// diffs: an unapplied migration, an adopted database, a policy dropped out of
+// band.
+//
+// Boot is not enough. A checkpoint arrives at a RUNNING server through
+// LISTEN/NOTIFY and the reload turns on `partitioned` for whatever the table
+// carries at that moment. A review delivered exactly that and read another
+// tenant's rows, while the one signal an operator can see — omit the tenant,
+// get refused — reported healthy throughout.
 //
 // A func field rather than a direct call because this package must not import
 // internal/storage/pg: pg already depends on runtime, and the check belongs

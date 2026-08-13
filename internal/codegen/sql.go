@@ -1989,10 +1989,20 @@ func assertCheckNamesUnique(ir *dsl.IR) error {
 // The predicate goes through atlantis.current_partition() rather than inlining
 // whatever that function reads. That indirection is what let migration 0024
 // move the discriminator from a table to a run-time parameter without touching
-// a single policy — and it has to, because emitPartitionPolicy runs on CREATE
-// TABLE only and no differ reads `partition by` (task #36). A policy whose text
-// had to change would be a policy on every existing partitioned table that
-// nothing can migrate.
+// a single policy, and the reason it is still required is worth stating
+// precisely, because the obvious version of it stopped being true.
+//
+// The differ does now read `partition by` — diffPartition emits DDL when the
+// clause is added, removed or moved. What it compares is DECLARATIONS. A change
+// to the POLICY TEXT this function emits is invisible to it: the .atl file is
+// byte-identical before and after, so there is no diff, so no migration. Ship a
+// version of atlantis that writes a different predicate and every policy
+// already in the field keeps the old one, permanently, with nothing able to
+// tell you.
+//
+// So the constraint holds in the shape that matters: whatever this function
+// emits has to stay correct forever, and indirection through a function is how
+// the mechanism stays changeable when the text cannot be.
 func emitPartitionPolicy(b *sqlBuilder, e *dsl.Entity) {
 	if e.PartitionField == "" {
 		return

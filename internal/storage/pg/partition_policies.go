@@ -24,16 +24,25 @@ type PartitionedTable struct {
 //
 // # Why this is needed at all
 //
-// The policy, FORCE ROW LEVEL SECURITY and the backing index are emitted on
-// CREATE TABLE only. No differ reads `partition by` (task #36), so adding the
-// clause to an entity that already exists produces an empty plan: no migration,
-// no policy, no output. The schema then claims a partition the database has
-// never heard of.
+// The differ compares two DECLARATIONS. This compares a declaration against the
+// LIVE CATALOGUE, and only the second question has an answer an operator can
+// act on.
 //
-// That was survivable while the clause was inert in both directions, and the
-// docs said so. It stopped being survivable once the server began binding the
-// tenant per request, because the only signal an operator can observe — omit
-// the tenant, get refused — now works whether or not a policy exists. A review
+// It was written when the first question could not be asked at all: nothing
+// read `partition by`, so adding the clause to an existing entity produced an
+// empty plan and the schema claimed a partition the database had never heard
+// of. diffPartition fixed that, and `tide apply` now emits the policy.
+//
+// It did not make this redundant. A table can carry no policy while its
+// declaration is perfectly correct — the migration was planned and never
+// applied, the database was adopted with the clause already written, the policy
+// was dropped out of band, or the checkpoint predates the differ. None of those
+// is a diff, and every one of them is a table serving every tenant's rows.
+//
+// The failure is also invisible from inside the server, which is what makes
+// this load-bearing rather than defensive. Binding a tenant succeeds whether or
+// not a policy exists, so the only signal an operator can observe — omit the
+// tenant, get refused — reports healthy either way. A review
 // executed exactly that: the differ emitted nothing, the server refused an
 // unbound request, and a bound request returned every tenant's rows. The
 // appearance of isolation is worse than its absence, because nothing prompts
@@ -188,11 +197,17 @@ SELECT n.nspname || '.' || c.relname, c.relrowsecurity, c.relforcerowsecurity,
 					"lookup that misses cannot tell you the policy is absent",
 				t.EntityID, qualified))
 		case len(st.policies) == 0:
+			// The remedy line is the whole value of this message, and it used to
+			// be wrong: it told the operator the differ could not see the clause
+			// and that `tide apply` had emitted nothing, which stopped being true
+			// when diffPartition landed. An operator who believed it would not
+			// have run the one command that fixes this.
 			problems = append(problems, fmt.Sprintf(
 				"%s declares `partition by` but %s carries no row-level security "+
-					"policy. Every read returns every tenant's rows. The clause was "+
-					"almost certainly added to an entity that already existed: the "+
-					"differ does not read it, so `tide apply` emitted nothing",
+					"policy. Every read returns every tenant's rows. Run `tide plan` — "+
+					"the change is diffed, so a pending migration will show it. If the "+
+					"plan is empty the policy was dropped outside atlantis, or this "+
+					"database was adopted with the clause already declared",
 				t.EntityID, qualified))
 		case !st.enabled:
 			problems = append(problems, fmt.Sprintf(

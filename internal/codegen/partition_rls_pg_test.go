@@ -97,11 +97,14 @@ SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronames
 	// inline whatever that function currently reads.
 	//
 	// The indirection is what let migration 0024 move the discriminator from a
-	// table to a run-time parameter without touching a single policy. That
-	// matters more than it sounds: emitPartitionPolicy runs on CREATE TABLE
-	// only and no differ reads `partition by` (task #36), so a policy whose
-	// text had to change would be a policy on every existing partitioned table
-	// that nothing can migrate.
+	// table to a run-time parameter without touching a single policy, and it is
+	// still required for a reason the differ does not cover.
+	//
+	// diffPartition reads `partition by` and emits DDL when the clause moves.
+	// It compares DECLARATIONS. A change to the emitted POLICY TEXT is not a
+	// declaration change — the .atl file is identical before and after — so no
+	// diff exists and no migration runs. Every policy already in the field
+	// keeps the old predicate permanently.
 	if strings.Contains(scripts.Up, "current_setting(") {
 		t.Errorf("the policy inlines current_setting() instead of calling "+
 			"atlantis.current_partition(). The mechanism then lives in every "+
