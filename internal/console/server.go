@@ -1953,18 +1953,24 @@ func (s *Server) requirePolicyRole(next http.HandlerFunc) http.HandlerFunc {
 				http.StatusForbidden)
 			return
 		}
-		// The USER's role travels onward, not the policy's.
+		// The USER's role travels onward.
 		//
-		// Stashing `want` here instead was the first version, and it quietly
-		// disarmed the server's own check: the console would have echoed the
-		// policy's role back at the server, which compares the assertion to
-		// that same policy — so the comparison could never fail for console
-		// traffic, however wrong this middleware was. A guard that always
-		// passes for the only client that reaches it is not a guard.
+		// Forwarding `want` instead would be equivalent, and it is worth being
+		// exact about that rather than claiming a safety property this does not
+		// have: the check above refuses unless u.Role == want, so past this
+		// line the two are the same string. An earlier version of this comment
+		// said stashing `want` "disarmed the server's own check". It does not,
+		// and a mutation test confirms the swap changes no observable
+		// behaviour. u.Role is preferred only because it says what it means —
+		// this is the role the person holds — instead of relying on an
+		// invariant three lines up.
 		//
-		// Sending u.Role makes the server's check independent. If this
-		// middleware were skipped, reordered, or wrong, a viewer's role would
-		// arrive at the server and be refused there.
+		// What DOES protect the server is that a request which never passed
+		// through here carries no role at all. The handler reads the empty
+		// string, asserts it, and the server refuses: the class's approver_role
+		// is never "". So removing or reordering this middleware fails the
+		// legitimate path too, loudly, rather than opening the illegitimate one
+		// quietly. TestApproveSucceedsWithRoleSudoAndOrigin is what fails.
 		next(w, r.WithContext(context.WithValue(r.Context(), ctxPlanRoleKey{}, u.Role)))
 	}
 }

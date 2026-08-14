@@ -78,21 +78,6 @@ func TestPartitionReadDoesNotConsumeTransactionIDs(t *testing.T) {
 		}
 	}
 
-	// snapshot reads the current ID WITHOUT assigning one, so the measurement
-	// does not perturb what it measures.
-	snapshot := func() int64 {
-		t.Helper()
-		var v *int64
-		if err := pool.QueryRow(ctx,
-			`SELECT pg_snapshot_xmax(pg_current_snapshot())::text::bigint`).Scan(&v); err != nil {
-			t.Fatalf("snapshot: %v", err)
-		}
-		if v == nil {
-			t.Fatal("could not read the transaction-ID horizon")
-		}
-		return *v
-	}
-
 	const reads = 100
 
 	readerConn, err := pool.Acquire(ctx)
@@ -101,7 +86,19 @@ func TestPartitionReadDoesNotConsumeTransactionIDs(t *testing.T) {
 	}
 	defer readerConn.Release()
 
-	before := snapshot()
+	// Asked of each transaction directly rather than measured against the
+	// cluster's transaction-ID horizon.
+	//
+	// The horizon is cluster-wide. The first version of this test read it
+	// before and after the loop and allowed reads/2 of slack for "anything else
+	// touching this database" — which held until `go test` ran enough packages
+	// in parallel to burn 90 IDs of somebody else's work during the run, and
+	// the test failed on a defect that was not there. A measurement that other
+	// processes can move is not a measurement of this code.
+	//
+	// txid_current_if_assigned() returns NULL when the calling transaction has
+	// been assigned no ID, which is precisely the property: it is local, exact,
+	// and unaffected by every other backend on the instance.
 	for i := 0; i < reads; i++ {
 		// One explicit transaction per read, each as the restricted role. A
 		// read-only transaction is assigned no transaction ID unless something
@@ -121,24 +118,22 @@ func TestPartitionReadDoesNotConsumeTransactionIDs(t *testing.T) {
 			t.Fatalf("read %d saw %d rows as a restricted role with no partition set; "+
 				"the policy is not being applied, so this measures nothing", i, n)
 		}
+		var assigned *int64
+		if err := tx.QueryRow(ctx, `SELECT txid_current_if_assigned()`).Scan(&assigned); err != nil {
+			t.Fatalf("read assigned xid %d: %v", i, err)
+		}
+		if assigned != nil {
+			t.Fatalf("read %d of a partitioned entity was assigned transaction ID %d. "+
+				"Reads must not assign transaction IDs: doing so makes read volume "+
+				"drive wraparound pressure one-for-one, and the end state is a "+
+				"database that refuses writes. Check that atlantis.current_partition() "+
+				"uses txid_current_if_assigned() rather than txid_current()", i, *assigned)
+		}
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatalf("commit %d: %v", i, err)
 		}
 	}
-	burned := snapshot() - before
-
-	// Some slack: anything else touching this database during the run advances
-	// the horizon too. The failure being guarded against is one-per-read, so a
-	// generous ceiling still catches it by a wide margin.
-	if burned > reads/2 {
-		t.Errorf("%d reads of a partitioned entity consumed %d transaction IDs. "+
-			"Reads must not assign transaction IDs: doing so makes read volume "+
-			"drive wraparound pressure one-for-one, and the end state is a "+
-			"database that refuses writes. Check that atlantis.current_partition() "+
-			"uses txid_current_if_assigned() rather than txid_current()",
-			reads, burned)
-	}
-	t.Logf("%d RLS reads consumed %d transaction IDs", reads, burned)
+	t.Logf("%d RLS reads, none assigned a transaction ID", reads)
 
 	// And the mechanism still works: the discriminator is still transaction
 	// scoped, so the cheaper form did not buy performance with a leak.
