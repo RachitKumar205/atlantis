@@ -545,7 +545,7 @@ func (s *Service) PlanSchema(ctx context.Context, req *adminpb.PlanSchemaRequest
 	}
 
 	resp := &adminpb.PlanSchemaResponse{
-		PlanId:          computePlanID(req.GetCaller(), callerFiles, depHash),
+		PlanId:          computePlanID(req.GetCaller(), reqFiles, depHash),
 		Class:           planClassToPB(translateClass(d.HighestClass())),
 		UpSql:           scripts.Up,
 		DownSql:         scripts.Down,
@@ -771,7 +771,7 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 	if err != nil {
 		return nil, err
 	}
-	gotPlanID := computePlanID(req.GetCaller(), parsed, depHash)
+	gotPlanID := computePlanID(req.GetCaller(), reqFiles, depHash)
 	if gotPlanID != req.GetPlanId() {
 		return nil, fmt.Errorf("admin: plan %s is stale; current plan is %s — re-run tide apply",
 			req.GetPlanId(), gotPlanID)
@@ -801,22 +801,6 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 		return nil, fmt.Errorf("admin: the schema this plan depends on has moved (planned against %s, now %s) — re-plan and retry",
 			want[:min(12, len(want))], depHash[:min(12, len(depHash))])
 	}
-	// Destructive is refused HERE, not only in the CLI's switch.
-	//
-	// Until now the only class check was CrossCallerBreaking, so a destructive
-	// plan was stopped by `cmd/tide/apply.go` deciding not to call this RPC.
-	// Anything that skipped that switch — a script, a retry wrapper, a newer or
-	// older tide, any direct gRPC client holding CAPABILITY_SCHEMA_APPLY — could
-	// pass a valid plan_id and the DROP ran. A gate that lives in the client is
-	// not a gate.
-	//
-	// This is the interim shape. It becomes a lookup against the deployment's
-	// change policy, which decides per class whether a human must approve; the
-	// hole closes now rather than waiting for that.
-	if c := d.HighestClass(); c == codegen.ClassCrossCallerBreaking || c == codegen.ClassDestructive {
-		return nil, fmt.Errorf("admin: plan is %s and cannot be auto-applied", c)
-	}
-
 	var scripts codegen.SQLScripts
 	if prior == nil {
 		scripts, err = codegen.EmitInitial(newIR)
@@ -825,6 +809,34 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 	}
 	if err != nil {
 		return nil, fmt.Errorf("emit sql: %w", err)
+	}
+
+	// Whether this class of change may apply without a human.
+	//
+	// This is the gate that replaced a flat refusal of cross-caller-breaking
+	// and destructive plans. That refusal existed HERE rather than in the CLI's
+	// switch statement for a reason worth restating, because it is the reason
+	// this is here too: anything that skipped the switch — a script, a retry
+	// wrapper, an older or newer tide, any direct gRPC client holding
+	// CAPABILITY_SCHEMA_APPLY — could pass a valid plan id and the DROP ran. A
+	// gate that lives in the client is not a gate.
+	//
+	// It runs after emit because it compares against the SQL that would
+	// actually execute, and before the drift checks and the DDL because a
+	// change waiting on a human should not first spend the migration's locks.
+	if err := s.gateOnChangePolicy(ctx, tx, gateRequest{
+		Caller:      req.GetCaller(),
+		PlanID:      gotPlanID,
+		RequestedBy: req.GetCaller(),
+		Files:       reqFiles,
+		FilesHash:   filesHash(reqFiles),
+		BaseHash:    depHash,
+		Diff:        d,
+		UpSQL:       scripts.Up,
+		DownSQL:     scripts.Down,
+		Now:         time.Now().UTC(),
+	}); err != nil {
+		return nil, err
 	}
 
 	// Auto-enable extensions required by the new IR but not yet enabled
@@ -899,6 +911,26 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 	version, err := s.persistCheckpoint(ctx, tx, newIR, meta)
 	if err != nil {
 		return nil, err
+	}
+
+	// Close out this plan, and retire the caller's other outstanding ones.
+	//
+	// Both run whether or not this apply went through the gate: a plan row
+	// exists only when one was required, and the UPDATEs match nothing
+	// otherwise. Doing it unconditionally means there is no second condition
+	// to get wrong later, when a class moves from ungated to gated.
+	//
+	// Superseding matters more than it looks. The plans left behind were
+	// computed against a checkpoint this apply has just moved, so approving one
+	// afterwards would be approving a diff that no longer describes anything —
+	// and the gate would then refuse it on the SQL comparison, which reads to
+	// the approver as the product malfunctioning rather than as their decision
+	// having gone stale.
+	if err := markPlanApplied(ctx, tx, gotPlanID, version); err != nil {
+		return nil, fmt.Errorf("close out plan %s: %w", gotPlanID, err)
+	}
+	if err := supersedePlansFor(ctx, tx, req.GetCaller(), gotPlanID); err != nil {
+		return nil, fmt.Errorf("supersede outstanding plans for %s: %w", req.GetCaller(), err)
 	}
 
 	// Read the newly written content hash for the response.
@@ -1274,30 +1306,63 @@ func loadCheckpointHashTx(ctx context.Context, tx pgx.Tx) (string, error) {
 	return hash, nil
 }
 
-// computePlanID hashes (caller, file paths, dependency hash) so applies can
-// detect drift since planning. Stable across reruns of the same plan.
+// filesHash identifies one submitted file set by what is in it.
 //
-// depHash is callerDependencyHash's output, not the checkpoint's content hash.
-// This used to hash the entire prior checkpoint, which made the plan id move
-// whenever any caller applied anything — so the id-mismatch refusal fired
-// before the CAS ever ran, and narrowing only the CAS would have changed
-// nothing observable. The two staleness guards are deliberately fed the same
-// token: they answer the same question, and letting them disagree about what
-// "the world" means is how one of them ends up enforcing a stale rule.
-func computePlanID(caller string, files []*dsl.File, depHash string) string {
+// Each file contributes sha256(path) and sha256(content) — fixed 32-byte
+// fields, so no path or content can be crafted to run into the next one and
+// produce the digest of a different file set. Sorted by path, because the
+// order files arrive in is not part of what was submitted.
+func filesHash(files []SubmittedFile) string {
+	sorted := make([]SubmittedFile, len(files))
+	copy(sorted, files)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Path != sorted[j].Path {
+			return sorted[i].Path < sorted[j].Path
+		}
+		return string(sorted[i].Content) < string(sorted[j].Content)
+	})
+
+	h := sha256.New()
+	for _, f := range sorted {
+		p := sha256.Sum256([]byte(f.Path))
+		c := sha256.Sum256(f.Content)
+		h.Write(p[:])
+		h.Write(c[:])
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// computePlanID hashes (caller, files, dependency hash) so applies can detect
+// drift since planning. Stable across reruns of the same plan.
+//
+// # It hashes contents, and that is load-bearing
+//
+// It used to hash file PATHS. `cmd/tide/apply.go` and `backfill.go` both
+// documented the consequence — "a staleness check, not an integrity one" —
+// and both were right that nothing then rested on it: the security property
+// was that the request carries no channel for raw SQL, whatever files arrive.
+//
+// An approval changes that. Once a human's decision is recorded against a plan
+// id, a path-only id means a caller can be approved for "drop users.legacy_flag"
+// and then submit entirely different content at the same paths, against the
+// same checkpoint, match the same id, and inherit the approval. The gate would
+// have been passed by a change nobody looked at.
+//
+// # And it hashes the dependency hash, not the checkpoint
+//
+// depHash is callerDependencyHash's output. This used to hash the entire prior
+// checkpoint, which made the plan id move whenever any caller applied
+// anything — so the id-mismatch refusal fired before the CAS ever ran, and
+// narrowing only the CAS would have changed nothing observable. The two
+// staleness guards are deliberately fed the same token: they answer the same
+// question, and letting them disagree about what "the world" means is how one
+// of them ends up enforcing a stale rule.
+func computePlanID(caller string, files []SubmittedFile, depHash string) string {
 	h := sha256.New()
 	h.Write([]byte(caller))
 	h.Write([]byte{0})
-	// Sort files by path for determinism.
-	paths := make([]string, len(files))
-	for i, f := range files {
-		paths[i] = f.Path
-	}
-	sort.Strings(paths)
-	for _, p := range paths {
-		h.Write([]byte(p))
-		h.Write([]byte{0})
-	}
+	h.Write([]byte(filesHash(files)))
+	h.Write([]byte{0})
 	h.Write([]byte(depHash))
 	return hex.EncodeToString(h.Sum(nil)[:16])
 }

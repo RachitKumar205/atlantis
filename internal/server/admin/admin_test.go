@@ -154,9 +154,9 @@ func TestParseSubmitted_SurfacesErrors(t *testing.T) {
 }
 
 func TestComputePlanID_StableForSameInput(t *testing.T) {
-	files := []*dsl.File{
-		{Path: "caller-1:a.atl"},
-		{Path: "caller-1:b.atl"},
+	files := []SubmittedFile{
+		{Path: "a.atl", Content: []byte("entity A in x { id bigint primary }")},
+		{Path: "b.atl", Content: []byte("entity B in x { id bigint primary }")},
 	}
 	id1 := computePlanID("caller-1", files, "")
 	id2 := computePlanID("caller-1", files, "")
@@ -166,7 +166,7 @@ func TestComputePlanID_StableForSameInput(t *testing.T) {
 }
 
 func TestComputePlanID_ChangesWithTheDependencyHash(t *testing.T) {
-	files := []*dsl.File{{Path: "caller-1:a.atl"}}
+	files := []SubmittedFile{{Path: "a.atl", Content: []byte("entity A in x { id bigint primary }")}}
 	idA := computePlanID("caller-1", files, "")
 	idB := computePlanID("caller-1", files, "9f86d081884c7d65")
 	if idA == idB {
@@ -175,15 +175,17 @@ func TestComputePlanID_ChangesWithTheDependencyHash(t *testing.T) {
 }
 
 func TestComputePlanID_StableUnderFileReorder(t *testing.T) {
-	f1 := []*dsl.File{{Path: "caller-1:a.atl"}, {Path: "caller-1:b.atl"}}
-	f2 := []*dsl.File{{Path: "caller-1:b.atl"}, {Path: "caller-1:a.atl"}}
+	a := SubmittedFile{Path: "a.atl", Content: []byte("entity A in x { id bigint primary }")}
+	b := SubmittedFile{Path: "b.atl", Content: []byte("entity B in x { id bigint primary }")}
+	f1 := []SubmittedFile{a, b}
+	f2 := []SubmittedFile{b, a}
 	if computePlanID("caller-1", f1, "") != computePlanID("caller-1", f2, "") {
 		t.Errorf("PlanID should be invariant under file order; reordering changed it")
 	}
 }
 
 func TestComputePlanID_DiffersAcrossCallers(t *testing.T) {
-	files := []*dsl.File{{Path: "caller:a.atl"}}
+	files := []SubmittedFile{{Path: "a.atl", Content: []byte("entity A in x { id bigint primary }")}}
 	idA := computePlanID("caller-A", files, "")
 	idB := computePlanID("caller-B", files, "")
 	if idA == idB {
@@ -573,5 +575,58 @@ func TestMutatingPlaneSwitchIsNotAuthorization(t *testing.T) {
 	closed := New(nil, Config{AllowApplyMutation: false})
 	if err := closed.requireMutablePlane("schema apply"); err == nil {
 		t.Error("a closed plane permitted a mutation")
+	}
+}
+
+// TestPlanIDChangesWhenContentChangesUnderTheSamePaths is the approval-transfer
+// regression, and its name carries the reason.
+//
+// The plan id used to hash file PATHS. That was documented and, at the time,
+// harmless: nothing rested on the id beyond staleness, and the security
+// property was that the request carries no channel for raw SQL whatever files
+// arrive.
+//
+// An approval keyed on the id changes that. A reviewer approves "drop
+// users.legacy_flag"; the caller then submits entirely different content at the
+// same paths, against the same checkpoint; the id matches; the approval is
+// inherited by a change nobody read. Every other guard in the apply path lets
+// this through, because every other guard is asking a different question.
+func TestPlanIDChangesWhenContentChangesUnderTheSamePaths(t *testing.T) {
+	approved := []SubmittedFile{
+		{Path: "users.atl", Content: []byte("entity User in acct { id bigint primary }")},
+	}
+	swapped := []SubmittedFile{
+		{Path: "users.atl", Content: []byte("entity User in acct { id bigint primary  secret text }")},
+	}
+
+	const sameCheckpoint = "9f86d081884c7d65"
+	if computePlanID("acct", approved, sameCheckpoint) == computePlanID("acct", swapped, sameCheckpoint) {
+		t.Fatal("two different file sets at identical paths, against the same checkpoint, " +
+			"produced the same plan id. An approval recorded against one would be " +
+			"honoured for the other.")
+	}
+
+	// Stability for identical input is TestComputePlanID_StableForSameInput's
+	// job. Restating it here as a self-comparison asserted nothing — staticcheck
+	// flagged the expression as identical on both sides, which it was.
+}
+
+// filesHash must not be foolable by moving bytes across the path/content
+// boundary. Fixed-width digests per field are what makes that true; naive
+// concatenation with a separator is what makes it false.
+func TestFilesHashDistinguishesPathFromContent(t *testing.T) {
+	a := []SubmittedFile{{Path: "ab", Content: []byte("cd")}}
+	b := []SubmittedFile{{Path: "a", Content: []byte("bcd")}}
+	if filesHash(a) == filesHash(b) {
+		t.Error("a file set was hashed the same as one with bytes moved from the " +
+			"content into the path")
+	}
+
+	// A second file must change the digest even when it is empty — otherwise a
+	// submission can gain a file without the id noticing.
+	one := []SubmittedFile{{Path: "a.atl", Content: []byte("x")}}
+	two := []SubmittedFile{{Path: "a.atl", Content: []byte("x")}, {Path: "b.atl"}}
+	if filesHash(one) == filesHash(two) {
+		t.Error("adding an empty file left the digest unchanged")
 	}
 }

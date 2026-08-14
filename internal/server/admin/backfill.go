@@ -229,7 +229,7 @@ func (s *Service) BeginBackfillPlan(ctx context.Context, req *adminpb.BeginBackf
 	if err != nil {
 		return nil, err
 	}
-	gotPlanID := computePlanID(req.GetCaller(), parsed, depHash)
+	gotPlanID := computePlanID(req.GetCaller(), files, depHash)
 	if gotPlanID != req.GetPlanId() {
 		return nil, fmt.Errorf("admin: plan %s is stale; current plan is %s — re-run tide apply",
 			req.GetPlanId(), gotPlanID)
@@ -245,14 +245,18 @@ func (s *Service) BeginBackfillPlan(ctx context.Context, req *adminpb.BeginBackf
 	// stored and executed later by the backfill worker, in a transaction the
 	// plan-id check never covered.
 	//
-	// Note what the plan-id check above does and does not establish. It is a
-	// staleness guard: it proves the caller is working from the current
-	// checkpoint. It is NOT an integrity guard on the files, because
-	// computePlanID hashes file paths rather than contents, so a caller can
-	// submit different content at the same paths and still match. The security
-	// property here does not rest on it — it rests on the request having no
-	// channel for raw SQL at all, so whatever schema arrives, the DDL is
-	// codegen's output for that schema and nothing else.
+	// Note what the plan-id check above establishes. It is a staleness guard —
+	// it proves the caller is working from the current checkpoint — and, since
+	// computePlanID began hashing file contents, an integrity guard on the
+	// files as well: content submitted here that differs from what was planned
+	// produces a different id and is refused.
+	//
+	// The security property this RPC rests on is still the older and simpler
+	// one: the request has no channel for raw SQL at all, so whatever schema
+	// arrives, the DDL is codegen's output for that schema and nothing else.
+	// That holds whether or not the id check does. Keeping the two separate
+	// matters, because the id check protects a reviewer's decision and this
+	// protects against there being nothing to review.
 
 	var scripts codegen.SQLScripts
 	if prior == nil {
@@ -265,6 +269,33 @@ func (s *Service) BeginBackfillPlan(ctx context.Context, req *adminpb.BeginBackf
 	}
 	if err != nil {
 		return nil, fmt.Errorf("emit sql: %w", err)
+	}
+
+	// The change policy governs this path too, and until now it did not govern
+	// it at all — this RPC had no class check of any kind.
+	//
+	// That was a live hole rather than a theoretical one. A diff carrying a
+	// destructive change ALONGSIDE a backfill-required one classifies as
+	// backfill-required overall, so `tide apply --backfill` routed it here and
+	// the drop executed, having never passed the refusal ApplyMigration made.
+	// Two RPCs that apply schema need the same gate, or the gate is a
+	// suggestion about which entry point to use.
+	//
+	// The SQL compared is PreBackfillUp, because that is what this transaction
+	// executes. The post-backfill half runs later, in the worker, against a
+	// plan whose approval this one records.
+	if err := s.gateOnChangePolicy(ctx, tx, gateRequest{
+		Caller:      req.GetCaller(),
+		PlanID:      gotPlanID,
+		RequestedBy: req.GetCaller(),
+		Files:       files,
+		FilesHash:   filesHash(files),
+		BaseHash:    depHash,
+		Diff:        backfillDiff,
+		UpSQL:       scripts.PreBackfillUp,
+		Now:         time.Now().UTC(),
+	}); err != nil {
+		return nil, err
 	}
 
 	// Two different conditions produce an empty field list, and conflating them

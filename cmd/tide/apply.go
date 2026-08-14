@@ -202,12 +202,12 @@ func doBeginBackfill(ctx context.Context, client *adminClient, cfg *tideConfig, 
 	// for an audit finding — the server used to execute req.PreBackfillUpSQL
 	// verbatim, which made "may apply schema" mean "may run arbitrary SQL".
 	//
-	// What executes is now codegen's output for the submitted .atl files. That
-	// is a real narrowing — from any SQL to SQL the emitter will produce — but
-	// it is not a guarantee about the files themselves. The plan id is a
-	// staleness check, not an integrity one: computePlanID hashes file paths,
-	// not contents. The property that holds is that the request has no channel
-	// for raw SQL at all.
+	// What executes is codegen's output for the submitted .atl files. That is a
+	// real narrowing — from any SQL to SQL the emitter will produce — and the
+	// plan id now covers the files themselves too, since computePlanID hashes
+	// their contents rather than their paths. The property that holds
+	// regardless of either is that the request has no channel for raw SQL at
+	// all.
 	resp, err := client.BeginBackfillPlan(ctx, &adminpb.BeginBackfillPlanRequest{
 		Caller: cfg.Caller,
 		PlanId: plan.GetPlanId(),
