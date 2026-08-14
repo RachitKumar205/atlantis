@@ -14,7 +14,7 @@ import (
 
 // cmdPlan diffs the .atl file set against the IR checkpoint and writes a
 // staged migration pair into <stage-dir>. The staged files are NOT placed
-// directly in migrations/ — that's `tidectl approve`'s job (the human
+// directly in migrations/ — that's `tidectl promote`'s job (the human
 // review gate).
 //
 // Exit code:

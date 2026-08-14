@@ -69,7 +69,7 @@ The diff also covers two declaration forms that are not plain columns:
 
 A change to an **existing** custom query or procedure hot-reloads on `tide apply`; a **brand-new** one is persisted but its gRPC method isn't dispatchable until the server restarts (custom-service methods register at startup).
 
-The migration SQL is staged under `migrations/tidectl/_staged/`. `tidectl approve` promotes it into `migrations/tidectl/` with sequential numbering.
+The migration SQL is staged under `migrations/tidectl/_staged/`. `tidectl promote` promotes it into `migrations/tidectl/` with sequential numbering.
 
 ## Transaction boundary
 

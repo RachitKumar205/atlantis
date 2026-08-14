@@ -181,7 +181,7 @@ plan: ## Stage a migration from current .atl state
 
 .PHONY: approve
 approve: ## Promote staged migration into migrations/
-	$(GO) run ./cmd/tidectl approve
+	$(GO) run ./cmd/tidectl promote
 
 # ---------- migrate ----------
 #
@@ -295,7 +295,7 @@ dev-build: ## One dev cycle (called by air): plan â†’ approve (if meaningful) â†
 			rm -f .dev/migrations/tidectl/_staged/*.sql; \
 		else \
 			printf "\033[36m==> approve\033[0m\n"; \
-			$(GO) run ./cmd/tidectl approve -stage-dir=.dev/migrations/tidectl/_staged -migrations-dir=.dev/migrations/tidectl; \
+			$(GO) run ./cmd/tidectl promote -stage-dir=.dev/migrations/tidectl/_staged -migrations-dir=.dev/migrations/tidectl; \
 		fi; \
 	fi
 	@printf "\033[36m==> codegen\033[0m\n"

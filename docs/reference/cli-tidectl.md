@@ -88,12 +88,12 @@ tidectl adopt [--workspace <file>] [--workspace-cache <dir>]
 
 Exit codes: `0` clean adopt (or drift accepted with `--allow-drift`, checkpoint written); `1` drift detected and the baseline refused; `3` operational error. See [Adopt an existing database](../guides/adopt-an-existing-database.md).
 
-### `tidectl approve`
+### `tidectl promote`
 
 Moves every staged migration from `--stage-dir` into `--migrations-dir`. Does not re-run codegen or re-diff.
 
 ```
-tidectl approve [--stage-dir <dir>] [--migrations-dir <dir>]
+tidectl promote [--stage-dir <dir>] [--migrations-dir <dir>]
 ```
 
 | Flag | Default | Description |
@@ -102,6 +102,10 @@ tidectl approve [--stage-dir <dir>] [--migrations-dir <dir>]
 | `--migrations-dir` | `migrations/tidectl` | Target directory. |
 
 Exits 1 if `--stage-dir` is empty.
+
+This command was called `tidectl approve`. That spelling still works and prints a deprecation notice; it will be removed in the next release.
+
+The rename matters because atlantis now has an in-product approval — a person decides, in the console, whether a schema change may run against a production database. One word cannot cover both. `promote` moves files inside a repository; approval happens against a plan the server is holding, and nothing you run on the command line grants it.
 
 ### `tidectl lint`
 
@@ -165,7 +169,7 @@ The repository ships with two histories on disk:
 migrations/
 ├── infra/        # hand-written; runtime machinery (outbox, bookkeeping)
 └── tidectl/      # codegen-emitted; caller entities
-    └── _staged/  # output of `tidectl plan`; promoted by `tidectl approve`
+    └── _staged/  # output of `tidectl plan`; promoted by `tidectl promote`
 ```
 
 `tidectl migrate-up` targets one directory at a time via `--migrations-dir`. To apply both histories with their separate `_schema_migrations` tables, use the Makefile targets `make migrate-up-infra` and `make migrate-up-tidectl` (or invoke `migrate` directly per directory).

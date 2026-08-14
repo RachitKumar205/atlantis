@@ -95,7 +95,7 @@ Swap `linux-amd64` for `linux-arm64` per host. SHA256SUMS for every tarball is a
 Leave `ATL_ALLOW_APPLY_MUTATION=true`. The opt-out exists only for regulated workloads.
 
 - **`true` (default)** — callers run `tide apply --against=<prod>` from their CI. The server validates against the live IR, acquires an advisory lock, applies the DDL, writes the new `atlantis.ir_checkpoint` row under content-hash CAS, and inserts an audit row into `atlantis.schema_versions` — all in one Postgres transaction. `NOTIFY atl_schema_changed` fires from a Postgres trigger after commit and the server's listener rebuilds entity metadata. Editing an existing entity, custom query, or procedure takes effect within seconds (hot-reload). A brand-new entity, custom query, or procedure needs a rolling restart, because each gRPC method registers at startup only — hot-reload swaps the schema snapshot but can't add a method to the running server.
-- **`false` (regulated opt-in)** — the server rejects every `tide apply` mutation. Schema changes route through your own version control instead: update `atlantis.workspace.yaml`, regenerate migrations with `tidectl plan` + `tidectl approve`, review the materialised SQL, deploy. Use this only when a regulator requires literal SQL review before any production database change (SOX, HIPAA, PCI). The default flow already provides cross-caller safety, reversibility, atomic IR writes, and a per-apply audit row.
+- **`false` (regulated opt-in)** — the server rejects every `tide apply` mutation. Schema changes route through your own version control instead: update `atlantis.workspace.yaml`, regenerate migrations with `tidectl plan` + `tidectl promote`, review the materialised SQL, deploy. Use this only when a regulator requires literal SQL review before any production database change (SOX, HIPAA, PCI). The default flow already provides cross-caller safety, reversibility, atomic IR writes, and a per-apply audit row.
 
 Two boundaries gate every apply in the default flow, and both are enforced by the server:
 
@@ -260,7 +260,7 @@ The server is live the moment apply commits. The typed Go client does **not** up
 
 ### Regulated opt-in
 
-For workloads under SOX, HIPAA, or PCI rules that require literal SQL review before any production database change, set `ATL_ALLOW_APPLY_MUTATION=false`. Schema changes then go through the deployment repo: bump the caller ref in `atlantis.workspace.yaml`, run `tidectl plan` + `tidectl approve` in CI, review the emitted SQL on the PR, merge, and let the deploy pipeline run `tidectl migrate-up --migrations-dir migrations/tidectl` before rolling the new server image. The default flow's safety mechanisms (cross-caller break detection, advisory lock, transactional IR write) still apply — the regulated flow only adds the human-review step.
+For workloads under SOX, HIPAA, or PCI rules that require literal SQL review before any production database change, set `ATL_ALLOW_APPLY_MUTATION=false`. Schema changes then go through the deployment repo: bump the caller ref in `atlantis.workspace.yaml`, run `tidectl plan` + `tidectl promote` in CI, review the emitted SQL on the PR, merge, and let the deploy pipeline run `tidectl migrate-up --migrations-dir migrations/tidectl` before rolling the new server image. The default flow's safety mechanisms (cross-caller break detection, advisory lock, transactional IR write) still apply — the regulated flow only adds the human-review step.
 
 ## Logging
 

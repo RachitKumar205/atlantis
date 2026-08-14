@@ -50,7 +50,7 @@ Choose this only when a regulator (SOX, HIPAA, PCI) requires literal SQL review 
 2. PR merges. The server refuses any `tide apply` mutation.
 3. An operator (or webhook) opens a PR against the atlantis deployment repo bumping the caller's ref in `atlantis.workspace.yaml`.
 4. Deployment-repo CI runs `tidectl plan`, which clones each caller at its pinned ref, runs codegen against the unioned IR, and writes `migrations/tidectl/_staged/NNNN_tidectl_staged.up.sql` + `.down.sql`.
-5. The operator reviews the staged SQL. `tidectl approve` renames it into `migrations/tidectl/` at the next sequential number.
+5. The operator reviews the staged SQL. `tidectl promote` renames it into `migrations/tidectl/` at the next sequential number.
 6. Deployment-repo CI is expected to re-run `tidectl plan` and diff the working tree to catch any hand edit to a promoted file. (atlantis upstream's own `codegen-check` target guards generated client code, not promoted migrations — the staged-file integrity guard belongs in your deployment-repo CI.)
 7. PR merges; the deploy pipeline runs `tidectl migrate-up --migrations-dir migrations/tidectl` (writes `atlantis_schema_migrations_tidectl`) before rolling the new server image.
 
@@ -98,7 +98,7 @@ In the **regulated flow**, follow it with:
 
 **A new entity migration in the default flow**: there's nothing to add on disk. The developer edits an `.atl` in their caller repo and `tide apply` does the rest.
 
-**A new entity migration in the regulated flow**: the developer edits an `.atl` in their caller repo, the operator runs `tidectl plan` (which writes the staged pair), and `tidectl approve` promotes it to the next sequential number under `migrations/tidectl/`.
+**A new entity migration in the regulated flow**: the developer edits an `.atl` in their caller repo, the operator runs `tidectl plan` (which writes the staged pair), and `tidectl promote` promotes it to the next sequential number under `migrations/tidectl/`.
 
 ## Down migrations
 
