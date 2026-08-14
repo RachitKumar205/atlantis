@@ -1,4 +1,9 @@
-package main
+// Package migrate applies the SQL migration tree to a Postgres database.
+//
+// It lives here rather than in cmd/server because two things need it and only
+// one of them is the server: tests that boot against a private database have to
+// build the schema first, and a test binary cannot call into package main.
+package migrate
 
 import (
 	"errors"
@@ -13,7 +18,7 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 )
 
-// runAutoMigrate applies any pending migrations against the configured
+// Run applies any pending migrations against the configured
 // Postgres URL when AUTO_MIGRATE is enabled (the default in
 // docker-compose / make dev-isolated; off in production where ops runs
 // migrations explicitly).
@@ -28,7 +33,7 @@ import (
 // Failures here are fatal: starting the server against an out-of-date
 // schema would let RPCs hit columns that don't exist yet. We'd rather
 // crash on boot than serve garbage.
-func runAutoMigrate(pgURL string, migrationsDir string, log *slog.Logger) error {
+func Run(pgURL string, migrationsDir string, log *slog.Logger) error {
 	if err := applyDir(pgURL, migrationsDir, "infra", "atlantis_schema_migrations_infra", log); err != nil {
 		return err
 	}

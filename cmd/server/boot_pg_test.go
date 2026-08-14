@@ -17,6 +17,7 @@ import (
 
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/migrate"
 	"github.com/rachitkumar205/atlantis/internal/server/authz"
 	"github.com/rachitkumar205/atlantis/internal/testsupport/pgcatalog"
 )
@@ -266,7 +267,7 @@ func bootDatabase(t *testing.T, adminDSN string) string {
 		`CREATE EXTENSION IF NOT EXISTS timescaledb`,
 	)
 
-	if err := runAutoMigrate(dsn, "../../migrations", quietBootLogger()); err != nil {
+	if err := migrate.Run(dsn, "../../migrations", quietBootLogger()); err != nil {
 		t.Fatalf("migrate %s: %v", dbName, err)
 	}
 	return dsn

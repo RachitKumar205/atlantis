@@ -2,7 +2,19 @@
 
 Every `tide apply` creates a numbered schema version. The version stores the full IR snapshot, a structural diff from the previous version, the generated SQL, the caller identity, a content hash, and a timestamp. The version registry is append-only and is the source of truth for what has been deployed and when (the `.atl` files remain the authoring authority for schema definitions).
 
-Each new version persists the IR checkpoint to Postgres with a content hash (sha256 of the canonical IR JSON). The server detects the new checkpoint via PostgreSQL `LISTEN/NOTIFY` and hot-reloads entity metadata automatically — no restart is needed for field changes to existing entities or edits to existing custom queries and procedures. (A newly *added* custom query or procedure is the exception: its gRPC method registers only at startup, so it isn't callable until the server restarts — see [custom queries and procedures](custom-queries-and-procedures.md#adding-vs-editing).) The content hash serves as both a version identity and a CAS (compare-and-swap) token: `tide apply` rejects writes when the checkpoint has moved since planning, preventing lost updates from concurrent applies.
+Each new version persists the IR checkpoint to Postgres with a content hash (sha256 of the canonical IR JSON). The server detects the new checkpoint via PostgreSQL `LISTEN/NOTIFY` and hot-reloads entity metadata automatically — no restart is needed for field changes to existing entities or edits to existing custom queries and procedures. (A newly *added* custom query or procedure is the exception: its gRPC method registers only at startup, so it isn't callable until the server restarts — see [custom queries and procedures](custom-queries-and-procedures.md#adding-vs-editing).) The content hash is the version's identity.
+
+## When a plan goes stale
+
+`tide apply` refuses a plan whose ground moved after `tide plan` ran, so two applies racing cannot lose one another's work. Re-run `tide plan` and apply again.
+
+What counts as moving is scoped to the caller. A plan is invalidated by a change to:
+
+- the caller's own schema,
+- an entity it references, a job its workflows run, or an entity its queries and procedures touch,
+- anything the migration is about to emit DDL for.
+
+A change to another caller's schema that meets none of those leaves the plan valid. This matters on any deployment with more than one team: an unrelated service shipping a column does not send everybody else back to `tide plan`.
 
 ```
 $ tide history --limit=3

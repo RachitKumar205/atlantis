@@ -211,7 +211,25 @@ func (s *Service) BeginBackfillPlan(ctx context.Context, req *adminpb.BeginBackf
 	}
 	codegen.AssignProtoNumbers(prior, newIR)
 
-	gotPlanID := computePlanID(req.GetCaller(), parsed, prior)
+	// The caller context is the same one PlanSchema and ApplyMigration build.
+	// Without it every removal classifies as cross-caller-breaking, which moves
+	// changes between diff buckets and reorders the emitted script — so the
+	// operator would review one sequence at plan time and a different one would
+	// execute here.
+	//
+	// It is built before the plan-id check because the check needs the diff:
+	// the staleness token is scoped to what this caller depends on, and the
+	// diff is part of that scope.
+	backfillOwnership := buildEntityOwnership(req.GetCaller(), parsed, others)
+	backfillCrossRefs := buildCrossCallerRefs(others)
+	backfillDiff := codegen.ComputeDiff(prior, newIR,
+		codegen.WithCallerContext(req.GetCaller(), backfillOwnership, backfillCrossRefs))
+
+	depHash, err := callerDependencyHash(req.GetCaller(), prior, backfillOwnership, parsed, backfillDiff)
+	if err != nil {
+		return nil, err
+	}
+	gotPlanID := computePlanID(req.GetCaller(), parsed, depHash)
 	if gotPlanID != req.GetPlanId() {
 		return nil, fmt.Errorf("admin: plan %s is stale; current plan is %s — re-run tide apply",
 			req.GetPlanId(), gotPlanID)
@@ -235,16 +253,6 @@ func (s *Service) BeginBackfillPlan(ctx context.Context, req *adminpb.BeginBackf
 	// property here does not rest on it — it rests on the request having no
 	// channel for raw SQL at all, so whatever schema arrives, the DDL is
 	// codegen's output for that schema and nothing else.
-	//
-	// The caller context is the same one PlanSchema and ApplyMigration build.
-	// Without it every removal classifies as cross-caller-breaking, which moves
-	// changes between diff buckets and reorders the emitted script — so the
-	// operator would review one sequence at plan time and a different one would
-	// execute here.
-	backfillOwnership := buildEntityOwnership(req.GetCaller(), parsed, others)
-	backfillCrossRefs := buildCrossCallerRefs(others)
-	backfillDiff := codegen.ComputeDiff(prior, newIR,
-		codegen.WithCallerContext(req.GetCaller(), backfillOwnership, backfillCrossRefs))
 
 	var scripts codegen.SQLScripts
 	if prior == nil {
@@ -365,15 +373,13 @@ VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
 		}
 	}
 
-	bfHash, _ := loadCheckpointHashTx(ctx, tx)
 	_, err = s.persistCheckpoint(ctx, tx, newIR, versionMeta{
-		Caller:       req.GetCaller(),
-		PlanClass:    backfillDiff.HighestClass().String(),
-		Diff:         backfillDiff,
-		UpSQL:        scripts.PreBackfillUp,
-		PlanID:       req.GetPlanId(),
-		EventType:    "apply",
-		ExpectedHash: bfHash,
+		Caller:    req.GetCaller(),
+		PlanClass: backfillDiff.HighestClass().String(),
+		Diff:      backfillDiff,
+		UpSQL:     scripts.PreBackfillUp,
+		PlanID:    req.GetPlanId(),
+		EventType: "apply",
 	})
 	if err != nil {
 		return nil, err

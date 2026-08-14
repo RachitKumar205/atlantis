@@ -319,9 +319,15 @@ message PlanSchemaResponse {
   repeated string parse_errors = 6;
   repeated string breaking_detail = 7;
 
-  // Content hash of the IR checkpoint at plan time, returned in
-  // ApplyMigrationRequest so the server can detect a compare-and-swap
-  // conflict against a checkpoint that moved underneath the caller.
+  // Compare-and-swap token, returned in ApplyMigrationRequest so the server
+  // can refuse an apply whose ground moved after the plan was made.
+  //
+  // It covers the part of the checkpoint this caller depends on — its own
+  // schema, what it reads from other callers, and whatever this apply will
+  // emit DDL for — and not the whole checkpoint. The field name predates
+  // that: it did carry the checkpoint's own content hash, which meant any
+  // caller's apply invalidated every other caller's plan. Renaming it would
+  // break every deployed tide for a word.
   string checkpoint_hash = 8;
 
   // pg_query_go validation failures for query/procedure blocks.
@@ -361,7 +367,8 @@ message ApplyMigrationRequest {
   string caller = 1;
   string plan_id = 2;
   repeated SubmittedFile files = 3;
-  // CAS token from PlanSchemaResponse.
+  // CAS token from PlanSchemaResponse. Empty skips the check, which is what
+  // the first apply into an empty database sends.
   string checkpoint_hash = 4;
 }
 

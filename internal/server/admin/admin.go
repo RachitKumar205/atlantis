@@ -253,8 +253,9 @@ type PlanResponse struct {
 	ParseErrors    []string      `json:"parse_errors"`
 	BreakingDetail []string      `json:"breaking_detail"`
 
-	// CheckpointHash is the content hash of the IR checkpoint at plan time.
-	// Sent back in ApplyRequest for CAS conflict detection.
+	// CheckpointHash is the compare-and-swap token, sent back in ApplyRequest.
+	// It covers the part of the checkpoint this caller depends on rather than
+	// the whole of it — see callerDependencyHash.
 	CheckpointHash string `json:"checkpoint_hash"`
 
 	// CustomSQLErrors lists pg_query_go validation failures for query/procedure blocks.
@@ -481,6 +482,13 @@ func (s *Service) PlanSchema(ctx context.Context, req *adminpb.PlanSchemaRequest
 	d := codegen.ComputeDiff(prior, newIR,
 		codegen.WithCallerContext(req.GetCaller(), ownership, crossRefs))
 
+	// The token the apply is checked against. Scoped to what this caller reads
+	// so an unrelated caller's apply does not invalidate this plan.
+	depHash, err := callerDependencyHash(req.GetCaller(), prior, ownership, callerFiles, d)
+	if err != nil {
+		return nil, err
+	}
+
 	// Validate every custom query/procedure with pg_query_go. Lowering catches
 	// dep-free rules; this catches syntax and unresolved table refs.
 	// Scoped to the submitting caller's content — stored content from other
@@ -537,12 +545,12 @@ func (s *Service) PlanSchema(ctx context.Context, req *adminpb.PlanSchemaRequest
 	}
 
 	resp := &adminpb.PlanSchemaResponse{
-		PlanId:          computePlanID(req.GetCaller(), callerFiles, prior),
+		PlanId:          computePlanID(req.GetCaller(), callerFiles, depHash),
 		Class:           planClassToPB(translateClass(d.HighestClass())),
 		UpSql:           scripts.Up,
 		DownSql:         scripts.Down,
 		ImpactReport:    impactToPB(buildImpactReport(req.GetCaller(), others, d, newIR)),
-		CheckpointHash:  s.loadCheckpointHash(ctx),
+		CheckpointHash:  depHash,
 		CustomSqlErrors: customSQLErrs,
 		CustomCount: &adminpb.CustomDeclCount{
 			Queries:    int32(len(newIR.Queries)),
@@ -742,10 +750,39 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 		return nil, fmt.Errorf("admin: custom SQL validation failed: %v", msgs)
 	}
 
-	gotPlanID := computePlanID(req.GetCaller(), parsed, prior)
+	depHash, err := callerDependencyHash(req.GetCaller(), prior, applyOwnership, parsed, d)
+	if err != nil {
+		return nil, err
+	}
+	gotPlanID := computePlanID(req.GetCaller(), parsed, depHash)
 	if gotPlanID != req.GetPlanId() {
 		return nil, fmt.Errorf("admin: plan %s is stale; current plan is %s — re-run tide apply",
 			req.GetPlanId(), gotPlanID)
+	}
+	// The compare-and-swap.
+	//
+	// Be clear about what it adds over the check above, because it is less
+	// than it looks: the plan id is hashed over this same token, so any drift
+	// that would fail here has already failed there. What is left is a client
+	// that sends the plan id from one plan and the token from another — a
+	// mixed-up retry wrapper, not schema drift. It stays for that, and because
+	// the token has to travel on the wire regardless: an approval, when there
+	// is one, is recorded against the ground the approver saw, and this field
+	// is that ground.
+	//
+	// It is checked here rather than where it used to live, at the end of the
+	// transaction beside the checkpoint write. That put it after the DDL, so a
+	// caller working from moved ground executed its whole migration before
+	// anything looked at the token. The transaction rolled back either way, so
+	// correctness never depended on the placement — but the DDL had taken its
+	// locks by then, and on a large table that is minutes of ACCESS EXCLUSIVE
+	// spent on an apply that was always going to be refused.
+	//
+	// An empty token skips the check. That is the first apply into an empty
+	// database, where there is no checkpoint to have moved.
+	if want := req.GetCheckpointHash(); want != "" && want != depHash {
+		return nil, fmt.Errorf("admin: the schema this plan depends on has moved (planned against %s, now %s) — re-plan and retry",
+			want[:min(12, len(want))], depHash[:min(12, len(depHash))])
 	}
 	// Destructive is refused HERE, not only in the CLI's switch.
 	//
@@ -833,21 +870,14 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 		return nil, fmt.Errorf("apply: %w", err)
 	}
 
-	// Use client-provided hash when available (what they planned against);
-	// fall back to reading it server-side inside the advisory-locked tx.
-	expectedHash := req.GetCheckpointHash()
-	if expectedHash == "" {
-		expectedHash, _ = loadCheckpointHashTx(ctx, tx)
-	}
 	meta := versionMeta{
-		Caller:       req.GetCaller(),
-		PlanClass:    d.HighestClass().String(),
-		Diff:         d,
-		UpSQL:        scripts.Up,
-		DownSQL:      scripts.Down,
-		PlanID:       gotPlanID,
-		EventType:    "apply",
-		ExpectedHash: expectedHash,
+		Caller:    req.GetCaller(),
+		PlanClass: d.HighestClass().String(),
+		Diff:      d,
+		UpSQL:     scripts.Up,
+		DownSQL:   scripts.Down,
+		PlanID:    gotPlanID,
+		EventType: "apply",
 	}
 	version, err := s.persistCheckpoint(ctx, tx, newIR, meta)
 	if err != nil {
@@ -1132,29 +1162,27 @@ func (s *Service) loadCheckpointTx(ctx context.Context, tx pgx.Tx) (*dsl.IR, err
 	return dsl.DecodeJSONIR(raw)
 }
 
-func (s *Service) loadCheckpointHash(ctx context.Context) string {
-	var hash string
-	err := s.pool.QueryRow(ctx, `SELECT content_hash FROM atlantis.ir_checkpoint WHERE id = 1`).Scan(&hash)
-	if err != nil {
-		return ""
-	}
-	return hash
-}
-
 // versionMeta holds the metadata for one schema_versions row. Passed to
 // persistCheckpoint so the caller can supply the diff, SQL, plan ID, and
 // event type without persistCheckpoint needing to know how they were
 // produced.
+//
+// It carries no compare-and-swap token. There was one, and three of its four
+// call sites read the current checkpoint hash inside the transaction and
+// handed it straight back as the value to compare against — a check on a
+// value against itself, which no drift could fail. The fourth, ApplyMigration,
+// is where the real token lives, and it now checks it beside the plan-id check
+// rather than here: both ask "did the world move since the plan", and keeping
+// them apart is what let one of them decay into a self-comparison unnoticed.
 type versionMeta struct {
-	Caller       string
-	PlanClass    string
-	Diff         *codegen.Diff
-	UpSQL        string
-	DownSQL      string
-	PlanID       string
-	EventType    string // "apply", "rollback", "adopt"
-	ParentVer    *int64
-	ExpectedHash string // CAS token — if set, reject when current checkpoint hash differs
+	Caller    string
+	PlanClass string
+	Diff      *codegen.Diff
+	UpSQL     string
+	DownSQL   string
+	PlanID    string
+	EventType string // "apply", "rollback", "adopt"
+	ParentVer *int64
 }
 
 func (s *Service) persistCheckpoint(ctx context.Context, tx pgx.Tx, ir *dsl.IR, meta versionMeta) (int64, error) {
@@ -1165,19 +1193,6 @@ func (s *Service) persistCheckpoint(ctx context.Context, tx pgx.Tx, ir *dsl.IR, 
 
 	h := sha256.Sum256(raw)
 	irHash := hex.EncodeToString(h[:])
-
-	// CAS: reject if the checkpoint has moved since the caller planned.
-	if meta.ExpectedHash != "" {
-		got, err := loadCheckpointHashTx(ctx, tx)
-		if err != nil {
-			return 0, fmt.Errorf("cas: %w", err)
-		}
-		if got != "" && got != meta.ExpectedHash {
-			return 0, fmt.Errorf("admin: checkpoint has moved (expected %s, got %s) — re-plan and retry",
-				meta.ExpectedHash[:min(12, len(meta.ExpectedHash))],
-				got[:min(12, len(got))])
-		}
-	}
 
 	_, err = tx.Exec(ctx, `
 INSERT INTO atlantis.ir_checkpoint (id, ir, applied_by, content_hash) VALUES (1, $1, $2, $3)
@@ -1242,9 +1257,17 @@ func loadCheckpointHashTx(ctx context.Context, tx pgx.Tx) (string, error) {
 	return hash, nil
 }
 
-// computePlanID hashes (caller, files, prior checkpoint hash) so applies can
+// computePlanID hashes (caller, file paths, dependency hash) so applies can
 // detect drift since planning. Stable across reruns of the same plan.
-func computePlanID(caller string, files []*dsl.File, prior *dsl.IR) string {
+//
+// depHash is callerDependencyHash's output, not the checkpoint's content hash.
+// This used to hash the entire prior checkpoint, which made the plan id move
+// whenever any caller applied anything — so the id-mismatch refusal fired
+// before the CAS ever ran, and narrowing only the CAS would have changed
+// nothing observable. The two staleness guards are deliberately fed the same
+// token: they answer the same question, and letting them disagree about what
+// "the world" means is how one of them ends up enforcing a stale rule.
+func computePlanID(caller string, files []*dsl.File, depHash string) string {
 	h := sha256.New()
 	h.Write([]byte(caller))
 	h.Write([]byte{0})
@@ -1258,10 +1281,7 @@ func computePlanID(caller string, files []*dsl.File, prior *dsl.IR) string {
 		h.Write([]byte(p))
 		h.Write([]byte{0})
 	}
-	if prior != nil {
-		b, _ := prior.EncodeJSON()
-		h.Write(b)
-	}
+	h.Write([]byte(depHash))
 	return hex.EncodeToString(h.Sum(nil)[:16])
 }
 

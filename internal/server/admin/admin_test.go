@@ -158,34 +158,34 @@ func TestComputePlanID_StableForSameInput(t *testing.T) {
 		{Path: "caller-1:a.atl"},
 		{Path: "caller-1:b.atl"},
 	}
-	id1 := computePlanID("caller-1", files, nil)
-	id2 := computePlanID("caller-1", files, nil)
+	id1 := computePlanID("caller-1", files, "")
+	id2 := computePlanID("caller-1", files, "")
 	if id1 != id2 {
 		t.Errorf("PlanID should be deterministic: %q != %q", id1, id2)
 	}
 }
 
-func TestComputePlanID_ChangesWithCheckpoint(t *testing.T) {
+func TestComputePlanID_ChangesWithTheDependencyHash(t *testing.T) {
 	files := []*dsl.File{{Path: "caller-1:a.atl"}}
-	idA := computePlanID("caller-1", files, nil)
-	idB := computePlanID("caller-1", files, &dsl.IR{Version: 1})
+	idA := computePlanID("caller-1", files, "")
+	idB := computePlanID("caller-1", files, "9f86d081884c7d65")
 	if idA == idB {
-		t.Errorf("PlanID should change when checkpoint changes; both = %q", idA)
+		t.Errorf("PlanID should change when the dependency hash changes; both = %q", idA)
 	}
 }
 
 func TestComputePlanID_StableUnderFileReorder(t *testing.T) {
 	f1 := []*dsl.File{{Path: "caller-1:a.atl"}, {Path: "caller-1:b.atl"}}
 	f2 := []*dsl.File{{Path: "caller-1:b.atl"}, {Path: "caller-1:a.atl"}}
-	if computePlanID("caller-1", f1, nil) != computePlanID("caller-1", f2, nil) {
+	if computePlanID("caller-1", f1, "") != computePlanID("caller-1", f2, "") {
 		t.Errorf("PlanID should be invariant under file order; reordering changed it")
 	}
 }
 
 func TestComputePlanID_DiffersAcrossCallers(t *testing.T) {
 	files := []*dsl.File{{Path: "caller:a.atl"}}
-	idA := computePlanID("caller-A", files, nil)
-	idB := computePlanID("caller-B", files, nil)
+	idA := computePlanID("caller-A", files, "")
+	idB := computePlanID("caller-B", files, "")
 	if idA == idB {
 		t.Errorf("different callers should produce different PlanIDs; got %q for both", idA)
 	}

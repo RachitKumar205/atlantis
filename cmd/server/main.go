@@ -32,6 +32,7 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/cache/read"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/dsl/sqlvalidate"
+	"github.com/rachitkumar205/atlantis/internal/migrate"
 	"github.com/rachitkumar205/atlantis/internal/obs"
 	"github.com/rachitkumar205/atlantis/internal/schema"
 	"github.com/rachitkumar205/atlantis/internal/server/admin"
@@ -100,7 +101,7 @@ func main() {
 // can register cleanup before its Run starts.
 func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing, adminPolicy *authz.Policy) error {
 	if cfg.AutoMigrate {
-		if err := runAutoMigrate(cfg.PGURL, cfg.MigrationsDir, log); err != nil {
+		if err := migrate.Run(cfg.PGURL, cfg.MigrationsDir, log); err != nil {
 			return err
 		}
 	}

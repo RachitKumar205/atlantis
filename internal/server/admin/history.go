@@ -426,17 +426,15 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.GetToV
 		}
 	}
 
-	checkpointHash, _ := loadCheckpointHashTx(ctx, tx)
 	parentVer := req.GetToVersion()
 	version, err := s.persistCheckpoint(ctx, tx, targetIR, versionMeta{
-		Caller:       req.GetCaller(),
-		PlanClass:    d.HighestClass().String(),
-		Diff:         d,
-		UpSQL:        scripts.Up,
-		DownSQL:      scripts.Down,
-		EventType:    "rollback",
-		ParentVer:    &parentVer,
-		ExpectedHash: checkpointHash,
+		Caller:    req.GetCaller(),
+		PlanClass: d.HighestClass().String(),
+		Diff:      d,
+		UpSQL:     scripts.Up,
+		DownSQL:   scripts.Down,
+		EventType: "rollback",
+		ParentVer: &parentVer,
 	})
 	if err != nil {
 		return nil, err
