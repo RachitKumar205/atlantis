@@ -125,6 +125,24 @@ service AdminService {
     option (required_capability) = CAPABILITY_SCHEMA_APPROVE;
   }
 
+  // Changes waiting on a human, and the decisions about them.
+  //
+  // Reading is SCHEMA_READ: a change queued for approval is not a secret from
+  // the engineers whose deploys it blocks. Deciding is SCHEMA_APPROVE, which no
+  // identity that can apply holds.
+  rpc ListSchemaPlans(ListSchemaPlansRequest) returns (ListSchemaPlansResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  rpc GetSchemaPlan(GetSchemaPlanRequest) returns (GetSchemaPlanResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  rpc ApproveSchemaPlan(ApproveSchemaPlanRequest) returns (ApproveSchemaPlanResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_APPROVE;
+  }
+  rpc RejectSchemaPlan(RejectSchemaPlanRequest) returns (RejectSchemaPlanResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_APPROVE;
+  }
+
   // Reverts the shared checkpoint for every caller in one transaction.
   rpc RollbackSchema(RollbackSchemaRequest) returns (RollbackSchemaResponse) {
     option (required_capability) = CAPABILITY_OPERATOR;
@@ -450,6 +468,100 @@ message SetChangePolicyResponse {
   // The policy as it stands after the write, every class included, so a client
   // never has to re-read to render what it just changed.
   repeated ChangePolicyEntry entries = 1;
+}
+
+// SchemaPlanSummary is one change waiting on, or already carrying, a decision.
+message SchemaPlanSummary {
+  string plan_id = 1;
+  string caller = 2;
+  PlanClass change_class = 3;
+  // pending_approval | approved | rejected | applied | superseded.
+  string state = 4;
+  // The verified cert CN that tried to apply.
+  string requested_by = 5;
+  string created_at = 6;
+  string expires_at = 7;
+  string decided_by = 8;
+  string decided_by_role = 9;
+  string decided_at = 10;
+  string decision_reason = 11;
+
+  // The role this class currently requires, resolved from the change policy so
+  // a client does not have to join the two itself — and so it sees the rule as
+  // it stands now rather than as it stood when the plan was filed.
+  string approver_role = 12;
+
+  // Whether the window has closed, evaluated at read time. Reported rather than
+  // left to the client to compute, because the server is what will enforce it
+  // and two clocks disagreeing about an approval is not a difference anyone
+  // wants to debug.
+  bool expired = 13;
+}
+
+// SchemaPlanDetail is what a reviewer decides on.
+message SchemaPlanDetail {
+  SchemaPlanSummary summary = 1;
+
+  // The proposed .atl source. A reviewer approves SCHEMA; up_sql is what the
+  // emitter makes of it, and approving DDL without sight of the declaration
+  // that produced it is a signature, not a review.
+  repeated SubmittedFile files = 2;
+
+  bytes diff = 3;
+  string up_sql = 4;
+  string down_sql = 5;
+  string base_checkpoint_hash = 6;
+}
+
+message ListSchemaPlansRequest {
+  // Empty means every state. Callers wanting the queue pass 'pending_approval'.
+  string state = 1;
+  string caller = 2;
+  int32 limit = 3;
+}
+
+message ListSchemaPlansResponse {
+  repeated SchemaPlanSummary plans = 1;
+}
+
+message GetSchemaPlanRequest {
+  string plan_id = 1;
+}
+
+message GetSchemaPlanResponse {
+  SchemaPlanDetail plan = 1;
+}
+
+// ApproveSchemaPlanRequest carries who is deciding and what role they hold.
+//
+// The server cannot authenticate a console user — that identity system belongs
+// to the console — so decided_by is recorded as given. decided_by_role is
+// different: the server checks it against the class's approver_role before
+// writing anything. It cannot prove the console asserted the role honestly, but
+// it can refuse an assertion that does not match the rule, so a middleware
+// ordering mistake cannot quietly produce an under-privileged approval.
+message ApproveSchemaPlanRequest {
+  string plan_id = 1;
+  string decided_by = 2;
+  string decided_by_role = 3;
+  string reason = 4;
+}
+
+message ApproveSchemaPlanResponse {
+  SchemaPlanSummary plan = 1;
+}
+
+message RejectSchemaPlanRequest {
+  string plan_id = 1;
+  string decided_by = 2;
+  string decided_by_role = 3;
+  // Reaches the caller in the refusal they get on their next apply, so it is
+  // the whole of what they are told about why. Required.
+  string reason = 4;
+}
+
+message RejectSchemaPlanResponse {
+  SchemaPlanSummary plan = 1;
 }
 
 message GetMergedSchemaRequest {

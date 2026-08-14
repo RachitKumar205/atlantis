@@ -52,6 +52,10 @@ func RegisterGenerated(srv *grpc.Server, svc *Service) {
 // on UnimplementedAdminServiceServer above for why the compiler no longer can.
 var migratedRPCs = map[string]bool{
 	"GetChangePolicy":        true,
+	"ListSchemaPlans":        true,
+	"GetSchemaPlan":          true,
+	"ApproveSchemaPlan":      true,
+	"RejectSchemaPlan":       true,
 	"SetChangePolicy":        true,
 	"GetCallerAliases":       true,
 	"SetCallerAliases":       true,
@@ -231,6 +235,22 @@ func (g *grpcServer) GetChangePolicy(ctx context.Context, req *adminpb.GetChange
 
 func (g *grpcServer) SetChangePolicy(ctx context.Context, req *adminpb.SetChangePolicyRequest) (*adminpb.SetChangePolicyResponse, error) {
 	return g.svc.SetChangePolicy(ctx, req)
+}
+
+func (g *grpcServer) ListSchemaPlans(ctx context.Context, req *adminpb.ListSchemaPlansRequest) (*adminpb.ListSchemaPlansResponse, error) {
+	return g.svc.ListSchemaPlans(ctx, req)
+}
+
+func (g *grpcServer) GetSchemaPlan(ctx context.Context, req *adminpb.GetSchemaPlanRequest) (*adminpb.GetSchemaPlanResponse, error) {
+	return g.svc.GetSchemaPlan(ctx, req)
+}
+
+func (g *grpcServer) ApproveSchemaPlan(ctx context.Context, req *adminpb.ApproveSchemaPlanRequest) (*adminpb.ApproveSchemaPlanResponse, error) {
+	return g.svc.ApproveSchemaPlan(ctx, req)
+}
+
+func (g *grpcServer) RejectSchemaPlan(ctx context.Context, req *adminpb.RejectSchemaPlanRequest) (*adminpb.RejectSchemaPlanResponse, error) {
+	return g.svc.RejectSchemaPlan(ctx, req)
 }
 
 func (g *grpcServer) GetLogs(ctx context.Context, req *adminpb.GetLogsRequest) (*adminpb.GetLogsResponse, error) {

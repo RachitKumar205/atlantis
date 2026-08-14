@@ -360,6 +360,41 @@ export interface ChangePolicyResponse {
   entries: ChangePolicyEntry[]
 }
 
+/** One change waiting on, or already carrying, a decision. */
+export interface SchemaPlanSummary {
+  plan_id: string
+  caller: string
+  change_class: string
+  state: string
+  requested_by: string
+  created_at: string
+  expires_at?: string
+  decided_by?: string
+  decided_by_role?: string
+  decided_at?: string
+  decision_reason?: string
+  /** The role the class requires, resolved from the policy as it stands now. */
+  approver_role: string
+  expired?: boolean
+}
+
+export interface SchemaPlansResponse {
+  plans: SchemaPlanSummary[]
+}
+
+export interface SchemaPlanDetail {
+  summary: SchemaPlanSummary
+  /** The proposed .atl source, stored as text so it can be shown as written. */
+  files: { path: string; content: string }[]
+  up_sql?: string
+  down_sql?: string
+  base_checkpoint_hash?: string
+}
+
+export interface SchemaPlanResponse {
+  plan: SchemaPlanDetail
+}
+
 export interface CallerAliasesResponse {
   caller: string
   aliases: string[]
@@ -701,6 +736,26 @@ export const api = {
 
     evict: (sessionID: string): Promise<Record<string, never>> =>
       apiFetch(`/api/admin/workers/${encodeURIComponent(sessionID)}/evict`, { method: 'POST' }),
+  },
+
+  plans: {
+    list: (state?: string): Promise<SchemaPlansResponse> =>
+      apiFetch<SchemaPlansResponse>(`/api/plans${state ? `?state=${encodeURIComponent(state)}` : ''}`),
+
+    get: (id: string): Promise<SchemaPlanResponse> =>
+      apiFetch<SchemaPlanResponse>(`/api/plans/${encodeURIComponent(id)}`),
+
+    approve: (id: string, reason: string): Promise<SchemaPlanResponse> =>
+      apiFetch<SchemaPlanResponse>(`/api/plans/${encodeURIComponent(id)}/approve`, {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      }),
+
+    reject: (id: string, reason: string): Promise<SchemaPlanResponse> =>
+      apiFetch<SchemaPlanResponse>(`/api/plans/${encodeURIComponent(id)}/reject`, {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      }),
   },
 
   policy: {

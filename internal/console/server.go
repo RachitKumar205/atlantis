@@ -248,6 +248,24 @@ func (s *Server) buildMux() {
 	mux.HandleFunc("PUT /api/policy",
 		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleSetChangePolicy)))))
 
+	// Schema plans waiting on a human.
+	//
+	// Reading is open to any signed-in user: a change blocking an engineer's
+	// deploy is not a secret from that engineer. Deciding runs through
+	// requirePolicyRole, which resolves the role from the plan's class rather
+	// than taking a static one — see the note on that middleware.
+	//
+	// Approve takes sudo, alongside sign-out-all and revoke-all-callers: it is
+	// the button that lets production DDL run. Reject does not, because the
+	// worst a wrongly-rejected plan costs is a re-plan, and putting a password
+	// prompt in front of "no" is how reviewers stop saying it.
+	mux.HandleFunc("GET /api/plans", s.auth(s.handleListSchemaPlans))
+	mux.HandleFunc("GET /api/plans/{id}", s.auth(s.handleGetSchemaPlan))
+	mux.HandleFunc("POST /api/plans/{id}/approve",
+		s.auth(s.requirePolicyRole(s.csrf(s.requireSudo(s.handleApproveSchemaPlan)))))
+	mux.HandleFunc("POST /api/plans/{id}/reject",
+		s.auth(s.requirePolicyRole(s.csrf(s.handleRejectSchemaPlan))))
+
 	// Job queue management.
 	mux.HandleFunc("GET /api/jobs/dead", s.auth(s.handleListDeadJobs))
 	mux.HandleFunc("GET /api/jobs/{id}", s.auth(s.handleGetJobStatus))
@@ -1893,4 +1911,139 @@ func (s *Server) handleSetChangePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	s.db.logAction(r.Context(), u.ID, "set_change_policy", map[string]any{"entries": changed})
 	s.proxyProto(w, "SetChangePolicy", resp, nil)
+}
+
+// ctxPlanRole carries the role requirePolicyRole resolved, so the handler
+// behind it asserts the same role the middleware checked rather than looking it
+// up again and possibly getting a different answer.
+type ctxPlanRoleKey struct{}
+
+// requirePolicyRole gates a decision on the role the plan's class requires.
+//
+// requireRole cannot do this. It takes a static role string, decided when the
+// route is registered — and the role that may approve is per-class, stored in
+// atlantis.change_policy, and only knowable after the plan has been loaded and
+// its class read. Wiring requireRole("admin") here would hard-code today's
+// default and silently ignore an operator who set a different role for
+// destructive changes, which is the one setting they were most likely to
+// change.
+//
+// The plan is fetched once here and the resolved role is stashed in the request
+// context, the way auth already stashes ctxUser. The handler then asserts that
+// role to the server, which checks it against the same policy — so this
+// middleware being wrong produces a refusal there rather than a decision
+// nobody was entitled to make.
+func (s *Server) requirePolicyRole(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		planID := r.PathValue("id")
+		if planID == "" {
+			jsonError(w, "plan id is required", http.StatusBadRequest)
+			return
+		}
+		resp, err := s.atl.GetSchemaPlan(r.Context(), &adminpb.GetSchemaPlanRequest{PlanId: planID})
+		if err != nil {
+			s.log.Error("GetSchemaPlan", "plan", planID, "err", err)
+			jsonError(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		want := resp.GetPlan().GetSummary().GetApproverRole()
+		u := r.Context().Value(ctxUser).(*User)
+		if u.Role != want {
+			jsonError(w, fmt.Sprintf("forbidden: %s role required to decide this change", want),
+				http.StatusForbidden)
+			return
+		}
+		// The USER's role travels onward, not the policy's.
+		//
+		// Stashing `want` here instead was the first version, and it quietly
+		// disarmed the server's own check: the console would have echoed the
+		// policy's role back at the server, which compares the assertion to
+		// that same policy — so the comparison could never fail for console
+		// traffic, however wrong this middleware was. A guard that always
+		// passes for the only client that reaches it is not a guard.
+		//
+		// Sending u.Role makes the server's check independent. If this
+		// middleware were skipped, reordered, or wrong, a viewer's role would
+		// arrive at the server and be refused there.
+		next(w, r.WithContext(context.WithValue(r.Context(), ctxPlanRoleKey{}, u.Role)))
+	}
+}
+
+// handleListSchemaPlans proxies the approval queue.
+func (s *Server) handleListSchemaPlans(w http.ResponseWriter, r *http.Request) {
+	resp, err := s.atl.ListSchemaPlans(r.Context(), &adminpb.ListSchemaPlansRequest{
+		State:  r.URL.Query().Get("state"),
+		Caller: r.URL.Query().Get("caller"),
+	})
+	s.proxyProto(w, "ListSchemaPlans", resp, err)
+}
+
+// handleGetSchemaPlan proxies one plan, including the proposed .atl source.
+func (s *Server) handleGetSchemaPlan(w http.ResponseWriter, r *http.Request) {
+	resp, err := s.atl.GetSchemaPlan(r.Context(), &adminpb.GetSchemaPlanRequest{
+		PlanId: r.PathValue("id"),
+	})
+	s.proxyProto(w, "GetSchemaPlan", resp, err)
+}
+
+func (s *Server) handleApproveSchemaPlan(w http.ResponseWriter, r *http.Request) {
+	s.decideSchemaPlan(w, r, true)
+}
+
+func (s *Server) handleRejectSchemaPlan(w http.ResponseWriter, r *http.Request) {
+	s.decideSchemaPlan(w, r, false)
+}
+
+// decideSchemaPlan records a console user's decision.
+//
+// decided_by comes from the session, never from the body. A body field would
+// let the caller write any name into an audit column, which is worse than
+// having no column at all — it would read as evidence.
+func (s *Server) decideSchemaPlan(w http.ResponseWriter, r *http.Request, approve bool) {
+	planID := r.PathValue("id")
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	u := r.Context().Value(ctxUser).(*User)
+	role, _ := r.Context().Value(ctxPlanRoleKey{}).(string)
+
+	// The two arms are kept whole rather than reduced to a shared variable of
+	// interface type: proxyProto takes a proto.Message, and widening to `any` to
+	// share one call site costs the type check that keeps a nil-typed response
+	// from reaching the encoder.
+	audit := func(verb string) {
+		s.db.logAction(r.Context(), u.ID, verb, map[string]any{
+			"plan_id": planID,
+			"role":    role,
+			"reason":  body.Reason,
+		})
+	}
+	if approve {
+		resp, err := s.atl.ApproveSchemaPlan(r.Context(), &adminpb.ApproveSchemaPlanRequest{
+			PlanId: planID, DecidedBy: u.Email, DecidedByRole: role, Reason: body.Reason,
+		})
+		if err != nil {
+			s.log.Error("ApproveSchemaPlan", "plan", planID, "err", err)
+			jsonError(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		audit("approve_schema_plan")
+		s.proxyProto(w, "ApproveSchemaPlan", resp, nil)
+		return
+	}
+	resp, err := s.atl.RejectSchemaPlan(r.Context(), &adminpb.RejectSchemaPlanRequest{
+		PlanId: planID, DecidedBy: u.Email, DecidedByRole: role, Reason: body.Reason,
+	})
+	if err != nil {
+		s.log.Error("RejectSchemaPlan", "plan", planID, "err", err)
+		jsonError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	audit("reject_schema_plan")
+	s.proxyProto(w, "RejectSchemaPlan", resp, nil)
 }

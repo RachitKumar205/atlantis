@@ -13,6 +13,7 @@ import { Route as HistoryRoute } from './routes/history'
 import { Route as HealthRoute } from './routes/health'
 import { Route as SettingsRoute } from './routes/settings'
 import { Route as CallersRoute } from './routes/callers'
+import { Route as ApprovalsRoute } from './routes/approvals'
 import { Route as ParkedRoute } from './routes/parked'
 import { Route as OperationsRoute } from './routes/operations'
 import { Route as SandboxRoute } from './routes/sandbox'
@@ -28,6 +29,7 @@ export const routeTree = RootRoute.addChildren([
   HealthRoute,
   SettingsRoute,
   CallersRoute,
+  ApprovalsRoute,
   ParkedRoute,
   OperationsRoute,
   SandboxRoute,

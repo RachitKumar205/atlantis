@@ -237,6 +237,7 @@ type schemaPlan struct {
 	ExpiresAt      *time.Time
 	DecidedBy      string
 	DecidedByRole  string
+	DecidedAt      *time.Time
 	DecisionReason string
 }
 
@@ -254,7 +255,7 @@ func loadSchemaPlan(ctx context.Context, q pgxQuerier, planID string) (schemaPla
 	rows, err := q.Query(ctx, `
 SELECT plan_id, caller, change_class, files_hash, base_checkpoint_hash, up_sql,
        state, requested_by, created_at, expires_at, decided_by, decided_by_role,
-       decision_reason
+       decided_at, decision_reason
 FROM atlantis.schema_plans WHERE plan_id = $1`, planID)
 	if err != nil {
 		return schemaPlan{}, false, err
@@ -266,7 +267,7 @@ FROM atlantis.schema_plans WHERE plan_id = $1`, planID)
 	var p schemaPlan
 	if err := rows.Scan(&p.PlanID, &p.Caller, &p.ChangeClass, &p.FilesHash, &p.BaseHash,
 		&p.UpSQL, &p.State, &p.RequestedBy, &p.CreatedAt, &p.ExpiresAt,
-		&p.DecidedBy, &p.DecidedByRole, &p.DecisionReason); err != nil {
+		&p.DecidedBy, &p.DecidedByRole, &p.DecidedAt, &p.DecisionReason); err != nil {
 		return schemaPlan{}, false, err
 	}
 	return p, true, rows.Err()

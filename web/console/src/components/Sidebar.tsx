@@ -10,6 +10,7 @@ import {
   LogOut,
   Settings,
   Users,
+  ShieldQuestion,
 } from 'lucide-react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
@@ -22,6 +23,7 @@ const NAV = [
   { to: '/workers',    icon: Cpu,      tip: 'Workers' },
   { to: '/health',     icon: Activity, tip: 'Health' },
   { to: '/callers',    icon: Users,    tip: 'Callers' },
+  { to: '/approvals', icon: ShieldQuestion, tip: 'Approvals' },
   { to: '/parked',     icon: Archive,  tip: 'Parked' },
   { to: '/operations', icon: Cog,      tip: 'Operations' },
 ] as const

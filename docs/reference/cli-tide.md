@@ -268,11 +268,13 @@ tide version
 |---|---|
 | 0 | Success, or no-op (e.g., `tide pull` with the local cache already current) |
 | 1 | Backfill required — `tide apply` or `tide plan` returned a backfill-required class |
-| 2 | Unknown subcommand passed to `tide` itself, **or** cross-caller breaking change returned by `apply`/`plan` |
+| 2 | Unknown subcommand passed to `tide` itself; cross-caller breaking change from `plan`; **or** `apply` blocked on an approval that has not been given |
 | 3 | Operational error: parse/validation failure, network error, config error, or unknown plan class |
 | 4 | Destructive change — the plan drops something that may hold data |
 
-`tide apply` and `tide plan` share their code map exactly.
+`tide apply` and `tide plan` no longer share a code map, and the difference is worth knowing before writing CI.
+
+`tide plan` classifies: it reports what the change is and exits on the class. `tide apply` submits: it reports what the server decided. A destructive change exits 4 from `plan`, but from `apply` it exits 0 if the deployment's change policy permits it unattended, and 2 if a human has to approve first. Code 2 from `apply` is not a failure — the gate did its job, and the pipeline should be re-run once somebody has decided, or started with `--wait-for-approval`.
 
 Code 2 covers two unrelated conditions: an unknown subcommand passed to `tide`, and a cross-caller breaking change. CI scripts that need to distinguish them must parse stderr.
 

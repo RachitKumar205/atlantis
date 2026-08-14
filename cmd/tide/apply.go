@@ -10,6 +10,9 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
@@ -23,10 +26,17 @@ func planClassName(c adminpb.PlanClass) string {
 
 // Exit codes:
 //
-//	0 — plan applied (or dry-run / no changes).
-//	1 — backfill required.
-//	2 — breaking changes; need a atlantis PR.
-//	3 — operational error (parse error, network failure, etc).
+//	0 — applied (or --dry-run on an additive plan, or no changes).
+//	1 — backfill required and --backfill was not passed.
+//	2 — blocked on a human: the change policy requires an approval that has not
+//	    been given, or the request was rejected. Not an operational failure —
+//	    the gate worked.
+//	3 — operational error (parse error, network failure, unknown plan class).
+//	4 — --dry-run only, on a class `tide plan` would exit 4 for.
+//
+// `tide apply` and `tide plan` no longer share a code map. plan classifies and
+// reports; apply submits and reports what the server decided, and "waiting for
+// a reviewer" is an outcome plan cannot produce.
 //
 // cmdApply is the main user touchpoint for tide apply.
 func cmdApply(args []string) int {
@@ -37,6 +47,12 @@ func cmdApply(args []string) int {
 	dryRun := fs.Bool("dry-run", false, "Plan only; do not apply")
 	timeout := fs.Duration("timeout", 30*time.Second, "RPC timeout")
 	noPull := fs.Bool("no-pull", false, "Skip the pre-apply `tide pull` refresh of .tide-cache/")
+	// Opt-in, and off by default on purpose. tide runs on CI runners, and a
+	// polling default would hold one for as long as a review takes — which is
+	// however long the reviewer is at lunch. The default is to file the request,
+	// exit, and let the pipeline be re-run once somebody has decided.
+	waitForApproval := fs.Duration("wait-for-approval", 0,
+		"Wait up to this long for a human to approve the change, retrying the apply (e.g. 30m). Default: do not wait")
 	if err := fs.Parse(args); err != nil {
 		return 3
 	}
@@ -109,7 +125,7 @@ func cmdApply(args []string) int {
 			fmt.Println("tide: additive plan; would apply (--dry-run set)")
 			return 0
 		}
-		return doApply(ctx, client, cfg, planResp, files)
+		return doApply(ctx, client, cfg, planResp, files, *waitForApproval)
 
 	case adminpb.PlanClass_PLAN_CLASS_BACKFILL_REQUIRED:
 		if !*backfill {
@@ -134,9 +150,15 @@ func cmdApply(args []string) int {
 			fmt.Fprintln(os.Stderr, "  ", d)
 		}
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "tide: the server refuses this while those callers still read the old shape.")
-		fmt.Fprintln(os.Stderr, "      Ship their changes first, then re-run `tide apply`.")
-		return exitCodeForClass(planResp.GetClass())
+		if *dryRun {
+			return exitCodeForClass(planResp.GetClass())
+		}
+		// Submitted rather than refused here, and that is the point of moving
+		// the gate to the server. Whether this may apply is the deployment's
+		// change policy to decide, not tide's — and submitting is also how the
+		// request reaches the approval queue, so refusing locally would leave
+		// nobody anything to approve.
+		return doApply(ctx, client, cfg, planResp, files, *waitForApproval)
 
 	case adminpb.PlanClass_PLAN_CLASS_DESTRUCTIVE:
 		// Its own arm, not folded into the breaking one. The two need different
@@ -150,10 +172,13 @@ func cmdApply(args []string) int {
 			fmt.Fprintln(os.Stderr, "  ", d)
 		}
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintln(os.Stderr, "tide: the server refuses to apply this unattended.")
 		fmt.Fprintln(os.Stderr, "      Dropped objects are parked, not deleted, and reaped after the")
 		fmt.Fprintln(os.Stderr, "      retention window — `tide parked` shows what is held and until when.")
-		return exitCodeForClass(planResp.GetClass())
+		fmt.Fprintln(os.Stderr, "")
+		if *dryRun {
+			return exitCodeForClass(planResp.GetClass())
+		}
+		return doApply(ctx, client, cfg, planResp, files, *waitForApproval)
 
 	case adminpb.PlanClass_PLAN_CLASS_UNPARSEABLE:
 		// Server marks the plan unparseable when pg_query_go validation on
@@ -238,19 +263,38 @@ func doBeginBackfill(ctx context.Context, client *adminClient, cfg *tideConfig, 
 	}
 }
 
-func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan *adminpb.PlanSchemaResponse, files []*adminpb.SubmittedFile) int {
+func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan *adminpb.PlanSchemaResponse, files []*adminpb.SubmittedFile, wait time.Duration) int {
 	// No UpSQL. The plan's SQL was always documented as a drift check the server
 	// never read, and ApplyMigrationRequest now has no field for it. The server
 	// re-emits the DDL from these files against the checkpoint the hash pins,
 	// so the statements that run are codegen's output for the submitted schema
 	// rather than a string the client chose.
-	applyResp, err := client.ApplyMigration(ctx, &adminpb.ApplyMigrationRequest{
+	req := &adminpb.ApplyMigrationRequest{
 		Caller:         cfg.Caller,
 		PlanId:         plan.GetPlanId(),
 		Files:          files,
 		CheckpointHash: plan.GetCheckpointHash(),
-	})
+	}
+	applyResp, err := client.ApplyMigration(ctx, req)
+	if err != nil && status.Code(err) == codes.FailedPrecondition && wait > 0 {
+		applyResp, err = waitForDecision(ctx, client, req, wait, err)
+	}
 	if err != nil {
+		// FailedPrecondition is the change policy: this needs a human, or a
+		// human already said no. It is not an operational failure, and reporting
+		// it as one would have CI page somebody about a working gate.
+		//
+		// Branching on the code rather than the message, because the message is
+		// written for a person and will be reworded.
+		if status.Code(err) == codes.FailedPrecondition {
+			fmt.Fprintln(os.Stderr, "tide apply:", status.Convert(err).Message())
+			if wait == 0 {
+				fmt.Fprintln(os.Stderr, "")
+				fmt.Fprintln(os.Stderr, "      Re-run once it has been decided, or pass --wait-for-approval=30m")
+				fmt.Fprintln(os.Stderr, "      to hold this process open until then.")
+			}
+			return 2
+		}
 		fmt.Fprintln(os.Stderr, "tide apply:", err)
 		return 3
 	}
@@ -262,6 +306,49 @@ func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan *ad
 		cliout.Infof("regenerate the typed client under %s with `tide generate`", cfg.OutputDir)
 	}
 	return 0
+}
+
+// waitForDecision retries the apply until it is decided or the budget runs out.
+//
+// Retrying the apply rather than polling a status RPC, for two reasons. It is
+// the apply that has to succeed, so retrying it tests the thing that matters
+// rather than a proxy for it; and each attempt is already idempotent — the
+// server upsert refuses to touch a row that has been approved or rejected, so a
+// retry cannot undo the decision it is waiting for.
+//
+// A rejection ends the wait immediately. Sitting in a retry loop against a
+// decision that will never change is how a pipeline burns thirty minutes to
+// report something it knew at the first attempt.
+func waitForDecision(ctx context.Context, client *adminClient, req *adminpb.ApplyMigrationRequest,
+	budget time.Duration, first error,
+) (*adminpb.ApplyMigrationResponse, error) {
+	if strings.Contains(status.Convert(first).Message(), "was rejected by") {
+		return nil, first
+	}
+	cliout.Infof("waiting up to %s for a decision — %s", budget, status.Convert(first).Message())
+
+	const poll = 15 * time.Second
+	deadline := time.Now().Add(budget)
+	last := first
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return nil, last
+		case <-time.After(poll):
+		}
+		resp, err := client.ApplyMigration(ctx, req)
+		if err == nil {
+			return resp, nil
+		}
+		last = err
+		if status.Code(err) != codes.FailedPrecondition {
+			return nil, err
+		}
+		if strings.Contains(status.Convert(err).Message(), "was rejected by") {
+			return nil, err
+		}
+	}
+	return nil, last
 }
 
 func printImpactReport(p *adminpb.PlanSchemaResponse) {
