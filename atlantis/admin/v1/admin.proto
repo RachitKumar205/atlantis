@@ -115,6 +115,16 @@ service AdminService {
     option (required_capability) = CAPABILITY_SCHEMA_READ;
   }
 
+  // Which plan classes may apply without a human. Read is SCHEMA_READ because
+  // a caller about to apply should be able to see the ceiling it will meet;
+  // write is a capability of its own, held by no identity that can apply.
+  rpc GetChangePolicy(GetChangePolicyRequest) returns (GetChangePolicyResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  rpc SetChangePolicy(SetChangePolicyRequest) returns (SetChangePolicyResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_APPROVE;
+  }
+
   // Reverts the shared checkpoint for every caller in one transaction.
   rpc RollbackSchema(RollbackSchemaRequest) returns (RollbackSchemaResponse) {
     option (required_capability) = CAPABILITY_OPERATOR;
@@ -358,6 +368,21 @@ message PlanSchemaResponse {
   repeated string check_drift_notes = 21;
   string check_drift_error = 22;
 
+  // What the deployment's change policy says about this plan's class.
+  //
+  // Reported by the server rather than derived by the client from the class,
+  // and that is not a convenience: the rule is a row in a table the client
+  // cannot read, and a CLI that guessed would print one answer while the apply
+  // enforced another. The same reasoning put the destructive gate in the
+  // handler instead of `tide apply`'s switch statement.
+  //
+  // requires_approval is advisory in this release — nothing enforces it yet.
+  // It is reported first so an operator sees the rule they are about to be
+  // held to before it starts refusing anything.
+  bool requires_approval = 26;
+  // The console role that may approve, when one is required. Empty otherwise.
+  string approver_role = 27;
+
   repeated ColumnTypeDrift column_drift = 23;
   repeated string column_drift_notes = 24;
   string column_drift_error = 25;
@@ -376,6 +401,55 @@ message ApplyMigrationResponse {
   string applied_at = 1;
   int64 version = 2;
   string content_hash = 3;
+}
+
+// ChangePolicyEntry is one deployment's rule for one class of change.
+//
+// change_class is a PlanClass rather than free text so the set is closed and a
+// client cannot invent a rule for a class that does not exist. Note the enum
+// carries two values no rule can apply to: UNSPECIFIED, and UNPARSEABLE, which
+// means the DSL did not compile and so never reaches an apply at all.
+//
+// approver_role names a console role. The admin server cannot verify console
+// roles — that identity system belongs to the console — so this is what the
+// console must present, not something the server checks a human against. It
+// lives here rather than in console storage because the decision it qualifies
+// is made here.
+message ChangePolicyEntry {
+  PlanClass change_class = 1;
+  bool require_approval = 2;
+  string approver_role = 3;
+  string updated_at = 4;
+  string updated_by = 5;
+}
+
+message GetChangePolicyRequest {}
+
+message GetChangePolicyResponse {
+  // One entry per class the deployment has a rule for. A class absent here
+  // requires approval: the server treats a missing rule and an unrecognized
+  // one the same way, so a typo cannot widen anything.
+  repeated ChangePolicyEntry entries = 1;
+}
+
+// SetChangePolicyRequest replaces the rules for the classes it names, and
+// leaves every class it does not name alone.
+//
+// A full replacement was the alternative and is worse here: two operators with
+// the settings page open would each send the whole policy, and the second save
+// would silently revert the first one's edit to an unrelated class.
+message SetChangePolicyRequest {
+  repeated ChangePolicyEntry entries = 1;
+  // Who is making the change, for the audit column. The server records it as
+  // given — it has no way to authenticate a console user — so it is evidence,
+  // not proof.
+  string updated_by = 2;
+}
+
+message SetChangePolicyResponse {
+  // The policy as it stands after the write, every class included, so a client
+  // never has to re-read to render what it just changed.
+  repeated ChangePolicyEntry entries = 1;
 }
 
 message GetMergedSchemaRequest {

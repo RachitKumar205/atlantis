@@ -51,6 +51,8 @@ func RegisterGenerated(srv *grpc.Server, svc *Service) {
 // the implementations lets a test hold the descriptor to account; see the note
 // on UnimplementedAdminServiceServer above for why the compiler no longer can.
 var migratedRPCs = map[string]bool{
+	"GetChangePolicy":        true,
+	"SetChangePolicy":        true,
 	"GetCallerAliases":       true,
 	"SetCallerAliases":       true,
 	"GetCallers":             true,
@@ -221,6 +223,14 @@ func (g *grpcServer) RollbackSchema(ctx context.Context, req *adminpb.RollbackSc
 
 func (g *grpcServer) PreviewRollback(ctx context.Context, req *adminpb.PreviewRollbackRequest) (*adminpb.PreviewRollbackResponse, error) {
 	return g.svc.PreviewRollback(ctx, req)
+}
+
+func (g *grpcServer) GetChangePolicy(ctx context.Context, req *adminpb.GetChangePolicyRequest) (*adminpb.GetChangePolicyResponse, error) {
+	return g.svc.GetChangePolicy(ctx, req)
+}
+
+func (g *grpcServer) SetChangePolicy(ctx context.Context, req *adminpb.SetChangePolicyRequest) (*adminpb.SetChangePolicyResponse, error) {
+	return g.svc.SetChangePolicy(ctx, req)
 }
 
 func (g *grpcServer) GetLogs(ctx context.Context, req *adminpb.GetLogsRequest) (*adminpb.GetLogsResponse, error) {

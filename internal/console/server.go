@@ -238,6 +238,16 @@ func (s *Server) buildMux() {
 	mux.HandleFunc("POST /api/schema/rollback", s.auth(s.requireRole("admin", s.csrf(s.handleRollbackSchema))))
 	mux.HandleFunc("POST /api/schema/rollback/preview", s.auth(s.requireRole("admin", s.csrf(s.handlePreviewRollback))))
 
+	// Change policy — which classes of schema change may apply unattended.
+	//
+	// Reading is open to any signed-in user: a policy nobody but an admin can
+	// see is one an engineer discovers by having an apply refused. Writing
+	// takes sudo, alongside sign-out-all and revoke-all-callers, because it is
+	// the control that decides whether production DDL runs without a human.
+	mux.HandleFunc("GET /api/policy", s.auth(s.handleGetChangePolicy))
+	mux.HandleFunc("PUT /api/policy",
+		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleSetChangePolicy)))))
+
 	// Job queue management.
 	mux.HandleFunc("GET /api/jobs/dead", s.auth(s.handleListDeadJobs))
 	mux.HandleFunc("GET /api/jobs/{id}", s.auth(s.handleGetJobStatus))
@@ -1813,4 +1823,74 @@ func clearSessionCookie(w http.ResponseWriter, secure bool) {
 		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 	})
+}
+
+// handleGetChangePolicy proxies the deployment's change policy.
+func (s *Server) handleGetChangePolicy(w http.ResponseWriter, r *http.Request) {
+	resp, err := s.atl.GetChangePolicy(r.Context(), &adminpb.GetChangePolicyRequest{})
+	s.proxyProto(w, "GetChangePolicy", resp, err)
+}
+
+// handleSetChangePolicy writes the rules the request names and leaves the rest
+// alone.
+//
+// updated_by is the signed-in console user, taken from the session rather than
+// from the request body. A body field would let the caller write any name into
+// an audit column, which is worse than having no column at all: it would read
+// as evidence.
+func (s *Server) handleSetChangePolicy(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Entries []struct {
+			ChangeClass     string `json:"change_class"`
+			RequireApproval bool   `json:"require_approval"`
+			ApproverRole    string `json:"approver_role"`
+		} `json:"entries"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if len(body.Entries) == 0 {
+		jsonError(w, "no policy entries to set", http.StatusBadRequest)
+		return
+	}
+
+	entries := make([]*adminpb.ChangePolicyEntry, 0, len(body.Entries))
+	for _, e := range body.Entries {
+		// The class arrives as the proto enum's name, which is how the server
+		// stores it and how GetChangePolicy renders it. Resolved here rather
+		// than passed through as a number so an unknown name is refused at the
+		// edge with something a person can read.
+		num, ok := adminpb.PlanClass_value[e.ChangeClass]
+		if !ok {
+			jsonError(w, "unknown change class: "+e.ChangeClass, http.StatusBadRequest)
+			return
+		}
+		entries = append(entries, &adminpb.ChangePolicyEntry{
+			ChangeClass:     adminpb.PlanClass(num),
+			RequireApproval: e.RequireApproval,
+			ApproverRole:    e.ApproverRole,
+		})
+	}
+
+	u := r.Context().Value(ctxUser).(*User)
+	resp, err := s.atl.SetChangePolicy(r.Context(), &adminpb.SetChangePolicyRequest{
+		Entries:   entries,
+		UpdatedBy: u.Email,
+	})
+	if err != nil {
+		s.log.Error("SetChangePolicy", "err", err)
+		jsonError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	changed := make([]map[string]any, 0, len(entries))
+	for _, e := range entries {
+		changed = append(changed, map[string]any{
+			"change_class":     e.GetChangeClass().String(),
+			"require_approval": e.GetRequireApproval(),
+			"approver_role":    e.GetApproverRole(),
+		})
+	}
+	s.db.logAction(r.Context(), u.ID, "set_change_policy", map[string]any{"entries": changed})
+	s.proxyProto(w, "SetChangePolicy", resp, nil)
 }

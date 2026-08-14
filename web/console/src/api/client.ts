@@ -342,6 +342,24 @@ export interface GetCallersResponse {
   callers: CallerInfo[]
 }
 
+/** One class's rule in the deployment's change policy.
+ *
+ * `change_class` is the proto enum's name, which is also how the server stores
+ * it — the console never translates it to a number, so a class this build has
+ * never heard of round-trips unchanged rather than becoming 0.
+ */
+export interface ChangePolicyEntry {
+  change_class: string
+  require_approval: boolean
+  approver_role: string
+  updated_at?: string
+  updated_by?: string
+}
+
+export interface ChangePolicyResponse {
+  entries: ChangePolicyEntry[]
+}
+
 export interface CallerAliasesResponse {
   caller: string
   aliases: string[]
@@ -683,6 +701,23 @@ export const api = {
 
     evict: (sessionID: string): Promise<Record<string, never>> =>
       apiFetch(`/api/admin/workers/${encodeURIComponent(sessionID)}/evict`, { method: 'POST' }),
+  },
+
+  policy: {
+    get: (): Promise<ChangePolicyResponse> =>
+      apiFetch<ChangePolicyResponse>('/api/policy'),
+
+    /** Writes the rules it is given and leaves every other class alone.
+     *
+     * Sending only what changed is deliberate. A full replacement would mean
+     * two operators with this page open each save the whole policy, and the
+     * second save silently reverts the first one's edit to an unrelated class.
+     */
+    set: (entries: ChangePolicyEntry[]): Promise<ChangePolicyResponse> =>
+      apiFetch<ChangePolicyResponse>('/api/policy', {
+        method: 'PUT',
+        body: JSON.stringify({ entries }),
+      }),
   },
 
   callers: {

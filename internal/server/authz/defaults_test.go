@@ -212,21 +212,65 @@ func assertSameSet(t *testing.T, what string, got map[string]bool, want []string
 // checked against what the console actually does rather than against a list.
 //
 // Removing the admin allowlist exemption means the console reaches admin RPCs
-// only if it holds grants, and it holds grants only if 0019 seeds them. Without
-// the row the first boot of a new deployment has no identity able to call
-// RegisterCaller — the RPC that creates the first identity — and the install is
-// unrecoverable over gRPC.
+// only if it holds grants, and it holds grants only if a migration seeds them.
+// Without the identity row the first boot of a new deployment has no identity
+// able to call RegisterCaller — the RPC that creates the first identity — and
+// the install is unrecoverable over gRPC. 0019 is where that row is written, so
+// that one claim is pinned to 0019 by name.
 //
 // A missing grant for any *other* RPC fails quietly instead: the server starts,
 // and one console page returns PermissionDenied to whoever happens to open it.
 // So the expectation is computed — every RPC name appearing in internal/console
 // source, mapped through the proto's own declarations — and a new console
-// feature calling a new RPC fails here until 0019 grants what it needs.
+// feature calling a new RPC fails here until some migration grants what it
+// needs.
+//
+// # Why the grants are scanned across every migration, not just 0019
+//
+// 0019 has already run on every deployment that exists. A grant appended to it
+// now would reach fresh installs and nothing else, so the upgrade path — the
+// one with users on it — would get a console page that returns PermissionDenied
+// forever. New grants therefore go in the migration that introduces the feature
+// needing them, and this reads the union.
+//
+// The union is discovered rather than listed. An earlier version of this test
+// named one file, and the first feature to add a console grant elsewhere failed
+// it with a message blaming the wrong migration.
 func TestConsoleBootstrapGrantsEveryRPCTheConsoleCalls(t *testing.T) {
-	granted := capabilityNamesIn(t, "../../../migrations/infra/0019_console_identity.up.sql")
-	if !granted["CAPABILITY_OPERATOR"] {
+	const migrationsDir = "../../../migrations/infra"
+
+	if !capabilityNamesIn(t, migrationsDir+"/0019_console_identity.up.sql")["CAPABILITY_OPERATOR"] {
 		t.Fatal("0019 does not grant the console CAPABILITY_OPERATOR; a fresh install " +
 			"would have no identity able to call RegisterCaller")
+	}
+
+	granted := map[string]bool{}
+	entries, err := os.ReadDir(migrationsDir)
+	if err != nil {
+		t.Fatalf("read %s: %v", migrationsDir, err)
+	}
+	var seeding []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".up.sql") {
+			continue
+		}
+		body, err := os.ReadFile(migrationsDir + "/" + e.Name())
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		// Only files that actually name the console identity outside a comment
+		// count, so prose about a capability is not read as a grant of it.
+		if !strings.Contains(stripSQLLineComments(string(body)), "'atlantis-console'") {
+			continue
+		}
+		seeding = append(seeding, e.Name())
+		for name := range capabilityNamesIn(t, migrationsDir+"/"+e.Name()) {
+			granted[name] = true
+		}
+	}
+	if len(seeding) == 0 {
+		t.Fatal("no migration seeds grants for 'atlantis-console'; the scan is no " +
+			"longer finding them and this test proves nothing")
 	}
 
 	policy, err := AdminPolicy()
@@ -243,10 +287,24 @@ func TestConsoleBootstrapGrantsEveryRPCTheConsoleCalls(t *testing.T) {
 	for _, name := range called {
 		want := methods[name].String()
 		if !granted[want] {
-			t.Errorf("the console calls %s, which requires %s, but 0019 does not grant it — "+
-				"that page returns PermissionDenied on every deployment", name, want)
+			t.Errorf("the console calls %s, which requires %s, but none of %v grants it — "+
+				"that page returns PermissionDenied on every deployment", name, want, seeding)
 		}
 	}
+}
+
+// stripSQLLineComments drops `-- ...` so a migration that discusses the console
+// in prose is not counted as granting it anything.
+func stripSQLLineComments(sql string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(sql, "\n") {
+		if i := strings.Index(line, "--"); i >= 0 {
+			line = line[:i]
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // rpcNamesReferencedIn returns the admin RPC names that appear as string
@@ -285,4 +343,35 @@ func rpcNamesReferencedIn(t *testing.T, dir string, methods map[string]adminpb.C
 	}
 	sort.Strings(out)
 	return out
+}
+
+// Nothing RegisterCaller hands out may include CAPABILITY_SCHEMA_APPROVE.
+//
+// The separation this asserts is the whole reason the capability is not just
+// folded into CAPABILITY_OPERATOR: the identity that wants a schema change must
+// never be the identity that permits it. Today that holds because applying
+// identities are machine cert CNs registered through RegisterCaller, and the
+// only holder of SCHEMA_APPROVE is the console — which 0019 deliberately
+// withheld SCHEMA_APPLY from.
+//
+// It would stop holding the moment somebody appends this to a bundle to make a
+// CI pipeline stop asking. That edit reads as a one-line convenience; this is
+// what makes it read as removing the gate.
+func TestApproveIsInNoRegistrationBundle(t *testing.T) {
+	for _, canMutate := range []bool{false, true} {
+		for _, name := range Names(DefaultCapabilities(canMutate)) {
+			if name == "CAPABILITY_SCHEMA_APPROVE" {
+				t.Errorf("DefaultCapabilities(can_mutate=%v) grants SCHEMA_APPROVE. "+
+					"Every caller that can apply could then approve its own change, "+
+					"and the policy would decide nothing.", canMutate)
+			}
+		}
+	}
+	for _, name := range Names(ManagedCapabilities()) {
+		if name == "CAPABILITY_SCHEMA_APPROVE" {
+			t.Error("ManagedCapabilities includes SCHEMA_APPROVE, so re-registering a " +
+				"caller would reconcile it — granting or revoking approval authority " +
+				"as a side effect of an unrelated identity edit")
+		}
+	}
 }

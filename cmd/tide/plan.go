@@ -160,6 +160,14 @@ func printPlanReport(resp *adminpb.PlanSchemaResponse) {
 	cliout.Header(os.Stdout, "plan")
 	cliout.Field(os.Stdout, "plan_id", resp.GetPlanId())
 	cliout.Field(os.Stdout, "class", colorClass(resp.GetClass()))
+	// The server decides this and says so; tide does not derive it from the
+	// class. The rule is a row in a table only the server reads, so a CLI that
+	// worked it out from the class would print one answer while the apply
+	// enforced another.
+	if resp.GetRequiresApproval() {
+		cliout.Field(os.Stdout, "approval", cliout.Brass(
+			fmt.Sprintf("required (%s)", resp.GetApproverRole())))
+	}
 	if len(resp.GetImpactReport()) > 0 {
 		fmt.Println()
 		cliout.Header(os.Stdout, "impact")

@@ -11,12 +11,13 @@ import {
   Mail,
   Monitor,
   Plus,
+  ShieldCheck,
   Server,
   Shield,
   Trash2,
   Users,
 } from 'lucide-react'
-import { api, queries, type OperatorUser, type UserRole } from '@/api/client'
+import { api, queries, type ChangePolicyEntry, type OperatorUser, type UserRole } from '@/api/client'
 import { useMe } from '@/hooks/useAuth'
 import { PageShell } from '@/components/PageShell'
 
@@ -29,7 +30,7 @@ import { PageShell } from '@/components/PageShell'
 // never shown in the nav, and is now deleted along with the flow it served —
 // the console does not author schema, so it has no reason to hold a repository
 // address. Schema files live in the customer's own git repo.
-type SectionId = 'general' | 'members' | 'security' | 'danger'
+type SectionId = 'general' | 'members' | 'security' | 'policy' | 'danger'
 
 interface Section {
   id: SectionId
@@ -42,6 +43,7 @@ const SECTIONS: Section[] = [
   { id: 'general',  label: 'General',     icon: <Building2 /> },
   { id: 'members',  label: 'Members',     icon: <Users /> },
   { id: 'security', label: 'Security',    icon: <Shield /> },
+  { id: 'policy',   label: 'Change policy', icon: <ShieldCheck /> },
   { id: 'danger',   label: 'Danger zone', icon: <AlertTriangle />, danger: true },
 ]
 
@@ -87,7 +89,7 @@ export function Settings() {
   })
 
   return (
-    <PageShell title="Settings" sub="general · members · security">
+    <PageShell title="Settings" sub="general · members · security · change policy">
       <div className="page__bodyinner">
         <div className="settings">
           <nav className="set-nav">
@@ -126,6 +128,9 @@ export function Settings() {
                 onToast={fire}
                 onAfterPasswordChange={() => navigate({ to: '/login' })}
               />
+            </div>
+            <div className={`set-panel ${active === 'policy' ? 'is-active' : ''}`}>
+              <ChangePolicyPanel onToast={fire} isAdmin={me?.role === 'admin'} />
             </div>
             <div className={`set-panel ${active === 'danger' ? 'is-active' : ''}`}>
               <DangerPanel
@@ -530,6 +535,142 @@ function SecurityPanel({
 }
 
 // ── Danger ───────────────────────────────────────────────────────────────
+// CLASS_LABELS names each class the way `tide plan` does, so an operator
+// reading a refused plan and an operator reading this page see the same word.
+// The keys are the proto enum names the server stores and returns.
+const CLASS_LABELS: Record<string, { name: string; help: string }> = {
+  PLAN_CLASS_ADDITIVE: {
+    name: 'Additive',
+    help: 'New entities, new nullable fields, new indexes. Nothing existing changes shape.',
+  },
+  PLAN_CLASS_BACKFILL_REQUIRED: {
+    name: 'Backfill required',
+    help: 'A new NOT NULL column without a default, or a new composite unique. Existing rows have to be filled in or deduplicated first.',
+  },
+  PLAN_CLASS_CROSS_CALLER_BREAKING: {
+    name: 'Cross-caller breaking',
+    help: 'Removes or renames something another team reads. Their next deploy fails, not this one.',
+  },
+  PLAN_CLASS_DESTRUCTIVE: {
+    name: 'Destructive',
+    help: 'Drops something that holds rows. Parked rather than deleted, and recoverable until the retention window closes.',
+  },
+}
+
+// ChangePolicyPanel — which classes of schema change may apply unattended.
+//
+// The rule is stored by the admin server, not the console, because the thing
+// that enforces it is `tide apply`. This page is a view onto that table.
+//
+// Nothing enforces it in this release. Saying so on the page is deliberate: an
+// operator who sets a rule and watches an apply proceed anyway should be told
+// why here, rather than deciding the toggle is broken.
+function ChangePolicyPanel({ onToast, isAdmin }: { onToast: (msg: string) => void; isAdmin: boolean }) {
+  const qc = useQueryClient()
+  const [pending, setPending] = useState<ChangePolicyEntry | null>(null)
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['change-policy'],
+    queryFn: api.policy.get,
+  })
+
+  // Sudo first, then the write — the same two-step the danger zone uses. This
+  // is the control that decides whether production DDL runs without a human,
+  // so a stolen session cookie alone must not be enough to relax it.
+  const save = useMutation({
+    mutationFn: async ({ entry, password }: { entry: ChangePolicyEntry; password: string }) => {
+      await api.auth.sudo(password)
+      return api.policy.set([entry])
+    },
+    onSuccess: (_res, { entry }) => {
+      qc.invalidateQueries({ queryKey: ['change-policy'] })
+      const label = CLASS_LABELS[entry.change_class]?.name ?? entry.change_class
+      onToast(entry.require_approval
+        ? `${label} changes now need approval`
+        : `${label} changes now apply unattended`)
+      setPending(null)
+    },
+  })
+
+  const entries = data?.entries ?? []
+
+  return (
+    <>
+      <div className="set-head">
+        <h2>Change policy</h2>
+        <p>
+          Which classes of schema change may apply without a human. `tide plan` reports the
+          rule for the class it produced, so an engineer sees it before they run `tide apply`.
+        </p>
+      </div>
+
+      <div className="setrow">
+        <div className="setrow__main">
+          <div className="setrow__label">Not yet enforced</div>
+          <div className="setrow__help">
+            Applies are not held for approval in this release. The rule is recorded and
+            reported so it can be agreed before it starts refusing anything.
+          </div>
+        </div>
+      </div>
+
+      {isLoading && <div className="setrow"><div className="setrow__main">Loading…</div></div>}
+
+      {entries.map(e => {
+        const meta = CLASS_LABELS[e.change_class]
+        return (
+          <div className="setrow" key={e.change_class}>
+            <div className="setrow__main">
+              <div className="setrow__label">{meta?.name ?? e.change_class}</div>
+              <div className="setrow__help">
+                {meta?.help ?? 'A class this console does not have a description for.'}
+                {e.updated_by && (
+                  <> {' '}<span className="muted">Last changed by {e.updated_by}.</span></>
+                )}
+              </div>
+            </div>
+            <div className="setrow__control">
+              {/* Coral marks "applies unattended", not "needs approval".
+                  Requiring a human is the safe setting; the one worth catching
+                  an operator's eye as they scan the page is the class that
+                  runs production DDL with nobody watching. */}
+              <button
+                className={`btn btn--sm ${e.require_approval ? '' : 'btn--danger'}`}
+                disabled={!isAdmin || save.isPending}
+                title={isAdmin ? undefined : 'Only admins can change this'}
+                onClick={() => setPending({ ...e, require_approval: !e.require_approval })}
+              >
+                {e.require_approval ? `Needs ${e.approver_role}` : 'Applies unattended'}
+              </button>
+            </div>
+          </div>
+        )
+      })}
+
+      {pending && (
+        <SudoConfirmDialog
+          title={pending.require_approval ? 'Require approval' : 'Allow unattended applies'}
+          icon={<ShieldCheck />}
+          body={
+            <p>
+              {pending.require_approval
+                ? <>Plans classed <strong>{CLASS_LABELS[pending.change_class]?.name ?? pending.change_class}</strong> will
+                   wait for a <strong>{pending.approver_role}</strong> before they can apply.</>
+                : <>Plans classed <strong>{CLASS_LABELS[pending.change_class]?.name ?? pending.change_class}</strong> will
+                   apply with no human involved.</>}
+            </p>
+          }
+          confirmLabel={pending.require_approval ? 'Require approval' : 'Allow unattended'}
+          pending={save.isPending}
+          error={save.error ? (save.error as Error).message : null}
+          onCancel={() => { save.reset(); setPending(null) }}
+          onConfirm={(password) => save.mutate({ entry: pending, password })}
+        />
+      )}
+    </>
+  )
+}
+
 function DangerPanel({
   onToast,
   onAfterSignOutAll,

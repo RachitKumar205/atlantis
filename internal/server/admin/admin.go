@@ -588,6 +588,23 @@ func (s *Service) PlanSchema(ctx context.Context, req *adminpb.PlanSchemaRequest
 	if len(customSQLErrs) > 0 {
 		resp.Class = adminpb.PlanClass_PLAN_CLASS_UNPARSEABLE
 	}
+
+	// What the change policy says about this class. Read after the class is
+	// final, so an unparseable plan is not reported as awaiting an approval it
+	// will never be offered.
+	//
+	// A failed read is not fatal here. The plan is a read-only preview and the
+	// gate lives at apply time; refusing to plan because a policy row could not
+	// be fetched would take away the operator's ability to see what is wrong.
+	if policyClassIsSettable(resp.Class) && s.pool != nil {
+		if stored, _, err := loadChangePolicy(ctx, s.pool); err == nil {
+			p := effectiveChangePolicy(stored, resp.Class)
+			resp.RequiresApproval = p.RequireApproval
+			if p.RequireApproval {
+				resp.ApproverRole = p.ApproverRole
+			}
+		}
+	}
 	return resp, nil
 }
 

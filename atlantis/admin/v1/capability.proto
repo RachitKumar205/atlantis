@@ -79,4 +79,16 @@ enum Capability {
   // evict workers. Every one of these affects callers other than the one
   // making the request.
   CAPABILITY_OPERATOR = 9;
+
+  // Decide which plan classes may apply without a human, and — once approvals
+  // exist — approve an individual plan.
+  //
+  // Deliberately not implied by OPERATOR, and deliberately absent from every
+  // bundle RegisterCaller hands out. The separation is the entire point: an
+  // identity holding SCHEMA_APPLY must never also hold this, or the caller
+  // that wants the change is the caller that permits it. Today that holds
+  // structurally — applying identities are machine cert CNs and this is
+  // granted only to the console, which holds no SCHEMA_APPLY — and a test
+  // asserts it rather than leaving it to be noticed.
+  CAPABILITY_SCHEMA_APPROVE = 10;
 }
