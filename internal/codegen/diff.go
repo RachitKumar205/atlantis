@@ -1625,9 +1625,14 @@ func diffPartition(oldE, newE *dsl.Entity, d *Diff) {
 				Kind:     KindPartitionChanged,
 				EntityID: newE.ID(),
 				Field:    newField,
-				Detail: fmt.Sprintf("%s: the type of the tenant column %q changed, so "+
+				// Detail does not name the entity. EntityID is a field on the
+				// change and every renderer already has it: `tide plan` prints
+				// "%s/%s: %s" over EntityID, Field and Detail, so repeating it
+				// here produced "shop.Doc/tenant: shop.Doc: the type of...".
+				// These four were the only Details in the file that did.
+				Detail: fmt.Sprintf("the type of the tenant column %q changed, so "+
 					"the isolation policy must be rebuilt — PostgreSQL refuses to alter "+
-					"a column a policy depends on", newE.ID(), newField),
+					"a column a policy depends on", newField),
 			})
 		}
 		return
@@ -1641,9 +1646,9 @@ func diffPartition(oldE, newE *dsl.Entity, d *Diff) {
 			Class:    ClassCrossCallerBreaking,
 			Kind:     KindPartitionAdded,
 			EntityID: newE.ID(),
-			Detail: fmt.Sprintf("%s: tenant isolation enabled on %q — after this "+
+			Detail: fmt.Sprintf("tenant isolation enabled on %q — after this "+
 				"applies, a request that carries no tenant reads nothing from this table",
-				newE.ID(), newField),
+				newField),
 			Field: newField,
 		})
 	case oldField != "" && newField == "":
@@ -1651,8 +1656,8 @@ func diffPartition(oldE, newE *dsl.Entity, d *Diff) {
 			Class:    ClassCrossCallerBreaking,
 			Kind:     KindPartitionRemoved,
 			EntityID: newE.ID(),
-			Detail: fmt.Sprintf("%s: tenant isolation REMOVED from %q — after this "+
-				"applies, every caller reads every tenant's rows", newE.ID(), oldField),
+			Detail: fmt.Sprintf("tenant isolation REMOVED from %q — after this "+
+				"applies, every caller reads every tenant's rows", oldField),
 			Field: oldField,
 		})
 	default:
@@ -1660,9 +1665,9 @@ func diffPartition(oldE, newE *dsl.Entity, d *Diff) {
 			Class:    ClassCrossCallerBreaking,
 			Kind:     KindPartitionChanged,
 			EntityID: newE.ID(),
-			Detail: fmt.Sprintf("%s: tenant isolation moved from %q to %q — rows are "+
+			Detail: fmt.Sprintf("tenant isolation moved from %q to %q — rows are "+
 				"regrouped by a different column, so what each caller can see changes",
-				newE.ID(), oldField, newField),
+				oldField, newField),
 			Field: newField,
 		})
 	}
