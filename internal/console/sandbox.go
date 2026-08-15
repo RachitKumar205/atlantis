@@ -26,8 +26,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +33,7 @@ import (
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/runtime/sandbox"
+	"github.com/rachitkumar205/atlantis/internal/runtime/sandbox/embedded"
 )
 
 // defaultSandboxTTL is the idle window before the janitor evicts a
@@ -230,30 +229,21 @@ func mintPubID() (string, error) {
 }
 
 // sweepEmbeddedTempdirs runs once at BFF startup, removing per-sandbox
-// embedded-postgres temp directories left over from a prior process
-// crash. Matches the layout in
-// internal/runtime/sandbox/embedded/embedded.go (atlantis-sandbox-data-*
-// and atlantis-sandbox-runtime-* prefixes under os.TempDir()).
+// embedded-postgres temp directories left over from a prior process crash.
 //
-// Best-effort: logs errors via the provided logger but never fails
-// startup. The OS's own /tmp cleanup is unreliable on macOS (3+ days,
-// boot-only) and slow on Linux (systemd-tmpfiles default 10 days), so
-// this sweep is the actual cleanup path.
+// Best-effort: logs via the provided logger but never fails startup. The OS's
+// own /tmp cleanup is unreliable on macOS (3+ days, boot-only) and slow on
+// Linux (systemd-tmpfiles default 10 days), so this sweep is the actual
+// cleanup path.
+//
+// The work is embedded.SweepAbandoned's, not this package's, and that move is
+// the fix rather than a tidy-up. This function used to carry its own copy of
+// the directory-name prefixes and delete every match — so it deleted
+// directories belonging to any process on the host, including live ones. The
+// package that creates those directories is the only one that can say whose
+// they are, so it is the one that decides what may be removed.
 func sweepEmbeddedTempdirs(logf func(string, ...any)) {
-	dir := os.TempDir()
-	patterns := []string{"atlantis-sandbox-data-*", "atlantis-sandbox-runtime-*"}
-	for _, p := range patterns {
-		matches, err := filepath.Glob(filepath.Join(dir, p))
-		if err != nil {
-			logf("sandbox startup sweep: glob %s: %v", p, err)
-			continue
-		}
-		for _, m := range matches {
-			if err := os.RemoveAll(m); err != nil {
-				logf("sandbox startup sweep: remove %s: %v", m, err)
-			}
-		}
-	}
+	embedded.SweepAbandoned(logf)
 }
 
 // ─────────────────────────── HTTP handlers ───────────────────────────

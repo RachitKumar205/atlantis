@@ -47,7 +47,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	embeddedpostgres "github.com/fergusstrange/embedded-postgres"
@@ -456,11 +459,24 @@ func freePort() (int, error) {
 	return addr.Port, nil
 }
 
+// tempDirPrefixes are the two shapes SweepAbandoned recognises. Kept beside
+// their creation site: the console used to carry its own copy of these
+// literals, which is how a sweep comes to delete something nobody told it
+// about.
+var tempDirPrefixes = []string{"atlantis-sandbox-data-", "atlantis-sandbox-runtime-"}
+
+// ownerFile records which process a sandbox tempdir belongs to. See
+// SweepAbandoned for why a directory without one is left alone.
+const ownerFile = ".atlantis-owner"
+
 // makeTempDir returns a uniquely-named subdir under os.TempDir().
 // Each Backend instance gets its own (data + runtime) tempdir pair so
 // embedded-postgres's cleanup-on-start dance doesn't fail when
 // multiple instances run back-to-back. The caller is responsible for
 // removing the dir on Close — we do that in Backend.Close().
+//
+// The owner file is written before the directory is used, so a sweep that
+// runs between MkdirAll and the first write still sees a claimed directory.
 func makeTempDir(prefix string) (string, error) {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -470,5 +486,87 @@ func makeTempDir(prefix string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
+	if err := os.WriteFile(filepath.Join(dir, ownerFile),
+		[]byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		return "", fmt.Errorf("claim %s: %w", dir, err)
+	}
 	return dir, nil
+}
+
+// SweepAbandoned removes sandbox tempdirs whose owning process is gone.
+//
+// # Why the ownership check is the whole function
+//
+// The previous version globbed the two prefixes and os.RemoveAll'd every
+// match. That cannot tell "left behind by a crashed predecessor" from "in use
+// by another process right now", and it ran on every console boot. One console
+// per host made it harmless; a rolling restart with overlap, a blue/green
+// deploy, or two people running `make dev` on one machine would have a live
+// sandbox deleted out from under an active session, surfacing as an unrelated
+// Postgres error somewhere else entirely.
+//
+// It was found when a console test called the real New(): `go test` runs
+// packages concurrently, and the sweep deleted three sandbox packages' working
+// directories while they were extracting a Postgres archive.
+//
+// # Which way it fails
+//
+// A directory is removed only when its owner file names a process that is no
+// longer running. Anything else — no owner file, an unreadable one, a PID that
+// still resolves — is kept and logged. That leaks disk in the cases it cannot
+// judge, which is the right direction: an abandoned directory costs space until
+// somebody clears it, while a deleted live one costs a running session.
+//
+// PID reuse is possible and also falls the safe way: a recycled PID reads as
+// alive, so the directory is kept.
+//
+// Directories created before this marker existed have no owner file and are
+// therefore never swept. They are named in the log so an operator can remove
+// them deliberately.
+func SweepAbandoned(logf func(string, ...any)) {
+	for _, prefix := range tempDirPrefixes {
+		matches, err := filepath.Glob(filepath.Join(os.TempDir(), prefix+"*"))
+		if err != nil {
+			logf("sandbox sweep: glob %s: %v", prefix, err)
+			continue
+		}
+		for _, dir := range matches {
+			raw, err := os.ReadFile(filepath.Join(dir, ownerFile))
+			if err != nil {
+				logf("sandbox sweep: %s carries no owner and was left in place; "+
+					"remove it by hand if it is stale", dir)
+				continue
+			}
+			pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+			if err != nil {
+				logf("sandbox sweep: %s has an unreadable owner (%q) and was left "+
+					"in place", dir, string(raw))
+				continue
+			}
+			if processIsRunning(pid) {
+				continue
+			}
+			if err := os.RemoveAll(dir); err != nil {
+				logf("sandbox sweep: remove %s: %v", dir, err)
+			}
+		}
+	}
+}
+
+// processIsRunning reports whether a PID resolves to a live process.
+//
+// Signal 0 performs the permission and existence checks without delivering
+// anything. EPERM means the process exists under another user, which is still
+// "running" for this purpose — and is exactly the multi-operator case the
+// sweep must not delete through.
+func processIsRunning(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = p.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
