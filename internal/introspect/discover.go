@@ -1,0 +1,114 @@
+package introspect
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/rachitkumar205/atlantis/internal/dsl"
+)
+
+// DiscoveredTable is a physical table no declaration mentions.
+//
+// Deliberately not a dsl.Entity. Naming it — which namespace, what entity
+// name — is a decision with consequences a discovery pass has no standing to
+// make: those names become the caller's generated API surface, and renaming
+// one later is a breaking change that goes through the approval gate. This
+// type carries what the catalogue says and stops there.
+type DiscoveredTable struct {
+	Schema string
+	Table  string
+}
+
+// Qualified renders the schema-qualified name, which is what a generated
+// entity's `table` clause has to carry.
+func (d DiscoveredTable) Qualified() string { return d.Schema + "." + d.Table }
+
+// atlantisOwnedInPublic are tables atlantis creates in the public schema for
+// its own bookkeeping.
+//
+// Excluded by EXACT name rather than an `atlantis_%` prefix. A prefix would be
+// shorter and would also silently swallow a customer table that happened to
+// start with it — and dropping one of their tables from a discovery listing is
+// a worse failure than showing them one of ours, because the first is
+// invisible and the second is one deselection.
+//
+// Sourced from internal/migrate/migrate.go, which passes these as
+// x-migrations-table with search_path=public.
+var atlantisOwnedInPublic = map[string]bool{
+	"atlantis_schema_migrations_infra":   true,
+	"atlantis_schema_migrations_tidectl": true,
+}
+
+// DiscoverTables lists tables that physically exist and that declaredIR does
+// not describe.
+//
+// This is the capability adopt never had. FromPostgres can only verify what it
+// is told about — loadExistingTables filters pg_class down to the declared
+// pairs — so a database can only be adopted by somebody who has already
+// written a declaration for every table in it. That is the whole of the
+// onboarding problem: the person adopting a legacy database is exactly the
+// person who has not written those files.
+//
+// Pass nil schemas to search every non-system schema, which is what onboarding
+// wants. Pass an explicit list to narrow it.
+//
+// declaredIR may be nil, meaning "nothing is declared yet" — the first run
+// against a database atlantis has never seen.
+func DiscoverTables(ctx context.Context, q Querier, declaredIR *dsl.IR, schemas []string) ([]DiscoveredTable, error) {
+	known := map[physRef]bool{}
+	if declaredIR != nil {
+		for i := range declaredIR.Entities {
+			s, t := physical(&declaredIR.Entities[i])
+			known[physRef{schema: s, table: t}] = true
+		}
+	}
+
+	// relispartition excludes the children of a partitioned table. They are
+	// ordinary relations in pg_class and would otherwise be discovered as
+	// tables in their own right — one per partition, none of them separately
+	// declarable, and on a time-partitioned table there may be hundreds.
+	//
+	// The atlantis schema holds this server's own machinery (jobs, the IR
+	// checkpoint, caller registrations). Offering to generate declarations for
+	// it would propose that a customer adopt our bookkeeping as their schema.
+	//
+	// The _timescaledb_* schemas hold chunk storage for hypertables. Same
+	// reasoning as partition children, one layer down.
+	const query = `
+SELECT n.nspname, c.relname
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','p','f')
+  AND NOT c.relispartition
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'atlantis')
+  AND n.nspname NOT LIKE 'pg\_toast%'
+  AND n.nspname NOT LIKE 'pg\_temp%'
+  AND n.nspname NOT LIKE '\_timescaledb%'
+  AND (cardinality($1::text[]) = 0 OR n.nspname = ANY($1::text[]))
+ORDER BY n.nspname, c.relname`
+
+	if schemas == nil {
+		schemas = []string{}
+	}
+	rows, err := q.Query(ctx, query, schemas)
+	if err != nil {
+		return nil, fmt.Errorf("discover tables: %w", err)
+	}
+	defer rows.Close()
+
+	var out []DiscoveredTable
+	for rows.Next() {
+		var d DiscoveredTable
+		if err := rows.Scan(&d.Schema, &d.Table); err != nil {
+			return nil, fmt.Errorf("scan discovered table: %w", err)
+		}
+		if known[physRef{schema: d.Schema, table: d.Table}] {
+			continue
+		}
+		if d.Schema == "public" && atlantisOwnedInPublic[d.Table] {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
