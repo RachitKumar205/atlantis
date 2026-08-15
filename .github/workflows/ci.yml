@@ -89,7 +89,7 @@ jobs:
         run: |
           curl -sSL https://github.com/golang-migrate/migrate/releases/latest/download/migrate.linux-amd64.tar.gz | tar xz
           sudo mv migrate /usr/local/bin/migrate
-          migrate -path ./migrations/infra -database "$PG_URL&x-migrations-table=atlantis_schema_migrations_infra" up
+          migrate -path ./migrations/infra -database "$PG_URL&search_path=public&x-migrations-table=atlantis_schema_migrations_infra" up
 
       - name: confirm the database tests are not skipping
         # A skip is a pass, so "the suite is green" says nothing about whether

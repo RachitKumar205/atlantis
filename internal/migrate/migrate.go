@@ -60,7 +60,33 @@ func applyDir(pgURL, root, sub, historyTable string, log *slog.Logger) error {
 	if strings.Contains(pgURL, "?") {
 		sep = "&"
 	}
-	dbURL := "pgx5://" + trimScheme(pgURL) + sep + "x-migrations-table=" + historyTable
+	// search_path is pinned, and without it this re-runs the whole history on
+	// every boot after the first.
+	//
+	// golang-migrate names its version table unqualified, so where it lands is
+	// whatever search_path resolves to. The default is `"$user", public`, the
+	// role is called `atlantis`, and migration 1 creates a schema also called
+	// `atlantis` — so:
+	//
+	//   - First run: no `atlantis` schema yet, `"$user"` resolves to nothing,
+	//     the table is created in `public` and the run records version 27 there.
+	//   - Every later connection: the `atlantis` schema now exists, `"$user"`
+	//     resolves to it, and the unqualified name finds no table. golang-migrate
+	//     creates an empty one and concludes nothing has ever been applied.
+	//
+	// The consequences are not subtle once seen. `migrate version` reports "no
+	// migration" against a fully migrated database. `down` and `down -all` roll
+	// nothing back, which is why the reversibility gate in the Makefile passed
+	// while verifying nothing. And a second `up` replays every migration from
+	// zero — survivable only because most are `CREATE ... IF NOT EXISTS`, which
+	// is luck rather than design.
+	//
+	// `public` rather than a qualified table name: every deployment that exists
+	// already has its history there, having been created by a first run. Moving
+	// to `atlantis.<table>` would strand that history and re-run everything
+	// once, which is the failure being fixed.
+	dbURL := "pgx5://" + trimScheme(pgURL) + sep +
+		"search_path=public&x-migrations-table=" + historyTable
 
 	m, err := migrate.New(src, dbURL)
 	if err != nil {

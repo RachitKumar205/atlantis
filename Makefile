@@ -20,8 +20,8 @@ SIGNER_PORT ?= 7071
 # Two migration histories: infra (hand-written) and tidectl (codegen).
 MIGRATIONS_INFRA_DIR := ./migrations/infra
 MIGRATIONS_TIDECTL_DIR := ./.dev/migrations/tidectl
-MIGRATE_URL_INFRA := $(PG_URL)&x-migrations-table=atlantis_schema_migrations_infra
-MIGRATE_URL_TIDECTL := $(PG_URL)&x-migrations-table=atlantis_schema_migrations_tidectl
+MIGRATE_URL_INFRA := $(PG_URL)&search_path=public&x-migrations-table=atlantis_schema_migrations_infra
+MIGRATE_URL_TIDECTL := $(PG_URL)&search_path=public&x-migrations-table=atlantis_schema_migrations_tidectl
 
 GO ?= go
 GOFLAGS ?=
@@ -454,11 +454,29 @@ codegen-check: ## Verify gen/ + clients/go/ + atlantis/*.proto are up to date wi
 # operator by `tidectl plan/approve` against their own .atl files and
 # never lands in this repo, so CI can't roundtrip it.
 .PHONY: migrate-roundtrip
+# The assertion after `down -all` is the point of this target.
+#
+# Without it the gate passed for months while rolling nothing back: golang-migrate
+# read an empty version table, reported "no change", and left every table
+# standing. A reversibility check that cannot tell "rolled back cleanly" from
+# "did nothing" is a check that reports on its own invocation, not on the
+# migrations. See internal/migrate for the search_path cause.
 migrate-roundtrip: ## Verify every infra migration is reversible against a fresh DB
 	@which migrate >/dev/null || (echo "install golang-migrate: brew install golang-migrate" && exit 1)
 	migrate -path $(MIGRATIONS_INFRA_DIR) -database "$(MIGRATE_URL_INFRA)" up
 	migrate -path $(MIGRATIONS_INFRA_DIR) -database "$(MIGRATE_URL_INFRA)" down -all
+	@left=$$(psql "$(PG_URL)" -tAc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'atlantis'"); \
+	  if [ "$$left" != "0" ]; then \
+	    echo "migrate-roundtrip FAILED: $$left table(s) survived 'down -all'."; \
+	    echo "  Either a .down.sql does not undo its .up.sql, or golang-migrate rolled"; \
+	    echo "  nothing back — check that the version table is where it thinks it is."; \
+	    exit 1; \
+	  fi
 	migrate -path $(MIGRATIONS_INFRA_DIR) -database "$(MIGRATE_URL_INFRA)" up
+	@left=$$(psql "$(PG_URL)" -tAc "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'atlantis'"); \
+	  if [ "$$left" = "0" ]; then \
+	    echo "migrate-roundtrip FAILED: the second 'up' restored no tables."; exit 1; \
+	  fi
 	@echo "migrate-roundtrip ok"
 
 # ---------- clean ----------

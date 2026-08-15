@@ -445,8 +445,12 @@ func openInfraMigrate(t *testing.T, dsn string) *migrate.Migrate {
 	if strings.Contains(url, "?") {
 		sep = "&"
 	}
+	// search_path pinned for the same reason internal/migrate pins it: without
+	// it golang-migrate's unqualified version table moves between `public` and
+	// `atlantis` depending on whether the schema exists yet, and the version it
+	// reads back is not the version it wrote.
 	m, err := migrate.New("file://../../../migrations/infra",
-		"pgx5://"+url+sep+"x-migrations-table=atlantis_schema_migrations_infra")
+		"pgx5://"+url+sep+"search_path=public&x-migrations-table=atlantis_schema_migrations_infra")
 	if err != nil {
 		t.Fatalf("migrate init: %v", err)
 	}
