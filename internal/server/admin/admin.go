@@ -64,6 +64,10 @@ type Service struct {
 	backfillEnabled    bool
 	logRing            *obs.LogRing
 
+	// hasCapability answers "is this request an operator" for the job RPCs.
+	// See Config.HasCapability for why nil narrows.
+	hasCapability func(ctx context.Context, c adminpb.Capability) (bool, error)
+
 	// proxyForwarded reports whether the request's identity was asserted by
 	// a trusted front proxy (vs a direct mTLS client). nil when trusted-
 	// proxy mode is off. The two trustedProxyMay* flags decide which gates
@@ -101,6 +105,23 @@ type Config struct {
 	// caller can't impersonate another caller's identity in the
 	// request body. When nil the check is skipped (insecure dev mode).
 	CallerFromContext func(context.Context) string
+
+	// HasCapability reports whether the calling identity holds one
+	// capability. The job RPCs use it for a single decision: an operator
+	// reads and retries across every caller, and everybody else is scoped to
+	// the jobs they own.
+	//
+	// A function rather than an authz.Grants, matching CallerFromContext
+	// beside it, and a predicate rather than a list because a list is a
+	// second thing to keep in step — this package needs one answer, not an
+	// inventory it would have to search itself.
+	//
+	// When nil, no request is treated as an operator, so every caller sees
+	// only its own jobs. That is the safe direction for a misconfiguration:
+	// forgetting to wire this narrows what is visible rather than widening
+	// it, and the symptom is an operator's console showing an empty DLQ
+	// rather than a caller reading another caller's args.
+	HasCapability func(ctx context.Context, c adminpb.Capability) (bool, error)
 
 	// ProxyForwardedFromContext reports whether the request's identity came
 	// from a trusted front proxy (a forwarded, re-validated client cert)
@@ -144,6 +165,8 @@ func New(pool *pgxpool.Pool, cfg Config) *Service {
 		callerFromContext:  cfg.CallerFromContext,
 		backfillEnabled:    cfg.BackfillEnabled,
 		logRing:            cfg.LogRing,
+
+		hasCapability: cfg.HasCapability,
 
 		proxyForwarded:         cfg.ProxyForwardedFromContext,
 		trustedProxyMayApply:   cfg.TrustedProxyMayApply,

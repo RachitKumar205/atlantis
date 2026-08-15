@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/auth"
 	"github.com/rachitkumar205/atlantis/internal/backfill"
 	"github.com/rachitkumar205/atlantis/internal/cache/invalidate"
@@ -326,6 +327,26 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		},
 	})
 
+	// Capability enforcement for the admin plane. Grants come from
+	// atlantis.caller_capabilities, keyed by the same cert CN the auth,
+	// cert-binding and rate-limit layers resolve, and cached on the same 5s TTL
+	// as the cert-binding checker so a revocation takes effect at one
+	// consistent horizon rather than two.
+	//
+	// Built before admin.Service because the service reads it too: the job
+	// RPCs scope their rows to the calling caller and let an operator see
+	// across all of them, and that is one question — "does this identity hold
+	// CAPABILITY_OPERATOR" — asked of the same grants the interceptor uses.
+	// Two sources for that answer is two things to keep in step.
+	adminGrants, err := authz.NewPostgresGrants(authz.PostgresGrantsConfig{
+		DB:                authz.Pool(pool.Raw()),
+		CallerFromContext: callerFromContext,
+		Logger:            log,
+	})
+	if err != nil {
+		return fmt.Errorf("build admin grants: %w", err)
+	}
+
 	// admin.Service is constructed early because the cert-binding
 	// interceptor needs its LookupCallerCertBinding method. Register on
 	// the gRPC server happens after server construction below.
@@ -340,6 +361,17 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		CallerFromContext: callerFromContext,
 		BackfillEnabled:   cfg.BackfillWorkerEnabled,
 		LogRing:           logRing,
+
+		// The job RPCs ask this one question: may this identity read across
+		// callers, or only its own rows. Adapted here so the admin package
+		// does not import authz to ask it.
+		HasCapability: func(ctx context.Context, c adminpb.Capability) (bool, error) {
+			set, err := adminGrants.For(ctx)
+			if err != nil {
+				return false, err
+			}
+			return set.Has(c), nil
+		},
 
 		// Trusted-proxy admin-plane policy: a forwarded identity may
 		// self-apply (default) but not invoke cross-caller operator RPCs
@@ -373,19 +405,10 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		Log:               log,
 	})
 
-	// Capability enforcement for the admin plane. Grants come from
-	// atlantis.caller_capabilities, keyed by the same cert CN the auth,
-	// cert-binding and rate-limit layers resolve, and cached on the same 5s TTL
-	// as the cert-binding checker so a revocation takes effect at one
-	// consistent horizon rather than two.
-	adminGrants, err := authz.NewPostgresGrants(authz.PostgresGrantsConfig{
-		DB:                authz.Pool(pool.Raw()),
-		CallerFromContext: callerFromContext,
-		Logger:            log,
-	})
-	if err != nil {
-		return fmt.Errorf("build admin grants: %w", err)
-	}
+	// adminGrants is built above, before admin.Service, because the service
+	// consults it too. One instance means the interceptor's decision and the
+	// job RPCs' scoping read the same grants through the same 5s cache,
+	// rather than two caches that can disagree about a revocation.
 
 	unary := []grpc.UnaryServerInterceptor{
 		recoveryInterceptor(log),

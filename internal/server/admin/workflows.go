@@ -129,10 +129,19 @@ RETURNING id`, req.GetWorkflowName(), []byte(state), req.GetSubmittedBy(), step.
 	// Enqueued inline because there is no post-insert hook to rely on: this
 	// package cannot import internal/jobs without an import cycle, so the
 	// engine never learns about the instance until a job for it exists.
+	//
+	// owner_caller is stamped here for the same reason SubmitJob stamps it:
+	// this row lands in atlantis.jobs and is read back through GetJobStatus
+	// and the dead-letter queue, both of which scope by owner. Left unset it
+	// would default to '', so a caller could start a workflow and then not be
+	// able to see the job it created — visible to operators and to nobody
+	// else. The submitted_by value beside it stays "workflow:<name>", which
+	// is provenance for a human and not an identity.
 	if _, err := tx.Exec(ctx, `
-INSERT INTO atlantis.jobs (job_name, queue, args, max_retries, timeout_ms, submitted_by, workflow_id, workflow_step)
-VALUES ($1, 'default', $2, 3, 1800000, $3, $4, $5)`,
-		step.TargetJobID, argsJSON, "workflow:"+req.GetWorkflowName(), id, step.Name); err != nil {
+INSERT INTO atlantis.jobs (job_name, queue, args, max_retries, timeout_ms, submitted_by, workflow_id, workflow_step, owner_caller)
+VALUES ($1, 'default', $2, 3, 1800000, $3, $4, $5, $6)`,
+		step.TargetJobID, argsJSON, "workflow:"+req.GetWorkflowName(), id, step.Name,
+		s.jobOwner(ctx)); err != nil {
 		return nil, fmt.Errorf("enqueue first step: %w", err)
 	}
 

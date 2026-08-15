@@ -248,8 +248,8 @@ func MoveToDLQ(ctx context.Context, pool *pgxpool.Pool, jobID int64, errMsg stri
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	if _, err := tx.Exec(ctx, `
 INSERT INTO atlantis.jobs_dead
-    (id, job_name, queue, args, attempts, max_retries, last_error, last_error_at, enqueued_at, submitted_by)
-SELECT id, job_name, queue, args, attempts, max_retries, $2, now(), enqueued_at, submitted_by
+    (id, job_name, queue, args, attempts, max_retries, last_error, last_error_at, enqueued_at, submitted_by, owner_caller)
+SELECT id, job_name, queue, args, attempts, max_retries, $2, now(), enqueued_at, submitted_by, owner_caller
 FROM atlantis.jobs WHERE id = $1`, jobID, errMsg); err != nil {
 		return fmt.Errorf("insert dead: %w", err)
 	}
@@ -303,9 +303,9 @@ WITH exhausted AS (
 ),
 moved AS (
     INSERT INTO atlantis.jobs_dead
-        (id, job_name, queue, args, attempts, max_retries, last_error, last_error_at, enqueued_at, submitted_by)
+        (id, job_name, queue, args, attempts, max_retries, last_error, last_error_at, enqueued_at, submitted_by, owner_caller)
     SELECT j.id, j.job_name, j.queue, j.args, j.attempts, j.max_retries,
-           'retries exhausted (swept)', now(), j.enqueued_at, j.submitted_by
+           'retries exhausted (swept)', now(), j.enqueued_at, j.submitted_by, j.owner_caller
     FROM atlantis.jobs j
     JOIN exhausted e ON e.id = j.id
     RETURNING id

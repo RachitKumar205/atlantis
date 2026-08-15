@@ -111,6 +111,55 @@ type RetryDeadJobResponse struct {
 	JobID string `json:"JobID"`
 }
 
+// jobOwner is the identity a job belongs to: the mTLS common name the request
+// arrived under, never anything from the request body.
+//
+// Returns "" when this deployment has no verified identity to read — no
+// CallerFromContext, or a caller resolved as "anonymous". That is the insecure
+// dev mode cmd/server warns about on startup, where the caller name comes from
+// a header the client writes itself. Scoping on such a value would deny
+// whoever is honest and admit whoever types a different string, which is the
+// appearance of authorization rather than authorization; the deployment has
+// already been told its admin plane is open.
+func (s *Service) jobOwner(ctx context.Context) string {
+	if s.callerFromContext == nil {
+		return ""
+	}
+	cn := s.callerFromContext(ctx)
+	if cn == "anonymous" {
+		return ""
+	}
+	return cn
+}
+
+// jobReadScope reports the owner_caller a job query must filter on, where ""
+// means "no filter — read across every caller".
+//
+// Two identities get the unfiltered view, for different reasons. An OPERATOR
+// gets it because triaging a dead-letter queue means seeing the whole queue;
+// that is what the console's Operations page does, and scoping it would show
+// an empty DLQ on every deployment. An unidentified caller gets it because
+// there is nothing to filter on — see jobOwner.
+//
+// A capability lookup that FAILS scopes to the caller rather than widening.
+// The lookup reads atlantis.caller_capabilities, so the realistic failure is
+// the database being unreachable or slow, and "the grants table did not answer"
+// must not be the thing that turns a scoped read into a global one.
+func (s *Service) jobReadScope(ctx context.Context) string {
+	owner := s.jobOwner(ctx)
+	if owner == "" {
+		return ""
+	}
+	if s.hasCapability == nil {
+		return owner
+	}
+	operator, err := s.hasCapability(ctx, adminpb.Capability_CAPABILITY_OPERATOR)
+	if err != nil || !operator {
+		return owner
+	}
+	return ""
+}
+
 // SubmitJob inserts a new job onto atlantis.jobs. The server reads
 // the job's runtime config (retries / timeout / queue) from the IR
 // checkpoint so callers submit only the args they actually vary
@@ -152,24 +201,28 @@ func (s *Service) SubmitJob(ctx context.Context, req *adminpb.SubmitJobRequest) 
 	if spec == nil {
 		return nil, fmt.Errorf("admin: unknown job %q (declare it in a .atl file and run `tide apply`)", req.GetJobName())
 	}
-	// RBAC: when the job declares `visible_to`, only the named caller
-	// (or "*" for any) can submit. We strip the "cli:" prefix if present so
-	// operator submissions match the DSL-declared caller name.
+	// RBAC: when the job declares `visible_to`, only the named caller (or "*"
+	// for any) can submit.
 	//
-	// SubmittedBy is client-supplied and unverified — cmd/tide sets it from
-	// $USER — so this gate is advisory, not a security boundary: any
-	// authenticated caller can name whatever identity the job declares. The
-	// server does resolve a real caller (callerFromContext, used by
-	// bindCallerIdentity); using it here instead would make the gate real,
-	// and is tracked separately — it changes who may submit which job, not
-	// just where the check reads its input.
+	// This reads the VERIFIED identity, not req.SubmittedBy. It used to read
+	// the latter, which cmd/tide fills from $USER, and a gate whose input the
+	// client chooses is not a gate: any authenticated caller could name the
+	// identity the job declared and submit. The "cli:" prefix strip went with
+	// it — it existed only to make a client-supplied string match, and there
+	// is nothing to normalise about a common name.
+	//
+	// An operator is allowed through. `visible_to` says which caller a job
+	// belongs to, and an operator already reads, retries and cancels across
+	// every caller; refusing them the submit half would be a boundary that
+	// holds in one direction only.
+	//
+	// An unidentified caller is allowed through as well, because there is
+	// nothing to compare — the same dev-mode reasoning as jobOwner, and the
+	// deployment has already been warned its admin plane is open.
 	if spec.visibleTo != "" && spec.visibleTo != "*" {
-		submitter := req.GetSubmittedBy()
-		if len(submitter) > 4 && submitter[:4] == "cli:" {
-			submitter = submitter[4:]
-		}
-		if submitter != spec.visibleTo {
-			return nil, fmt.Errorf("admin: caller %q is not allowed to submit %s (visible_to = %q)", submitter, req.GetJobName(), spec.visibleTo)
+		if submitter := s.jobReadScope(ctx); submitter != "" && submitter != spec.visibleTo {
+			return nil, fmt.Errorf("admin: caller %q is not allowed to submit %s (visible_to = %q)",
+				submitter, req.GetJobName(), spec.visibleTo)
 		}
 	}
 
@@ -208,11 +261,16 @@ func (s *Service) SubmitJob(ctx context.Context, req *adminpb.SubmitJobRequest) 
 
 	traceCtx := jobs.CaptureTraceCtx(ctx)
 
+	// owner_caller and submitted_by are both written, and they are not the
+	// same fact. owner_caller is the mTLS identity, which decides who may read
+	// this row back; submitted_by is whatever the client said, kept because a
+	// human triaging the queue wants to know which person or pipeline pressed
+	// the button. Only the first is trusted.
 	const insertSQL = `
 INSERT INTO atlantis.jobs
-    (job_name, queue, args, max_retries, timeout_ms, scheduled_for, submitted_by, trace_ctx)
+    (job_name, queue, args, max_retries, timeout_ms, scheduled_for, submitted_by, trace_ctx, owner_caller)
 VALUES
-    ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, now()), $7, $8)
+    ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, now()), $7, $8, $9)
 RETURNING id`
 	var id int64
 	if err := s.pool.QueryRow(ctx, insertSQL,
@@ -224,6 +282,7 @@ RETURNING id`
 		scheduledForArg,
 		req.GetSubmittedBy(),
 		traceCtx,
+		s.jobOwner(ctx),
 	).Scan(&id); err != nil {
 		return nil, fmt.Errorf("insert job: %w", err)
 	}
@@ -237,12 +296,18 @@ func (s *Service) GetJobStatus(ctx context.Context, req *adminpb.GetJobStatusReq
 	if req.GetJobId() == "" {
 		return nil, errors.New("admin: JobID is required")
 	}
+	// Scoped to the owner unless the caller is an operator. A job belonging to
+	// another caller reports Found=false rather than a refusal: whether a
+	// given id exists is itself information about another caller's queue, and
+	// "you may not read this one" answers the question the scoping exists to
+	// refuse to answer.
 	row := s.pool.QueryRow(ctx, `
 SELECT id, job_name, queue, args, status, attempts, max_retries,
        COALESCE(last_error, ''), last_error_at, scheduled_for,
        started_at, completed_at, enqueued_at, COALESCE(submitted_by, ''),
        progress_pct, COALESCE(progress_msg, ''), progress_at
-FROM atlantis.jobs WHERE id = $1`, req.GetJobId())
+FROM atlantis.jobs
+WHERE id = $1 AND ($2 = '' OR owner_caller = $2)`, req.GetJobId(), s.jobReadScope(ctx))
 	var js JobStatus
 	js, err := scanJobRow(row)
 	if err != nil {
@@ -277,9 +342,10 @@ SELECT id, job_name, queue, args, 'failed' AS status, attempts, max_retries,
        NULL::smallint AS progress_pct, ''::text AS progress_msg, NULL::timestamptz AS progress_at
 FROM atlantis.jobs_dead
 WHERE ($1 = '' OR job_name = $1)
+  AND ($3 = '' OR owner_caller = $3)
 ORDER BY moved_at DESC
 LIMIT $2`
-	rs, err := s.pool.Query(ctx, q, req.GetJobName(), limit)
+	rs, err := s.pool.Query(ctx, q, req.GetJobName(), limit, s.jobReadScope(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -312,21 +378,44 @@ func (s *Service) RetryDeadJob(ctx context.Context, req *adminpb.RetryDeadJobReq
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
+	// Scoped like the reads, and for a stronger reason: retrying re-runs
+	// another caller's work with their args. owner_caller carries across so a
+	// job retried by an operator still belongs to whoever submitted it — the
+	// row must not change hands by being triaged.
+	//
+	// The SELECT carries the scope, so a job the caller does not own moves
+	// nothing, RowsAffected reports 0, and the request takes the same "not
+	// found" path as an id that never existed — the answer that leaks nothing
+	// about another caller's queue. That predicate is the one doing the work,
+	// and TestRetryingAnotherCallersDeadJobDestroysNothing kills its removal.
+	//
+	// The DELETE repeats the scope and, as the code stands, does not need to:
+	// the RowsAffected check returns before it, so it is unreachable for a row
+	// the caller does not own. Mutating it to match everything leaves every
+	// test green, which is worth stating rather than leaving for someone to
+	// rediscover. It stays because the two statements are one operation and
+	// only their conjunction is safe — move the early return, or add a branch
+	// that reaches the DELETE another way, and an id-only predicate deletes a
+	// row this caller was refused. A guard that depends on a return statement
+	// twenty lines up is not a guard.
 	const moveSQL = `
 INSERT INTO atlantis.jobs
     (id, job_name, queue, args, status, attempts, max_retries,
-     scheduled_for, enqueued_at, submitted_by)
+     scheduled_for, enqueued_at, submitted_by, owner_caller)
 SELECT id, job_name, queue, args, 'pending', 0, max_retries,
-       now(), enqueued_at, submitted_by
-FROM atlantis.jobs_dead WHERE id = $1`
-	res, err := tx.Exec(ctx, moveSQL, req.GetJobId())
+       now(), enqueued_at, submitted_by, owner_caller
+FROM atlantis.jobs_dead WHERE id = $1 AND ($2 = '' OR owner_caller = $2)`
+	scope := s.jobReadScope(ctx)
+	res, err := tx.Exec(ctx, moveSQL, req.GetJobId(), scope)
 	if err != nil {
 		return nil, fmt.Errorf("re-insert: %w", err)
 	}
 	if res.RowsAffected() == 0 {
 		return nil, fmt.Errorf("admin: dead job %s not found", req.GetJobId())
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM atlantis.jobs_dead WHERE id = $1`, req.GetJobId()); err != nil {
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM atlantis.jobs_dead WHERE id = $1 AND ($2 = '' OR owner_caller = $2)`,
+		req.GetJobId(), scope); err != nil {
 		return nil, fmt.Errorf("delete dead: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
