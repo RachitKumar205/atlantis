@@ -71,6 +71,14 @@ Two consequences for your pipeline:
 - The drift warning lives **only** in `tide plan --format=json` (`index_drift`, `index_drift_notes`, `index_drift_error`). The human table output omits it, so a CI step that drops `--format=json` hides the only signal you'd get before merge. Keep `--format=json` and have reviewers (or a parser) watch for a non-empty `index_drift`.
 - The apply job needs a remediation before it can succeed: `DROP INDEX <name>;` against the DB, declaring the uniqueness in the `.atl`, or setting `ATLANTIS_ALLOW_INDEX_DRIFT=1` (note the `ATLANTIS_` prefix) in the apply environment. See [Legacy unique indexes can block apply](adopt-an-existing-database.md#legacy-unique-indexes-can-block-apply).
 
+### Exit 2 from apply means waiting, not broken
+
+Separately from drift: when the [change policy](../concepts/change-approval.md) holds a change for a human, `tide apply` exits **2**. The change is recorded and waiting for somebody to decide it in the console — nothing has failed.
+
+Have the apply job treat 2 as a neutral outcome and every other non-zero code as a failure. A pipeline that reports a working gate as a broken build teaches people to ignore it, and then to switch it off. `atlantis-apply.yml` in [the CI examples](../examples/README.md) shows the branch.
+
+`tide plan` already tells you this is coming: it prints an `approval` line for any class the policy holds.
+
 ## Post the plan as a PR comment
 
 Optional. Captures the plan output and posts it as a sticky comment on the PR:

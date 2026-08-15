@@ -100,9 +100,9 @@ Leave `ATL_ALLOW_APPLY_MUTATION=true`. The opt-out exists only for regulated wor
 Two boundaries gate every apply in the default flow, and both are enforced by the server:
 
 - **mTLS pins the connecting caller to its client cert.** The server requires `req.Caller` to match the CN, so a caller can only submit `.atl` files under its own namespace.
-- **The diff classifier refuses any change that breaks another caller or destroys data.** `ApplyMigration` rejects `cross_caller_breaking` and `destructive` plans itself, so a direct gRPC client holding `CAPABILITY_SCHEMA_APPLY` cannot route around it.
+- **The change policy decides which classes may apply unattended.** `ApplyMigration` classifies the diff, reads the rule for that class from `atlantis.change_policy`, and either proceeds or holds the change for a human. The check runs inside the same advisory-locked transaction as the apply, so a direct gRPC client holding `CAPABILITY_SCHEMA_APPLY` cannot route around it. By default a breaking or destructive change waits; see [change approval](../concepts/change-approval.md) for the defaults and how to change them.
 
-Review the change in your own repository as well — most teams gate merges on the `tide plan` exit code, and `tide plan` is read-only precisely so CI can run it on every pull request. But that review is your practice, not atlantis's gate: the server refuses a breaking or destructive plan however it arrives, including from a runner with no review at all.
+Review the change in your own repository as well — most teams gate merges on the `tide plan` exit code, and `tide plan` is read-only precisely so CI can run it on every pull request. That review is your practice; the change policy is atlantis's, and it applies however the plan arrives, including from a runner with no review at all. The two are not substitutes: your repository review sees the `.atl` change, and the policy gate sees what the server will actually do with it.
 
 A minimal production environment:
 

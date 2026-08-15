@@ -5,6 +5,7 @@ Core concepts before writing `.atl` files. Start with [Schema as code](schema-as
 - [Schema as code](schema-as-code.md). `.atl` syntax and the SQL, gRPC, and clients derived from it.
 - [The typed query surface](the-typed-query-surface.md). The `Get`/`Create`/`Update`/`Delete`/`Query` methods generated per entity.
 - [Schema versioning](schema-versioning.md). Append-only version registry, structural diffs, per-field blame.
+- [Change approval](change-approval.md). Which classes of change apply unattended, which wait for a person, and who decides.
 - [Caching and invalidation](caching-and-invalidation.md). Declaring read-through cache in `.atl` and how writes invalidate it.
 - [Ephemeral data](ephemeral-data.md). Memcached-only typed data with TTL for short-lived scratch state.
 - [The sandbox](sandbox.md). In-process disposable schema with checkpoints, restore, fork, diff, and seed.

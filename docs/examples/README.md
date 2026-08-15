@@ -10,7 +10,7 @@ review for every change.
 | File | Triggers on | Runs |
 |---|---|---|
 | `atlantis-plan.yml` | PR opened / synchronize (touching `**/*.atl`) | `tide plan` — read-only impact report; exit 2 on breaking and exit 4 on destructive → blocks merge via branch protection |
-| `atlantis-apply.yml` | Push to `main` (touching `**/*.atl`) | `tide apply` — the only path schema reaches prod |
+| `atlantis-apply.yml` | Push to `main` (touching `**/*.atl`) | `tide apply` — the only path schema reaches prod; exit 2 means the change is waiting for approval and the job ends green with a notice |
 
 ## Setup, step by step
 
@@ -81,6 +81,14 @@ Settings → Branches → Add rule for `main`:
 - ✅ Require `tide plan` to succeed (it'll appear after the first PR run)
 - ✅ Do not allow bypass
 
+Branch protection is a gate on your repository, not on your database. It
+stops an unreviewed `.atl` change from reaching `main`; it has no opinion
+about what the server does with one that gets there. The gate on the
+database is the [change policy](../concepts/change-approval.md), which the
+server enforces however the plan arrives — including from a runner with no
+review at all. Set both.
+
 That's it. Open a PR that edits a `.atl` file — `tide plan` runs, the
 impact report appears in the CI log, breaking changes block merge. Merge
-to `main` → `tide apply` runs.
+to `main` → `tide apply` runs, and applies unless the change policy holds
+it for a human.

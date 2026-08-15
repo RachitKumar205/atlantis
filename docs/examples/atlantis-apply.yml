@@ -73,4 +73,20 @@ jobs:
           TIDE_TLS_CERT_PEM: ${{ secrets.TIDE_TLS_CERT_PEM }}
           TIDE_TLS_KEY_PEM:  ${{ secrets.TIDE_TLS_KEY_PEM }}
           TIDE_TLS_CA_PEM:   ${{ secrets.TIDE_TLS_CA_PEM }}
-        run: tide apply
+        # Exit 2 means the change policy is holding this change for a human,
+        # not that anything is broken. By default a breaking or destructive
+        # change waits for approval in the console, so a bare `tide apply`
+        # here would turn a working gate into a red build — and a red build
+        # that recurs is a gate somebody eventually switches off.
+        #
+        # Any other non-zero code is a real failure and must stay one.
+        run: |
+          set +e
+          tide apply
+          CODE=$?
+          set -e
+          if [ "$CODE" -eq 2 ]; then
+            echo "::notice::Change needs approval — decide it in the console under Approvals, then re-run this job."
+            exit 0
+          fi
+          exit "$CODE"

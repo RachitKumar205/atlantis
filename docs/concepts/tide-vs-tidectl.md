@@ -8,7 +8,7 @@ atlantis ships two CLIs. `tide` runs from caller service repos and is the only p
 
 | Subcommand | Purpose |
 |---|---|
-| `tide plan --against=<endpoint>` | Read-only validation. Server returns the SQL it would run, the change classification, and any cross-caller breaks (the server refuses any apply that would invalidate another caller's current schema). Also surfaces a bare unique index the schema doesn't declare — a `CREATE UNIQUE INDEX` with no backing constraint (in `--format=json`). |
+| `tide plan --against=<endpoint>` | Read-only validation. Server returns the SQL it would run, the change classification, and any cross-caller breaks, plus whether the change needs approval before it can apply. Also surfaces a bare unique index the schema doesn't declare — a `CREATE UNIQUE INDEX` with no backing constraint (in `--format=json`). |
 | `tide apply --against=<endpoint>` | Mutates schema on the server. Refuses if the live database carries a bare unique index the schema doesn't declare, unless `ATLANTIS_ALLOW_INDEX_DRIFT=1`. Requires `CAPABILITY_SCHEMA_APPLY`, granted per caller in `atlantis.caller_capabilities`, and the deployment-wide `ATL_ALLOW_APPLY_MUTATION` switch left at its default `true`. The caller may only apply to its own namespace: `req.caller` must match the connecting certificate's CN. The server runs the DDL, writes `atlantis.ir_checkpoint` under content-hash CAS, and inserts an audit row into `atlantis.schema_versions` — all in one Postgres transaction, under an advisory lock. |
 | `tide pull` | Resyncs local `.atl` from server state. |
 | `tide diff` | Local diff between working tree and the server's IR. |
@@ -47,7 +47,7 @@ atlantis ships two CLIs. `tide` runs from caller service repos and is the only p
 Caller CI runs on every PR across every service repo. The blast radius of a buggy or malicious `tide apply` has to be bounded server-side:
 
 - **mTLS pins caller identity.** The connecting client cert's CN is the caller name; the server requires `req.Caller` to match the CN. A caller can only submit `.atl` files for its own namespace because it never holds anyone else's `.atl` source.
-- **Cross-caller break detection.** Even within its own namespace, the server's diff classifier refuses any apply that would invalidate another caller's current schema (e.g., dropping a column another caller reads).
+- **Cross-caller break detection.** Even within its own namespace, the server classifies any apply that would invalidate another caller's current schema (e.g., dropping a column another caller reads) as cross-caller-breaking, and the [change policy](change-approval.md) decides what happens to it. By default it waits for a named human rather than applying.
 - **Advisory lock.** Concurrent applies serialise; the second waits, re-plans against the new ground truth, and is rejected with a structured report if its plan no longer applies.
 
 The CLI split keeps the caller surface narrow — `tide` can submit schema changes but cannot run codegen, and `tidectl` is not deployed to caller pipelines at all.
