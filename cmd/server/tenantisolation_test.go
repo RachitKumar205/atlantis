@@ -623,10 +623,17 @@ func mentionsIdent(expr ast.Expr, name string) bool {
 // role and asserts whether the process starts. Arguments are not observable in
 // source and are unavoidable in behaviour.
 //
-// Still open, and worth stating rather than implying coverage: the reload
-// hook's call site, and `perr` (the probe-failure path) at either. The boot
-// test drives the boot call site only, and inducing a probe failure needs a
-// database that answers pg_class but not pg_policy.
+// The reload hook's call site is now covered the same way, by
+// TestReloadRefusesASchemaTheDatabaseIsNotEnforcing in reload_pg_test.go: a
+// server boots clean, the checkpoint changes underneath it to declare
+// `partition by` on a table with no policy, and the test asserts on which of
+// the two outcomes the running server logs. It drives the accepted case too,
+// so a gate that refused every reload would not pass it.
+//
+// Still open, and worth stating rather than implying coverage: `perr`, the
+// probe-failure path, at either call site. Inducing it needs a database that
+// answers pg_class but not pg_policy — a role with SELECT revoked on pg_policy
+// is the likely route.
 func TestPartitionGate(t *testing.T) {
 	probeFailed := errors.New("permission denied for table pg_policy")
 	findings := []string{"shop.Doc declares `partition by` but has no policy"}

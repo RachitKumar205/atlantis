@@ -77,7 +77,7 @@ func TestServerRefusesToBootWhenAPartitionedTableHasNoPolicy(t *testing.T) {
 	// Nothing about the gate needs the shared database, so it does not use it.
 	// A private one also removes the save-and-restore dance around
 	// atlantis.ir_checkpoint, which was a shared-state hazard of its own.
-	dsn := bootDatabase(t, adminDSN)
+	dsn := bootDatabase(t, adminDSN, "atlantis_bootgate")
 
 	for _, tc := range []struct {
 		name        string
@@ -235,9 +235,11 @@ func bootOnce(t *testing.T, pgURL, require string) string {
 // the children identical to a production boot — AUTO_MIGRATE defaults false and
 // a server that migrates its own database on start is a different thing from
 // one that finds it ready.
-func bootDatabase(t *testing.T, adminDSN string) string {
+// dbName is a parameter because the reload test needs its own database: both
+// tests drop theirs on cleanup, and sharing a name means whichever finishes
+// first destroys the other's while it is still booting children against it.
+func bootDatabase(t *testing.T, adminDSN, dbName string) string {
 	t.Helper()
-	const dbName = "atlantis_bootgate"
 
 	drop := func() {
 		pgcatalog.Exec(t, adminDSN,
