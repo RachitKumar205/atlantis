@@ -212,7 +212,36 @@ func (s *Service) AdoptBaseline(ctx context.Context, req *adminpb.AdoptBaselineR
 	// changes and emits the CREATE TABLE statements. Without this
 	// filtering, adopt would baseline phantom entities (RPCs reachable
 	// but failing at runtime against missing tables).
-	baseline := filterToExistingEntities(declaredIR, existingIDs)
+	//
+	// Filtered from the INTROSPECTED IR, not the declared one, and that is
+	// the whole point rather than a detail. Filtering handles an entity that
+	// does not exist; it cannot handle an ATTRIBUTE that does not exist on an
+	// entity that does. Baselining the declaration recorded every such
+	// attribute as already present, so the drift adopt had just reported as
+	// outstanding work became work that could never happen: the next
+	// `tide plan` compared the declaration against a checkpoint saying the
+	// same thing and found nothing to do.
+	//
+	// `partition by` is the case that makes this urgent. A table declared
+	// with tenant isolation but carrying no policy was baselined as isolated,
+	// so no apply ever created the policy, and the dispatcher — which reads
+	// the checkpoint — believed the table was partitioned. Every caller then
+	// read every tenant's rows while the one operator-visible signal, omit
+	// the tenant and get refused, kept reporting healthy.
+	//
+	// The same shape applied to a declared column that did not exist. Using
+	// the introspected IR fixes both at once, and any future attribute
+	// introspection learns to verify, because that IR is defined as
+	// "declared metadata, with everything the catalog can confirm overwritten
+	// by what the catalog actually says".
+	//
+	// KNOWN LIMIT: introspection does not yet read indexes, uniques or checks
+	// back from the catalogue — FromPostgres carries those over from the
+	// declaration untouched — so a declared-but-absent index is still
+	// baselined as present. That is an introspection gap rather than an adopt
+	// one, and closing it here would mean re-deriving the catalogue a second
+	// time in the wrong package.
+	baseline := filterToExistingEntities(introspectedIR, existingIDs)
 	_, err = s.persistCheckpoint(ctx, tx, baseline, versionMeta{
 		Caller:    "adopt",
 		PlanClass: "adopt",
@@ -347,14 +376,19 @@ func translateDrift(d *codegen.Diff) []AdoptDriftItem {
 }
 
 // filterToExistingEntities returns a shallow-cloned IR with only the
-// entities whose physical table exists in the live DB. Atlantis-only
-// metadata (cache, partition_field, indexes, relations) survives
-// unchanged for the entities that do exist; declarations for tables
-// that don't yet exist are dropped so they remain pending for
+// entities whose physical table exists in the live DB. Declarations for
+// tables that don't yet exist are dropped so they remain pending for
 // `tide apply` to materialize.
 //
+// Give this the INTROSPECTED IR. It filters whole entities and nothing
+// finer, so whatever it is handed is what gets baselined attribute for
+// attribute — hand it the declaration and every declared-but-absent
+// attribute of an existing table is recorded as present. See the call site
+// in AdoptBaseline for what that cost.
+//
 // Procedures and custom queries are preserved verbatim because they
-// have no physical SQL footprint until invoked.
+// have no physical SQL footprint until invoked; FromPostgres carries them
+// across from the declaration for the same reason.
 func filterToExistingEntities(in *dsl.IR, existing map[string]bool) *dsl.IR {
 	out := &dsl.IR{
 		Queries:    append([]dsl.CustomQuery(nil), in.Queries...),
