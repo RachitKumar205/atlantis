@@ -90,10 +90,11 @@ Modifier =
   | "check" "\"" SQLExpr "\""     // must share the field's line, or be indented past it
 
 DefaultExpr =
-    FunctionCall      // e.g. now(), gen_random_uuid()
-  | NumericLiteral    // e.g. 0, 3.14
-  | StringLiteral     // single-quoted, e.g. 'pending'
-  | BooleanLiteral    // true, false
+    "now" "(" ")"                 // the only function with its own keyword
+  | "raw" "\"" SQLExpr "\""       // any other expression, verbatim
+  | IntLiteral                    // e.g. 0, -1 — integers only
+  | StringLiteral                 // double-quoted, e.g. "pending"
+  | BooleanLiteral                // true, false
 
 QualifiedField = [ Namespace "." ] Entity "." Field
 
