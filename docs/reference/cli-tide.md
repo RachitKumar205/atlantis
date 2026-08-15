@@ -97,6 +97,36 @@ tide plan [--against <host:port>] [--format {table|json}] [--no-pull]
 
 A bare unique index the schema doesn't declare surfaces as an index-drift warning, but only under `--format=json` — in the `index_drift`, `index_drift_notes`, and `index_drift_error` fields. The `table` output does not render it. Drift never blocks `plan` or changes its exit code; `tide apply` is where it refuses unless [`ATLANTIS_ALLOW_INDEX_DRIFT=1`](configuration.md#schema-drift).
 
+### `tide inspect`
+
+Reports how the live database differs from your `.atl` files. Writes nothing.
+
+```
+tide inspect [--against <host:port>] [--format {table|json}] [--timeout <duration>]
+```
+
+| Flag | Description |
+|---|---|
+| `--against <host:port>` | Override the configured endpoint for this command only. |
+| `--format {table|json}` | Default `table`. `json` emits the raw drift report. |
+| `--timeout <duration>` | Default `2m`. Introspecting a large schema takes a while. |
+
+`plan` and `inspect` answer different questions. `plan` compares your files against the **recorded checkpoint** and tells you what an apply would do. `inspect` compares them against the **database itself** and tells you where the two have come apart — a column somebody added by hand, a policy that was dropped, a table that no longer matches its declaration.
+
+Findings are grouped by severity:
+
+| Severity | Meaning | Exit code |
+|---|---|---|
+| addition | Declared, not in the database yet | 1 |
+| removal | In the database, no longer declared | 1 |
+| mismatch | Both exist and disagree | 2 |
+
+Exit 2 is the one to act on. An addition is usually an apply away; a mismatch means the database was changed outside atlantis, and no apply will reconcile it.
+
+The report ends with a **not checked** section. Introspection does not read indexes, uniques or `check` predicates back from the catalogue, so `inspect` cannot tell you whether those match. Treat a clean run as "the columns, types, keys and tenant isolation agree", not as "everything agrees".
+
+The server runs this inside a read-only transaction, so it is safe to point at production from CI.
+
 ### `tide pull`
 
 Downloads the merged schema into `.tide-cache/schema/` and records the server's schema version in `.tide-cache/version.json`. Subsequent pulls short-circuit when the version matches.
@@ -267,8 +297,8 @@ tide version
 | Code | Meaning |
 |---|---|
 | 0 | Success, or no-op (e.g., `tide pull` with the local cache already current) |
-| 1 | Backfill required — `tide apply` or `tide plan` returned a backfill-required class |
-| 2 | Unknown subcommand passed to `tide` itself; cross-caller breaking change from `plan`; **or** `apply` blocked on an approval that has not been given |
+| 1 | Backfill required — `tide apply` or `tide plan` returned a backfill-required class; **or** `inspect` found outstanding work (additions/removals) |
+| 2 | Unknown subcommand passed to `tide` itself; cross-caller breaking change from `plan`; `apply` blocked on an approval that has not been given; **or** `inspect` found a mismatch |
 | 3 | Operational error: parse/validation failure, network error, config error, or unknown plan class |
 | 4 | Destructive change — the plan drops something that may hold data |
 

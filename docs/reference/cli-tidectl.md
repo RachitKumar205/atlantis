@@ -88,6 +88,34 @@ tidectl adopt [--workspace <file>] [--workspace-cache <dir>]
 
 Exit codes: `0` clean adopt (or drift accepted with `--allow-drift`, checkpoint written); `1` drift detected and the baseline refused; `3` operational error. See [Adopt an existing database](../guides/adopt-an-existing-database.md).
 
+If you want to know what differs without baselining anything, use `tidectl inspect` below. `--allow-drift` is not a way to look — it writes the shared checkpoint for every caller.
+
+### `tidectl inspect`
+
+Reports how the live database differs from the declared `.atl` files, across every caller in the workspace. Writes nothing.
+
+```
+tidectl inspect [--workspace <file>] [--workspace-cache <dir>]
+                [--endpoint <host:port>]
+                [--tls-cert <pem>] [--tls-key <pem>] [--tls-ca <pem>]
+                [--format {table|json}] [--timeout <duration>]
+```
+
+Flags are `adopt`'s, minus `--allow-drift`: there is nothing to permit.
+
+| Exit | Meaning |
+|---|---|
+| `0` | Every declaration matches the database |
+| `1` | Outstanding work — declared but absent, or present but no longer declared |
+| `2` | Mismatch — both sides exist and disagree |
+| `3` | Operational error |
+
+The same code map as [`tide inspect`](cli-tide.md#tide-inspect), which asks the same question scoped to one caller. An operator comparing a deployment-wide run against a caller's CI run should not have to translate.
+
+The server runs this in a read-only transaction. It takes no advisory lock, so it cannot block a concurrent apply.
+
+Like `tide inspect`, the report ends with a **not checked** section — introspection does not read indexes, uniques or `check` predicates back from the catalogue.
+
 ### `tidectl promote`
 
 Moves every staged migration from `--stage-dir` into `--migrations-dir`. Does not re-run codegen or re-diff.
@@ -152,14 +180,18 @@ tidectl version
 
 ## Exit codes
 
-| Command | 0 | 1 | 2 |
-|---|---|---|---|
-| `codegen` | success | lower or write failure | arg parse |
-| `plan` | success, no changes | destructive change without `--destructive` | arg parse, IO error |
-| `approve` | success | nothing staged, or move error | arg parse |
-| `lint` | clean | parse or validation failure | arg parse |
-| `migrate-up` / `migrate-down` | success | migrate failed | arg parse, missing `$PG_URL` |
-| `version` | success | — | — |
+| Command | 0 | 1 | 2 | 3 |
+|---|---|---|---|---|
+| `codegen` | success | lower or write failure | arg parse | — |
+| `plan` | success, no changes | destructive change without `--destructive` | arg parse, IO error | — |
+| `approve` | success | nothing staged, or move error | arg parse | — |
+| `lint` | clean | parse or validation failure | arg parse | — |
+| `migrate-up` / `migrate-down` | success | migrate failed | arg parse, missing `$PG_URL` | — |
+| `adopt` | baselined | drift found, baseline refused | — | operational |
+| `inspect` | in sync | outstanding work | mismatch | operational |
+| `version` | success | — | — | — |
+
+`adopt` and `inspect` are the two commands that talk to a live database rather than to files, and both reserve `3` for "could not run" so a pipeline can tell that from "ran, and here is what it found".
 
 ## Migration directory layout
 

@@ -149,46 +149,17 @@ func (s *Service) AdoptBaseline(ctx context.Context, req *adminpb.AdoptBaselineR
 		return &adminpb.AdoptBaselineResponse{AlreadyAdopted: true, CheckpointWritten: true}, nil
 	}
 
-	// Parse + lower the union of every submission. Other callers
-	// already registered (from a prior partial adopt or earlier
-	// applies) are also pulled so cross-caller FKs resolve.
-	submitterNames := make(map[string]bool, len(subs))
-	var parsed []*dsl.File
-	for _, sub := range subs {
-		submitterNames[sub.Caller] = true
-		ps, errs := parseSubmitted(sub.Caller, sub.Files)
-		if len(errs) > 0 {
-			return nil, fmt.Errorf("admin: parse failed for %s: %v", sub.Caller, errs)
-		}
-		parsed = append(parsed, ps...)
-	}
-	others, err := s.loadOtherCallersExcluding(ctx, tx, submitterNames)
+	cmp, err := s.compareToLive(ctx, tx, subs)
 	if err != nil {
 		return nil, err
 	}
-	declaredIR, err := dsl.Lower(append(parsed, others...))
-	if err != nil {
-		return nil, fmt.Errorf("admin: lower failed: %w", err)
-	}
-
-	introspectedIR, existingIDs, warnings, err := introspect.FromPostgres(ctx, tx, declaredIR)
-	if err != nil {
-		return nil, fmt.Errorf("introspect: %w", err)
-	}
-	codegen.AssignProtoNumbers(introspectedIR, declaredIR)
-	d := codegen.ComputeDiff(introspectedIR, declaredIR)
-	drift := translateDrift(d)
+	introspectedIR := cmp.IntrospectedIR
+	existingIDs, warnings, d, drift := cmp.ExistingIDs, cmp.Warnings, cmp.Diff, cmp.Drift
 
 	// Only mismatches block baselining. Additions / removals are
 	// outstanding-work indicators; surfacing them is the value, blocking
 	// on them is the bug.
-	mismatchCount := 0
-	for _, di := range drift {
-		if di.Severity == "mismatch" {
-			mismatchCount++
-		}
-	}
-	if mismatchCount > 0 && !req.GetAllowDrift() {
+	if mismatchCount(drift) > 0 && !req.GetAllowDrift() {
 		return &adminpb.AdoptBaselineResponse{
 			CheckpointWritten: false,
 			Drift:             adoptDriftToPB(drift),
@@ -266,7 +237,9 @@ func (s *Service) AdoptBaseline(ctx context.Context, req *adminpb.AdoptBaselineR
 // loadOtherCallersExcluding loads files for every caller NOT in the
 // supplied set. Mirror of loadOtherCallersTx but generalized for the
 // multi-caller adopt case.
-func (s *Service) loadOtherCallersExcluding(ctx context.Context, tx pgx.Tx, exclude map[string]bool) ([]*dsl.File, error) {
+// Takes a Querier rather than a pgx.Tx because it only reads. That is what
+// lets InspectSchema drive this path inside a READ ONLY transaction.
+func (s *Service) loadOtherCallersExcluding(ctx context.Context, tx introspect.Querier, exclude map[string]bool) ([]*dsl.File, error) {
 	rows, err := tx.Query(ctx, `
 SELECT caller, file_path, content
 FROM atlantis.caller_registrations
@@ -373,6 +346,80 @@ func translateDrift(d *codegen.Diff) []AdoptDriftItem {
 	// is not listed is drift the operator does not know about.
 	add(d.All())
 	return out
+}
+
+// liveComparison is what it costs to answer "how does this declaration differ
+// from the database": parse, lower, introspect, diff, classify.
+//
+// Shared by AdoptBaseline and InspectSchema, which ask the same question and
+// differ only in what they do with the answer — one writes a checkpoint, the
+// other returns. Two copies of this sequence would be two places for the diff
+// to be computed against a different pair of IRs, and getting that pairing
+// wrong is exactly what 3f819ac was: adopt baselined the declaration while
+// reporting drift derived from the introspection.
+type liveComparison struct {
+	DeclaredIR     *dsl.IR
+	IntrospectedIR *dsl.IR
+	ExistingIDs    map[string]bool
+	Diff           *codegen.Diff
+	Drift          []AdoptDriftItem
+	Warnings       []string
+}
+
+// compareToLive parses the submissions, lowers them alongside every other
+// registered caller so cross-caller FKs resolve, introspects the live database
+// and returns the classified difference.
+//
+// Takes a Querier rather than a Tx so a caller can hand it a READ ONLY
+// transaction. InspectSchema does exactly that, which is what makes "inspect
+// writes nothing" a property Postgres enforces rather than one a reviewer has
+// to check.
+func (s *Service) compareToLive(ctx context.Context, q introspect.Querier, subs []CallerSubmission) (*liveComparison, error) {
+	submitterNames := make(map[string]bool, len(subs))
+	var parsed []*dsl.File
+	for _, sub := range subs {
+		submitterNames[sub.Caller] = true
+		ps, errs := parseSubmitted(sub.Caller, sub.Files)
+		if len(errs) > 0 {
+			return nil, fmt.Errorf("admin: parse failed for %s: %v", sub.Caller, errs)
+		}
+		parsed = append(parsed, ps...)
+	}
+	others, err := s.loadOtherCallersExcluding(ctx, q, submitterNames)
+	if err != nil {
+		return nil, err
+	}
+	declaredIR, err := dsl.Lower(append(parsed, others...))
+	if err != nil {
+		return nil, fmt.Errorf("admin: lower failed: %w", err)
+	}
+
+	introspectedIR, existingIDs, warnings, err := introspect.FromPostgres(ctx, q, declaredIR)
+	if err != nil {
+		return nil, fmt.Errorf("introspect: %w", err)
+	}
+	codegen.AssignProtoNumbers(introspectedIR, declaredIR)
+	d := codegen.ComputeDiff(introspectedIR, declaredIR)
+	return &liveComparison{
+		DeclaredIR:     declaredIR,
+		IntrospectedIR: introspectedIR,
+		ExistingIDs:    existingIDs,
+		Diff:           d,
+		Drift:          translateDrift(d),
+		Warnings:       warnings,
+	}, nil
+}
+
+// mismatchCount is how many findings block a baseline: both sides exist and
+// disagree. Additions and removals are outstanding work.
+func mismatchCount(drift []AdoptDriftItem) int {
+	n := 0
+	for _, di := range drift {
+		if di.Severity == "mismatch" {
+			n++
+		}
+	}
+	return n
 }
 
 // filterToExistingEntities returns a shallow-cloned IR with only the

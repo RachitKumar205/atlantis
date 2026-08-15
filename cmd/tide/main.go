@@ -55,6 +55,8 @@ func main() {
 		os.Exit(cmdApply(os.Args[2:]))
 	case "plan":
 		os.Exit(cmdPlan(os.Args[2:]))
+	case "inspect":
+		os.Exit(cmdInspect(os.Args[2:]))
 	case "pull":
 		os.Exit(cmdPull(os.Args[2:]))
 	case "generate":
@@ -99,6 +101,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "usage: tide apply    [--backfill] [--dry-run] [--no-pull]")
 	fmt.Fprintln(os.Stderr, "       tide plan     [--against URL] [--format table|json] [--no-pull]")
+	fmt.Fprintln(os.Stderr, "       tide inspect  [--against URL] [--format table|json]")
 	fmt.Fprintln(os.Stderr, "       tide pull     [--force]")
 	fmt.Fprintln(os.Stderr, "       tide generate")
 	fmt.Fprintln(os.Stderr, "       tide list")
@@ -112,6 +115,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       tide owners")
 	fmt.Fprintln(os.Stderr, "       tide parked   [--all] [--format table|json]")
 	fmt.Fprintln(os.Stderr, "       tide rollback --to=<version> [--dry-run] [--yes]")
+	fmt.Fprintln(os.Stderr, "       tide sandbox  boot|shell|spawn ...")
 	fmt.Fprintln(os.Stderr, "       tide caller   alias list|add|rm <caller> [alias]")
 	fmt.Fprintln(os.Stderr, "       tide version")
 	fmt.Fprintln(os.Stderr, "")

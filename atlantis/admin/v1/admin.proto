@@ -57,6 +57,19 @@ service AdminService {
   rpc AdoptBaseline(AdoptBaselineRequest) returns (AdoptBaselineResponse) {
     option (required_capability) = CAPABILITY_OPERATOR;
   }
+  // Reports how the live database differs from a declaration, and writes
+  // nothing. Read-only in the same sense PlanSchema is: it runs in a
+  // Postgres READ ONLY transaction, so a write added here later fails at the
+  // database rather than in review.
+  //
+  // SCHEMA_READ rather than OPERATOR, unlike AdoptBaseline above. Adopt
+  // rewrites the shared checkpoint and affects every caller; this only
+  // answers a question, and the point of the command is that a caller can run
+  // it against production from CI without holding a privilege that could
+  // change anything.
+  rpc InspectSchema(InspectSchemaRequest) returns (InspectSchemaResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
 
   // Backfill.
 
@@ -629,6 +642,41 @@ message AdoptBaselineResponse {
   bool already_adopted = 2;
   repeated AdoptDriftItem drift = 3;
   repeated string warnings = 4;
+}
+
+// InspectSchemaRequest asks how the live database differs from a declaration.
+//
+// The same submission shape as adopt, because it answers the first half of the
+// same question. What it does not carry is allow_drift or adopted_by: there is
+// nothing to permit and nobody to record, which is the difference between
+// finding out and doing.
+message InspectSchemaRequest {
+  repeated CallerSubmission submissions = 1;
+  // Single-caller shortcut, matching AdoptBaselineRequest.
+  string caller = 2;
+  repeated SubmittedFile files = 3;
+}
+
+// InspectSchemaResponse is the drift report on its own.
+//
+// Deliberately the same AdoptDriftItem the adopt path returns. An operator
+// comparing what `inspect` told them against what `adopt` then reports must
+// not have to reconcile two vocabularies for one fact.
+message InspectSchemaResponse {
+  repeated AdoptDriftItem drift = 1;
+  repeated string warnings = 2;
+
+  // in_sync is true when the declaration and the database agree on everything
+  // introspection can verify. Reported by the server rather than left to the
+  // client to derive from an empty list, because "no drift" and "drift this
+  // build cannot classify" must not look the same to a CLI deciding an exit
+  // code.
+  bool in_sync = 3;
+
+  // mismatch_count is how many findings are the blocking kind — the ones where
+  // both sides exist and disagree. Additions and removals are outstanding
+  // work; a mismatch is the database contradicting the file.
+  int32 mismatch_count = 4;
 }
 
 // ---------------------------------------------------------------------------

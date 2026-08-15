@@ -63,6 +63,7 @@ func commands() []command {
 		{"migrate-down", "Run golang-migrate down 1 against $PG_URL", cmdMigrateDown, false},
 		{"dev", "Codegen + build + exec server from atlantis.dev.yaml (local iteration)", cmdDev, false},
 		{"adopt", "Verify the live DB matches the declared .atl files and seed the IR checkpoint as the baseline", cmdAdopt, false},
+		{"inspect", "Report how the live DB differs from the declared .atl files; writes nothing", cmdInspect, false},
 		{"history", "Show schema version history", cmdHistory, false},
 		{"blame", "Show per-field provenance for an entity", cmdBlame, false},
 		{"owners", "Show entity ownership map", cmdOwners, false},

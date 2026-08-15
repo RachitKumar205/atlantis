@@ -76,6 +76,7 @@ var migratedRPCs = map[string]bool{
 	"BeginBackfillPlan":      true,
 	"GetBackfillStatus":      true,
 	"AdoptBaseline":          true,
+	"InspectSchema":          true,
 	"PlanSchema":             true,
 	"ApplyMigration":         true,
 	"GetMergedSchema":        true,
@@ -179,6 +180,10 @@ func (g *grpcServer) GetBackfillStatus(ctx context.Context, req *adminpb.GetBack
 
 func (g *grpcServer) AdoptBaseline(ctx context.Context, req *adminpb.AdoptBaselineRequest) (*adminpb.AdoptBaselineResponse, error) {
 	return g.svc.AdoptBaseline(ctx, req)
+}
+
+func (g *grpcServer) InspectSchema(ctx context.Context, req *adminpb.InspectSchemaRequest) (*adminpb.InspectSchemaResponse, error) {
+	return g.svc.InspectSchema(ctx, req)
 }
 
 func (g *grpcServer) PlanSchema(ctx context.Context, req *adminpb.PlanSchemaRequest) (*adminpb.PlanSchemaResponse, error) {
