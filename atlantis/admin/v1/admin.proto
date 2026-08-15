@@ -496,6 +496,18 @@ message SchemaPlanSummary {
   // and two clocks disagreeing about an approval is not a difference anyone
   // wants to debug.
   bool expired = 13;
+
+  // The entities this plan touches, deduplicated and sorted.
+  //
+  // On the SUMMARY rather than only the detail because the two surfaces that
+  // need it both read the list: the approval queue, which otherwise names a
+  // plan without saying what it changes, and the Schema page's pending-changes
+  // strip, which asks "what is in flight for this one entity". Deriving it
+  // client-side would mean fetching every plan's detail to answer that.
+  //
+  // Derived from the stored diff, so it describes what the plan will actually
+  // do rather than what its files appear to say.
+  repeated string entity_ids = 14;
 }
 
 // SchemaPlanDetail is what a reviewer decides on.

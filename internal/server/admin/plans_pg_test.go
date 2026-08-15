@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -88,6 +89,44 @@ func TestListSchemaPlansShowsTheQueue(t *testing.T) {
 	}
 	if len(empty.GetPlans()) != 0 {
 		t.Errorf("filtering by %q returned %d plans", planApplied, len(empty.GetPlans()))
+	}
+}
+
+// The Schema page's pending-changes strip filters this queue by entity, so the
+// queue has to say which entities each plan touches.
+//
+// Proved through the RPC rather than on planEntityIDs alone. The unit tests
+// beside it show the derivation is correct; this shows something calls it. A
+// projection that works perfectly while nothing reads it is how a feature ships
+// wired to nothing, and the symptom here would be a strip that is empty on every
+// entity — indistinguishable from a queue with nothing in it.
+func TestTheQueueNamesTheEntitiesEachPlanTouches(t *testing.T) {
+	svc := depScopeService(t)
+	planID := pendingPlan(t, svc)
+	ctx := context.Background()
+	want := []string{"dsplan.Book"}
+
+	resp, err := svc.ListSchemaPlans(ctx, &adminpb.ListSchemaPlansRequest{State: planPending})
+	if err != nil {
+		t.Fatalf("ListSchemaPlans: %v", err)
+	}
+	if len(resp.GetPlans()) != 1 {
+		t.Fatalf("queue holds %d plans, want 1", len(resp.GetPlans()))
+	}
+	if got := resp.GetPlans()[0].GetEntityIds(); !reflect.DeepEqual(got, want) {
+		t.Errorf("list: entity_ids = %v, want %v.\n"+
+			"  This plan drops a field from dsplan.Book. A strip filtering on this "+
+			"list would report that entity as having nothing in flight.", got, want)
+	}
+
+	// The detail carries the same summary, and reads the column by a different
+	// query — so it can regress on its own.
+	one, err := svc.GetSchemaPlan(ctx, &adminpb.GetSchemaPlanRequest{PlanId: planID})
+	if err != nil {
+		t.Fatalf("GetSchemaPlan: %v", err)
+	}
+	if got := one.GetPlan().GetSummary().GetEntityIds(); !reflect.DeepEqual(got, want) {
+		t.Errorf("detail: entity_ids = %v, want %v", got, want)
 	}
 }
 

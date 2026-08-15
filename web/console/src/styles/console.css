@@ -301,6 +301,12 @@ a { color: inherit; text-decoration: none; }
 .badge--destroy { color: var(--canvas-0); background: var(--coral); }
 .badge--destroy::before { background: var(--canvas-0); }
 .badge--fk    { color: var(--slate); background: var(--slate-tint); }
+/* Not a change class — it marks a Schema row whose entity has something waiting
+   for approval. Takes the same accent pair as .lvl--warn rather than a new hue,
+   per the note above about the palette holding one alarm colour: a pending
+   change wants attention, not alarm, and alarm is reserved for what the change
+   turns out to be once you open it. */
+.badge--warn  { color: var(--accent); background: var(--accent-tint); }
 .badge--plain { color: var(--ink-2); background: var(--canvas-3); }
 .badge--plain::before { display: none; }
 

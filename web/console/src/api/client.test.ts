@@ -1,9 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import {
   CHANGE_CLASS_DISPLAY,
+  indexPlansByEntity,
   parseRawDiff,
   orderedBuckets,
   planClassBadge,
+  planClassLabel,
+  type SchemaPlanSummary,
 } from './client'
 
 // The console's half of "a change class must never render as nothing".
@@ -121,5 +124,78 @@ describe('orderedBuckets', () => {
     })
     expect(got.map(b => b.bucket)).toEqual(['additive', 'some_future_class'])
     expect(got[1].badge).toBe('plain')
+  })
+})
+
+// The Schema page's pending-changes strip. Same property as everything above:
+// the failure is not an exception, it is an entity rendering as quiet while a
+// change waits against it.
+
+const plan = (id: string, entities: string[]): SchemaPlanSummary => ({
+  plan_id: id,
+  caller: 'shop',
+  change_class: 'PLAN_CLASS_DESTRUCTIVE',
+  state: 'pending_approval',
+  requested_by: 'shop',
+  created_at: '2026-08-15T00:00:00Z',
+  approver_role: 'admin',
+  entity_ids: entities,
+})
+
+describe('indexPlansByEntity', () => {
+  it('files one plan under every entity it touches', () => {
+    // A plan changing two entities has to appear on both. Filing it only under
+    // the first would leave the second looking untouched while an approval
+    // that changes it sits in the queue.
+    const idx = indexPlansByEntity([plan('p1', ['shop.Order', 'shop.Line'])])
+    expect(idx.get('shop.Order')?.map(p => p.plan_id)).toEqual(['p1'])
+    expect(idx.get('shop.Line')?.map(p => p.plan_id)).toEqual(['p1'])
+  })
+
+  it('keeps every plan touching the same entity', () => {
+    // Two plans against one entity is the case an operator most needs to see,
+    // and the one a Map assignment rather than an append would collapse.
+    const idx = indexPlansByEntity([
+      plan('p1', ['shop.Order']),
+      plan('p2', ['shop.Order']),
+    ])
+    expect(idx.get('shop.Order')?.map(p => p.plan_id)).toEqual(['p1', 'p2'])
+  })
+
+  it('reports nothing for an entity no plan touches', () => {
+    const idx = indexPlansByEntity([plan('p1', ['shop.Order'])])
+    expect(idx.get('shop.Untouched')).toBeUndefined()
+  })
+
+  it('survives a plan the server sent without entity_ids', () => {
+    // entity_ids is absent when the server could not decode a stored diff. The
+    // plan is still real; it simply cannot be filed under an entity, and that
+    // must not take the whole strip down with it.
+    const partial = { ...plan('p1', []), entity_ids: undefined }
+    const idx = indexPlansByEntity([partial, plan('p2', ['shop.Order'])])
+    expect(idx.get('shop.Order')?.map(p => p.plan_id)).toEqual(['p2'])
+  })
+
+  it('survives no plans at all', () => {
+    expect(indexPlansByEntity(undefined).size).toBe(0)
+    expect(indexPlansByEntity([]).size).toBe(0)
+  })
+})
+
+describe('planClassLabel', () => {
+  it('strips the proto prefix so the badge lookup can hit', () => {
+    // These two run together on every surface that shows a class. The label
+    // must reach planClassBadge in the spelling its table is keyed on, or a
+    // destructive change renders in the grey badge that means "unremarkable".
+    expect(planClassLabel('PLAN_CLASS_CROSS_CALLER_BREAKING')).toBe('cross-caller-breaking')
+    expect(planClassBadge(planClassLabel('PLAN_CLASS_DESTRUCTIVE'))).toBe('destroy')
+    expect(planClassBadge(planClassLabel('PLAN_CLASS_BACKFILL_REQUIRED'))).toBe('back')
+    expect(planClassBadge(planClassLabel('PLAN_CLASS_ADDITIVE'))).toBe('add')
+  })
+
+  it('leaves an already-stripped class alone', () => {
+    // The history endpoint serves the hyphenated spelling with no prefix.
+    // Running the label over it a second time must not corrupt it.
+    expect(planClassLabel('cross-caller-breaking')).toBe('cross-caller-breaking')
   })
 })

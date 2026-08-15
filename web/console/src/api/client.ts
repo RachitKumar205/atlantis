@@ -215,6 +215,20 @@ export function planClassBadge(planClass: string): string {
   return PLAN_CLASS_BADGE[normalizeClass(planClass)] ?? 'plain'
 }
 
+// planClassLabel turns the proto enum name into the spelling every other
+// surface uses: PLAN_CLASS_CROSS_CALLER_BREAKING -> cross-caller-breaking.
+//
+// Here rather than in a page for the same reason planClassBadge is: the pages
+// that show a class must show the same one. It also has to run BEFORE
+// planClassBadge on any value that came off the wire as an enum name, because
+// the badge table is keyed without the prefix and an unstripped name misses it
+// — falling back to the grey "plain" badge, which is the styling that means
+// nothing notable happened. That is the exact failure the comment above
+// describes, and a destructive change is the value it would hide.
+export function planClassLabel(planClass: string): string {
+  return planClass.replace(/^PLAN_CLASS_/, '').toLowerCase().replace(/_/g, '-')
+}
+
 // plan_class values mapped to badge modifiers. Keyed in the underscored
 // spelling; reach it through planClassBadge, which accepts either.
 //
@@ -376,10 +390,51 @@ export interface SchemaPlanSummary {
   /** The role the class requires, resolved from the policy as it stands now. */
   approver_role: string
   expired?: boolean
+  /**
+   * The entities this plan touches, derived server-side from the stored diff.
+   *
+   * The BFF marshals with EmitDefaultValues, so this arrives as `[]` rather
+   * than absent when the server derived nothing. Every real plan touches at
+   * least one entity — a diff with no changes never becomes a plan — so an
+   * empty list means the server could not read that plan's stored diff, and
+   * the plan is simply not filed under any entity. It still appears in the
+   * approval queue, which is the surface that must not lose it.
+   *
+   * Optional in the type anyway: this crosses a process boundary, and code
+   * that assumes a field is always there is how a rename becomes a crash.
+   */
+  entity_ids?: string[]
 }
 
 export interface SchemaPlansResponse {
   plans: SchemaPlanSummary[]
+}
+
+/**
+ * Group plans by the entities they touch, for the Schema page's per-entity
+ * pending strip.
+ *
+ * One plan lands under every entity it changes, so a plan that renames a field
+ * on two entities appears on both — the approval is on the plan, and an
+ * operator looking at either entity has to see the same one waiting.
+ *
+ * Here rather than inside the component so it can be tested: the console has
+ * vitest but no DOM harness, and this is the part that can be wrong in a way
+ * nobody sees. A bug here does not throw — it renders an entity as having
+ * nothing pending, which looks exactly like an entity that has nothing pending.
+ */
+export function indexPlansByEntity(
+  plans: readonly SchemaPlanSummary[] | undefined,
+): Map<string, SchemaPlanSummary[]> {
+  const idx = new Map<string, SchemaPlanSummary[]>()
+  for (const p of plans ?? []) {
+    for (const id of p.entity_ids ?? []) {
+      const at = idx.get(id)
+      if (at) at.push(p)
+      else idx.set(id, [p])
+    }
+  }
+  return idx
 }
 
 export interface SchemaPlanDetail {

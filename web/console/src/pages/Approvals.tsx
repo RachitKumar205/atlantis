@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { CheckCircle2, ShieldQuestion, XCircle } from 'lucide-react'
-import { api, planClassBadge, type SchemaPlanSummary } from '@/api/client'
+import { api, planClassBadge, planClassLabel, type SchemaPlanSummary } from '@/api/client'
 import { useMe } from '@/hooks/useAuth'
 import { PageShell } from '@/components/PageShell'
 import { SudoConfirmDialog } from '@/pages/Settings'
@@ -16,10 +16,9 @@ import { SudoConfirmDialog } from '@/pages/Settings'
 // which is not review.
 
 // The wire carries the proto enum name; every other surface names classes
-// without the prefix.
-function className(c: string): string {
-  return c.replace(/^PLAN_CLASS_/, '').toLowerCase().replace(/_/g, '-')
-}
+// without the prefix. planClassLabel does the stripping, and lives in client.ts
+// beside planClassBadge so the Schema page's pending strip spells a class the
+// same way this page does.
 
 // Badge modifiers come from planClassBadge, not from a second map here. A
 // local one would drift from the History and Operations pages the first time
@@ -100,8 +99,8 @@ export function Approvals() {
               <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
                   <div className="row" style={{ gap: 8, alignItems: 'center' }}>
-                    <span className={`badge badge--${planClassBadge(className(p.change_class))}`}>
-                      {className(p.change_class)}
+                    <span className={`badge badge--${planClassBadge(planClassLabel(p.change_class))}`}>
+                      {planClassLabel(p.change_class)}
                     </span>
                     <strong>{p.caller}</strong>
                     <span className="muted">requested by {p.requested_by}</span>
@@ -174,7 +173,7 @@ export function Approvals() {
           body={
             <p>
               <strong>{confirm.plan.caller}</strong> will be able to apply a{' '}
-              <strong>{className(confirm.plan.change_class)}</strong> change. Approval is
+              <strong>{planClassLabel(confirm.plan.change_class)}</strong> change. Approval is
               recorded against your account and against this exact schema — if the caller
               submits anything else, it will not carry over.
             </p>

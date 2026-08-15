@@ -1,8 +1,8 @@
 import { useMemo, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearch, useNavigate } from '@tanstack/react-router'
-import { Box, Link as LinkIcon } from 'lucide-react'
-import { queries } from '@/api/client'
+import { Box, Link as LinkIcon, ShieldQuestion } from 'lucide-react'
+import { api, indexPlansByEntity, planClassBadge, planClassLabel, queries } from '@/api/client'
 import { PageShell } from '@/components/PageShell'
 
 // ── IR shapes (mirror internal/dsl/ir.go) ──────────────────────────────────
@@ -121,6 +121,29 @@ export function Schema() {
   )
   const selectedEntity = entities.find(e => e.id === selectedEntityId)
 
+  // Everything waiting on a human, indexed by the entity it touches.
+  //
+  // One request for the whole queue rather than one per entity: the list is
+  // bounded server-side, and each plan already names the entities it touches,
+  // so a single pass indexes them all and the strip stays instant as the
+  // selection moves.
+  //
+  // The query key is deliberately the one Approvals.tsx uses. That page
+  // invalidates the ['schema-plans'] prefix after a decision, so approving
+  // something there clears it from here too — rather than leaving this page
+  // showing an approval that has already been granted.
+  const { data: pendingPlans, isError: pendingUnavailable } = useQuery({
+    queryKey: ['schema-plans', 'pending_approval'],
+    queryFn: () => api.plans.list('pending_approval'),
+  })
+
+  const pendingByEntity = useMemo(
+    () => indexPlansByEntity(pendingPlans?.plans),
+    [pendingPlans],
+  )
+
+  const pendingHere = (selectedEntity && pendingByEntity.get(selectedEntity.id)) ?? []
+
   useEffect(() => {
     if (selectedNS && !selectedEntityId && nsEntities.length > 0) {
       navigate({ to: '/schema', search: { namespace: selectedNS, entity: nsEntities[0].id } })
@@ -142,10 +165,11 @@ export function Schema() {
   // second authoring path beside their own git repo is a second place for the
   // schema to diverge from what is applied.
   //
-  // What replaces it is not an editor. Step 5 of the approval work adds a
-  // per-entity "pending changes" strip fed by /api/plans, which turns this from
-  // "browse a schema you cannot change" into "current state, plus everything in
-  // flight" — the question an operator actually opens this page to answer.
+  // What replaces it is not an editor. The pending-changes strip below shows
+  // what is waiting on a human for the selected entity, which turns this page
+  // from "browse a schema you cannot change" into "current state, plus
+  // everything in flight" — the question an operator actually opens it to
+  // answer.
 
   const ver = (canonical?.ir as IRRoot | undefined)?.version
   const sub = `${entities.length} entit${entities.length === 1 ? 'y' : 'ies'} · ${namespaces.length} namespace${namespaces.length === 1 ? '' : 's'}${ver ? ` · server v${String(ver).padStart(4, '0')}` : ''}`
@@ -202,6 +226,18 @@ export function Schema() {
                 onClick={() => handleSelectEntity(e.id)}
               >
                 <span className="entrow__name">{e.name}</span>
+                {/* Without a marker here the strip is only findable by
+                    clicking through every entity in the namespace, which for
+                    the operator asking "is anything waiting on me" is the same
+                    as it not being there. */}
+                {pendingByEntity.has(e.id) && (
+                  <span
+                    className="badge badge--warn"
+                    title="This entity has changes waiting for approval"
+                  >
+                    pending
+                  </span>
+                )}
                 <span className="chip chip--count">{e.fields.length}</span>
               </div>
             ))
@@ -267,6 +303,66 @@ export function Schema() {
             </div>
 
             <div className="detail__body">
+              {/* Pending changes.
+                  Above Fields on purpose: an operator reading a column list
+                  needs to know it is about to change before they read it. */}
+              {pendingUnavailable ? (
+                // Not silently empty. "No pending changes" and "could not ask"
+                // are different answers, and rendering the second as the first
+                // is how somebody concludes a table is quiet while a
+                // destructive plan sits in the queue against it.
+                <div className="detail__sec">
+                  <div className="detail__seclabel">
+                    <h4>Pending changes</h4>
+                    <div className="line" />
+                  </div>
+                  <div className="muted" style={{ fontSize: 12 }}>
+                    Could not load the approval queue, so anything in flight for this
+                    entity is not shown here. Open Approvals to check.
+                  </div>
+                </div>
+              ) : pendingHere.length > 0 && (
+                <div className="detail__sec">
+                  <div className="detail__seclabel">
+                    <h4>Pending changes</h4>
+                    <div className="line" />
+                    <span className="chip chip--count">{pendingHere.length}</span>
+                  </div>
+                  {pendingHere.map(p => (
+                    <div
+                      key={p.plan_id}
+                      className="row"
+                      style={{ gap: 8, alignItems: 'center', padding: '6px 0' }}
+                    >
+                      {/* The PLAN's class, not a per-entity one. A plan is the
+                          unit of approval, so its class is the rule that
+                          governs — inventing a narrower per-entity class here
+                          would show a gentler badge than the thing an approver
+                          is actually signing off. */}
+                      <span className={`badge badge--${planClassBadge(planClassLabel(p.change_class))}`}>
+                        {planClassLabel(p.change_class)}
+                      </span>
+                      <span className="mono" style={{ fontSize: 12 }} title={p.plan_id}>
+                        {p.plan_id.slice(0, 12)}
+                      </span>
+                      <span className="muted" style={{ fontSize: 12 }}>
+                        by {p.requested_by || 'unknown'}
+                        {p.expired ? ' · expired' : ''}
+                      </span>
+                      <span className="spacer" />
+                      <button
+                        className="btn btn--ghost"
+                        onClick={() => navigate({ to: '/approvals' })}
+                        title="Review this change on the Approvals page"
+                      >
+                        <ShieldQuestion size={14} />
+                        <span>Review</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {/* Fields */}
               <div className="detail__sec">
                 <div className="detail__seclabel">

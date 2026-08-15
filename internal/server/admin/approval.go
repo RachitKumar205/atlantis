@@ -239,6 +239,11 @@ type schemaPlan struct {
 	DecidedByRole  string
 	DecidedAt      *time.Time
 	DecisionReason string
+
+	// Diff is the stored diff as written, kept raw. Nothing on the read path
+	// needs the decoded value except planEntityIDs, and holding it as bytes
+	// means a row this build cannot fully decode still lists.
+	Diff []byte
 }
 
 // Expired reports whether this plan's window has closed.

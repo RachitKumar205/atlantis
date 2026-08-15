@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -12,6 +13,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/codegen"
 )
 
 // The decision surface: reading what is waiting, and saying yes or no.
@@ -41,7 +43,7 @@ func (s *Service) ListSchemaPlans(ctx context.Context, req *adminpb.ListSchemaPl
 	rows, err := s.pool.Query(ctx, `
 SELECT plan_id, caller, change_class, files_hash, base_checkpoint_hash, up_sql,
        state, requested_by, created_at, expires_at, decided_by, decided_by_role,
-       decided_at, decision_reason
+       decided_at, decision_reason, diff
 FROM atlantis.schema_plans
 WHERE ($1 = '' OR state = $1)
   AND ($2 = '' OR caller = $2)
@@ -57,7 +59,7 @@ LIMIT $3`, req.GetState(), req.GetCaller(), limit)
 		var p schemaPlan
 		if err := rows.Scan(&p.PlanID, &p.Caller, &p.ChangeClass, &p.FilesHash, &p.BaseHash,
 			&p.UpSQL, &p.State, &p.RequestedBy, &p.CreatedAt, &p.ExpiresAt,
-			&p.DecidedBy, &p.DecidedByRole, &p.DecidedAt, &p.DecisionReason); err != nil {
+			&p.DecidedBy, &p.DecidedByRole, &p.DecidedAt, &p.DecisionReason, &p.Diff); err != nil {
 			return nil, fmt.Errorf("scan schema plan: %w", err)
 		}
 		plans = append(plans, p)
@@ -88,9 +90,9 @@ func (s *Service) GetSchemaPlan(ctx context.Context, req *adminpb.GetSchemaPlanR
 	}
 
 	var (
-		p                  schemaPlan
-		filesJSON, diffRaw []byte
-		downSQL            string
+		p         schemaPlan
+		filesJSON []byte
+		downSQL   string
 	)
 	err := s.pool.QueryRow(ctx, `
 SELECT plan_id, caller, change_class, files_hash, base_checkpoint_hash, up_sql, down_sql,
@@ -99,7 +101,7 @@ SELECT plan_id, caller, change_class, files_hash, base_checkpoint_hash, up_sql, 
 FROM atlantis.schema_plans WHERE plan_id = $1`, req.GetPlanId()).Scan(
 		&p.PlanID, &p.Caller, &p.ChangeClass, &p.FilesHash, &p.BaseHash, &p.UpSQL, &downSQL,
 		&p.State, &p.RequestedBy, &p.CreatedAt, &p.ExpiresAt, &p.DecidedBy, &p.DecidedByRole,
-		&p.DecidedAt, &p.DecisionReason, &filesJSON, &diffRaw)
+		&p.DecidedAt, &p.DecisionReason, &filesJSON, &p.Diff)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, status.Errorf(codes.NotFound, "admin: no plan %s", req.GetPlanId())
@@ -127,7 +129,7 @@ FROM atlantis.schema_plans WHERE plan_id = $1`, req.GetPlanId()).Scan(
 	return &adminpb.GetSchemaPlanResponse{Plan: &adminpb.SchemaPlanDetail{
 		Summary:            planSummaryToPB(p, stored, time.Now().UTC()),
 		Files:              files,
-		Diff:               diffRaw,
+		Diff:               p.Diff,
 		UpSql:              p.UpSQL,
 		DownSql:            downSQL,
 		BaseCheckpointHash: p.BaseHash,
@@ -282,6 +284,48 @@ func planClassFromName(name string) adminpb.PlanClass {
 	return adminpb.PlanClass_PLAN_CLASS_UNSPECIFIED
 }
 
+// planEntityIDs reports the entities a stored diff touches, sorted and without
+// duplicates.
+//
+// Derived from the DIFF, not from the submitted files. The files are what the
+// caller wrote; the diff is what the apply will do, and those differ whenever a
+// file is edited without changing the schema it declares. A strip promising
+// "changes in flight for this entity" has to name the second.
+//
+// Reads Diff.All() rather than the four buckets by name, for the reason
+// countDiffChanges gives: a local struct listing the buckets is how one gets
+// missed, and the bucket that went missing was the destructive one. All() is
+// exhaustive and TestDiffAllCoversEveryBucket keeps it that way, so a fifth
+// bucket is covered here the day it exists rather than the day someone
+// remembers this function.
+//
+// Tolerant of a diff that will not decode, matching countDiffChanges beside it.
+// This is not the guard against a renamed bucket — JSON decoding is tolerant, so
+// a renamed bucket decodes to empty and returns no error at all. What guards
+// that is TestPlanEntityIDsReadsEveryBucket, which builds a change in every
+// bucket by reflection.
+func planEntityIDs(diffRaw []byte) []string {
+	var d codegen.Diff
+	if json.Unmarshal(diffRaw, &d) != nil {
+		return nil
+	}
+	changes := d.All()
+	seen := make(map[string]struct{}, len(changes))
+	out := make([]string, 0, len(changes))
+	for _, ch := range changes {
+		if ch.EntityID == "" {
+			continue
+		}
+		if _, dup := seen[ch.EntityID]; dup {
+			continue
+		}
+		seen[ch.EntityID] = struct{}{}
+		out = append(out, ch.EntityID)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func planSummaryToPB(p schemaPlan, stored map[adminpb.PlanClass]ChangePolicy, now time.Time) *adminpb.SchemaPlanSummary {
 	class := planClassFromName(p.ChangeClass)
 	out := &adminpb.SchemaPlanSummary{
@@ -296,6 +340,7 @@ func planSummaryToPB(p schemaPlan, stored map[adminpb.PlanClass]ChangePolicy, no
 		DecisionReason: p.DecisionReason,
 		ApproverRole:   effectiveChangePolicy(stored, class).ApproverRole,
 		Expired:        p.Expired(now),
+		EntityIds:      planEntityIDs(p.Diff),
 	}
 	if p.ExpiresAt != nil {
 		out.ExpiresAt = p.ExpiresAt.UTC().Format(time.RFC3339)
