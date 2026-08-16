@@ -144,6 +144,13 @@ Those two OR together, as grants should, and both stay inside the tenant.
 **Leaving the default grant in place makes narrower policies pointless** — it
 already allows everything they would allow.
 
+Your replacement survives `tide apply`. Apply re-emits the policy pair whenever
+the `partition by` clause changes or the discriminator column moves, but it
+creates the default grant only when the table carries no permissive policy at
+all. Once your own grants are in place, apply leaves them alone. It does not put
+`USING (true)` back beside them, which would allow everything they allow and
+leave you reading a policy list that no longer describes who can see what.
+
 **Adding it later produces a migration.** `partition by` is diffed, so you can
 add it to an entity that already exists, move it to another column, or remove
 it. The plan is classified cross-caller breaking: enabling isolation means a

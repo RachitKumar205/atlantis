@@ -1,0 +1,17 @@
+-- Deliberately empty, and the reason is not that there is nothing to undo.
+--
+-- 0030 does not introduce a state. It finishes the job 0025 describes and only
+-- partly performed: every tenant boundary restrictive. A server running at
+-- version 0029 already expects that — 0025 is what established it — so leaving
+-- the repaired tables restrictive on the way down to 0029 is the CORRECT state
+-- for that version, not residue.
+--
+-- Undoing the inversion is 0025's down, and it is the only place that should
+-- do it. Widening boundaries here as well would mean rolling back one step
+-- reopened tables whose migration nobody was rolling back, and rolling back two
+-- steps ran the widening twice.
+--
+-- The rollback that does matter still carries a warning, and it is in 0025's
+-- down where an operator will read it: a permissive boundary can be widened by
+-- any other permissive policy, so a database that has since grown
+-- access-control grants is not safe on that side of the migration.

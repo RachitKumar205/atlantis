@@ -27,6 +27,47 @@ going the other way needs a backfill, as any other narrowing does.
 
 ### Fixed
 
+#### Tenant isolation stayed permissive on tables with long names
+
+**Check this if you run `partition by` on a table whose name is 47 characters
+or longer.** Migration 0025 moved every tenant boundary from a permissive
+policy to a restrictive one. It selected the policies to move by name, matching
+`%_tenant_isolation`. atlantis does not always emit that name: a policy
+identifier longer than 63 bytes is truncated and given a hash suffix, so on a
+long table the policy is called something like
+`analytics_customer_engagement_daily_rollup_snapshot_te_6d29d49d`. Migration
+0025 did not match it, skipped the table, and reported success.
+
+That matters because 0025 is also what allowed the check that refused any
+migration against a table carrying a second permissive policy to be removed.
+Permissive policies OR together. So on exactly those tables, one access-control
+grant is enough to read every tenant's rows, and nothing reports it — the
+declaration is correct, so `tide inspect` agrees.
+
+**Migration 0030 converts what was missed.** It selects boundaries by their
+dependency on `atlantis.current_partition()` rather than by name, so truncation
+cannot hide one. It carries each predicate verbatim, including hardening you
+added yourself, and it does nothing on a database 0025 handled correctly. Run
+your migrations to pick it up.
+
+#### `tide apply` put back the access-control grant you replaced
+
+`<table>_default_access` is documented as yours to replace: drop it, write
+narrower permissive policies, and tenant isolation is unaffected because it
+lives in the restrictive policy. Apply then re-created the total grant. Because
+permissive policies OR, that did not add a policy beside your own — it stopped
+every one of them constraining anything, while the catalogue still listed them
+exactly as you wrote them.
+
+This was not limited to creating an entity. Apply re-emits the policy pair when
+`partition by` is added and at the end of any migration that moves the
+discriminator column, so a change classified additive was enough to undo an
+access-control model.
+
+Apply now creates the default grant only when the table carries no permissive
+policy at all, which is the one thing that grant exists to prevent — a table
+with only a restrictive boundary admits nothing.
+
 #### `real` and `double` columns
 
 Both types were documented in the type reference and accepted by the parser,

@@ -2041,8 +2041,11 @@ func emitPartitionPolicy(b *sqlBuilder, e *dsl.Entity) {
 	// rather than a read leak, and just as much a breach.
 	// CREATE POLICY has no IF NOT EXISTS, and the initial migration promises to
 	// be re-appliable after a partial failure. Dropping first keeps that true.
+	//
+	// The boundary only. The default grant below is made re-appliable by a
+	// catalogue check instead of by a DROP, because dropping that one is a
+	// user's supported action and this function must not undo it.
 	b.linef("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(partitionPolicyName(e)), table)
-	b.linef("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(partitionDefaultPolicyName(e)), table)
 
 	// TWO policies, and which is which is the whole design.
 	//
@@ -2075,18 +2078,46 @@ func emitPartitionPolicy(b *sqlBuilder, e *dsl.Entity) {
 	b.linef("CREATE POLICY %s ON %s AS RESTRICTIVE USING (%s = %s) WITH CHECK (%s = %s);",
 		quoteIdent(partitionPolicyName(e)), table, col, discriminator, col, discriminator)
 
-	// The default grant. Restrictive policies only ever subtract, so a table
-	// carrying the boundary alone admits nothing at all — RLS needs at least
-	// one permissive policy to let any row through.
+	// The default grant, created only when the table would otherwise admit
+	// nothing.
 	//
-	// This one is deliberately total: it reproduces the behaviour of the single
-	// permissive policy it replaces, where the tenant check was the only
-	// constraint. It is also the policy a user REPLACES when they define their
-	// own access control — dropping it and writing narrower grants is the
-	// supported path, and doing so cannot weaken tenant isolation because that
-	// lives in the restrictive policy above.
-	b.linef("CREATE POLICY %s ON %s AS PERMISSIVE USING (true) WITH CHECK (true);",
+	// Restrictive policies only ever subtract, so a table carrying the boundary
+	// alone is deny-all — RLS needs at least one permissive policy to let any
+	// row through. This supplies it, deliberately total, reproducing the
+	// behaviour of the single permissive policy it replaces where the tenant
+	// check was the only constraint.
+	//
+	// It is CONDITIONAL, and that is what the DO block is for. This is the
+	// policy a user replaces when they define access control: the documented
+	// path is to drop it and write narrower permissive grants, which cannot
+	// weaken isolation because that lives in the restrictive policy above. An
+	// unconditional DROP-then-CREATE undoes that on the next apply — and
+	// because permissive policies OR, restoring `USING (true)` beside their
+	// narrow grants does not merely add a policy back, it makes every one of
+	// them stop constraining anything. Their access control is gone and the
+	// catalogue still lists it.
+	//
+	// Reachable from well beyond entity creation, which is what makes it worth
+	// a DO block rather than a comment telling people not to. diffPartition
+	// calls this when the clause is added, and the partition-rebuild bracket
+	// calls it again at the end of any migration that moves the discriminator
+	// column. A change classified ADDITIVE is enough.
+	//
+	// The condition asks whether ANY permissive policy exists, not whether our
+	// own name is missing. Checking our own name is precisely what re-creates
+	// the total grant beside the user's replacements; asking whether the table
+	// can admit anything at all is the question this policy exists to answer,
+	// and it keeps the script re-appliable without a DROP.
+	tableLit := "'" + strings.ReplaceAll(table, "'", "''") + "'"
+	b.line("DO $atlantis_default_access$")
+	b.line("BEGIN")
+	b.linef("    IF NOT EXISTS (SELECT 1 FROM pg_policy"+
+		" WHERE polrelid = %s::regclass AND polpermissive) THEN", tableLit)
+	b.linef("        CREATE POLICY %s ON %s AS PERMISSIVE USING (true) WITH CHECK (true);",
 		quoteIdent(partitionDefaultPolicyName(e)), table)
+	b.line("    END IF;")
+	b.line("END")
+	b.line("$atlantis_default_access$;")
 
 	// An index on the discriminator, always, owned by the policy.
 	//
