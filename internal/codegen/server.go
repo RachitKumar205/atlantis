@@ -191,6 +191,9 @@ func emitGoServerEntity(e *dsl.Entity, inbound []inboundRef) (GoFile, error) {
 	if err != nil {
 		return GoFile{}, err
 	}
+	if err := checkPKPredicates(e); err != nil {
+		return GoFile{}, err
+	}
 
 	table := qualifiedTable(e)
 	allCols := fieldColumns(e)
@@ -383,6 +386,38 @@ func pkEntityAccess(spec *pkSpec) string {
 // Keep in sync with predicateMessageForField (query_emit.go) and
 // predicateKindForField (query_emit_server.go) — adding a new filterable
 // type means a new arm in all three.
+// checkPKPredicates refuses an entity whose primary key has no predicate type,
+// before anything is written.
+//
+// emitPKEqFilter interpolates predicateGoName's result unguarded, so a PK type
+// with no arm produced `Value: &commonpb.{Op: &commonpb._Eq{...}}` — source
+// that is not valid Go. Nothing caught it: there is no format.Source anywhere
+// in this package, so the broken text was written to disk, and the caller's
+// generated package failed to compile with a syntax error pointing at
+// generated code rather than at their schema.
+//
+// Reachable as soon as a float column can be declared, which it now can: a
+// legacy table with a float8 primary key is ordinary, and `tide inspect
+// --generate` will propose exactly that entity. Refusing here names the
+// column and the reason; the alternative is a syntax error in a file the
+// customer did not write.
+func checkPKPredicates(e *dsl.Entity) error {
+	for _, f := range schema.PKColumns(e) {
+		if predicateGoName(f.Type) == "" {
+			return fmt.Errorf("primary key %q is %s, which has no predicate type — "+
+				"atlantis cannot generate a Get or BatchGet for it; use bigint, int, "+
+				"smallint, text, varchar, citext, uuid, boolean, timestamptz or date",
+				f.Name, typeString(f.Type))
+		}
+	}
+	return nil
+}
+
+// predicateGoName returns the predicate message for a filterable type, or ""
+// when there is none.
+//
+// Callers must treat "" as a refusal rather than interpolating it. See
+// checkPKPredicates.
 func predicateGoName(t dsl.FieldType) string {
 	if t.Array {
 		return ""

@@ -99,12 +99,18 @@ func Entity(e *dsl.Entity, physicalTable string) string {
 	// and is not — and the first thing that would tell them is an apply
 	// planning to drop a column that is still in use.
 	if len(dropped) > 0 {
-		b.WriteString("\n  // NOT DECLARED — no .atl type for these columns:\n")
+		b.WriteString("\n  // NOT DECLARED — atlantis has no usable .atl type for these:\n")
 		for _, d := range dropped {
 			fmt.Fprintf(&b, "  //   %s\n", d)
 		}
-		b.WriteString("  // They exist in the database. Declaring this entity without them\n")
-		b.WriteString("  // means atlantis does not manage them; it will not drop them.\n")
+		b.WriteString("  //\n")
+		b.WriteString("  // They exist in the database and this entity does not declare them.\n")
+		b.WriteString("  // READ THIS BEFORE APPROVING THE FIRST PLAN: adopt baselines what the\n")
+		b.WriteString("  // catalogue actually contains, not this file, so the next `tide plan`\n")
+		b.WriteString("  // reports each one as a REMOVAL and the apply parks the column —\n")
+		b.WriteString("  // renaming it to <name>__parked, dropping its NOT NULL, and scheduling\n")
+		b.WriteString("  // it for deletion in 30 days. Anything still reading those columns\n")
+		b.WriteString("  // breaks at that moment. Reject that plan unless you mean it.\n")
 	}
 
 	b.WriteString("}\n")
@@ -211,7 +217,12 @@ func renderType(t *dsl.FieldType) (string, bool) {
 		if t.VecDim > 0 {
 			return "vector(" + strconv.Itoa(t.VecDim) + ")", true
 		}
-		return "vector", true
+		// pgvector allows `vector` with no dimension; the .atl parser does
+		// not — parseType calls p.expect(TokLParen) for this name with no
+		// optional branch, exactly as it used to for varchar. Emitting bare
+		// `vector` produced a file that would not parse, which is the same
+		// defect this function's doc describes and one it still had.
+		return "", false
 	}
 	if toolchainHandles(t) {
 		return t.Name, true

@@ -1,11 +1,16 @@
 package entity
 
 import (
+	"database/sql"
+	"reflect"
+	"strings"
 	"testing"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
+	"google.golang.org/protobuf/types/dynamicpb"
 
+	_ "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/common/v1"
 	"github.com/rachitkumar205/atlantis/internal/codegen/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/testsupport/dsltypes"
@@ -75,10 +80,23 @@ func TestDispatcherPublishesTheSameWireTypeAsCodegen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// interval is the one documented divergence, and it is deliberate rather
-	// than an oversight: coltype names google.protobuf.Duration while the
-	// dispatcher renders the column as a string. Naming it here means the
-	// loop below stays exact for everything else instead of being loosened.
+	// interval diverges: coltype names google.protobuf.Duration, the
+	// dispatcher publishes TYPE_STRING. This is a KNOWN DEFECT, not a
+	// deliberate design — an earlier version of this comment called it
+	// deliberate, which is exactly how a broken type stays broken.
+	//
+	// The divergence is not even the whole of it. `interval` does not work on
+	// the codegen side either: emitProtoEntity writes
+	// `google.protobuf.Duration` into the .proto and imports only
+	// timestamp.proto — duration.proto appears nowhere in internal/codegen —
+	// so protoc fails with "google.protobuf.Duration is not defined". coltype
+	// is also split against itself, GoType saying time.Duration while
+	// ScanFragments declares `var v string`.
+	//
+	// Choosing the wire type is a user-facing decision and is tracked
+	// separately. This entry keeps the loop exact for every other type while
+	// the choice is open; it must be DELETED, not extended, when interval is
+	// settled.
 	knownDivergent := map[string]bool{"interval": true}
 
 	for _, r := range rows {
@@ -120,12 +138,10 @@ func TestDispatcherPublishesTheSameWireTypeAsCodegen(t *testing.T) {
 	}
 }
 
-// TestDispatcherScansAndBindsEveryDocumentedType covers the other two
-// dispatcher tables. Both have a silent fallback: makeScanTarget falls to
-// scanAny, which stringifies the value through fmt.Sprintf, and bindColumnValue
-// falls to msg.Get(fd).Interface(), which hands pgx whatever the proto field
-// happens to hold.
-func TestDispatcherScansAndBindsEveryDocumentedType(t *testing.T) {
+// TestDispatcherScansEveryDocumentedType covers the read half. makeScanTarget
+// has a silent fallback to scanAny, which stringifies the value through
+// fmt.Sprintf into whatever proto field is waiting.
+func TestDispatcherScansEveryDocumentedType(t *testing.T) {
 	for name, ft := range samples {
 		for _, nullable := range []bool{false, true} {
 			cm := columnMeta{field: &dsl.Field{Name: "f", Type: ft}, nullable: nullable}
@@ -136,6 +152,86 @@ func TestDispatcherScansAndBindsEveryDocumentedType(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestDispatcherBindsNullForEveryUnsetNullableColumn covers the write half.
+//
+// The first version of this test was named "ScansAndBinds", its comment named
+// bindColumnValue as the hazard, and its body called only makeScanTarget. A
+// review found that ten of the eighteen nullable bind arms could be deleted
+// with the suite still green — a nullable bigint left unset would have written
+// 0 instead of NULL, and every later `WHERE col IS NULL` would have missed the
+// row. A test that names a function it never calls is worse than no test,
+// because it occupies the space where the real one would go.
+//
+// The property: for a column whose nullable Go form is a pointer, an UNSET
+// proto field must bind something that reaches Postgres as NULL — a sql.NullX
+// with Valid false, or a typed nil pointer. The bare getter yields the zero
+// value, which is a real 0 or "" in the row.
+func TestDispatcherBindsNullForEveryUnsetNullableColumn(t *testing.T) {
+	for name, ft := range samples {
+		if !strings.HasPrefix(coltype.GoType(ft, false), "*") {
+			// []byte, []float32 and arrays carry null as nil already, so the
+			// bare getter is the correct answer for them.
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			e := &dsl.Entity{
+				Name: "Probe", Namespace: "probe", Kind: dsl.EntityKindRegular,
+				Fields: []dsl.Field{
+					{Name: "id", Type: dsl.FieldType{Name: "bigint"}, Primary: true, NotNull: true, ProtoNumber: 1},
+					{Name: "f", Type: ft, ProtoNumber: 2},
+				},
+			}
+			meta := entityMetaFor(e, &dsl.IR{Version: 1})
+			fd, err := buildProtoDescriptors(e)
+			if err != nil {
+				t.Fatalf("buildProtoDescriptors: %v", err)
+			}
+			resolveProtoDescriptors(meta, fd)
+
+			var cm columnMeta
+			for _, c := range meta.columns {
+				if c.field.Name == "f" {
+					cm = c
+				}
+			}
+			if cm.field == nil {
+				t.Fatal("column f is missing from the entity metadata")
+			}
+			if !cm.nullable {
+				t.Fatalf("column f is not nullable, so this case proves nothing")
+			}
+
+			// Field left unset: this is a caller omitting it.
+			got := bindColumnValue(meta, cm, dynamicpb.NewMessage(meta.msgDesc))
+			if !carriesNull(got) {
+				t.Errorf("an unset nullable %s binds %#v, which reaches Postgres as "+
+					"a value rather than NULL", name, got)
+			}
+		})
+	}
+}
+
+// carriesNull reports whether a bind value represents SQL NULL: a sql.NullX
+// marked invalid, or a nil pointer. Anything else is a real value.
+func carriesNull(v any) bool {
+	switch x := v.(type) {
+	case sql.NullString:
+		return !x.Valid
+	case sql.NullInt64:
+		return !x.Valid
+	case sql.NullInt32:
+		return !x.Valid
+	case sql.NullBool:
+		return !x.Valid
+	case sql.NullFloat64:
+		return !x.Valid
+	case sql.NullTime:
+		return !x.Valid
+	}
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }
 
 // TestNullFloatScanRespectsTheFieldWidth pins the one place the scan table

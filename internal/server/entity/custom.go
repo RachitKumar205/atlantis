@@ -530,6 +530,14 @@ func makeCustomScanTarget(t dsl.FieldType) any {
 		return new(int32)
 	case "boolean":
 		return new(bool)
+	case "real", "double":
+		// Both widths scan into the 64-bit form, and both are NULLABLE
+		// regardless of the column's declaration: a custom query's output
+		// carries no not-null guarantee (see the vector arm below for the
+		// same reasoning). Scanning a float into the default *string target
+		// below succeeds — pgx will render float4 as text — and then panics
+		// when set onto a float-kind proto field.
+		return new(sql.NullFloat64)
 	case "timestamptz", "date":
 		return new(sql.NullTime)
 	case "bytea", "jsonb":
@@ -556,6 +564,17 @@ func setCustomProtoField(msg *dynamicpb.Message, fd protoreflect.FieldDescriptor
 		msg.Set(fd, protoreflect.ValueOfInt32(*(target.(*int32))))
 	case "boolean":
 		msg.Set(fd, protoreflect.ValueOfBool(*(target.(*bool))))
+	case "real":
+		if v := *(target.(*sql.NullFloat64)); v.Valid {
+			// Narrowed, because the descriptor for a `real` column is
+			// TYPE_FLOAT and protoreflect panics on a width mismatch rather
+			// than converting.
+			msg.Set(fd, protoreflect.ValueOfFloat32(float32(v.Float64)))
+		}
+	case "double":
+		if v := *(target.(*sql.NullFloat64)); v.Valid {
+			msg.Set(fd, protoreflect.ValueOfFloat64(v.Float64))
+		}
 	case "timestamptz", "date":
 		v := *(target.(*sql.NullTime))
 		if v.Valid {
@@ -588,6 +607,16 @@ func customBindValue(msg *dynamicpb.Message, fd protoreflect.FieldDescriptor, t 
 		return int32(msg.Get(fd).Int())
 	case "boolean":
 		return msg.Get(fd).Bool()
+	case "real":
+		// Explicit rather than left to the .String() default below. That
+		// default does not panic on a float field — protoreflect formats it
+		// — so a float input currently binds the Go string "0.1" and
+		// Postgres re-parses it. That works by accident, and an accident in
+		// the bind path is how a value silently changes on the way to the
+		// database.
+		return float32(msg.Get(fd).Float())
+	case "double":
+		return msg.Get(fd).Float()
 	case "timestamptz", "date":
 		sub := msg.Get(fd).Message()
 		secFD := sub.Descriptor().Fields().ByName("seconds")
