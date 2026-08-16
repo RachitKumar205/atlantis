@@ -1,0 +1,177 @@
+package admin
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/dsl"
+)
+
+// GenerateSchema is the onboarding path: point atlantis at a database and get
+// declarations back. Everything it produces is something a customer will
+// commit, so the properties are "does it parse" and "does it describe the
+// database", not "does it look right".
+
+func createLegacySchema(t *testing.T, svc *Service) {
+	t.Helper()
+	ctx := context.Background()
+	for _, stmt := range []string{
+		`DROP SCHEMA IF EXISTS legacy CASCADE`,
+		`CREATE SCHEMA legacy`,
+		`CREATE TABLE legacy.customer (
+			id     bigint PRIMARY KEY,
+			email  varchar(255) NOT NULL UNIQUE,
+			joined timestamptz NOT NULL DEFAULT now()
+		)`,
+		// A foreign key BETWEEN two discovered tables. Introspecting the two
+		// separately would drop this reference, so it is here deliberately.
+		`CREATE TABLE legacy.order_line (
+			id          bigint PRIMARY KEY,
+			customer_id bigint NOT NULL REFERENCES legacy.customer(id) ON DELETE CASCADE,
+			qty         int NOT NULL DEFAULT 1
+		)`,
+	} {
+		if _, err := svc.pool.Exec(ctx, stmt); err != nil {
+			t.Fatalf("setup %q: %v", stmt, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = svc.pool.Exec(context.Background(), `DROP SCHEMA IF EXISTS legacy CASCADE`)
+	})
+}
+
+func TestGenerateSchemaProducesUsableDeclarations(t *testing.T) {
+	svc := depScopeService(t)
+	ctx := context.Background()
+	createLegacySchema(t, svc)
+
+	resp, err := svc.GenerateSchema(ctx, &adminpb.GenerateSchemaRequest{
+		Namespace: "shop",
+		Schemas:   []string{"legacy"},
+	})
+	if err != nil {
+		t.Fatalf("GenerateSchema: %v", err)
+	}
+	if n := len(resp.GetEntities()); n != 2 {
+		t.Fatalf("generated %d entities, want 2 (customer, order_line); skipped=%v",
+			n, resp.GetSkipped())
+	}
+
+	byTable := map[string]*adminpb.GeneratedEntity{}
+	var all []*dsl.File
+	for _, e := range resp.GetEntities() {
+		byTable[e.GetTable()] = e
+
+		// Every generated file must parse. A customer's first act is to commit
+		// these and run `tide plan`; a file that does not parse fails there,
+		// naming a generated file rather than the table it came from.
+		f, err := dsl.Parse(e.GetEntityName()+".atl", []byte(e.GetAtl()))
+		if err != nil {
+			t.Fatalf("generated .atl for %s does not parse: %v\n%s", e.GetTable(), err, e.GetAtl())
+		}
+		all = append(all, f)
+	}
+
+	// Together they must lower — which is where a foreign key between two
+	// generated entities either resolves or does not.
+	ir, err := dsl.Lower(all)
+	if err != nil {
+		t.Fatalf("generated .atl does not lower as a set: %v", err)
+	}
+	if len(ir.Entities) != 2 {
+		t.Fatalf("lowered %d entities, want 2", len(ir.Entities))
+	}
+
+	t.Run("the table override points at the real table", func(t *testing.T) {
+		e := byTable["legacy.customer"]
+		if e == nil {
+			t.Fatal("legacy.customer was not generated")
+		}
+		if !strings.Contains(e.GetAtl(), `table "legacy.customer"`) {
+			t.Errorf("no table override; without it the entity resolves to "+
+				"atlantis.shop_customer, which does not exist\n%s", e.GetAtl())
+		}
+	})
+
+	t.Run("the cross-table foreign key survives", func(t *testing.T) {
+		// This is why the tables are introspected together rather than one at
+		// a time: a reference can only resolve to an entity in the same IR.
+		var found bool
+		for _, e := range ir.Entities {
+			for _, f := range e.Fields {
+				if f.Ref != nil && f.Name == "customer_id" {
+					found = true
+					if f.Ref.TargetID != "shop.Customer" {
+						t.Errorf("customer_id references %q, want shop.Customer", f.Ref.TargetID)
+					}
+				}
+			}
+		}
+		if !found {
+			t.Error("the foreign key from order_line to customer was lost — " +
+				"introspecting the discovered tables separately would do this")
+		}
+	})
+
+	t.Run("the header says what was not checked", func(t *testing.T) {
+		// Risk #1 from the adopt rework: a generated file understates the
+		// schema, and a customer who believes it complete will later add an
+		// index the database already has.
+		atl := byTable["legacy.customer"].GetAtl()
+		for _, want := range []string{"Indexes", "not present", "Review before committing"} {
+			if !strings.Contains(atl, want) {
+				t.Errorf("generated header does not mention %q:\n%s", want, atl)
+			}
+		}
+	})
+}
+
+// TestGenerateSchemaSkipsWhatIsAlreadyDeclared stops onboarding proposing a
+// duplicate of something the customer already has.
+func TestGenerateSchemaSkipsWhatIsAlreadyDeclared(t *testing.T) {
+	svc := depScopeService(t)
+	ctx := context.Background()
+	createLegacySchema(t, svc)
+
+	const declared = `
+entity Customer in shop {
+  table "legacy.customer"
+  id     bigint primary
+  email  varchar(255) not null unique
+  joined timestamptz not null default now()
+}
+`
+	resp, err := svc.GenerateSchema(ctx, &adminpb.GenerateSchemaRequest{
+		Namespace: "shop",
+		Schemas:   []string{"legacy"},
+		Submissions: []*adminpb.CallerSubmission{
+			{Caller: "shop", Files: depScopeFiles("customer.atl", declared)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("GenerateSchema: %v", err)
+	}
+	for _, e := range resp.GetEntities() {
+		if e.GetTable() == "legacy.customer" {
+			t.Error("generated a declaration for legacy.customer, which is already " +
+				"declared — the customer would end up with two entities on one table")
+		}
+	}
+	if n := len(resp.GetEntities()); n != 1 {
+		t.Errorf("generated %d entities, want 1 (order_line only)", n)
+	}
+}
+
+// TestGenerateSchemaRequiresANamespace pins that the server does not invent
+// one. The namespace becomes part of every entity ID and therefore of the
+// caller's generated API.
+func TestGenerateSchemaRequiresANamespace(t *testing.T) {
+	svc := depScopeService(t)
+	if _, err := svc.GenerateSchema(context.Background(),
+		&adminpb.GenerateSchemaRequest{Schemas: []string{"legacy"}}); err == nil {
+		t.Error("generated with no namespace; the server picked a name that becomes " +
+			"the customer's public API")
+	}
+}

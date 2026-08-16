@@ -110,6 +110,8 @@ tide inspect [--against <host:port>] [--format {table|json}] [--timeout <duratio
 | `--against <host:port>` | Override the configured endpoint for this command only. |
 | `--format {table|json}` | Default `table`. `json` emits the raw drift report. |
 | `--timeout <duration>` | Default `2m`. Introspecting a large schema takes a while. |
+| `--generate <dir>` | Write `.atl` for tables no declaration mentions into `<dir>`, one file per entity. Never overwrites an existing file. |
+| `--schemas <list>` | With `--generate`: comma-separated Postgres schemas to search. Default is every non-system schema. |
 
 `plan` and `inspect` answer different questions. `plan` compares your files against the **recorded checkpoint** and tells you what an apply would do. `inspect` compares them against the **database itself** and tells you where the two have come apart — a column somebody added by hand, a policy that was dropped, a table that no longer matches its declaration.
 
@@ -126,6 +128,22 @@ Exit 2 is the one to act on. An addition is usually an apply away; a mismatch me
 The report ends with a **not checked** section. Introspection does not read indexes, uniques or `check` predicates back from the catalogue, so `inspect` cannot tell you whether those match. Treat a clean run as "the columns, types, keys and tenant isolation agree", not as "everything agrees".
 
 The server runs this inside a read-only transaction, so it is safe to point at production from CI.
+
+#### Generating declarations for a database you already have
+
+```
+tide inspect --generate=schema/
+```
+
+Discovers tables nothing declares, reads their columns, types, keys, defaults and foreign keys from the catalogue, and writes a `.atl` file per table. This is how you adopt a database without hand-writing a declaration for every table in it first.
+
+Entities are named from the table — `user_accounts` becomes `UserAccounts`, with no attempt to singularise. **That name is a proposal.** It becomes a generated Go type, a proto message, and part of the entity ID other callers reference, so renaming it after you have adopted is a breaking change. Edit the files before committing them.
+
+Skipped tables are reported with a reason rather than dropped silently: two tables in different Postgres schemas that would collide on one entity name, for instance. Existing files are never overwritten — delete one to regenerate it.
+
+Partition children, views, `atlantis`'s own tables and TimescaleDB chunk storage are not offered.
+
+The generated files carry a header saying what introspection could not verify. Read it — the same limits described above apply, and a generated file **understates** your schema.
 
 ### `tide pull`
 

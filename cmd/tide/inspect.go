@@ -5,7 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
@@ -42,6 +44,8 @@ func cmdInspect(args []string) int {
 	against := fs.String("against", "", "Server endpoint override (host:port); defaults to tide.yaml's endpoint")
 	timeout := fs.Duration("timeout", 120*time.Second, "RPC timeout (introspecting a large schema takes a while)")
 	format := fs.String("format", "table", "Output format: table or json")
+	generate := fs.String("generate", "", "Write .atl for tables no declaration mentions into this directory")
+	pgSchemas := fs.String("schemas", "", "With --generate: comma-separated Postgres schemas to search (default: all non-system)")
 	if err := fs.Parse(args); err != nil {
 		return 3
 	}
@@ -75,6 +79,10 @@ func cmdInspect(args []string) int {
 	}
 	defer func() { _ = client.Close() }()
 
+	if *generate != "" {
+		return runGenerate(ctx, client, cfg, files, *generate, *pgSchemas)
+	}
+
 	resp, err := client.InspectSchema(ctx, &adminpb.InspectSchemaRequest{
 		Caller: cfg.Caller, Files: files,
 	})
@@ -103,6 +111,101 @@ func cmdInspect(args []string) int {
 		return 1
 	default:
 		return 0
+	}
+}
+
+// runGenerate writes .atl for tables no declaration mentions.
+//
+// One file per entity. A single file would be one merge conflict for every
+// pair of people onboarding different parts of a schema, and a customer
+// reviewing forty generated tables wants to delete the ones they do not want
+// by deleting files.
+//
+// Never overwrites. A generated file the customer has since edited is the
+// worst thing this command could destroy, and "re-run to refresh" is not worth
+// that risk — they can delete a file to regenerate it.
+func runGenerate(ctx context.Context, client *adminClient, cfg *tideConfig,
+	files []*adminpb.SubmittedFile, outDir, pgSchemas string,
+) int {
+	var schemas []string
+	for _, s := range strings.Split(pgSchemas, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			schemas = append(schemas, s)
+		}
+	}
+
+	resp, err := client.GenerateSchema(ctx, &adminpb.GenerateSchemaRequest{
+		Namespace: cfg.Caller,
+		Schemas:   schemas,
+		Submissions: []*adminpb.CallerSubmission{
+			{Caller: cfg.Caller, Files: files},
+		},
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "tide inspect --generate:", err)
+		return 3
+	}
+
+	cliout.Header(os.Stdout, "generate")
+	if len(resp.GetEntities()) == 0 {
+		cliout.Successf("every table is already declared — nothing to generate")
+		printGenerateNotes(resp)
+		return 0
+	}
+
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, "tide inspect --generate:", err)
+		return 3
+	}
+
+	written, skipped := 0, 0
+	for _, e := range resp.GetEntities() {
+		path := filepath.Join(outDir, strings.ToLower(e.GetEntityName())+".atl")
+		if _, err := os.Stat(path); err == nil {
+			cliout.Row(os.Stdout, "muted", cliout.Bold(path), "exists — left alone")
+			skipped++
+			continue
+		}
+		if err := os.WriteFile(path, []byte(e.GetAtl()), 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, "tide inspect --generate: write", path, err)
+			return 3
+		}
+		cliout.Row(os.Stdout, "muted", cliout.Bold(path), e.GetTable())
+		written++
+	}
+
+	fmt.Println()
+	cliout.Field(os.Stdout, "written", fmt.Sprintf("%d", written))
+	if skipped > 0 {
+		cliout.Field(os.Stdout, "kept", fmt.Sprintf("%d (already on disk)", skipped))
+	}
+	printGenerateNotes(resp)
+
+	fmt.Println()
+	cliout.Warnf("Review before committing. Entity names are a proposal, and they " +
+		"become your generated API — renaming one later is a breaking change.")
+	return 0
+}
+
+// printGenerateNotes renders what was skipped and what could not be checked.
+//
+// Both are printed even when empty-handed elsewhere. A customer told "we found
+// 40 tables" who had 41 has no way to notice, so the reason each one was
+// dropped goes on screen rather than into a log.
+func printGenerateNotes(resp *adminpb.GenerateSchemaResponse) {
+	if s := resp.GetSkipped(); len(s) > 0 {
+		fmt.Println()
+		cliout.Header(os.Stdout, "not generated")
+		for _, line := range s {
+			cliout.Row(os.Stdout, "warn", "", line)
+		}
+	}
+	if w := resp.GetWarnings(); len(w) > 0 {
+		fmt.Println()
+		cliout.Header(os.Stdout, "not checked")
+		for _, line := range w {
+			cliout.Row(os.Stdout, "muted", "", line)
+		}
 	}
 }
 

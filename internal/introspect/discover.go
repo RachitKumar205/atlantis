@@ -3,6 +3,7 @@ package introspect
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
@@ -22,6 +23,37 @@ type DiscoveredTable struct {
 // Qualified renders the schema-qualified name, which is what a generated
 // entity's `table` clause has to carry.
 func (d DiscoveredTable) Qualified() string { return d.Schema + "." + d.Table }
+
+// SuggestedName proposes an entity name: user_accounts becomes UserAccounts.
+//
+// A proposal, and named so. This string becomes a generated Go type, a proto
+// message and part of the entity ID every other caller references, so renaming
+// it after adoption is a breaking change that goes through the approval gate.
+// Whatever calls this must offer the result for editing rather than applying
+// it silently.
+//
+// Deliberately does NOT singularise. "users" → "User" reads better and is
+// right most of the time, but English plurals are irregular enough that it is
+// wrong often enough to matter — and a wrong name that looks deliberate is
+// harder to notice than a clumsy one. Doubling the table name is a choice the
+// customer can see and change.
+func (d DiscoveredTable) SuggestedName() string {
+	var b strings.Builder
+	b.Grow(len(d.Table))
+	upper := true
+	for _, r := range d.Table {
+		switch {
+		case r == '_' || r == '-' || r == ' ':
+			upper = true
+		case upper:
+			b.WriteString(strings.ToUpper(string(r)))
+			upper = false
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
 
 // atlantisOwnedInPublic are tables atlantis creates in the public schema for
 // its own bookkeeping.

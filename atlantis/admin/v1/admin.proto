@@ -70,6 +70,12 @@ service AdminService {
   rpc InspectSchema(InspectSchemaRequest) returns (InspectSchemaResponse) {
     option (required_capability) = CAPABILITY_SCHEMA_READ;
   }
+  // Writes .atl describing tables no declaration mentions. Reads the
+  // catalogue and returns text; changes nothing, in the same READ ONLY
+  // transaction InspectSchema uses.
+  rpc GenerateSchema(GenerateSchemaRequest) returns (GenerateSchemaResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
 
   // Backfill.
 
@@ -662,6 +668,57 @@ message InspectSchemaRequest {
 // Deliberately the same AdoptDriftItem the adopt path returns. An operator
 // comparing what `inspect` told them against what `adopt` then reports must
 // not have to reconcile two vocabularies for one fact.
+// GenerateSchemaRequest asks for .atl describing tables nobody has declared.
+//
+// This is onboarding: somebody points atlantis at a database they already have
+// and gets the declarations back, rather than being asked to hand-write a file
+// per table before they can adopt anything.
+message GenerateSchemaRequest {
+  // The namespace generated entities are declared in. Required — it becomes
+  // part of every entity's ID and therefore of the caller's generated API, so
+  // the server will not pick one.
+  string namespace = 1;
+
+  // Restrict discovery to these Postgres schemas. Empty means every
+  // non-system schema, which is what a first run wants.
+  repeated string schemas = 2;
+
+  // Declarations that already exist, so their tables are not offered again.
+  // Same submission shape as inspect and adopt.
+  repeated CallerSubmission submissions = 3;
+}
+
+// GeneratedEntity is one table, its proposed declaration, and the name that
+// declaration gave it.
+message GeneratedEntity {
+  // The physical table, schema-qualified — the fact this was derived from.
+  string table = 1;
+
+  // The entity name the server proposed. Returned separately from the source
+  // so a client can offer it for editing without re-parsing the .atl: this
+  // name becomes a generated Go type and a proto message, and renaming it
+  // after adoption is a breaking change.
+  string entity_name = 2;
+
+  // The .atl source. Carries a header comment saying what introspection could
+  // not verify.
+  string atl = 3;
+}
+
+message GenerateSchemaResponse {
+  repeated GeneratedEntity entities = 1;
+
+  // Tables discovered but not generated, with the reason. Reported rather than
+  // dropped: a customer who is told "we found 40 tables" and had 41 has no way
+  // to notice the difference.
+  repeated string skipped = 2;
+
+  // What introspection could not read back from the catalogue, in the same
+  // shape inspect uses. Generated .atl understates the schema and the response
+  // has to say so.
+  repeated string warnings = 3;
+}
+
 message InspectSchemaResponse {
   repeated AdoptDriftItem drift = 1;
   repeated string warnings = 2;
