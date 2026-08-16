@@ -404,7 +404,7 @@ VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
 		}
 	}
 
-	_, err = s.persistCheckpoint(ctx, tx, newIR, versionMeta{
+	version, err := s.persistCheckpoint(ctx, tx, newIR, versionMeta{
 		Caller:    req.GetCaller(),
 		PlanClass: backfillDiff.HighestClass().String(),
 		Diff:      backfillDiff,
@@ -414,6 +414,27 @@ VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	// Close the plan out, exactly as ApplyMigration does.
+	//
+	// This path passed the approval gate and committed without ever marking
+	// the plan applied, so a gated backfill left its row `approved` with
+	// applied_version NULL forever. Two consequences: the approval ledger has
+	// no record that the decision was acted on — an auditor asking "was this
+	// approved change applied, and as which schema version?" gets nothing from
+	// the row — and ListSchemaPlans(state='approved') keeps returning it, so
+	// the console's approved queue never drains.
+	//
+	// Backfill-required is gated by default on a fresh install (0026 seeds
+	// PLAN_CLASS_BACKFILL_REQUIRED with require_approval=true), so this is the
+	// ordinary path rather than a corner.
+	if err := markPlanApplied(ctx, tx, req.GetPlanId(), version); err != nil {
+		return nil, fmt.Errorf("close out plan %s: %w", req.GetPlanId(), err)
+	}
+	newHash, _ := loadCheckpointHashTx(ctx, tx)
+	if err := supersedePlansFor(ctx, tx, req.GetCaller(), req.GetPlanId(), newHash); err != nil {
+		return nil, fmt.Errorf("supersede outstanding plans for %s: %w", req.GetCaller(), err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
