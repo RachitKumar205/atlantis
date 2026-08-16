@@ -38,7 +38,7 @@ This is the standard production flow.
 
 1. A developer edits an `.atl` file in their caller repo and opens a PR.
 2. Caller CI runs `tide plan --against=<prod>` — read-only validation against the live IR.
-3. PR merges; caller CI runs `tide apply --against=<prod>`.
+3. PR merges; caller CI runs `tide apply` with `ATL_ENDPOINT` set to prod (apply has no `--against`).
 4. The server validates, acquires the advisory lock, runs the DDL, writes the new `atlantis.ir_checkpoint` row (under content-hash CAS), and inserts an audit row into `atlantis.schema_versions` — all in one Postgres transaction.
 5. `NOTIFY atl_schema_changed` fires from a Postgres trigger on `ir_checkpoint`; the server's listener rebuilds entity metadata and swaps it atomically.
 

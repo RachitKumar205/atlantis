@@ -562,9 +562,15 @@ const CLASS_LABELS: Record<string, { name: string; help: string }> = {
 // The rule is stored by the admin server, not the console, because the thing
 // that enforces it is `tide apply`. This page is a view onto that table.
 //
-// Nothing enforces it in this release. Saying so on the page is deliberate: an
-// operator who sets a rule and watches an apply proceed anyway should be told
-// why here, rather than deciding the toggle is broken.
+// It IS enforced. The admin server's gateOnChangePolicy reads this table inside
+// the transaction that would run the DDL, on both ApplyMigration and
+// BeginBackfillPlan, and refuses — recording a plan for a reviewer.
+//
+// The row below says so on the page rather than leaving it implied. This panel
+// shipped one release before enforcement did, saying "not yet enforced" for
+// exactly the same reason: an operator toggling a control that decides whether
+// production DDL runs unattended should be able to read what it does now, not
+// infer it from a release note.
 function ChangePolicyPanel({ onToast, isAdmin }: { onToast: (msg: string) => void; isAdmin: boolean }) {
   const qc = useQueryClient()
   const [pending, setPending] = useState<ChangePolicyEntry | null>(null)
@@ -606,10 +612,11 @@ function ChangePolicyPanel({ onToast, isAdmin }: { onToast: (msg: string) => voi
 
       <div className="setrow">
         <div className="setrow__main">
-          <div className="setrow__label">Not yet enforced</div>
+          <div className="setrow__label">Enforced on apply</div>
           <div className="setrow__help">
-            Applies are not held for approval in this release. The rule is recorded and
-            reported so it can be agreed before it starts refusing anything.
+            A change in a class that needs approval is refused before its DDL runs, and
+            recorded. `tide apply` exits 2 — the gate working, not a failure — and the
+            request appears under Approvals for a reviewer to decide.
           </div>
         </div>
       </div>

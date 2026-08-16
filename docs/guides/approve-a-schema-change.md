@@ -23,7 +23,7 @@ No `approval` line means that class applies unattended on this deployment.
 ## 2. Apply, and expect to be held
 
 ```
-$ tide apply --against=prod
+$ tide apply
 tide apply: admin: this change is destructive and needs approval from admin
 before it can apply. Plan 9f2c1ab4e07d: recorded and waiting for a decision.
 
@@ -32,6 +32,8 @@ before it can apply. Plan 9f2c1ab4e07d: recorded and waiting for a decision.
 $ echo $?
 2
 ```
+
+No `--against` here, unlike `tide plan` above. `apply` reads its endpoint from `tide.yaml`, or from `ATL_ENDPOINT` in the environment.
 
 **Exit code 2 is not a failure.** The gate did its job. The plan — the proposed `.atl` source, the diff, and the SQL that would run — is stored and waiting.
 
@@ -55,7 +57,7 @@ Rejection is final. Resubmitting the same change does not re-open the request �
 ## 4. Apply again
 
 ```
-$ tide apply --against=prod
+$ tide apply
 ✔ applied at 2026-08-15T14:22:07Z
 ```
 

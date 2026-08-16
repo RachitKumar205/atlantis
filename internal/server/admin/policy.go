@@ -14,16 +14,23 @@ import (
 
 // The change policy: which classes of schema change may apply without a human.
 //
-// Nothing enforces this yet. The table, the RPCs and the console panel land
-// first so an operator can see the rule they are about to be held to and set
-// it before it decides anything. A gate that appears in the same release that
-// starts refusing applies is a gate people learn about from an outage.
+// This is ENFORCED. gateOnChangePolicy reads this table and refuses the apply,
+// recording a plan for a reviewer to decide. Two call sites, and both are
+// inside the transaction that would otherwise run the DDL:
 //
-// The enforcement point, when it arrives, is ApplyMigration inside its
-// advisory-locked transaction — which is why the table lives in atlantis.* and
-// why nothing here caches. authz.postgresGrants caches for five seconds
-// because it sits on every RPC's hot path; apply does not, and a cached gate
-// decision is a window in which a just-tightened rule still permits.
+//	admin.go     ApplyMigration, after emit and before the drift checks
+//	backfill.go  BeginBackfillPlan, which reaches the same DDL by another door
+//
+// The table, the RPCs and the console panel shipped one release ahead of that,
+// deliberately, so an operator could see the rule they were about to be held to
+// and agree it before it decided anything. A gate that appears in the same
+// release that starts refusing applies is a gate people learn about from an
+// outage. That release has passed; do not reintroduce the caveat.
+//
+// Nothing here caches, and that is the reason the table lives in atlantis.*
+// rather than in config. authz.postgresGrants caches for five seconds because
+// it sits on every RPC's hot path; apply does not, and a cached gate decision
+// is a window in which a just-tightened rule still permits.
 
 // ChangeClasses are the classes a rule can exist for.
 //
