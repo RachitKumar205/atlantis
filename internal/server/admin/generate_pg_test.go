@@ -164,6 +164,75 @@ entity Customer in shop {
 	}
 }
 
+// TestGenerateSchemaWillNotReuseADeclaredEntityName covers the collision the
+// skip path exists for, and the half of it that was missing.
+//
+// DiscoverTables excludes declared TABLES, so a declaration pointing at
+// legacy.customer hides that table. It does not hide the NAME: a differently
+// named table whose SuggestedName collides with a declared entity was offered
+// anyway, with skipped empty. Committing that file makes dsl.Lower fail on a
+// duplicate entity ID, which breaks every later plan, apply and inspect for
+// the caller — and the customer's only clue is an error about their own file.
+func TestGenerateSchemaWillNotReuseADeclaredEntityName(t *testing.T) {
+	svc := depScopeService(t)
+	ctx := context.Background()
+
+	for _, stmt := range []string{
+		`DROP SCHEMA IF EXISTS legdup CASCADE`,
+		`CREATE SCHEMA legdup`,
+		// Declared below under a DIFFERENT physical table, so discovery does
+		// not exclude this one — only the name collides.
+		`CREATE TABLE legdup.customer (id bigint PRIMARY KEY, note text)`,
+		`CREATE TABLE legdup.other (id bigint PRIMARY KEY)`,
+	} {
+		if _, err := svc.pool.Exec(ctx, stmt); err != nil {
+			t.Fatalf("setup %q: %v", stmt, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = svc.pool.Exec(context.Background(), `DROP SCHEMA IF EXISTS legdup CASCADE`)
+	})
+
+	// Declares shop.Customer against a table that is NOT legdup.customer.
+	const declared = `
+entity Customer in shop {
+  table "legdup.other"
+  id bigint primary
+}
+`
+	resp, err := svc.GenerateSchema(ctx, &adminpb.GenerateSchemaRequest{
+		Namespace: "shop",
+		Schemas:   []string{"legdup"},
+		Submissions: []*adminpb.CallerSubmission{
+			{Caller: "shop", Files: depScopeFiles("customer.atl", declared)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("GenerateSchema: %v", err)
+	}
+
+	for _, e := range resp.GetEntities() {
+		if e.GetEntityName() == "Customer" {
+			t.Errorf("generated a second entity named Customer (table %s) while "+
+				"shop.Customer is already declared — committing both makes "+
+				"dsl.Lower fail on a duplicate entity ID", e.GetTable())
+		}
+	}
+
+	// Dropped is only half of it. A table that vanishes with no explanation
+	// reads as a table atlantis did not find.
+	var named bool
+	for _, s := range resp.GetSkipped() {
+		if strings.Contains(s, "legdup.customer") && strings.Contains(s, "already declared") {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("legdup.customer was skipped without being reported as a name "+
+			"collision with an existing declaration; skipped = %v", resp.GetSkipped())
+	}
+}
+
 // TestGenerateSchemaRequiresANamespace pins that the server does not invent
 // one. The namespace becomes part of every entity ID and therefore of the
 // caller's generated API.

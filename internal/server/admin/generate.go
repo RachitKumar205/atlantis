@@ -79,7 +79,29 @@ func (s *Service) GenerateSchema(ctx context.Context, req *adminpb.GenerateSchem
 	stubs := &dsl.IR{Entities: make([]dsl.Entity, 0, len(found))}
 	nameFor := make(map[string]string, len(found))
 	var skipped []string
+
+	// Seeded from what is ALREADY declared, not only from what this run
+	// discovers. DiscoverTables excludes declared TABLES, but two different
+	// tables can suggest the same entity NAME — a declared
+	// `entity Order in shop { table "legacy.orders" }` alongside an
+	// undiscovered `legacy.order` both want to be shop.Order.
+	//
+	// Without this the response offered a second Order with skipped empty, and
+	// committing it made dsl.Lower fail on a duplicate entity ID, which breaks
+	// every later plan, apply and inspect for that caller. The collision was
+	// already handled between two discovered tables; only the declared side
+	// was missing.
 	seen := map[string]bool{}
+	declaredNames := map[string]bool{}
+	if declaredIR != nil {
+		for i := range declaredIR.Entities {
+			if declaredIR.Entities[i].Namespace == ns {
+				seen[declaredIR.Entities[i].Name] = true
+				declaredNames[declaredIR.Entities[i].Name] = true
+			}
+		}
+	}
+
 	for _, d := range found {
 		name := d.SuggestedName()
 		if name == "" {
@@ -89,6 +111,17 @@ func (s *Service) GenerateSchema(ctx context.Context, req *adminpb.GenerateSchem
 		// Two tables in different Postgres schemas can share a name, and both
 		// would land in the one atlantis namespace this request names. The
 		// second is reported rather than silently overwriting the first.
+		//
+		// The two causes get different messages because the remedy differs: a
+		// clash with an existing declaration is resolved by renaming one of
+		// them, a clash between two discovered tables by generating into
+		// separate namespaces.
+		if declaredNames[name] {
+			skipped = append(skipped, fmt.Sprintf(
+				"%s: entity name %q is already declared in namespace %q — rename "+
+					"the entity or declare this table by hand", d.Qualified(), name, ns))
+			continue
+		}
 		if seen[name] {
 			skipped = append(skipped, fmt.Sprintf(
 				"%s: entity name %q is already taken by another discovered table — "+

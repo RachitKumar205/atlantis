@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	iofs "io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -59,12 +61,28 @@ func cmdInspect(args []string) int {
 		cfg.Endpoint = *against
 	}
 
+	// --generate is the one subcommand that is SUPPOSED to run in a repo with
+	// no .atl files: it exists to write the first ones. Both the walk error
+	// and the empty result are therefore tolerated on that path.
+	//
+	// They were not, and the guard sat above the generate dispatch, so
+	// `tide inspect --generate` refused with "no .atl files found" in exactly
+	// the repo it was built for. The server side always handled it —
+	// GenerateSchema leaves declaredIR nil when there are no submissions, and
+	// DiscoverTables documents nil as "nothing is declared yet".
+	generating := *generate != ""
+
 	files, err := collectPCFiles(cfg.SchemaPaths)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tide:", err)
-		return 3
+		// A schema directory that does not exist yet is not an error when the
+		// point of the command is to create its contents.
+		if !generating || !errors.Is(err, iofs.ErrNotExist) {
+			fmt.Fprintln(os.Stderr, "tide:", err)
+			return 3
+		}
+		files = nil
 	}
-	if len(files) == 0 {
+	if len(files) == 0 && !generating {
 		fmt.Fprintf(os.Stderr, "tide: no .atl files found under %v\n", cfg.SchemaPaths)
 		return 3
 	}
@@ -124,6 +142,30 @@ func cmdInspect(args []string) int {
 // Never overwrites. A generated file the customer has since edited is the
 // worst thing this command could destroy, and "re-run to refresh" is not worth
 // that risk — they can delete a file to regenerate it.
+// generatedFileName turns a server-supplied entity name into a filename, or
+// refuses.
+//
+// An entity name reaching here came from introspecting a table name, and a
+// Postgres identifier is only constrained by what fits in quotes. The
+// accepted shape is what dsl.Parse would accept as an entity name anyway —
+// letters, digits and underscore — so a name this rejects could not have
+// produced a usable declaration either.
+func generatedFileName(entity string) (string, error) {
+	if entity == "" {
+		return "", errors.New("skipped: the server returned an entity with no name")
+	}
+	for _, r := range entity {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+		default:
+			return "", fmt.Errorf("skipped: entity name %q is not a safe filename "+
+				"(only letters, digits and underscore) — rename the table or "+
+				"declare it by hand", entity)
+		}
+	}
+	return strings.ToLower(entity) + ".atl", nil
+}
+
 func runGenerate(ctx context.Context, client *adminClient, cfg *tideConfig,
 	files []*adminpb.SubmittedFile, outDir, pgSchemas string,
 ) int {
@@ -134,13 +176,22 @@ func runGenerate(ctx context.Context, client *adminClient, cfg *tideConfig,
 		}
 	}
 
-	resp, err := client.GenerateSchema(ctx, &adminpb.GenerateSchemaRequest{
+	req := &adminpb.GenerateSchemaRequest{
 		Namespace: cfg.Caller,
 		Schemas:   schemas,
-		Submissions: []*adminpb.CallerSubmission{
+	}
+	// Omitted entirely when there is nothing declared yet, rather than sent as
+	// a submission carrying an empty file list. GenerateSchema branches on
+	// len(subs) > 0 to decide whether to compare against a declaration at all,
+	// and a submission with no files is not the same statement as no
+	// submission — the first asks it to parse an empty caller.
+	if len(files) > 0 {
+		req.Submissions = []*adminpb.CallerSubmission{
 			{Caller: cfg.Caller, Files: files},
-		},
-	})
+		}
+	}
+
+	resp, err := client.GenerateSchema(ctx, req)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide inspect --generate:", err)
 		return 3
@@ -160,7 +211,21 @@ func runGenerate(ctx context.Context, client *adminClient, cfg *tideConfig,
 
 	written, skipped := 0, 0
 	for _, e := range resp.GetEntities() {
-		path := filepath.Join(outDir, strings.ToLower(e.GetEntityName())+".atl")
+		// The entity name is server-supplied and derived from a table name, so
+		// it is not a filename until this says it is. Postgres accepts almost
+		// anything inside quoted identifiers — `CREATE TABLE "../../etc/x"` is
+		// legal — and filepath.Join CLEANS the result, so a name containing
+		// ".." silently resolves outside outDir and os.WriteFile follows it.
+		//
+		// Refusing beats sanitising: a mangled filename would leave the
+		// customer with a file whose name does not match the entity inside it.
+		base, err := generatedFileName(e.GetEntityName())
+		if err != nil {
+			cliout.Row(os.Stdout, "warn", cliout.Bold(e.GetTable()), err.Error())
+			skipped++
+			continue
+		}
+		path := filepath.Join(outDir, base)
 		if _, err := os.Stat(path); err == nil {
 			cliout.Row(os.Stdout, "muted", cliout.Bold(path), "exists — left alone")
 			skipped++

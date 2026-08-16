@@ -137,9 +137,17 @@ tide inspect --generate=schema/
 
 Discovers tables nothing declares, reads their columns, types, keys, defaults and foreign keys from the catalogue, and writes a `.atl` file per table. This is how you adopt a database without hand-writing a declaration for every table in it first.
 
+Run it in a repo with no `.atl` files at all — that is the case it exists for. `--generate` is the one form of `inspect` that does not require an existing declaration, and it tolerates a `schema_paths` directory that has not been created yet. Every other form still refuses, because there is nothing to compare the database against.
+
 Entities are named from the table — `user_accounts` becomes `UserAccounts`, with no attempt to singularise. **That name is a proposal.** It becomes a generated Go type, a proto message, and part of the entity ID other callers reference, so renaming it after you have adopted is a breaking change. Edit the files before committing them.
 
-Skipped tables are reported with a reason rather than dropped silently: two tables in different Postgres schemas that would collide on one entity name, for instance. Existing files are never overwritten — delete one to regenerate it.
+Skipped tables are reported with a reason rather than dropped silently. Three cases produce a skip:
+
+- the entity name is already declared in this namespace — rename one, or declare the table by hand;
+- two discovered tables in different Postgres schemas want the same entity name — generate one of them into its own namespace;
+- the name is not usable as a filename. Atlantis will not write a file whose name it derived from a table name without checking it, because a Postgres identifier can contain `/` and `..`.
+
+Existing files are never overwritten — delete one to regenerate it.
 
 Partition children, views, `atlantis`'s own tables and TimescaleDB chunk storage are not offered.
 
