@@ -95,24 +95,38 @@ func lookupJob(ir *dsl.IR, id string) *dsl.Job {
 	return nil
 }
 
-// jobVisibleTo applies the same permissive default that SubmitJob
-// uses: empty or "*" means any caller, otherwise the field must
-// match the caller CN exactly OR any of the caller's configured
-// aliases. Mirroring SubmitJob's gate keeps the policy in one mental
-// model; aliases extend it cleanly without changing the matching
-// semantics for callers that don't use aliases.
-func jobVisibleTo(job *dsl.Job, callerCN string, aliases []string) bool {
-	v := job.VisibleTo
-	if v == "" || v == "*" {
+// VisibleToMatches decides whether a caller satisfies a `visible_to` value.
+//
+// Empty or "*" means any caller; otherwise the value must equal the caller's
+// CN or one of its configured aliases. Migration 0017 states those three rules
+// as the semantics of the feature, and they are written once here because two
+// places need them and they had drifted.
+//
+// # Why this is exported
+//
+// SubmitJob had its own copy that implemented only the first two, so a caller
+// renamed from `vendor` to `vendor-v2` with aliases={'vendor'} could still
+// HANDLE a job declared `visible_to "vendor"` and could no longer ENQUEUE it.
+// The gradual CN rename that aliases exist to enable was impossible in one
+// direction, and the two gates disagreed about who a caller is — which is the
+// worst shape for an authorization rule, because each side looks correct on
+// its own.
+func VisibleToMatches(visibleTo, callerCN string, aliases []string) bool {
+	if visibleTo == "" || visibleTo == "*" {
 		return true
 	}
-	if v == callerCN {
+	if visibleTo == callerCN {
 		return true
 	}
 	for _, a := range aliases {
-		if v == a {
+		if visibleTo == a {
 			return true
 		}
 	}
 	return false
+}
+
+// jobVisibleTo is the dsl.Job-shaped form of VisibleToMatches.
+func jobVisibleTo(job *dsl.Job, callerCN string, aliases []string) bool {
+	return VisibleToMatches(job.VisibleTo, callerCN, aliases)
 }

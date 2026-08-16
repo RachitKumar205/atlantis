@@ -309,6 +309,52 @@ func TestVisibleToRefusesACallerTheJobDoesNotName(t *testing.T) {
 	}
 }
 
+// TestAnAliasedCallerCanSubmitWhatItCanHandle covers the CN-rename cutover
+// migration 0017 exists to enable.
+//
+// The submit gate compared the CN alone while jobsdispatcher.jobVisibleTo
+// checked CN OR aliases, so the two disagreed about who a caller is. Rename
+// `vendor` to `vendor-v2` with aliases={'vendor'} and the same caller could
+// still HANDLE a job declared `visible_to "vendor"` and was refused permission
+// to ENQUEUE it — the rename half-works, in the direction nobody tests first.
+//
+// Both gates now call jobsdispatcher.VisibleToMatches, so this pins that they
+// cannot drift apart again: the assertions below are the submit half, and
+// jobsdispatcher's own tests are the handle half, over one function.
+func TestAnAliasedCallerCanSubmitWhatItCanHandle(t *testing.T) {
+	base := depScopeService(t)
+	ctx := context.Background()
+	depScopePlanAndApply(t, base, "shop", "jobs.atl", visibleToSchema)
+
+	// The rename: shop is now shop-v2, with the old name kept as an alias.
+	if _, err := base.pool.Exec(ctx, `
+INSERT INTO atlantis.caller_identities (caller, aliases)
+VALUES ('shop-v2', ARRAY['shop'])
+ON CONFLICT (caller) DO UPDATE SET aliases = EXCLUDED.aliases`); err != nil {
+		t.Fatalf("set aliases: %v", err)
+	}
+
+	renamed := jobScopeSvc(t, base, "shop-v2", false)
+	if _, err := renamed.SubmitJob(ctx, &adminpb.SubmitJobRequest{
+		JobName: "shop.Restricted", Args: []byte(`{"note":"x"}`),
+	}); err != nil {
+		t.Errorf("shop-v2 cannot submit a job it is allowed to handle: %v\n"+
+			"  aliases={'shop'} and the job declares visible_to \"shop\", so the "+
+			"dispatcher lets this caller run it. A submit gate that disagrees "+
+			"makes the gradual CN rename impossible.", err)
+	}
+
+	// A caller with no alias linking it is still refused, or the fix above is
+	// just a gate that lets everyone through.
+	other := jobScopeSvc(t, base, "billing", false)
+	if _, err := other.SubmitJob(ctx, &adminpb.SubmitJobRequest{
+		JobName: "shop.Restricted", Args: []byte(`{"note":"x"}`),
+	}); err == nil {
+		t.Error("billing submitted shop.Restricted with no alias linking it — " +
+			"resolving aliases must widen the gate for the renamed caller only")
+	}
+}
+
 // TestSubmitJobRecordsTheVerifiedOwner closes the loop between the two halves:
 // the identity the gate checks is the identity written to the row, so a job
 // submitted by shop is one shop can later read back.

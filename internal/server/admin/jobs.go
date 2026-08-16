@@ -11,6 +11,7 @@ import (
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 
+	"github.com/rachitkumar205/atlantis/internal/server/jobsdispatcher"
 	"github.com/rachitkumar205/atlantis/jobs"
 )
 
@@ -219,8 +220,24 @@ func (s *Service) SubmitJob(ctx context.Context, req *adminpb.SubmitJobRequest) 
 	// An unidentified caller is allowed through as well, because there is
 	// nothing to compare — the same dev-mode reasoning as jobOwner, and the
 	// deployment has already been warned its admin plane is open.
-	if spec.visibleTo != "" && spec.visibleTo != "*" {
-		if submitter := s.jobReadScope(ctx); submitter != "" && submitter != spec.visibleTo {
+	// Aliases count, and the predicate is the dispatcher's own.
+	//
+	// This gate used to compare the CN alone, so it disagreed with
+	// jobsdispatcher about who a caller is. Rename a caller from `vendor` to
+	// `vendor-v2` with aliases={'vendor'} — the flow migration 0017 exists to
+	// enable — and the same caller could still HANDLE a job declared
+	// `visible_to "vendor"` while being refused permission to ENQUEUE it. Two
+	// authorization gates on one field, each correct-looking alone.
+	if submitter := s.jobReadScope(ctx); submitter != "" {
+		aliases, err := s.LookupCallerAliases(ctx, submitter)
+		if err != nil {
+			// Fail closed on the alias lookup rather than falling back to a
+			// CN-only comparison: the fallback is exactly the narrower rule
+			// this is fixing, and it would reappear on any transient error.
+			return nil, fmt.Errorf("admin: could not resolve aliases for %q, so "+
+				"visible_to cannot be evaluated: %w", submitter, err)
+		}
+		if !jobsdispatcher.VisibleToMatches(spec.visibleTo, submitter, aliases) {
 			return nil, fmt.Errorf("admin: caller %q is not allowed to submit %s (visible_to = %q)",
 				submitter, req.GetJobName(), spec.visibleTo)
 		}
