@@ -177,7 +177,14 @@ func bindPKValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) any {
 }
 
 // timestampToTime works with both compiled and dynamic Timestamp messages.
-func timestampToTime(msg *dynamicpb.Message, fd protoreflect.FieldDescriptor) time.Time {
+//
+// Takes protoreflect.Message rather than *dynamicpb.Message so the handler's
+// goValueFromProtoReflect can use it too. That path had its own copy of this
+// conversion and the copy was wrong — it returned
+// fmt.Sprintf("%v", sec+int64(nanos)), adding a nanosecond count to a second
+// count and formatting the sum as a decimal string, which Postgres rejects
+// with "date/time field value out of range". One helper, three callers.
+func timestampToTime(msg protoreflect.Message, fd protoreflect.FieldDescriptor) time.Time {
 	if !msg.Has(fd) {
 		return time.Time{}
 	}

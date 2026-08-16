@@ -99,7 +99,10 @@ func TestDispatcherPublishesTheSameWireTypeAsCodegen(t *testing.T) {
 	// settled.
 	knownDivergent := map[string]bool{"interval": true}
 
+	seen := map[string]bool{}
+
 	for _, r := range rows {
+		seen[r.ATL] = true
 		if r.ATL == dsltypes.ArrayRowSpelling {
 			continue
 		}
@@ -135,6 +138,24 @@ func TestDispatcherPublishesTheSameWireTypeAsCodegen(t *testing.T) {
 					fd.GetType(), want, protoName)
 			}
 		})
+	}
+
+	// The reverse direction, which this file did not have and coltype's
+	// equivalent did. The loop above iterates DOC ROWS, so removing a type
+	// from the reference page silently stops checking it here while the
+	// sample sits unused in the map — and the dispatcher could then drift
+	// from codegen for that type with the suite green.
+	//
+	// dsltypes.Rows()'s row-count floor does not cover this: the page has 19
+	// four-cell rows against a floor of 15, so four can go before it fires.
+	// The floor guards against the parser breaking entirely; this guards
+	// against one row going missing.
+	for name := range samples {
+		if !seen[name] {
+			t.Errorf("sample %q matches no row in %s — either the page dropped "+
+				"the type or this map has a typo, and both make the loop above "+
+				"quieter than it looks", name, dsltypes.DocPath)
+		}
 	}
 }
 

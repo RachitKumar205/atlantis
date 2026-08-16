@@ -226,6 +226,12 @@ func buildCustomProtoImports(ir *dsl.IR, ns string, g *customGroup) []string {
 	if customGroupHasTimestamp(g) {
 		add("google/protobuf/timestamp.proto")
 	}
+	// Same reasoning, same defect: an interval column maps to
+	// google.protobuf.Duration and this file named it without importing it,
+	// so protoc refused the generated .proto. See entityHasDurationField.
+	if customGroupHasDuration(g) {
+		add("google/protobuf/duration.proto")
+	}
 	for _, q := range g.Queries {
 		if q.Output.AsEntityID != "" {
 			otherNS := namespaceFromID(q.Output.AsEntityID)
@@ -244,6 +250,25 @@ func buildCustomProtoImports(ir *dsl.IR, ns string, g *customGroup) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// customGroupHasDuration mirrors customGroupHasTimestamp for the one type
+// whose protobuf surface is google.protobuf.Duration.
+func customGroupHasDuration(g *customGroup) bool {
+	check := func(params []dsl.QueryParam) bool {
+		for _, p := range params {
+			if p.Type.Name == "interval" {
+				return true
+			}
+		}
+		return false
+	}
+	for _, q := range g.Queries {
+		if check(q.Inputs) || check(q.Output.Columns) {
+			return true
+		}
+	}
+	return false
 }
 
 func customGroupHasTimestamp(g *customGroup) bool {

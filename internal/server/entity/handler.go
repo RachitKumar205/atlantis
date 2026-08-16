@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -708,19 +709,17 @@ func goValueFromProtoReflect(msg protoreflect.Message, fd protoreflect.FieldDesc
 		return int32(msg.Get(fd).Int())
 	case "boolean":
 		return msg.Get(fd).Bool()
+	case "real":
+		// Explicit, even though the Interface() fallback below already yields
+		// float32 for a TYPE_FLOAT field. The cache id is built from whatever
+		// this returns, and readScanTargets must return the identical Go type
+		// for the same row — leaving either side to a fallback is how those
+		// two drifted apart before.
+		return float32(msg.Get(fd).Float())
+	case "double":
+		return msg.Get(fd).Float()
 	case "timestamptz", "date":
-		sub := msg.Get(fd).Message()
-		secFD := sub.Descriptor().Fields().ByName("seconds")
-		if secFD == nil {
-			return nil
-		}
-		sec := sub.Get(secFD).Int()
-		nanoFD := sub.Descriptor().Fields().ByName("nanos")
-		var nanos int32
-		if nanoFD != nil {
-			nanos = int32(sub.Get(nanoFD).Int())
-		}
-		return fmt.Sprintf("%v", sec+int64(nanos))
+		return timestampToTime(msg, fd)
 	case "bytea", "jsonb":
 		return msg.Get(fd).Bytes()
 	}
@@ -772,17 +771,52 @@ func makePKScanTargets(meta *entityMeta) []any {
 // "49:[17 17 17 …]" from one path and "36:1111-2222-…" from the other. The
 // mismatch is silent: an outbox row is written, the worker faithfully bumps a
 // pointer key nobody reads, and the cached row stays stale until TTL.
+// The arms below MUST stay paired with readScanTargets and with
+// goValueFromProtoReflect. All three describe the same column, and a cache id
+// built from one must equal a cache id built from another.
+//
+// They were not paired. Only four types were listed and everything else fell
+// to `new(string)`, which fails two different ways:
+//
+//   - timestamptz, date, boolean and bytea cannot be scanned into *string at
+//     all. pgx refuses with "cannot scan timestamptz (OID 1184) in binary
+//     format into *string", so every Create on an entity with such a primary
+//     key died at the RETURNING clause, with a driver error naming neither
+//     the column nor the cause. checkPKPredicates advertises exactly those
+//     types as valid primary keys.
+//   - float4 and float8 DO scan into *string, and that is worse. pgx hands
+//     back Postgres's text rendering, so a double holding 1e6 read back as
+//     "1000000" here while the read path produced float64(1e6), which
+//     runtime.CompositeID renders "1e+06". Two ids for one row: the outbox
+//     bumps a key nobody reads and the parent's cached row stays stale until
+//     TTL — verbatim the failure this function's doc describes.
 func makeScanTargets(cols []columnMeta) []any {
 	targets := make([]any, len(cols))
 	for i, cm := range cols {
 		switch cm.field.Type.Name {
-		case "text", "varchar", "citext", "uuid":
+		case "text", "varchar", "citext", "uuid", "numeric", "interval":
 			targets[i] = new(string)
 		case "bigint":
 			targets[i] = new(int64)
 		case "int", "smallint":
 			targets[i] = new(int32)
+		case "real":
+			targets[i] = new(float32)
+		case "double":
+			targets[i] = new(float64)
+		case "boolean":
+			targets[i] = new(bool)
+		case "timestamptz", "date":
+			targets[i] = new(time.Time)
+		case "bytea", "jsonb":
+			targets[i] = new([]byte)
 		default:
+			// Still a string, because a type this build does not know is
+			// most likely text-shaped and refusing here would take down an
+			// entity that works. It is the paired default in readScanTargets
+			// that keeps the two consistent; a type reaching here is a gap in
+			// the list above, and TestScanTargetsMatchGoValueFromProto names
+			// every type that must not.
 			targets[i] = new(string)
 		}
 	}
@@ -800,12 +834,22 @@ func readScanTargets(cols []columnMeta, targets []any) []any {
 	out := make([]any, len(targets))
 	for i, cm := range cols {
 		switch cm.field.Type.Name {
-		case "text", "varchar", "citext", "uuid":
+		case "text", "varchar", "citext", "uuid", "numeric", "interval":
 			out[i] = *(targets[i].(*string))
 		case "bigint":
 			out[i] = *(targets[i].(*int64))
 		case "int", "smallint":
 			out[i] = *(targets[i].(*int32))
+		case "real":
+			out[i] = *(targets[i].(*float32))
+		case "double":
+			out[i] = *(targets[i].(*float64))
+		case "boolean":
+			out[i] = *(targets[i].(*bool))
+		case "timestamptz", "date":
+			out[i] = *(targets[i].(*time.Time))
+		case "bytea", "jsonb":
+			out[i] = *(targets[i].(*[]byte))
 		default:
 			out[i] = *(targets[i].(*string))
 		}

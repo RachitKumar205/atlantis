@@ -253,14 +253,39 @@ func renderType(t *dsl.FieldType) (string, bool) {
 // "does this name look like one token", and there is then one list rather than
 // two that drift.
 func toolchainHandles(t *dsl.FieldType) bool {
-	if _, err := coltype.ProtoType(*t); err != nil {
+	pt, err := coltype.ProtoType(*t)
+	if err != nil {
 		return false
 	}
 	// GoType has no error return; `any` is its unknown-type fallback, and a
 	// column typed `any` in a generated struct is not a column the customer
 	// can use.
-	return coltype.GoType(*t, true) != "any"
+	if coltype.GoType(*t, true) == "any" {
+		return false
+	}
+	// A well-known type is only usable if the .proto emitter imports its
+	// definition, and it imports timestamp.proto and nothing else.
+	//
+	// `interval` is the case that proved asking coltype alone is not enough.
+	// coltype.ProtoType returns google.protobuf.Duration with a nil error and
+	// GoType returns time.Duration, so an earlier version of this function
+	// declared the column — and the emitted .proto then failed protoc with
+	// `"google.protobuf.Duration" is not defined`, because duration.proto
+	// appears nowhere in internal/codegen. That put the failure at the worst
+	// step again: plan and apply clean, checkpoint written, `tide generate`
+	// dead. Which wire type interval should use is a product decision and is
+	// tracked separately; until it is settled, generation must not propose the
+	// column.
+	if strings.HasPrefix(pt, wellKnownPrefix) && pt != wellKnownTimestamp {
+		return false
+	}
+	return true
 }
+
+const (
+	wellKnownPrefix    = "google.protobuf."
+	wellKnownTimestamp = "google.protobuf.Timestamp"
+)
 
 // renderDefault turns a resolved Default into a DefaultExpr.
 //
