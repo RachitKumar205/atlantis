@@ -47,6 +47,23 @@
 -- change as this file. Here the grant is created only when the table would
 -- otherwise be left admitting nothing, which is the only reason it exists.
 --
+-- Why the loop terminates
+-- -----------------------
+-- It mutates pg_policy while iterating over pg_policy, and the rename it does
+-- first produces a row that still satisfies its own WHERE: `<name>_legacy` is
+-- permissive and still calls current_partition(). A loop that re-read the
+-- catalogue would find that row, and the iteration for it would reach an
+-- ALTER POLICY on something the previous iteration had already dropped.
+--
+-- It does not, because FOR ... IN <query> takes its snapshot when the query
+-- opens and rows created inside the loop are not visible to it. That is the
+-- load-bearing property of this whole migration and it is not visible in the
+-- text, so it is stated here and driven by
+-- TestMigration0030HandlesATableWithTwoTenantScopedPermissivePolicies — a
+-- fixture with two matching policies, which is the smallest case where a
+-- re-scan and a snapshot behave differently. A single-policy fixture cannot
+-- tell them apart.
+--
 -- Isolation holds after EVERY statement
 -- -------------------------------------
 --   after RENAME   permissive {legacy, ...}                    -> unchanged
