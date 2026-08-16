@@ -73,7 +73,16 @@ func cmdApply(args []string) int {
 		return 3
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	// --timeout bounds one RPC; --wait-for-approval bounds how long we keep
+	// retrying one. They are different clocks and this used to conflate them:
+	// the whole command ran under a single 30s deadline, so
+	// `--wait-for-approval=30m` expired after 30 seconds and reported the
+	// original refusal. The flag could never wait, whatever it was set to.
+	//
+	// The budget is the wait PLUS one timeout, so the attempt issued just
+	// before the deadline still gets a full RPC rather than being cut off
+	// mid-flight.
+	ctx, cancel := context.WithTimeout(context.Background(), commandBudget(*timeout, *waitForApproval))
 	defer cancel()
 
 	// Refresh the local merged-schema cache so cross-caller references the
@@ -125,9 +134,24 @@ func cmdApply(args []string) int {
 			fmt.Println("tide: additive plan; would apply (--dry-run set)")
 			return 0
 		}
-		return doApply(ctx, client, cfg, planResp, files, *waitForApproval)
+		return doApply(ctx, client, cfg, planResp, files, *waitForApproval, *timeout)
 
 	case adminpb.PlanClass_PLAN_CLASS_BACKFILL_REQUIRED:
+		// --dry-run is checked BEFORE --backfill, because the backfill arm is
+		// the one that acts. Every other arm honoured the flag and this one did
+		// not, so `tide apply --dry-run --backfill` called BeginBackfillPlan
+		// and started the backfill — the flag whose entire promise is "do not
+		// apply" performing the longest-running write in the product.
+		if *dryRun {
+			fmt.Println("tide: backfill-required plan; --dry-run set, no backfill started")
+			if len(planResp.GetBackfillFields()) > 0 {
+				fmt.Fprintln(os.Stderr, "    Would backfill:")
+				for _, f := range planResp.GetBackfillFields() {
+					fmt.Fprintf(os.Stderr, "      %s.%s ← %s\n", f.GetEntityId(), f.GetField(), f.GetExpression())
+				}
+			}
+			return exitCodeForClass(planResp.GetClass())
+		}
 		if !*backfill {
 			fmt.Fprintln(os.Stderr, "tide: this change is backfill-required.")
 			if len(planResp.GetBackfillFields()) > 0 {
@@ -158,7 +182,7 @@ func cmdApply(args []string) int {
 		// change policy to decide, not tide's — and submitting is also how the
 		// request reaches the approval queue, so refusing locally would leave
 		// nobody anything to approve.
-		return doApply(ctx, client, cfg, planResp, files, *waitForApproval)
+		return doApply(ctx, client, cfg, planResp, files, *waitForApproval, *timeout)
 
 	case adminpb.PlanClass_PLAN_CLASS_DESTRUCTIVE:
 		// Its own arm, not folded into the breaking one. The two need different
@@ -178,7 +202,7 @@ func cmdApply(args []string) int {
 		if *dryRun {
 			return exitCodeForClass(planResp.GetClass())
 		}
-		return doApply(ctx, client, cfg, planResp, files, *waitForApproval)
+		return doApply(ctx, client, cfg, planResp, files, *waitForApproval, *timeout)
 
 	case adminpb.PlanClass_PLAN_CLASS_UNPARSEABLE:
 		// Server marks the plan unparseable when pg_query_go validation on
@@ -263,7 +287,25 @@ func doBeginBackfill(ctx context.Context, client *adminClient, cfg *tideConfig, 
 	}
 }
 
-func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan *adminpb.PlanSchemaResponse, files []*adminpb.SubmittedFile, wait time.Duration) int {
+// commandBudget is how long the whole command may run.
+//
+// --timeout bounds ONE RPC; --wait-for-approval bounds how long we keep
+// retrying one. Conflating them is what made --wait-for-approval inert: the
+// command ran under a single 30s deadline, so `--wait-for-approval=30m`
+// expired after thirty seconds and reported the original refusal. The flag
+// could never wait, whatever it was set to, and the only symptom was a
+// pipeline that gave up early and looked like the reviewer had been slow.
+//
+// The wait plus one timeout, so the attempt issued just before the wait
+// deadline still gets a full RPC rather than being cut off mid-flight.
+func commandBudget(rpcTimeout, wait time.Duration) time.Duration {
+	if wait <= 0 {
+		return rpcTimeout
+	}
+	return wait + rpcTimeout
+}
+
+func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan *adminpb.PlanSchemaResponse, files []*adminpb.SubmittedFile, wait, rpcTimeout time.Duration) int {
 	// No UpSQL. The plan's SQL was always documented as a drift check the server
 	// never read, and ApplyMigrationRequest now has no field for it. The server
 	// re-emits the DDL from these files against the checkpoint the hash pins,
@@ -277,7 +319,7 @@ func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan *ad
 	}
 	applyResp, err := client.ApplyMigration(ctx, req)
 	if err != nil && status.Code(err) == codes.FailedPrecondition && wait > 0 {
-		applyResp, err = waitForDecision(ctx, client, req, wait, err)
+		applyResp, err = waitForDecision(ctx, client, req, wait, rpcTimeout, err)
 	}
 	if err != nil {
 		// FailedPrecondition is the change policy: this needs a human, or a
@@ -320,7 +362,7 @@ func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan *ad
 // decision that will never change is how a pipeline burns thirty minutes to
 // report something it knew at the first attempt.
 func waitForDecision(ctx context.Context, client *adminClient, req *adminpb.ApplyMigrationRequest,
-	budget time.Duration, first error,
+	budget, rpcTimeout time.Duration, first error,
 ) (*adminpb.ApplyMigrationResponse, error) {
 	if strings.Contains(status.Convert(first).Message(), "was rejected by") {
 		return nil, first
@@ -336,7 +378,15 @@ func waitForDecision(ctx context.Context, client *adminClient, req *adminpb.Appl
 			return nil, last
 		case <-time.After(poll):
 		}
-		resp, err := client.ApplyMigration(ctx, req)
+		// Per attempt, not per wait. The outer context now spans the whole
+		// approval budget, so without this a server that accepts the
+		// connection and never answers would consume the entire half hour in
+		// one call and report the original refusal at the end of it.
+		resp, err := func() (*adminpb.ApplyMigrationResponse, error) {
+			attemptCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
+			defer cancel()
+			return client.ApplyMigration(attemptCtx, req)
+		}()
 		if err == nil {
 			return resp, nil
 		}

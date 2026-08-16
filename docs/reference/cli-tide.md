@@ -68,14 +68,16 @@ Every command accepts `--config <path>` (default `tide.yaml`) and `--timeout <du
 Submits the local `.atl` files to the server, runs the migration, and prints a hint for the caller to regenerate the typed Go client. No endpoint override flag — `apply` always targets the configured `endpoint`.
 
 ```
-tide apply [--backfill] [--dry-run] [--no-pull]
+tide apply [--backfill] [--dry-run] [--no-pull] [--wait-for-approval=30m]
 ```
 
 | Flag | Description |
 |---|---|
 | `--backfill` | Boolean. Kick off the declarative backfill flow for a `backfill_required` plan (calls `BeginBackfillPlan`). Monitor progress with `tide backfill status`. |
-| `--dry-run` | Plan only; do not apply. Same exit codes as a real apply. |
+| `--dry-run` | Plan only; do not apply. Same exit codes as a real apply. Overrides `--backfill`: with both set, the backfill that *would* run is listed and nothing is started. |
 | `--no-pull` | Skip the automatic `tide pull` before the apply. Use when offline or when the local cache is known-current. |
+| `--timeout` | Bounds a single RPC. Default 30s. |
+| `--wait-for-approval` | Hold the process open this long, retrying the apply until a human decides. Off by default, because a polling default holds a CI runner for as long as a review takes. Independent of `--timeout`: the command's overall budget becomes the wait plus one `--timeout`, and each retry still gets its own `--timeout`. |
 
 The default flow runs `tide pull` first so cross-caller references resolve against the freshest merged schema.
 
