@@ -507,7 +507,10 @@ func (s *Server) batchGetInto(
 		}
 
 		// Build the array arg.
-		pkSlice := buildPKArray(meta.pkCols[0], list)
+		pkSlice, err := buildPKArray(meta.pkCols[0], list)
+		if err != nil {
+			return err
+		}
 
 		rows, err := q.Query(ctx, meta.sqlBatchGet, pkSlice)
 		if err != nil {
@@ -727,33 +730,90 @@ func goValueFromProtoReflect(msg protoreflect.Message, fd protoreflect.FieldDesc
 }
 
 // buildPKArray builds a typed Go slice for the ANY($1) SQL pattern.
-func buildPKArray(pk columnMeta, list protoreflect.List) any {
+//
+// This is the FOURTH primary-key table in this file, and the three above it
+// were given the full type list one commit before this one was. Leaving it on
+// the short list produced two different failures on primary-key types the DSL
+// accepts and lowers without complaint:
+//
+//   - A bytea key went through fmt.Sprintf("%v", []byte{…}) and reached
+//     Postgres as the Go rendering "[222 173 190 239]". BatchGet returned zero
+//     rows with a nil error — the caller asked for a key that exists and was
+//     told it does not.
+//   - A jsonb key rendered the same way and failed with "invalid input syntax
+//     for type json", which is at least loud.
+//
+// boolean and real survived only because Postgres coerces an unknown-typed
+// literal like "true" or "1e+06", which the code did not arrange and must not
+// rely on.
+func buildPKArray(pk columnMeta, list protoreflect.List) (any, error) {
 	switch pk.field.Type.Name {
-	case "text", "varchar", "citext", "uuid":
+	case "text", "varchar", "citext", "uuid", "numeric":
 		out := make([]string, list.Len())
 		for i := 0; i < list.Len(); i++ {
 			out[i] = list.Get(i).String()
 		}
-		return out
+		return out, nil
 	case "bigint":
 		out := make([]int64, list.Len())
 		for i := 0; i < list.Len(); i++ {
 			out[i] = list.Get(i).Int()
 		}
-		return out
+		return out, nil
 	case "int", "smallint":
 		out := make([]int32, list.Len())
 		for i := 0; i < list.Len(); i++ {
 			out[i] = int32(list.Get(i).Int())
 		}
-		return out
+		return out, nil
+	case "real":
+		out := make([]float32, list.Len())
+		for i := 0; i < list.Len(); i++ {
+			out[i] = float32(list.Get(i).Float())
+		}
+		return out, nil
+	case "double":
+		out := make([]float64, list.Len())
+		for i := 0; i < list.Len(); i++ {
+			out[i] = list.Get(i).Float()
+		}
+		return out, nil
+	case "boolean":
+		out := make([]bool, list.Len())
+		for i := 0; i < list.Len(); i++ {
+			out[i] = list.Get(i).Bool()
+		}
+		return out, nil
+	case "bytea", "jsonb":
+		out := make([][]byte, list.Len())
+		for i := 0; i < list.Len(); i++ {
+			out[i] = list.Get(i).Bytes()
+		}
+		return out, nil
+	case "timestamptz", "date":
+		out := make([]time.Time, list.Len())
+		for i := 0; i < list.Len(); i++ {
+			sub := list.Get(i).Message()
+			secFD := sub.Descriptor().Fields().ByName("seconds")
+			nanoFD := sub.Descriptor().Fields().ByName("nanos")
+			var sec, nanos int64
+			if secFD != nil {
+				sec = sub.Get(secFD).Int()
+			}
+			if nanoFD != nil {
+				nanos = sub.Get(nanoFD).Int()
+			}
+			out[i] = time.Unix(sec, nanos).UTC()
+		}
+		return out, nil
 	}
-	// Fallback: []string.
-	out := make([]string, list.Len())
-	for i := 0; i < list.Len(); i++ {
-		out[i] = fmt.Sprintf("%v", list.Get(i).Interface())
-	}
-	return out
+	// Refused rather than stringified. The previous fallback built a []string
+	// via fmt.Sprintf("%v", …) and handed it to Postgres uncast, which is how
+	// a bytea key turned into a silent empty result. An unsupported key type
+	// is a schema atlantis cannot serve, and saying so beats answering wrongly.
+	return nil, status.Errorf(codes.Unimplemented,
+		"BatchGet: primary key type %q is not supported for batch lookup",
+		pk.field.Type.Name)
 }
 
 // makePKScanTargets allocates scan targets for INSERT ... RETURNING.

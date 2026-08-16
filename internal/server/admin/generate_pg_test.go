@@ -233,6 +233,84 @@ entity Customer in shop {
 	}
 }
 
+// TestGenerateSchemaRefusesNamesThatAreNotIdentifiers stops the server
+// proposing an entity whose .atl could never parse.
+//
+// SuggestedName treats only `_`, `-` and ` ` as separators and copies every
+// other rune through, so `a/b` yields "A/b" and `2024_events` yields
+// "2024Events". Neither lexes as an identifier. The CLI does check before
+// writing a file, but it is one consumer of this RPC and the console is
+// another — a server that returns an entity it knows cannot parse is
+// proposing work that cannot succeed, and the CLI's check then reads as the
+// only thing standing between the customer and a broken file.
+func TestGenerateSchemaRefusesNamesThatAreNotIdentifiers(t *testing.T) {
+	svc := depScopeService(t)
+	ctx := context.Background()
+
+	for _, stmt := range []string{
+		`DROP SCHEMA IF EXISTS legbad CASCADE`,
+		`CREATE SCHEMA legbad`,
+		// Both are legal Postgres identifiers inside quotes.
+		`CREATE TABLE legbad."a/b" (id bigint PRIMARY KEY)`,
+		`CREATE TABLE legbad."2024_events" (id bigint PRIMARY KEY)`,
+		// A control, so a failure here means the refusal is too broad rather
+		// than the fixture being empty.
+		`CREATE TABLE legbad.good_rows (id bigint PRIMARY KEY)`,
+	} {
+		if _, err := svc.pool.Exec(ctx, stmt); err != nil {
+			t.Fatalf("setup %q: %v", stmt, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = svc.pool.Exec(context.Background(), `DROP SCHEMA IF EXISTS legbad CASCADE`)
+	})
+
+	resp, err := svc.GenerateSchema(ctx, &adminpb.GenerateSchemaRequest{
+		Namespace: "shop",
+		Schemas:   []string{"legbad"},
+	})
+	if err != nil {
+		t.Fatalf("GenerateSchema: %v", err)
+	}
+
+	for _, e := range resp.GetEntities() {
+		if !dsl.IsIdentifier(e.GetEntityName()) {
+			t.Errorf("generated entity name %q for table %s is not a usable .atl "+
+				"identifier — the file written for it will not parse",
+				e.GetEntityName(), e.GetTable())
+		}
+	}
+
+	// Dropped is half the job; naming them is the other half. A table that
+	// vanishes with no explanation reads as a table atlantis did not find.
+	var namedBad, namedDigit bool
+	for _, s := range resp.GetSkipped() {
+		if strings.Contains(s, "a/b") {
+			namedBad = true
+		}
+		if strings.Contains(s, "2024") {
+			namedDigit = true
+		}
+	}
+	if !namedBad || !namedDigit {
+		t.Errorf("unusable table names were dropped without being reported; "+
+			"skipped = %v", resp.GetSkipped())
+	}
+
+	// The control must still come through, or the refusal is rejecting
+	// ordinary tables.
+	var sawGood bool
+	for _, e := range resp.GetEntities() {
+		if e.GetTable() == "legbad.good_rows" {
+			sawGood = true
+		}
+	}
+	if !sawGood {
+		t.Error("legbad.good_rows was not generated — the identifier check is " +
+			"refusing names it should accept")
+	}
+}
+
 // TestGenerateSchemaRequiresANamespace pins that the server does not invent
 // one. The namespace becomes part of every entity ID and therefore of the
 // caller's generated API.

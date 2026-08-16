@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	_ "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/common/v1"
@@ -150,8 +151,135 @@ func TestScanTargetsAreScannableTypes(t *testing.T) {
 	for _, ft := range pkCapableTypes {
 		cols := []columnMeta{{field: &dsl.Field{Name: "k", Type: ft}}}
 		got := reflect.TypeOf(makeScanTargets(cols)[0]).String()
-		if w, ok := want[ft.Name]; ok && got != w {
+		// A missing entry is a FAILURE, not a skip. The first version wrote
+		// `if w, ok := want[ft.Name]; ok && got != w` — so adding a type to
+		// pkCapableTypes without adding it here asserted nothing at all about
+		// that type, while pkCapableTypes' own comment claimed the list existed
+		// so that widening checkPKPredicates would be "a visible, failing
+		// change". It would have been silent.
+		w, ok := want[ft.Name]
+		if !ok {
+			t.Errorf("%s is in pkCapableTypes but has no expected scan target here — "+
+				"add one rather than leaving the type unchecked", ft.Name)
+			continue
+		}
+		if got != w {
 			t.Errorf("%s scans into %s, want %s", ft.Name, got, w)
 		}
 	}
+}
+
+// TestBuildPKArrayTypesEveryPrimaryKey covers the FOURTH primary-key table in
+// handler.go. The three above it — makeScanTargets, readScanTargets and
+// goValueFromProtoReflect — were given the full type list one commit before
+// this one; buildPKArray was left on the short list and nothing noticed.
+//
+// It feeds the `= ANY($1)` parameter for BatchGet, and its old fallback built
+// a []string through fmt.Sprintf("%v", …). For a bytea key that rendered
+// []byte{0xDE,0xAD} as "[222 173]", which Postgres matched against nothing:
+// BatchGet returned zero rows with a NIL ERROR. The caller asked for a key
+// that exists and was told it does not.
+//
+// Asserting the Go element type is what makes that impossible. A []string of
+// stringified bytes and a [][]byte are indistinguishable once they reach the
+// driver as "an argument"; they are not indistinguishable here.
+func TestBuildPKArrayTypesEveryPrimaryKey(t *testing.T) {
+	want := map[string]string{
+		"bigint":      "[]int64",
+		"int":         "[]int32",
+		"smallint":    "[]int32",
+		"text":        "[]string",
+		"varchar":     "[]string",
+		"citext":      "[]string",
+		"uuid":        "[]string",
+		"numeric":     "[]string",
+		"boolean":     "[]bool",
+		"timestamptz": "[]time.Time",
+		"date":        "[]time.Time",
+		"real":        "[]float32",
+		"double":      "[]float64",
+		"jsonb":       "[][]uint8",
+		"bytea":       "[][]uint8",
+	}
+	for _, ft := range pkCapableTypes {
+		t.Run(ft.Name, func(t *testing.T) {
+			w, ok := want[ft.Name]
+			if !ok {
+				t.Fatalf("%s is in pkCapableTypes but has no expected array type "+
+					"here — add one rather than leaving the type unchecked", ft.Name)
+			}
+
+			e := &dsl.Entity{
+				Name: "Probe", Namespace: "probe", Kind: dsl.EntityKindRegular,
+				Fields: []dsl.Field{
+					{Name: "k", Type: ft, Primary: true, NotNull: true, ProtoNumber: 1},
+				},
+			}
+			meta := entityMetaFor(e, &dsl.IR{Version: 1})
+			fd, err := buildProtoDescriptors(e)
+			if err != nil {
+				t.Fatalf("buildProtoDescriptors: %v", err)
+			}
+			resolveProtoDescriptors(meta, fd)
+
+			// An empty list is enough: the element type is chosen by the
+			// column, not by the values. Taken from the real BatchGet request
+			// descriptor, the same way handleBatchGet does, so the list is the
+			// shape production passes rather than a stand-in.
+			got, err := buildPKArray(meta.pkCols[0], emptyBatchList(t, meta))
+			if err != nil {
+				t.Fatalf("buildPKArray refused a documented PK type: %v", err)
+			}
+			if gt := reflect.TypeOf(got).String(); gt != w {
+				t.Errorf("buildPKArray yields %s, want %s — a mistyped ANY($1) "+
+					"parameter matches nothing and BatchGet returns an empty "+
+					"result with no error", gt, w)
+			}
+		})
+	}
+}
+
+// TestBuildPKArrayRefusesWhatItCannotType pins the replaced fallback. Building
+// a []string of fmt.Sprintf output for an unknown type is what made the bytea
+// failure silent; refusing is loud.
+func TestBuildPKArrayRefusesWhatItCannotType(t *testing.T) {
+	e := &dsl.Entity{
+		Name: "Probe", Namespace: "probe", Kind: dsl.EntityKindRegular,
+		Fields: []dsl.Field{
+			{Name: "k", Type: dsl.FieldType{Name: "bigint"}, Primary: true, NotNull: true, ProtoNumber: 1},
+		},
+	}
+	meta := entityMetaFor(e, &dsl.IR{Version: 1})
+	fd, err := buildProtoDescriptors(e)
+	if err != nil {
+		t.Fatalf("buildProtoDescriptors: %v", err)
+	}
+	resolveProtoDescriptors(meta, fd)
+
+	// The column metadata claims a type buildPKArray has no arm for. Reaching
+	// this in production needs a DSL type nothing maps yet; the point is what
+	// happens WHEN it is reached, not how likely that is today.
+	unknown := columnMeta{
+		field:    &dsl.Field{Name: "k", Type: dsl.FieldType{Name: "inet"}},
+		protoNum: meta.pkCols[0].protoNum,
+	}
+	if _, err := buildPKArray(unknown, emptyBatchList(t, meta)); err == nil {
+		t.Error("buildPKArray accepted a PK type it has no arm for — the old " +
+			"fallback stringified it and Postgres matched nothing, returning an " +
+			"empty page with a nil error")
+	}
+}
+
+// emptyBatchList returns the repeated primary-key field of a fresh BatchGet
+// request, which is where handleBatchGet gets the list it passes on.
+func emptyBatchList(t *testing.T, meta *entityMeta) protoreflect.List {
+	t.Helper()
+	if meta.batchGetRequestDesc == nil {
+		t.Fatal("no BatchGet request descriptor was built")
+	}
+	pkField := meta.batchGetRequestDesc.Fields().Get(0)
+	if pkField == nil {
+		t.Fatal("BatchGet request has no fields")
+	}
+	return dynamicpb.NewMessage(meta.batchGetRequestDesc).Get(pkField).List()
 }

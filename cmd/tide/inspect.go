@@ -14,6 +14,7 @@ import (
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
+	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
 // cmdInspect exits with:
@@ -73,18 +74,16 @@ func cmdInspect(args []string) int {
 	generating := *generate != ""
 
 	files, err := collectPCFiles(cfg.SchemaPaths)
-	if err != nil {
-		// A schema directory that does not exist yet is not an error when the
-		// point of the command is to create its contents.
-		if !generating || !errors.Is(err, iofs.ErrNotExist) {
-			fmt.Fprintln(os.Stderr, "tide:", err)
-			return 3
+	if refuse, why := refuseMissingSchema(generating, err, len(files)); refuse {
+		if why != nil {
+			fmt.Fprintln(os.Stderr, "tide:", why)
+		} else {
+			fmt.Fprintf(os.Stderr, "tide: no .atl files found under %v\n", cfg.SchemaPaths)
 		}
-		files = nil
-	}
-	if len(files) == 0 && !generating {
-		fmt.Fprintf(os.Stderr, "tide: no .atl files found under %v\n", cfg.SchemaPaths)
 		return 3
+	}
+	if err != nil {
+		files = nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -142,26 +141,67 @@ func cmdInspect(args []string) int {
 // Never overwrites. A generated file the customer has since edited is the
 // worst thing this command could destroy, and "re-run to refresh" is not worth
 // that risk — they can delete a file to regenerate it.
+// refuseMissingSchema decides whether cmdInspect can proceed without any .atl
+// files, and returns the walk error to report when it cannot.
+//
+// A pure function with the decision in it, rather than two conditions inline,
+// because the inline version could only be tested by grepping cmdInspect's body
+// for identifier names — and that tripwire could not see a `!`. Flipping either
+// negation restored the original bug (`--generate` refusing in the repo it
+// exists for) with the test still green, because a negation is a UnaryExpr and
+// the walk only collected identifiers and literals.
+//
+// The rules, and each one is a case the caller depends on:
+//
+//   - Generating tolerates a schema directory that does not exist yet. That is
+//     the fresh-repo case the flag was built for.
+//   - Generating tolerates finding no files. There is nothing to compare
+//     against, and generation does not compare.
+//   - Any other walk error is fatal on both paths — a permission error is not
+//     a fresh repo.
+//   - Not generating and no files is fatal: inspect has nothing to check.
+func refuseMissingSchema(generating bool, walkErr error, fileCount int) (bool, error) {
+	if walkErr != nil {
+		if generating && errors.Is(walkErr, iofs.ErrNotExist) {
+			return false, nil
+		}
+		return true, walkErr
+	}
+	if fileCount == 0 && !generating {
+		return true, nil
+	}
+	return false, nil
+}
+
 // generatedFileName turns a server-supplied entity name into a filename, or
 // refuses.
 //
-// An entity name reaching here came from introspecting a table name, and a
-// Postgres identifier is only constrained by what fits in quotes. The
-// accepted shape is what dsl.Parse would accept as an entity name anyway —
-// letters, digits and underscore — so a name this rejects could not have
-// produced a usable declaration either.
+// An entity name reaching here was derived from a table name, and a Postgres
+// identifier is only constrained by what fits inside quotes — `/` and `..`
+// included, and filepath.Join CLEANS its result, so a name containing ".."
+// resolves outside the output directory rather than being neutralised.
+//
+// The test is dsl.IsIdentifier, the lexer's own rule, and not a local
+// approximation of it. The first version WAS a local approximation —
+// [A-Za-z0-9_] — and it was wrong in both directions:
+//
+//   - Too permissive. "2024Events", from the ordinary legacy table
+//     `2024_events`, passed. A leading digit lexes as a number, so the file it
+//     wrote did not parse, and the customer got a syntax error in a file they
+//     had not written.
+//   - Too strict. "CaféOrders", from `café_orders`, was refused, though
+//     isIdentStart is unicode.IsLetter and the name is a perfectly good
+//     identifier that generated fine before the check existed.
+//
+// Checking identifier validity also settles path safety on its own: no valid
+// identifier contains a separator or a dot.
 func generatedFileName(entity string) (string, error) {
 	if entity == "" {
 		return "", errors.New("skipped: the server returned an entity with no name")
 	}
-	for _, r := range entity {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
-		default:
-			return "", fmt.Errorf("skipped: entity name %q is not a safe filename "+
-				"(only letters, digits and underscore) — rename the table or "+
-				"declare it by hand", entity)
-		}
+	if !dsl.IsIdentifier(entity) {
+		return "", fmt.Errorf("skipped: entity name %q is not a usable .atl "+
+			"identifier — rename the table or declare it by hand", entity)
 	}
 	return strings.ToLower(entity) + ".atl", nil
 }
@@ -209,7 +249,12 @@ func runGenerate(ctx context.Context, client *adminClient, cfg *tideConfig,
 		return 3
 	}
 
-	written, skipped := 0, 0
+	// Two counters, not one. A single total was printed under the fixed label
+	// "(already on disk)", so a table refused for an unusable name was
+	// reported as already generated — the summary contradicted the warning
+	// three lines above it, and anything scripting on the counts was told the
+	// file existed when nothing had been written.
+	written, kept, refused := 0, 0, 0
 	for _, e := range resp.GetEntities() {
 		// The entity name is server-supplied and derived from a table name, so
 		// it is not a filename until this says it is. Postgres accepts almost
@@ -222,13 +267,13 @@ func runGenerate(ctx context.Context, client *adminClient, cfg *tideConfig,
 		base, err := generatedFileName(e.GetEntityName())
 		if err != nil {
 			cliout.Row(os.Stdout, "warn", cliout.Bold(e.GetTable()), err.Error())
-			skipped++
+			refused++
 			continue
 		}
 		path := filepath.Join(outDir, base)
 		if _, err := os.Stat(path); err == nil {
 			cliout.Row(os.Stdout, "muted", cliout.Bold(path), "exists — left alone")
-			skipped++
+			kept++
 			continue
 		}
 		if err := os.WriteFile(path, []byte(e.GetAtl()), 0o644); err != nil {
@@ -241,8 +286,11 @@ func runGenerate(ctx context.Context, client *adminClient, cfg *tideConfig,
 
 	fmt.Println()
 	cliout.Field(os.Stdout, "written", fmt.Sprintf("%d", written))
-	if skipped > 0 {
-		cliout.Field(os.Stdout, "kept", fmt.Sprintf("%d (already on disk)", skipped))
+	if kept > 0 {
+		cliout.Field(os.Stdout, "kept", fmt.Sprintf("%d (already on disk)", kept))
+	}
+	if refused > 0 {
+		cliout.Field(os.Stdout, "refused", fmt.Sprintf("%d (unusable entity name)", refused))
 	}
 	printGenerateNotes(resp)
 

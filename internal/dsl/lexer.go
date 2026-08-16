@@ -577,3 +577,33 @@ func isIdentStart(r rune) bool {
 func isIdentRune(r rune) bool {
 	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
+
+// IsIdentifier reports whether s would lex as a single identifier token.
+//
+// Exported because schema generation has to answer exactly this question about
+// a name it derived from a Postgres table, and answering it with a
+// hand-rolled approximation got it wrong in both directions: an ASCII-only
+// [A-Za-z0-9_] check accepted "2024Events" — a leading digit lexes as a
+// number, so the generated file did not parse — and rejected "CaféOrders",
+// which is a perfectly good identifier because isIdentStart is
+// unicode.IsLetter rather than an ASCII range.
+//
+// One definition, so a caller cannot drift from the lexer that decides the
+// real answer.
+func IsIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if i == 0 {
+			if !isIdentStart(r) {
+				return false
+			}
+			continue
+		}
+		if !isIdentRune(r) {
+			return false
+		}
+	}
+	return true
+}

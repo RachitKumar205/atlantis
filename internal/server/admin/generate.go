@@ -108,6 +108,23 @@ func (s *Service) GenerateSchema(ctx context.Context, req *adminpb.GenerateSchem
 			skipped = append(skipped, fmt.Sprintf("%s: no entity name could be derived from the table name", d.Qualified()))
 			continue
 		}
+		// SuggestedName only treats `_`, `-` and ` ` as separators and copies
+		// every other rune through, so a table named "a/b" yields "A/b" and one
+		// named "2024_events" yields "2024Events". Neither lexes as an
+		// identifier, so the .atl this would emit does not parse.
+		//
+		// Refused here rather than left to the client. `tide inspect
+		// --generate` does check before writing a file, but it is one consumer
+		// of this RPC and the console is another; a server that hands back an
+		// entity it knows cannot parse is proposing work that cannot succeed.
+		if !dsl.IsIdentifier(name) {
+			skipped = append(skipped, fmt.Sprintf(
+				"%s: %q is not a usable entity name — an .atl identifier starts with "+
+					"a letter or underscore and continues with letters, digits or "+
+					"underscores. Rename the table or declare it by hand",
+				d.Qualified(), name))
+			continue
+		}
 		// Two tables in different Postgres schemas can share a name, and both
 		// would land in the one atlantis namespace this request names. The
 		// second is reported rather than silently overwriting the first.
