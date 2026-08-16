@@ -110,6 +110,88 @@ func TestACallerCannotReadAnotherCallersJob(t *testing.T) {
 	}
 }
 
+// seedWorkflow inserts one workflow instance owned by owner and returns its id
+// as the string the RPC takes.
+func seedWorkflow(t *testing.T, svc *Service, owner string) string {
+	t.Helper()
+	var id int64
+	err := svc.pool.QueryRow(context.Background(), `
+INSERT INTO atlantis.workflow_instances
+    (workflow_name, state, submitted_by, current_step, status, error_msg, owner_caller)
+VALUES ('ns.Flow', '{}'::jsonb, 'someone@example.com', 'step1', 'failed',
+        'connection refused talking to the payments API', $1)
+RETURNING id`, owner).Scan(&id)
+	if err != nil {
+		t.Fatalf("seed workflow for %q: %v", owner, err)
+	}
+	return itoa(id)
+}
+
+// TestACallerCannotReadAnotherCallersWorkflow is the same defect as
+// TestACallerCannotReadAnotherCallersJob, on the table 0028 did not reach.
+//
+// GetWorkflowStatus selected `WHERE id = $1` with no owner predicate. The ids
+// are a bigint sequence and CAPABILITY_JOBS_READ is in the base bundle, so
+// iterating 1, 2, 3 returned another caller's workflow name, status, current
+// step, submitter and error_msg — the last being whatever text a failing
+// handler produced, which is the most revealing column in the row.
+func TestACallerCannotReadAnotherCallersWorkflow(t *testing.T) {
+	base := depScopeService(t)
+	ctx := context.Background()
+
+	mine := seedWorkflow(t, base, "shop")
+	theirs := seedWorkflow(t, base, "billing")
+	// owner_caller = '' is what every row started before migration 0029
+	// carries. It must belong to nobody rather than to everybody.
+	legacy := seedWorkflow(t, base, "")
+
+	shop := jobScopeSvc(t, base, "shop", false)
+	for _, tc := range []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{"its own workflow", mine, true},
+		{"another caller's workflow", theirs, false},
+		{"a workflow with no recorded owner", legacy, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := shop.GetWorkflowStatus(ctx,
+				&adminpb.GetWorkflowStatusRequest{WorkflowId: tc.id})
+			if err != nil {
+				t.Fatalf("GetWorkflowStatus: %v", err)
+			}
+			if resp.GetFound() != tc.want {
+				t.Errorf("Found = %v, want %v.\n"+
+					"  A workflow the caller does not own must read as absent. "+
+					"Reporting it as found answers the question the scoping exists "+
+					"to refuse: whether that id is somebody's.",
+					resp.GetFound(), tc.want)
+			}
+			// Nothing about the row may leak on a refusal — not the name, not
+			// the error text. Found=false with a populated body would be the
+			// same disclosure by another route.
+			if !tc.want && resp.GetWorkflow() != nil {
+				t.Errorf("a refused read returned a workflow body: %v", resp.GetWorkflow())
+			}
+		})
+	}
+
+	// An operator reads across every caller, including unattributed rows, or
+	// the console's workflow view goes blank.
+	op := jobScopeSvc(t, base, "atlantis-console", true)
+	for _, id := range []string{mine, theirs, legacy} {
+		resp, err := op.GetWorkflowStatus(ctx,
+			&adminpb.GetWorkflowStatusRequest{WorkflowId: id})
+		if err != nil {
+			t.Fatalf("operator GetWorkflowStatus(%s): %v", id, err)
+		}
+		if !resp.GetFound() {
+			t.Errorf("operator cannot see workflow %s; triage needs the whole set", id)
+		}
+	}
+}
+
 func TestTheDeadLetterQueueIsScopedToItsOwner(t *testing.T) {
 	base := depScopeService(t)
 	ctx := context.Background()

@@ -120,9 +120,10 @@ func (s *Service) StartWorkflow(ctx context.Context, req *adminpb.StartWorkflowR
 
 	var id int64
 	if err := tx.QueryRow(ctx, `
-INSERT INTO atlantis.workflow_instances (workflow_name, state, submitted_by, current_step)
-VALUES ($1, $2, $3, $4)
-RETURNING id`, req.GetWorkflowName(), []byte(state), req.GetSubmittedBy(), step.Name).Scan(&id); err != nil {
+INSERT INTO atlantis.workflow_instances (workflow_name, state, submitted_by, current_step, owner_caller)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id`, req.GetWorkflowName(), []byte(state), req.GetSubmittedBy(), step.Name,
+		s.jobOwner(ctx)).Scan(&id); err != nil {
 		return nil, fmt.Errorf("insert workflow: %w", err)
 	}
 
@@ -194,10 +195,23 @@ func (s *Service) GetWorkflowStatus(ctx context.Context, req *adminpb.GetWorkflo
 		startedAt   time.Time
 		completedAt *time.Time
 	)
+	// Scoped to the calling caller, exactly as GetJobStatus is.
+	//
+	// This read used to be `WHERE id = $1` alone. CAPABILITY_JOBS_READ is in
+	// the base bundle every registered caller receives and the ids are a
+	// bigint sequence, so iterating 1, 2, 3 returned another caller's
+	// workflow name, status, current step, submitter and error text.
+	// Migration 0028 closed exactly this on atlantis.jobs and did not reach
+	// the sibling table; 0029 adds the column and this uses it.
+	//
+	// A miss reports Found=false rather than a permission error, and that is
+	// deliberate: telling an unauthorised caller "that workflow exists but is
+	// not yours" is itself an answer about another caller's data.
 	err := s.pool.QueryRow(ctx, `
 SELECT id, workflow_name, status, COALESCE(current_step, ''), started_at, completed_at,
        COALESCE(error_msg, ''), COALESCE(submitted_by, '')
-FROM atlantis.workflow_instances WHERE id = $1`, wfID).Scan(
+FROM atlantis.workflow_instances
+WHERE id = $1 AND ($2 = '' OR owner_caller = $2)`, wfID, s.jobReadScope(ctx)).Scan(
 		&id, &ws.WorkflowName, &ws.Status, &ws.CurrentStep,
 		&startedAt, &completedAt, &ws.ErrorMsg, &ws.SubmittedBy)
 	if err != nil {
