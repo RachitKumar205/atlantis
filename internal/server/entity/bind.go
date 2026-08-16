@@ -82,6 +82,26 @@ func bindColumnValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) an
 		}
 		return sql.NullInt32{}
 
+	case "real":
+		// protoreflect.Value.Float returns float64 for both float and
+		// double fields; the cast is what makes pgx send four bytes.
+		if !cm.nullable {
+			return float32(msg.Get(fd).Float())
+		}
+		if msg.Has(fd) {
+			return sql.NullFloat64{Valid: true, Float64: msg.Get(fd).Float()}
+		}
+		return sql.NullFloat64{}
+
+	case "double":
+		if !cm.nullable {
+			return msg.Get(fd).Float()
+		}
+		if msg.Has(fd) {
+			return sql.NullFloat64{Valid: true, Float64: msg.Get(fd).Float()}
+		}
+		return sql.NullFloat64{}
+
 	case "boolean":
 		if !cm.nullable {
 			return msg.Get(fd).Bool()
@@ -144,6 +164,10 @@ func bindPKValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) any {
 		return msg.Get(fd).Int()
 	case "int", "smallint":
 		return int32(msg.Get(fd).Int())
+	case "real":
+		return float32(msg.Get(fd).Float())
+	case "double":
+		return msg.Get(fd).Float()
 	case "boolean":
 		return msg.Get(fd).Bool()
 	case "timestamptz", "date":
@@ -206,6 +230,12 @@ func bindArrayValue(msg *dynamicpb.Message, fd protoreflect.FieldDescriptor) any
 		out := make([]float32, list.Len())
 		for i := 0; i < list.Len(); i++ {
 			out[i] = float32(list.Get(i).Float())
+		}
+		return out
+	case protoreflect.DoubleKind:
+		out := make([]float64, list.Len())
+		for i := 0; i < list.Len(); i++ {
+			out[i] = list.Get(i).Float()
 		}
 		return out
 	}

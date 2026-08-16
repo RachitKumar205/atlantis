@@ -18,6 +18,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -121,6 +122,23 @@ func encodePageTokenValue(v any) (*commonpb.PageTokenValue, error) {
 			return nil, fmt.Errorf("uint64 %d overflows page-token int64", x)
 		}
 		return &commonpb.PageTokenValue{V: &commonpb.PageTokenValue_I{I: int64(x)}}, nil
+	case float32:
+		// Widened to float64 before formatting, and that is the load-bearing
+		// part rather than a convenience. Postgres promotes float4 to float8
+		// to compare it against the cursor parameter, so the token must carry
+		// the value the PROMOTION produces. Formatting at 32-bit precision
+		// writes "0.1" for a float4 whose float8 promotion is
+		// 0.10000000149011612; the keyset predicate then reads 0.1 < that and
+		// hands back the boundary row again, so the caller sees one duplicate
+		// row per page forever.
+		return &commonpb.PageTokenValue{V: &commonpb.PageTokenValue_Num{
+			Num: strconv.FormatFloat(float64(x), 'g', -1, 64)}}, nil
+	case float64:
+		// 'g' with precision -1 is the shortest form that parses back to the
+		// identical float64, so the comparison Postgres performs is against
+		// the same bits the row holds. A fixed precision would not be.
+		return &commonpb.PageTokenValue{V: &commonpb.PageTokenValue_Num{
+			Num: strconv.FormatFloat(x, 'g', -1, 64)}}, nil
 	case time.Time:
 		return &commonpb.PageTokenValue{V: &commonpb.PageTokenValue_Ts{Ts: timestamppb.New(x)}}, nil
 	case *time.Time:

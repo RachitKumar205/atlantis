@@ -201,6 +201,12 @@ func setProtoType(fd *descriptorpb.FieldDescriptorProto, t dsl.FieldType) {
 	case "bigint":
 		typ := descriptorpb.FieldDescriptorProto_TYPE_INT64
 		fd.Type = &typ
+	case "real":
+		typ := descriptorpb.FieldDescriptorProto_TYPE_FLOAT
+		fd.Type = &typ
+	case "double":
+		typ := descriptorpb.FieldDescriptorProto_TYPE_DOUBLE
+		fd.Type = &typ
 	case "text", "varchar", "citext", "uuid", "numeric":
 		typ := descriptorpb.FieldDescriptorProto_TYPE_STRING
 		fd.Type = &typ

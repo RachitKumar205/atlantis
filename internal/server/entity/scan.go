@@ -65,9 +65,13 @@ const (
 	scanTime
 	scanNullTime
 	scanBytes
+	scanFloat32
+	scanFloat64
+	scanNullFloat
 	scanVector
 	scanNullVector
 	scanFloat32Slice
+	scanFloat64Slice
 	scanStringSlice
 	scanInt32Slice
 	scanInt64Slice
@@ -106,6 +110,25 @@ func makeScanTarget(cm columnMeta) scanTarget {
 		}
 		v := new(sql.NullInt32)
 		return scanTarget{ptr: v, tag: scanNullInt32}
+
+	case "real":
+		if !cm.nullable {
+			v := new(float32)
+			return scanTarget{ptr: v, tag: scanFloat32}
+		}
+		// database/sql has no NullFloat32; the 64-bit form is the scan
+		// target and setProtoFieldFromScan narrows to the proto `float`
+		// field. Widening float4→float64 and back is exact.
+		v := new(sql.NullFloat64)
+		return scanTarget{ptr: v, tag: scanNullFloat}
+
+	case "double":
+		if !cm.nullable {
+			v := new(float64)
+			return scanTarget{ptr: v, tag: scanFloat64}
+		}
+		v := new(sql.NullFloat64)
+		return scanTarget{ptr: v, tag: scanNullFloat}
 
 	case "boolean":
 		if !cm.nullable {
@@ -168,6 +191,12 @@ func makeArrayScanTarget(t dsl.FieldType) scanTarget {
 	case "boolean":
 		v := new([]bool)
 		return scanTarget{ptr: v, tag: scanBoolSlice}
+	case "real":
+		v := new([]float32)
+		return scanTarget{ptr: v, tag: scanFloat32Slice}
+	case "double":
+		v := new([]float64)
+		return scanTarget{ptr: v, tag: scanFloat64Slice}
 	case "vector":
 		v := new([]float32)
 		return scanTarget{ptr: v, tag: scanFloat32Slice}
@@ -237,6 +266,28 @@ func setProtoFieldFromScan(msg *dynamicpb.Message, fd protoreflect.FieldDescript
 			msg.Set(fd, protoreflect.ValueOfBytes(v))
 		}
 
+	case scanFloat32:
+		v := *(st.ptr.(*float32))
+		msg.Set(fd, protoreflect.ValueOfFloat32(v))
+
+	case scanFloat64:
+		v := *(st.ptr.(*float64))
+		msg.Set(fd, protoreflect.ValueOfFloat64(v))
+
+	case scanNullFloat:
+		// One scan tag serves both `real` and `double`, so the proto field
+		// decides the width. Setting a float64 on a TYPE_FLOAT field panics
+		// inside protoreflect rather than converting, so this must not
+		// guess from the Go value.
+		v := *(st.ptr.(*sql.NullFloat64))
+		if v.Valid {
+			if fd.Kind() == protoreflect.FloatKind {
+				msg.Set(fd, protoreflect.ValueOfFloat32(float32(v.Float64)))
+			} else {
+				msg.Set(fd, protoreflect.ValueOfFloat64(v.Float64))
+			}
+		}
+
 	case scanVector:
 		v := *(st.ptr.(*pgvector.Vector))
 		sl := v.Slice()
@@ -252,6 +303,13 @@ func setProtoFieldFromScan(msg *dynamicpb.Message, fd protoreflect.FieldDescript
 	case scanFloat32Slice:
 		v := *(st.ptr.(*[]float32))
 		setRepeatedFloat32(msg, fd, v)
+
+	case scanFloat64Slice:
+		v := *(st.ptr.(*[]float64))
+		list := msg.Mutable(fd).List()
+		for _, f := range v {
+			list.Append(protoreflect.ValueOfFloat64(f))
+		}
 
 	case scanStringSlice:
 		v := *(st.ptr.(*[]string))

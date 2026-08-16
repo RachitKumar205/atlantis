@@ -79,6 +79,9 @@ entity Kitchen in lab {
   n citext
   o date
   p interval
+  q varchar
+  r real
+  s double
 }
 `)
 	e := f.Decls[0].(*EntityDecl)
@@ -106,6 +109,12 @@ entity Kitchen in lab {
 		{"n", "citext", false, 0, 0, 0, 0},
 		{"o", "date", false, 0, 0, 0, 0},
 		{"p", "interval", false, 0, 0, 0, 0},
+		// Len 0 is the unbounded sentinel, and it must arrive as 0 rather
+		// than as a parse error: `varchar` with no length is what a legacy
+		// column being adopted usually says.
+		{"q", "varchar", false, 0, 0, 0, 0},
+		{"r", "real", false, 0, 0, 0, 0},
+		{"s", "double", false, 0, 0, 0, 0},
 	}
 	for i, w := range want {
 		fd := e.Members[i].(*FieldDecl)

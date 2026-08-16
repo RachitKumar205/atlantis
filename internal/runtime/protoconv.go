@@ -90,6 +90,19 @@ func NullableFloat64(p *float64) sql.NullFloat64 {
 	return sql.NullFloat64{Valid: true, Float64: *p}
 }
 
+// NullableFloat32 wraps a proto-optional *float32 into sql.NullFloat64.
+//
+// database/sql has no NullFloat32, so a nullable `real` column travels as
+// float64 in both directions. Widening float32→float64 is exact, and
+// Float32PtrFromNull narrows the same value back without loss, so the round
+// trip preserves the bits Postgres stores.
+func NullableFloat32(p *float32) sql.NullFloat64 {
+	if p == nil {
+		return sql.NullFloat64{}
+	}
+	return sql.NullFloat64{Valid: true, Float64: float64(*p)}
+}
+
 // On the read path the generated `scanInto<Entity>` receives the result
 // of a SELECT and pgx fills `sql.NullX` locals; these helpers turn each
 // back into the proto-shaped `*T` the message exposes.
@@ -137,6 +150,22 @@ func Float64PtrFromNull(s sql.NullFloat64) *float64 {
 		return nil
 	}
 	v := s.Float64
+	return &v
+}
+
+// Float32PtrFromNull converts a sql.NullFloat64 back to *float32, the shape a
+// `real` column takes on the wire (proto `float`).
+//
+// The narrowing is safe for values that came from a `real` column: Postgres
+// stores four bytes, pgx widens them to float64 exactly, and this converts
+// them back. It is NOT safe in general — a float64 outside float32's range
+// becomes ±Inf — which is why this is reached only from a column codegen knows
+// is `real`, never from an arbitrary float64.
+func Float32PtrFromNull(s sql.NullFloat64) *float32 {
+	if !s.Valid {
+		return nil
+	}
+	v := float32(s.Float64)
 	return &v
 }
 

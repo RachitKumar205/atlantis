@@ -35,6 +35,10 @@ func GoType(t dsl.FieldType, notNull bool) string {
 		base = "int32"
 	case "bigint":
 		base = "int64"
+	case "real":
+		base = "float32"
+	case "double":
+		base = "float64"
 	case "text", "varchar", "citext":
 		base = "string"
 	case "boolean":
@@ -87,6 +91,10 @@ func ProtoType(t dsl.FieldType) (string, error) {
 		return "int32", nil
 	case "bigint":
 		return "int64", nil
+	case "real":
+		return "float", nil
+	case "double":
+		return "double", nil
 	case "text", "varchar", "citext":
 		return "string", nil
 	case "boolean":
@@ -153,6 +161,24 @@ func ScanFragments(t dsl.FieldType, notNull bool, local, protoField string) (dec
 		} else {
 			decl = fmt.Sprintf("var %s sql.NullInt64", local)
 			assign = fmt.Sprintf("%s = runtime.Int64PtrFromNull(%s)", protoField, local)
+		}
+	case "real":
+		if notNull {
+			decl = fmt.Sprintf("var %s float32", local)
+			assign = fmt.Sprintf("%s = %s", protoField, local)
+		} else {
+			// sql.NullFloat32 does not exist, so the nullable scan target is
+			// the 64-bit one and the helper narrows on the way out.
+			decl = fmt.Sprintf("var %s sql.NullFloat64", local)
+			assign = fmt.Sprintf("%s = runtime.Float32PtrFromNull(%s)", protoField, local)
+		}
+	case "double":
+		if notNull {
+			decl = fmt.Sprintf("var %s float64", local)
+			assign = fmt.Sprintf("%s = %s", protoField, local)
+		} else {
+			decl = fmt.Sprintf("var %s sql.NullFloat64", local)
+			assign = fmt.Sprintf("%s = runtime.Float64PtrFromNull(%s)", protoField, local)
 		}
 	case "text", "varchar", "citext", "uuid", "numeric":
 		if notNull {
@@ -242,6 +268,16 @@ func BindExpr(t dsl.FieldType, notNull bool, protoGetter, protoFieldPtr string) 
 			return protoGetter
 		}
 		return "runtime.NullableInt64(" + protoFieldPtr + ")"
+	case "real":
+		if notNull {
+			return protoGetter
+		}
+		return "runtime.NullableFloat32(" + protoFieldPtr + ")"
+	case "double":
+		if notNull {
+			return protoGetter
+		}
+		return "runtime.NullableFloat64(" + protoFieldPtr + ")"
 	case "text", "varchar", "citext", "uuid", "numeric":
 		if notNull {
 			return protoGetter
@@ -297,6 +333,7 @@ func NeedsDatabaseSQL(t dsl.FieldType, notNull bool) bool {
 	}
 	switch t.Name {
 	case "smallint", "int", "bigint",
+		"real", "double",
 		"text", "varchar", "citext", "uuid", "numeric",
 		"boolean",
 		"timestamptz", "date",

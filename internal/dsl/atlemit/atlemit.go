@@ -38,6 +38,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/rachitkumar205/atlantis/internal/codegen/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
@@ -68,13 +69,22 @@ func Entity(e *dsl.Entity, physicalTable string) string {
 	// than fixed, so a table of short names does not get a wall of padding.
 	nameW, typeW := 0, 0
 	types := make([]string, len(e.Fields))
+	renderable := make([]bool, len(e.Fields))
+	var dropped []string
 	for i := range e.Fields {
-		types[i] = renderType(&e.Fields[i].Type)
+		types[i], renderable[i] = renderType(&e.Fields[i].Type)
+		if !renderable[i] {
+			dropped = append(dropped, fmt.Sprintf("%s (%s)", e.Fields[i].Name, e.Fields[i].Type.Name))
+			continue
+		}
 		nameW = max(nameW, len(e.Fields[i].Name))
 		typeW = max(typeW, len(types[i]))
 	}
 
 	for i := range e.Fields {
+		if !renderable[i] {
+			continue
+		}
 		f := &e.Fields[i]
 		fmt.Fprintf(&b, "  %-*s %-*s", nameW, f.Name, typeW, types[i])
 		for _, m := range modifiers(f) {
@@ -82,6 +92,19 @@ func Entity(e *dsl.Entity, physicalTable string) string {
 			b.WriteString(m)
 		}
 		b.WriteString("\n")
+	}
+
+	// Columns whose type has no .atl spelling are omitted and named. Silently
+	// dropping one would hand the customer a declaration that looks complete
+	// and is not — and the first thing that would tell them is an apply
+	// planning to drop a column that is still in use.
+	if len(dropped) > 0 {
+		b.WriteString("\n  // NOT DECLARED — no .atl type for these columns:\n")
+		for _, d := range dropped {
+			fmt.Fprintf(&b, "  //   %s\n", d)
+		}
+		b.WriteString("  // They exist in the database. Declaring this entity without them\n")
+		b.WriteString("  // means atlantis does not manage them; it will not drop them.\n")
 	}
 
 	b.WriteString("}\n")
@@ -131,33 +154,101 @@ func modifiers(f *dsl.Field) []string {
 	return out
 }
 
-// renderType turns a resolved type back into its surface spelling.
-func renderType(t *dsl.FieldType) string {
+// renderType turns a resolved type back into its .atl surface spelling, and
+// reports whether it could.
+//
+// # Why it refuses rather than guessing
+//
+// The first version returned t.Name for anything it did not recognise, which
+// is the introspected Postgres spelling. Three of those do not parse, and an
+// adversarial review reproduced all three end to end:
+//
+//   - float8 canonicalised to "double precision", TWO tokens. The parser takes
+//     one identifier, so `lat double precision not null` parsed `double` as
+//     the type and `precision` as the next field's name. Fixed at the source —
+//     canonicalUDT now returns the .atl spelling — rather than translated
+//     here, because every OTHER consumer of that name compares it as a raw
+//     string too, and a translation here would have left them all broken.
+//   - Arrays came out `text[]`, the Postgres suffix form. The grammar is the
+//     prefix form `[]text`; the suffix spelling is a syntax error.
+//   - An unbounded varchar had no .atl spelling at all: the parser required
+//     varchar(N) unconditionally. The first fix here emitted `text`, which
+//     parses and is WRONG — text and varchar are different Postgres types, so
+//     the generated file disagreed with the catalogue it was generated from,
+//     permanently. The round trip caught it. The grammar now accepts bare
+//     `varchar`, so this renders the type the column actually has.
+//
+// Every one produced a file the customer could not commit, and the error named
+// a generated file rather than the table it came from. So this now emits only
+// spellings it can guarantee, and the caller drops what it cannot render and
+// says so. A missing column in a generated starting point is recoverable; a
+// file that will not parse is not usable at all.
+func renderType(t *dsl.FieldType) (string, bool) {
 	if t.Array {
-		if t.Elem != nil {
-			return renderType(t.Elem) + "[]"
+		if t.Elem == nil {
+			return "", false
 		}
-		return "text[]"
+		// Prefix form. docs/reference/dsl-grammar.md maps []T (.atl) to T[]
+		// (Postgres); the first version emitted the right-hand column.
+		elem, ok := renderType(t.Elem)
+		if !ok {
+			return "", false
+		}
+		return "[]" + elem, true
 	}
 	switch t.Name {
 	case "varchar":
 		if t.Len > 0 {
-			return "varchar(" + strconv.Itoa(t.Len) + ")"
+			return "varchar(" + strconv.Itoa(t.Len) + ")", true
 		}
-		return "varchar"
+		return "varchar", true
 	case "numeric":
 		if t.HasNumP {
-			return "numeric(" + strconv.Itoa(t.NumP) + ", " + strconv.Itoa(t.NumS) + ")"
+			return "numeric(" + strconv.Itoa(t.NumP) + ", " + strconv.Itoa(t.NumS) + ")", true
 		}
-		return "numeric"
+		return "numeric", true
 	case "vector":
 		if t.VecDim > 0 {
-			return "vector(" + strconv.Itoa(t.VecDim) + ")"
+			return "vector(" + strconv.Itoa(t.VecDim) + ")", true
 		}
-		return "vector"
-	default:
-		return t.Name
+		return "vector", true
 	}
+	if toolchainHandles(t) {
+		return t.Name, true
+	}
+	return "", false
+}
+
+// toolchainHandles reports whether the whole pipeline can carry a column of
+// this type, not merely whether the parser accepts the spelling.
+//
+// # Why it asks coltype instead of consulting a list
+//
+// This was a hand-written whitelist, and the property it tested was the wrong
+// one. Its comment justified itself as guarding against "a name that lexes as
+// one token and still is not a type the parser accepts" — but the parser
+// accepts ANY identifier as a type name, so that test admits everything, and
+// the list quietly drifted to include six names the rest of the toolchain does
+// not implement: integer, bool, timestamp, time, json and inet. Every one is a
+// spelling canonicalUDT hands back verbatim for an ordinary legacy column.
+//
+// The consequence landed at the worst possible step. schema.SQLType renders
+// TIMESTAMP, JSON, INET and TIME — all valid Postgres — so parse, lower, plan
+// and apply were clean and the checkpoint was written. `tide codegen` was the
+// first thing to fail, with `unsupported type "timestamp" for proto`, after
+// the customer had committed the file and migrated the database.
+//
+// Asking coltype makes the question "can codegen emit this column" rather than
+// "does this name look like one token", and there is then one list rather than
+// two that drift.
+func toolchainHandles(t *dsl.FieldType) bool {
+	if _, err := coltype.ProtoType(*t); err != nil {
+		return false
+	}
+	// GoType has no error return; `any` is its unknown-type fallback, and a
+	// column typed `any` in a generated struct is not a column the customer
+	// can use.
+	return coltype.GoType(*t, true) != "any"
 }
 
 // renderDefault turns a resolved Default into a DefaultExpr.

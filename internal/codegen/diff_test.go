@@ -172,6 +172,36 @@ func TestDiff_VarcharNarrow_IsBackfill(t *testing.T) {
 	}
 }
 
+// The unbounded branch of classifyTypeChange — Len 0 — was unreachable from a
+// declaration until the parser learned bare `varchar`, so nothing exercised
+// it. Getting it wrong is not cosmetic: dropping the `oldT.Len == 0` term
+// classifies unbounded→varchar(10) as additive, which stages the migration
+// without the destructive gate and then aborts mid-apply with `value too long
+// for type character varying(10)` — or, on a table that happens to fit,
+// silently imposes a limit no approver saw.
+
+func TestDiff_VarcharBoundFromUnbounded_IsBackfill(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  v varchar }`)
+	newIR := lower(t, `entity A in x { id bigint primary  v varchar(10) }`)
+	d := ComputeDiff(oldIR, newIR)
+	c := findChange(t, d, KindFieldTypeChanged)
+	if c == nil || c.Class != ClassBackfillRequired {
+		t.Errorf("varchar→varchar(10) narrows every row longer than 10 and must "+
+			"require backfill, got %+v", c)
+	}
+}
+
+func TestDiff_VarcharUnboundFromBounded_IsAdditive(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary  v varchar(10) }`)
+	newIR := lower(t, `entity A in x { id bigint primary  v varchar }`)
+	d := ComputeDiff(oldIR, newIR)
+	c := findChange(t, d, KindFieldTypeChanged)
+	if c == nil || c.Class != ClassAdditive {
+		t.Errorf("varchar(10)→varchar removes the limit and cannot truncate, "+
+			"so it is additive, got %+v", c)
+	}
+}
+
 func TestDiff_VarcharSameLength_NoChange(t *testing.T) {
 	oldIR := lower(t, `entity A in x { id bigint primary  v varchar(64) }`)
 	newIR := lower(t, `entity A in x { id bigint primary  v varchar(64) }`)

@@ -616,9 +616,16 @@ func fieldType(c colMeta) dsl.FieldType {
 }
 
 // canonicalUDT maps Postgres internal type names to the .atl spellings.
-// Anything unrecognized passes through verbatim — diff treats verbatim
-// names as opaque strings, which is the right behavior for unknown
-// types that may appear in the legacy schema.
+//
+// Every name this returns is compared as a raw string against what a user
+// declared, so returning anything other than the exact .atl spelling makes a
+// column permanently un-matchable. "double precision" was that mistake.
+//
+// Anything unrecognized passes through verbatim — diff treats verbatim names
+// as opaque strings, which is the right behavior for unknown types that may
+// appear in the legacy schema. bpchar→char is in that group rather than a
+// translation: .atl has no char(N), so the mapping only makes a drift report
+// readable and cannot make the column matchable.
 func canonicalUDT(udt string) string {
 	switch udt {
 	case "int2":
@@ -630,7 +637,14 @@ func canonicalUDT(udt string) string {
 	case "float4":
 		return "real"
 	case "float8":
-		return "double precision"
+		// "double", not "double precision". The .atl spelling is one token
+		// because the parser reads a type as one identifier, and this function
+		// is defined as producing .atl spellings — a name only reaches typeEqual
+		// after passing through here, so returning the SQL spelling meant a
+		// float8 column could never equal any declaration a user could write.
+		// `tide inspect` reported a permanent mismatch and adopt refused to
+		// baseline without --allow-drift, on a schema that was correct.
+		return "double"
 	case "bool":
 		return "boolean"
 	case "bpchar":

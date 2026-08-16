@@ -11,7 +11,69 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ## Unreleased
 
+### Added
+
+#### `varchar` without a length
+
+`varchar` may now be declared with no length limit, matching Postgres. Previously
+the parser required `varchar(N)` unconditionally, which left an ordinary legacy
+column — `varchar` with no limit — with no `.atl` spelling at all. `text` is not
+a substitute: it is a different Postgres type, so declaring `text` against a
+`varchar` column reports drift rather than agreement.
+
+`Len 0` was already the "unbounded" sentinel everywhere downstream; only the
+grammar could not produce it. Widening `varchar(N)` to `varchar` is additive;
+going the other way needs a backfill, as any other narrowing does.
+
 ### Fixed
+
+#### `real` and `double` columns
+
+Both types were documented in the type reference and accepted by the parser,
+and no mapping behind them was implemented. A schema written exactly as the
+reference page described failed at the first step that touched the column:
+
+- `double` rendered as the Postgres type `DOUBLE`, which does not exist, so
+  `tide apply` stopped with a syntax error while running the DDL.
+- `tide codegen` returned `unsupported type "double" for proto` and generated
+  nothing for the whole entity.
+- Neither type had a Go mapping, a scan target, or a bind expression, so a
+  column that reached generated code scanned into `any` and was discarded.
+- The runtime dispatcher published both as protobuf `string`. A client that
+  did reach it wrote `""` to a float column and read every value back as 0.
+- Ordering a query by such a column produced an unencodable cursor, and the
+  emitted handler discarded that error — so the response carried an empty
+  `next_page_token`, which the caller reads as "no more rows".
+
+Introspection also reported a `float8` column as `double precision`, the SQL
+spelling. It is two tokens, the `.atl` spelling is `double`, and names are
+compared as raw strings — so such a column could never match any declaration a
+user could write. `tide inspect` reported a permanent mismatch and `tide adopt`
+refused to baseline without `--allow-drift`, on a schema that was correct.
+
+All of the above are fixed, and the reference page is now read by the test
+suite, so a documented type with no implementation fails the build.
+
+**Upgrading.** A `float8` column in an already-baselined database shows a type
+change from `double precision` to `double` on the first plan. The DDL is
+`ALTER COLUMN ... TYPE DOUBLE PRECISION`, which is the type the column already
+has; Postgres still rewrites the table, so treat it as it is classified rather
+than as a no-op. Reaching that state required a schema that could not pass
+codegen, so it should not occur in a deployment that was serving traffic.
+
+#### Generated schemas no longer declare types codegen cannot emit
+
+`tide inspect --generate` decided whether it could render a column by checking
+whether the type name was a single token. That is not the same question, and
+six names passed it that the rest of the toolchain does not implement:
+`integer`, `bool`, `timestamp`, `time`, `json` and `inet`. Each is what
+introspection returns for an ordinary legacy column.
+
+The failure landed at the worst step. All six render valid Postgres, so plan
+and apply ran clean and the checkpoint was written — and `tide codegen` was the
+first thing to fail, after the file had been committed and the database
+migrated. Those columns are now omitted and named in the file's
+`NOT DECLARED` block, alongside `char(n)`.
 
 #### Scheduled jobs now actually run
 

@@ -106,9 +106,26 @@ func SQLType(t dsl.FieldType) string {
 		return "INTEGER"
 	case "bigint":
 		return "BIGINT"
+	case "real":
+		return "REAL"
+	case "double":
+		// Named explicitly even though "REAL" would fall out of the ToUpper
+		// below, because "double" would not: it became "DOUBLE", which is not
+		// a Postgres type, so `tide apply` failed at the DDL with a syntax
+		// error naming a column the user had declared exactly as documented.
+		// The fallthrough turns a missing case into invalid SQL rather than a
+		// compile error, so every documented type is listed here whether or
+		// not upper-casing happens to work for it.
+		return "DOUBLE PRECISION"
 	case "text":
 		return "TEXT"
 	case "varchar":
+		// Len 0 is the unbounded sentinel, not a zero-length column.
+		// VARCHAR(0) is legal Postgres and would silently create a column
+		// that accepts only the empty string.
+		if t.Len == 0 {
+			return "VARCHAR"
+		}
 		return fmt.Sprintf("VARCHAR(%d)", t.Len)
 	case "citext":
 		return "CITEXT"

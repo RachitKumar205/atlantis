@@ -17,6 +17,7 @@ This page covers the types atlantis currently supports. The following PostgreSQL
 | `double` | `DOUBLE PRECISION` | `double` | `float64` |
 | `boolean` | `BOOLEAN` | `bool` | `bool` |
 | `varchar(N)` | `VARCHAR(N)` | `string` | `string` |
+| `varchar` | `VARCHAR` | `string` | `string` |
 | `text` | `TEXT` | `string` | `string` |
 | `citext` | `CITEXT` | `string` | `string` |
 | `jsonb` | `JSONB` | `bytes` | `[]byte` |
@@ -32,6 +33,7 @@ Notes:
 - `uuid` uses the canonical RFC 4122 hyphenated lowercase form on the wire. Non-canonical input is rejected by Postgres at parse time.
 - `bigint` over the wire: proto `int64`. If you serialize a response to JSON yourself, proto-JSON encodes `int64` as a string by default to preserve precision.
 - `varchar(N)` length is enforced by Postgres (`value too long for type` on `INSERT`); Atlantis does not pre-validate.
+- `varchar` without a length accepts strings of any size. It exists so a legacy column declared that way can be described exactly; `text` is the better choice in a new schema. The two are **not** interchangeable to Atlantis — they are different Postgres types, so declaring `text` against a `varchar` column reports drift rather than agreement.
 
 ## Time
 

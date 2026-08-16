@@ -275,7 +275,16 @@ func (s *%s) Query%s(ctx context.Context, req *pb.Query%sRequest) (*pb.Query%sRe
 		boundaryRow := resp.Entities[limit-1]
 		resp.Entities = resp.Entities[:limit]
 		cursorOut := extract%sCursor(boundaryRow, req.GetOrder())
-		nextPageToken, _ = runtime.EncodePageToken(%q, cursorOut)
+		// The error is returned, not dropped. An unencodable cursor yields
+		// the empty token, and an empty next_page_token is how this API says
+		// "there are no more rows" — so discarding the error truncates the
+		// result set silently, and the caller has no way to tell a short
+		// answer from a complete one.
+		tok, err := runtime.EncodePageToken(%q, cursorOut)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "encode page token: %%v", err)
+		}
+		nextPageToken = tok
 		resp.NextPageToken = nextPageToken
 	}
 

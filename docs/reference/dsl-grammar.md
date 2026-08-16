@@ -144,6 +144,7 @@ Columns count bytes, so one tab is one column. Indent consistently — a file mi
 | `double` | `DOUBLE PRECISION` | 64-bit float |
 | `boolean` | `BOOLEAN` | |
 | `varchar(N)` | `VARCHAR(N)` | |
+| `varchar` | `VARCHAR` | no length limit; prefer `text` in new schemas |
 | `text` | `TEXT` | |
 | `citext` | `CITEXT` | case-insensitive text |
 | `jsonb` | `JSONB` | |

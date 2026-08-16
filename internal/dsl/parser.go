@@ -451,11 +451,23 @@ func (p *Parser) parseType() TypeRef {
 			ref.VecDim = n
 		}
 	case "varchar":
-		p.expect(TokLParen)
-		ln := p.expect(TokInt)
-		p.expect(TokRParen)
-		if n, err := strconv.Atoi(ln.Value); err == nil {
-			ref.Len = n
+		// The length is optional, matching Postgres: `varchar` with no
+		// limit accepts strings of any size. Len stays 0, which is already
+		// the unbounded sentinel every consumer reads — classifyTypeChange
+		// treats it as the widest possible varchar, and SQLType renders it
+		// as bare VARCHAR.
+		//
+		// Requiring the length here made an ordinary legacy column
+		// undeclarable: a `varchar` column in a database being adopted had
+		// no .atl spelling at all, so schema generation had to either drop
+		// it or emit `text`, which is a DIFFERENT Postgres type and left
+		// the declaration permanently disagreeing with the catalogue.
+		if _, ok := p.accept(TokLParen); ok {
+			ln := p.expect(TokInt)
+			p.expect(TokRParen)
+			if n, err := strconv.Atoi(ln.Value); err == nil {
+				ref.Len = n
+			}
 		}
 	case "numeric":
 		// Optional precision/scale.
