@@ -138,6 +138,29 @@ func (w *Worker) SetTraceHook(h TraceHook) { w.traceHook = h }
 // propagates up. The expected production pattern is to launch
 // Run in a goroutine from cmd/server/main.go.
 func (w *Worker) Run(ctx context.Context) error {
+	// Refuse to start against a server whose schema this SDK is ahead of.
+	//
+	// clients/go is its own module, versioned independently of the server
+	// that applies the migrations, so an app can bump the SDK past a release
+	// the server has not caught up to. MoveToDLQ and SweepExhaustedToDLQ name
+	// owner_caller, added in migration 0028.
+	//
+	// Without this check the skew is invisible until the first job exhausts
+	// its retries. ReportFailure then fails with `column "owner_caller" does
+	// not exist`, reportFailure logs it at Warn and carries on, and the row is
+	// left status='running' with attempts == max_retries — which
+	// buildClaimSQL's `attempts < GREATEST(max_retries, 1)` excludes from
+	// every future claim. SweepExhaustedToDLQ, the documented safety net for
+	// exactly that state, fails on the same missing column. The job is stuck
+	// forever, never reaches the dead-letter queue, and the only trace is one
+	// Warn line.
+	//
+	// Failing at start is loud, immediate, and names the fix. One catalogue
+	// query per worker lifetime.
+	if err := requireOwnerCallerColumn(ctx, w.pool); err != nil {
+		return err
+	}
+
 	// Seed-drain pass clears anything that landed before the LISTEN
 	// session establishes. The ticker covers steady-state polling
 	// for cases where LISTEN's notification got dropped (network

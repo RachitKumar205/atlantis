@@ -27,6 +27,24 @@ going the other way needs a backfill, as any other narrowing does.
 
 ### Fixed
 
+#### A `clients/go` worker no longer starts against a server that is too old
+
+`clients/go` is its own Go module, versioned independently of the atlantis
+server that applies migrations, so an application can upgrade the SDK past the
+release that applied migration 0028. Nothing detected that.
+
+The skew had no early symptom. Claims, leases and completions all worked,
+because only the terminal-failure path names `owner_caller`. The first sign was
+a job exhausting its retries and wedging: `ReportFailure` failed on the missing
+column, the worker logged it at `Warn` and carried on, and the row stayed
+`status='running'` with `attempts == max_retries` — which every later claim
+excludes. `SweepExhaustedToDLQ`, the safety net for exactly that state, failed
+on the same column. The job never reached the dead-letter queue.
+
+`Worker.Run` now checks the catalogue once at start and refuses, naming the
+migration and telling you which side to move. Upgrade the server, or pin
+`clients/go` back to a release that matches it.
+
 #### Tenant isolation stayed permissive on tables with long names
 
 **Check this if you run `partition by` on a table whose name is 47 characters

@@ -471,3 +471,46 @@ func isSafeIdent(s string) bool {
 	}
 	return true
 }
+
+// requireOwnerCallerColumn refuses to run against a server schema older than
+// this SDK.
+//
+// clients/go is its own module. An application versions it independently of
+// the atlantis server that applies migrations, so an SDK upgrade can land
+// ahead of the server — and MoveToDLQ and SweepExhaustedToDLQ both name
+// owner_caller, added by migration 0028.
+//
+// The skew has no early symptom. Every claim, lease and completion works;
+// only the terminal-failure path touches the column, so the first sign is a
+// job exhausting its retries and quietly wedging: ReportFailure errors with
+// `column "owner_caller" does not exist`, the worker logs it at Warn, and the
+// row is left status='running' with attempts == max_retries, which
+// buildClaimSQL's `attempts < GREATEST(max_retries, 1)` excludes from every
+// later claim. SweepExhaustedToDLQ, the safety net for exactly that state,
+// fails on the same column.
+//
+// Checked rather than degraded. Writing the two INSERTs without owner_caller
+// when the column is absent would keep the worker running and put rows in the
+// dead-letter queue with no owner — which is the cross-caller read migration
+// 0028 exists to close, reintroduced through the SDK.
+func requireOwnerCallerColumn(ctx context.Context, pool *pgxpool.Pool) error {
+	const q = `
+SELECT count(*) FROM information_schema.columns
+ WHERE table_schema = 'atlantis'
+   AND table_name IN ('jobs', 'jobs_dead')
+   AND column_name = 'owner_caller'`
+	var n int
+	if err := pool.QueryRow(ctx, q).Scan(&n); err != nil {
+		return fmt.Errorf("jobs: checking atlantis.jobs schema: %w", err)
+	}
+	if n < 2 {
+		return fmt.Errorf(
+			"jobs: this SDK requires atlantis.jobs and atlantis.jobs_dead to carry "+
+				"owner_caller (migration 0028), and the database has it on %d of 2 "+
+				"tables. The atlantis server is older than this SDK: upgrade the "+
+				"server, or pin clients/go back to a release that matches it. "+
+				"Starting anyway would run normally until the first job exhausted "+
+				"its retries and then wedge that job permanently", n)
+	}
+	return nil
+}
