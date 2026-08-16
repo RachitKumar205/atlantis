@@ -125,6 +125,106 @@ SELECT count(*) FROM information_schema.columns
 	}
 }
 
+// TestAnUngatedClassDoesNotCarryAGatedOneThroughWithIt is the exploit the gate
+// used to allow.
+//
+// The change policy is FOUR independent rules, and the gate consulted only
+// Diff.HighestClass(). Breaking outranks Destructive, so a diff that both
+// renamed a table and dropped a column asked the breaking rule and never the
+// destructive one. An operator who set breaking to auto-apply — a defensible
+// setting when one team owns every caller — silently turned off the
+// destructive gate they had explicitly left on. The DROP ran unattended and no
+// plan row was filed, so there was nothing to review afterwards either.
+//
+// The fixture has to produce BOTH classes in one diff, and the assertion below
+// checks that before it checks anything else. A diff carrying only one class
+// would pass this test against the broken code.
+func TestAnUngatedClassDoesNotCarryAGatedOneThroughWithIt(t *testing.T) {
+	svc := depScopeService(t)
+	ctx := context.Background()
+
+	const v1 = `
+entity Vault in mixgate {
+  id   bigint primary
+  note text
+}
+`
+	// Renaming the physical table is Breaking; dropping `note` is Destructive.
+	const v2 = `
+entity Vault in mixgate {
+  table "atlantis.mixgate_vault_renamed"
+  id bigint primary
+}
+`
+	depScopePlanAndApply(t, svc, "mixgate", "vault.atl", v1)
+
+	// Breaking auto-applies; destructive still requires a human. A defensible
+	// pairing when one team owns every caller — and the one that turned the
+	// destructive gate off.
+	if _, err := svc.SetChangePolicy(ctx, &adminpb.SetChangePolicyRequest{
+		UpdatedBy: "operator",
+		Entries: []*adminpb.ChangePolicyEntry{
+			{
+				ChangeClass:     adminpb.PlanClass_PLAN_CLASS_CROSS_CALLER_BREAKING,
+				RequireApproval: false,
+			},
+			{
+				ChangeClass:     adminpb.PlanClass_PLAN_CLASS_DESTRUCTIVE,
+				RequireApproval: true,
+				ApproverRole:    "admin",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("SetChangePolicy: %v", err)
+	}
+
+	plan := depScopePlan(t, svc, "mixgate", "vault.atl", v2)
+
+	// The premise. Without both classes present this proves nothing, and the
+	// broken gate would pass it.
+	if plan.GetClass() != adminpb.PlanClass_PLAN_CLASS_CROSS_CALLER_BREAKING {
+		t.Fatalf("the diff planned as %s, so the ungated class is not the highest "+
+			"one and this test is not exercising the defect", plan.GetClass())
+	}
+	// The destructive half, checked against the SQL that would actually run
+	// rather than against a summary of it. A dropped column is parked, so the
+	// migration renames it — if that is absent, the diff carries no destructive
+	// change and the rest of this test proves nothing.
+	if !strings.Contains(plan.GetUpSql(), "note__parked") {
+		t.Fatalf("the migration parks no column, so the diff carries no "+
+			"destructive change and this test is not exercising the defect:\n%s",
+			plan.GetUpSql())
+	}
+
+	err := depScopeApply(t, svc, "mixgate", "vault.atl", v2, plan)
+	if err == nil {
+		t.Fatal("the apply went through. Breaking was set to auto-apply and the " +
+			"diff ALSO drops a column, so consulting only the highest class " +
+			"applied a destructive change the operator had gated — unattended, " +
+			"with no plan recorded for anyone to review after the fact.")
+	}
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Errorf("refusal code = %s, want FailedPrecondition", got)
+	}
+	// Recorded under the rule that stopped it, not under the worst class.
+	if !strings.Contains(err.Error(), "destructive") &&
+		!strings.Contains(strings.ToLower(err.Error()), "destructive") {
+		t.Errorf("the refusal does not name the destructive rule that caused it, "+
+			"so the operator cannot tell which policy to change: %v", err)
+	}
+
+	// And the column survives.
+	var n int
+	if err := svc.pool.QueryRow(ctx, `
+SELECT count(*) FROM information_schema.columns
+ WHERE table_schema = 'atlantis' AND table_name = 'mixgate_vault' AND column_name = 'note'`).Scan(&n); err != nil {
+		t.Fatalf("check the column: %v", err)
+	}
+	if n != 1 {
+		t.Error("the refused apply dropped the column anyway")
+	}
+}
+
 // The other half: an approval has to actually let the change through, or the
 // gate is just a refusal with extra steps.
 func TestApprovedPlanApplies(t *testing.T) {

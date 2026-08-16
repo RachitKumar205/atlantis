@@ -413,3 +413,68 @@ func TestDiffAllCoversEveryBucket(t *testing.T) {
 		t.Error("IsEmpty() is true for a diff with a change in every bucket")
 	}
 }
+
+// TestDiffClassesPresentCoversEveryBucket is the same guard for the method the
+// change policy iterates.
+//
+// The policy is four independent rules, and the gate used to consult only
+// HighestClass — so a diff that both broke a caller and dropped a column asked
+// the breaking rule alone. With breaking set to auto-apply, the DROP ran
+// unattended and no plan was filed, though the operator had explicitly
+// required approval for destructive changes.
+//
+// ClassesPresent replaced that, which makes it the thing a new bucket must not
+// escape. A bucket it forgets is a class the policy silently stops governing,
+// and the symptom is an apply that does not stop — the failure nobody notices
+// until it has already run.
+func TestDiffClassesPresentCoversEveryBucket(t *testing.T) {
+	typ := reflect.TypeOf(Diff{})
+
+	d := &Diff{}
+	buckets := 0
+	v := reflect.ValueOf(d).Elem()
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		if f.Type != reflect.TypeOf([]Change{}) {
+			continue
+		}
+		v.Field(i).Set(reflect.ValueOf([]Change{{Kind: KindEntityAdded, EntityID: f.Name}}))
+		buckets++
+	}
+	if buckets < 4 {
+		t.Fatalf("found %d change buckets on Diff; this test is not reading what "+
+			"it thinks it is", buckets)
+	}
+
+	got := d.ClassesPresent()
+	if len(got) != buckets {
+		t.Errorf("ClassesPresent() returned %d classes for a diff with %d "+
+			"populated buckets (%v) — a bucket missing here is a class the "+
+			"change policy no longer evaluates, so an apply that should have "+
+			"stopped proceeds unattended", len(got), buckets, got)
+	}
+
+	// Ordered most restrictive first, because the gate records the plan under
+	// the FIRST class that requires approval and names it in the refusal.
+	// Wrong order files the plan under the wrong rule.
+	want := []ChangeClass{
+		ClassCrossCallerBreaking,
+		ClassDestructive,
+		ClassBackfillRequired,
+		ClassAdditive,
+	}
+	for i := range want {
+		if i >= len(got) {
+			break
+		}
+		if got[i] != want[i] {
+			t.Errorf("ClassesPresent()[%d] = %v, want %v — the order decides "+
+				"which rule the plan is recorded under", i, got[i], want[i])
+		}
+	}
+
+	// An empty diff gates nothing.
+	if c := (&Diff{}).ClassesPresent(); len(c) != 0 {
+		t.Errorf("an empty diff reports classes %v", c)
+	}
+}

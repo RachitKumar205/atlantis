@@ -76,15 +76,18 @@ const defaultPlanTTL = 7 * 24 * time.Hour
 // codes.FailedPrecondition so a client can branch on the code rather than on
 // message text.
 func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateRequest) error {
-	class := planClassToPB(translateClass(g.Diff.HighestClass()))
-
-	// A class outside the settable set cannot be governed by a rule, and there
-	// are only two of them: UNSPECIFIED, which means the diff produced nothing
-	// a class maps to, and UNPARSEABLE, which means the DSL did not compile and
-	// the apply is refused long before here. Neither should silently proceed.
-	if !policyClassIsSettable(class) {
-		return status.Errorf(codes.FailedPrecondition,
-			"admin: plan class %s cannot be evaluated against the change policy", class)
+	// EVERY class the diff contains, not just the worst one.
+	//
+	// The policy is four independent rules. Consulting only the highest class
+	// meant a diff that both renamed a table and dropped a column asked the
+	// breaking rule and never the destructive one — so with breaking set to
+	// auto-apply, the DROP ran unattended and no plan row was ever filed. The
+	// operator had explicitly required approval for destructive changes.
+	present := g.Diff.ClassesPresent()
+	if len(present) == 0 {
+		// An empty diff has nothing to gate. Reaching here means the caller
+		// asked to apply nothing, which the apply path handles above.
+		return nil
 	}
 
 	stored, _, err := loadChangePolicy(ctx, tx)
@@ -96,8 +99,30 @@ func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateReque
 		return status.Errorf(codes.FailedPrecondition,
 			"admin: the change policy could not be read, so no change may apply unattended: %v", err)
 	}
-	policy := effectiveChangePolicy(stored, class)
-	if !policy.RequireApproval {
+
+	// ClassesPresent is ordered most-restrictive first, so the first class that
+	// requires approval is the one to record and to name in the refusal. That
+	// keeps the plan filed under the rule that actually stopped it rather than
+	// under whichever class happened to be worst.
+	var class adminpb.PlanClass
+	var policy ChangePolicy
+	var gated bool
+	for _, c := range present {
+		pb := planClassToPB(translateClass(c))
+		// A class outside the settable set cannot be governed by a rule, and
+		// there are only two: UNSPECIFIED, meaning the diff produced nothing a
+		// class maps to, and UNPARSEABLE, meaning the DSL did not compile and
+		// the apply was refused long before here. Neither may proceed quietly.
+		if !policyClassIsSettable(pb) {
+			return status.Errorf(codes.FailedPrecondition,
+				"admin: plan class %s cannot be evaluated against the change policy", pb)
+		}
+		if p := effectiveChangePolicy(stored, pb); p.RequireApproval {
+			class, policy, gated = pb, p, true
+			break
+		}
+	}
+	if !gated {
 		return nil
 	}
 

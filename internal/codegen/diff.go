@@ -249,6 +249,40 @@ func (d *Diff) HighestClass() ChangeClass {
 	return ClassAdditive
 }
 
+// ClassesPresent returns every class the diff actually contains, most
+// restrictive first.
+//
+// HighestClass answers "how bad is the worst of it", which is the right
+// question for a headline and the WRONG one for a policy. The change policy is
+// four independent rules, and a caller can set breaking to auto-apply while
+// leaving destructive gated. Evaluating only the highest class then consults
+// the breaking rule for a diff that ALSO drops a column, sees "no approval
+// needed", and applies the DROP unattended with no plan filed.
+//
+// So the gate iterates this instead. Additive is included even though it is
+// the floor: a deployment can require approval for every change, and omitting
+// it would make that setting silently unenforceable on an additive-only diff.
+//
+// Kept exhaustive by TestDiffClassesPresentCoversEveryBucket, the same way
+// All() is — a new bucket that this forgets is a class the policy stops
+// governing, which is the quietest possible way to lose a gate.
+func (d *Diff) ClassesPresent() []ChangeClass {
+	var out []ChangeClass
+	if len(d.Breaking) > 0 {
+		out = append(out, ClassCrossCallerBreaking)
+	}
+	if len(d.Destructive) > 0 {
+		out = append(out, ClassDestructive)
+	}
+	if len(d.BackfillRequired) > 0 {
+		out = append(out, ClassBackfillRequired)
+	}
+	if len(d.Additive) > 0 {
+		out = append(out, ClassAdditive)
+	}
+	return out
+}
+
 // diffCtx carries optional caller-ownership context into the diff engine.
 // When populated, removals of entities/fields owned exclusively by the
 // submitting caller (with no cross-caller references) are downgraded from
