@@ -225,6 +225,137 @@ SELECT count(*) FROM information_schema.columns
 	}
 }
 
+// backdatePlanExpiry pushes a plan past its deadline without sleeping seven
+// days. gateRequest.Now exists so expiry is decidable in a test; this is the
+// other half of that.
+func backdatePlanExpiry(t *testing.T, svc *Service, planID string) {
+	t.Helper()
+	tag, err := svc.pool.Exec(context.Background(), `
+UPDATE atlantis.schema_plans SET expires_at = now() - interval '1 hour'
+ WHERE plan_id = $1`, planID)
+	if err != nil {
+		t.Fatalf("backdate %s: %v", planID, err)
+	}
+	if tag.RowsAffected() != 1 {
+		t.Fatalf("backdating %s updated %d rows, want 1", planID, tag.RowsAffected())
+	}
+}
+
+// TestADivergedApprovalReopensRatherThanBricking covers the state machine's
+// missing edge.
+//
+// A plan id is deterministic in (caller, files, dependency hash). When the
+// stored content diverged from what an apply would now run, the gate refused
+// terminally and advised "re-plan and request approval again" — advice that
+// cannot be followed, because re-planning returns the SAME id and the row is
+// still `approved`, which ApproveSchemaPlan refuses as "not awaiting a
+// decision". The plan became permanently unapplicable AND permanently
+// undecidable, and the only escape was editing the .atl bytes to move the
+// hash, which no message mentions.
+//
+// A server upgrade that changes emitted SQL is enough to reach it. b6c0555
+// added emitLockTimeout — exactly that shape — and would have bricked every
+// approved-but-unapplied plan in a deployment.
+func TestADivergedApprovalReopensRatherThanBricking(t *testing.T) {
+	svc := depScopeService(t)
+	depScopePlanAndApply(t, svc, "dsdiv", "ledger.atl", gateLedgerV1)
+
+	plan := depScopePlan(t, svc, "dsdiv", "ledger.atl", gateLedgerV2)
+	if err := depScopeApply(t, svc, "dsdiv", "ledger.atl", gateLedgerV2, plan); err == nil {
+		t.Fatal("the destructive change applied without approval")
+	}
+	approveStoredPlan(t, svc, plan.GetPlanId())
+
+	// Divergence, standing in for a server upgrade that changes emitted SQL.
+	if _, err := svc.pool.Exec(context.Background(),
+		`UPDATE atlantis.schema_plans SET up_sql = up_sql || ' -- moved' WHERE plan_id = $1`,
+		plan.GetPlanId()); err != nil {
+		t.Fatalf("diverge the stored SQL: %v", err)
+	}
+
+	err := depScopeApply(t, svc, "dsdiv", "ledger.atl", gateLedgerV2, plan)
+	if err == nil {
+		t.Fatal("an apply ran against an approval that was for different SQL")
+	}
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Errorf("refusal code = %s, want FailedPrecondition", got)
+	}
+
+	// The point of the fix: the row goes back to pending so somebody can
+	// decide again.
+	if got := storedPlanState(t, svc, plan.GetPlanId()); got != planPending {
+		t.Errorf("plan state = %q, want %q — a diverged approval that stays "+
+			"approved is a plan nobody can apply and nobody can approve, with "+
+			"an id that re-planning reproduces exactly", got, planPending)
+	}
+
+	// And the stale decision is gone, or the console shows "approved by X"
+	// beside a pending request.
+	var decidedBy *string
+	if err := svc.pool.QueryRow(context.Background(),
+		`SELECT decided_by FROM atlantis.schema_plans WHERE plan_id = $1`,
+		plan.GetPlanId()).Scan(&decidedBy); err != nil {
+		t.Fatalf("read decided_by: %v", err)
+	}
+	if decidedBy != nil && *decidedBy != "" {
+		t.Errorf("decided_by is still %q on a re-opened request", *decidedBy)
+	}
+}
+
+// TestAnExpiredApprovalReopens is the TTL, which nothing exercised.
+//
+// schemaPlan.Expired could be changed to `return false` and the whole package
+// stayed green: no test wrote expires_at, and the 7-day default meant no plan
+// created in a test was ever expired. That mutation removes every enforcement
+// point at once and produces the exact failure the TTL's doc comment describes
+// — "an approval granted in April and used in September".
+func TestAnExpiredApprovalReopens(t *testing.T) {
+	svc := depScopeService(t)
+	depScopePlanAndApply(t, svc, "dsttl", "ledger.atl", gateLedgerV1)
+
+	plan := depScopePlan(t, svc, "dsttl", "ledger.atl", gateLedgerV2)
+	if err := depScopeApply(t, svc, "dsttl", "ledger.atl", gateLedgerV2, plan); err == nil {
+		t.Fatal("the destructive change applied without approval")
+	}
+	approveStoredPlan(t, svc, plan.GetPlanId())
+
+	backdatePlanExpiry(t, svc, plan.GetPlanId())
+
+	err := depScopeApply(t, svc, "dsttl", "ledger.atl", gateLedgerV2, plan)
+	if err == nil {
+		t.Fatal("an expired approval was honoured — the TTL is the only thing " +
+			"stopping a decision becoming a standing permission")
+	}
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Errorf("refusal code = %s, want FailedPrecondition", got)
+	}
+	if !strings.Contains(err.Error(), "expired") {
+		t.Errorf("the refusal does not mention expiry, so the operator cannot "+
+			"tell it from a rejection: %v", err)
+	}
+	if got := storedPlanState(t, svc, plan.GetPlanId()); got != planPending {
+		t.Errorf("plan state = %q, want %q — an expired approval must re-open "+
+			"for a fresh decision, not become undecidable", got, planPending)
+	}
+
+	// The column survives.
+	//
+	// dsgate_ledger, not dsttl_ledger: the physical table is named from the
+	// ENTITY's namespace, and gateLedgerV1 declares `entity Ledger in dsgate`
+	// whatever caller submits it. Querying dsttl_ledger returned 0 and read as
+	// "the apply dropped the column" when nothing of the sort had happened —
+	// an assertion against a table that never existed.
+	var n int
+	if err := svc.pool.QueryRow(context.Background(), `
+SELECT count(*) FROM information_schema.columns
+ WHERE table_schema = 'atlantis' AND table_name = 'dsgate_ledger' AND column_name = 'note'`).Scan(&n); err != nil {
+		t.Fatalf("check the column: %v", err)
+	}
+	if n != 1 {
+		t.Error("the refused apply dropped the column anyway")
+	}
+}
+
 // The other half: an approval has to actually let the change through, or the
 // gate is just a refusal with extra steps.
 func TestApprovedPlanApplies(t *testing.T) {

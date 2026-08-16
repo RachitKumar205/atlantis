@@ -153,13 +153,29 @@ func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateReque
 			"admin: plan %s has already been applied", g.PlanID)
 
 	case plan.State == planSuperseded:
+		// Re-opened, not merely reported. A superseded plan whose content is
+		// current again is a live request, and leaving it superseded made the
+		// id permanently undecidable: ApproveSchemaPlan refuses anything not
+		// awaiting a decision, and the plan id is deterministic in (caller,
+		// files, dependency hash), so re-planning returns the SAME dead id.
+		// The only escape was editing the .atl bytes to move the hash, which
+		// no message suggests and no reader would guess.
+		if err := s.recordPendingPlan(ctx, g, class); err != nil {
+			return fmt.Errorf("re-open superseded plan %s: %w", g.PlanID, err)
+		}
 		return approvalRequired(g.PlanID, class, policy.ApproverRole,
-			"the previous request was superseded by a change to the schema it depended on")
+			"the previous request was superseded by a change to the schema it "+
+				"depended on, and has been re-opened for a decision")
 
 	case plan.State == planApproved:
 		if plan.Expired(g.Now) {
+			// Same reasoning: void the approval AND re-open, so the expiry is
+			// a renewal rather than a dead end.
+			if err := s.recordPendingPlan(ctx, g, class); err != nil {
+				return fmt.Errorf("re-open expired plan %s: %w", g.PlanID, err)
+			}
 			return approvalRequired(g.PlanID, class, policy.ApproverRole,
-				"the approval expired before it was used")
+				"the approval expired before it was used and has been re-opened")
 		}
 		// An approval is for a specific change. Re-derive what would run now
 		// and require it to match what was approved.
@@ -169,15 +185,25 @@ func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateReque
 		// the prior IR moved underneath it, and the SQL is what actually
 		// executes. Comparing only the diff would approve a shape and run a
 		// script.
-		if plan.FilesHash != g.FilesHash {
-			return status.Errorf(codes.FailedPrecondition,
-				"admin: plan %s was approved for different file contents — "+
-					"the approval does not carry over", g.PlanID)
-		}
-		if plan.UpSQL != g.UpSQL {
-			return status.Errorf(codes.FailedPrecondition,
-				"admin: plan %s was approved for different SQL than this apply would run "+
-					"— re-plan and request approval again", g.PlanID)
+		//
+		// Divergence VOIDS the approval and re-opens the request. It used to
+		// refuse terminally, and the advice it gave — "re-plan and request
+		// approval again" — was impossible to follow, because re-planning
+		// produces the identical id and the row stayed `approved`. A server
+		// upgrade that changes emitted SQL is enough to reach this: b6c0555
+		// added emitLockTimeout, which is exactly that shape, and it would
+		// have bricked every approved-but-unapplied plan in the deployment.
+		if plan.FilesHash != g.FilesHash || plan.UpSQL != g.UpSQL {
+			what := "the SQL this apply would run"
+			if plan.FilesHash != g.FilesHash {
+				what = "the submitted file contents"
+			}
+			if err := s.recordPendingPlan(ctx, g, class); err != nil {
+				return fmt.Errorf("re-open diverged plan %s: %w", g.PlanID, err)
+			}
+			return approvalRequired(g.PlanID, class, policy.ApproverRole,
+				"the approval was for a different version of "+what+
+					", so it no longer applies and the request has been re-opened")
 		}
 		return nil
 
@@ -309,11 +335,26 @@ FROM atlantis.schema_plans WHERE plan_id = $1`, planID)
 // gateOnChangePolicy: this is written on a path that is about to return an
 // error, and the caller's transaction is about to roll back.
 //
-// The WHERE clause on the update arm is load-bearing. Without it, a CI job
-// retrying its apply every few minutes would reset an approved plan back to
-// pending — so an operator's decision would be undone by the very pipeline
-// waiting on it, and the two would chase each other indefinitely. It also stops
-// a rejected plan being resurrected by a resubmission.
+// # What the WHERE clause on the update arm actually does
+//
+// It is a CONCURRENCY backstop, not the thing that stops a retrying pipeline
+// from undoing an approval. That distinction was wrong here for a while, and
+// the comment asserting it survived a test that named it — because no
+// single-threaded path reaches the upsert with a row in a state the clause
+// excludes. gateOnChangePolicy returns before calling this for a rejected plan,
+// for an applied one, and for an approved one whose content still matches.
+//
+// What protects the sequential retry is that early return. What the clause
+// protects is the interleaving: two applies racing on the same plan id while an
+// operator decides. `rejected` and `applied` are terminal and excluded, so a
+// concurrent write cannot resurrect either.
+//
+// `approved` is INCLUDED, and deliberately. The approved arm calls this only
+// when the stored content has diverged from what would now run — the approval
+// is void at that point, and the row has to go back to pending or the plan id
+// becomes permanently undecidable. Excluding it is what made a server upgrade
+// that changed emitted SQL brick every approved-but-unapplied plan, with an
+// error advising a re-plan that returns the same dead id.
 func (s *Service) recordPendingPlan(ctx context.Context, g gateRequest, class adminpb.PlanClass) error {
 	filesJSON, err := json.Marshal(readableFiles(g.Files))
 	if err != nil {
@@ -340,8 +381,21 @@ ON CONFLICT (plan_id) DO UPDATE SET
     state                = EXCLUDED.state,
     requested_by         = EXCLUDED.requested_by,
     created_at           = EXCLUDED.created_at,
-    expires_at           = EXCLUDED.expires_at
-WHERE atlantis.schema_plans.state IN ('pending_approval', 'superseded')`,
+    expires_at           = EXCLUDED.expires_at,
+    -- Cleared, because the row is going back to pending and a decision that
+    -- no longer applies must not be displayed beside it. Leaving these would
+    -- show a re-opened request as "approved by X" in the console while the
+    -- state column says otherwise.
+    --
+    -- Empty string rather than NULL for the three TEXT columns: 0027 declares
+    -- them NOT NULL DEFAULT ''. decided_at is the one that is nullable, and
+    -- NULL is right there — "no decision at this time" is exactly what a
+    -- re-opened request means.
+    decided_by           = '',
+    decided_by_role      = '',
+    decided_at           = NULL,
+    decision_reason      = ''
+WHERE atlantis.schema_plans.state IN ('pending_approval', 'superseded', 'approved')`,
 		g.PlanID, g.Caller, class.String(), filesJSON, g.FilesHash, diffJSON,
 		g.UpSQL, g.DownSQL, g.BaseHash, planPending, g.RequestedBy, g.Now, expires)
 	return err
@@ -388,16 +442,34 @@ UPDATE atlantis.schema_plans
 // supersedePlansFor marks a caller's outstanding requests as no longer
 // answering the question they were filed about.
 //
-// Called after a successful apply by the same caller. The plans left behind
-// were computed against a checkpoint that has now moved; approving one would be
+// Called after a successful apply by the same caller. A plan left behind was
+// computed against a checkpoint that has now moved; approving one would be
 // approving a diff that no longer describes anything. Superseded rather than
 // deleted, so the console can show what happened to a request somebody was
 // waiting on rather than having it vanish.
-func supersedePlansFor(ctx context.Context, tx pgx.Tx, caller, keepPlanID string) error {
+//
+// # Only when the checkpoint really moved
+//
+// newCheckpointHash gates it, because the premise above is not always true. An
+// apply that changes no schema still runs: a comment-only edit produces
+// different file bytes, an identical IR and an empty diff, which classifies
+// additive and passes ungated. Retiring every outstanding plan on the strength
+// of that retired requests that were still perfectly valid — and because the
+// plan id is deterministic in (caller, files, dependency hash), the caller
+// could not file a fresh one either. The id came back identical and already
+// superseded.
+//
+// IS DISTINCT FROM rather than <>, so a row with no recorded base hash is
+// superseded rather than skipped. Not knowing what a plan was computed against
+// is a reason to retire it, not a reason to keep it.
+func supersedePlansFor(ctx context.Context, tx pgx.Tx, caller, keepPlanID, newCheckpointHash string) error {
 	_, err := tx.Exec(ctx, `
 UPDATE atlantis.schema_plans
    SET state = $3
- WHERE caller = $1 AND plan_id <> $2 AND state IN ('pending_approval', 'approved')`,
-		caller, keepPlanID, planSuperseded)
+ WHERE caller = $1
+   AND plan_id <> $2
+   AND state IN ('pending_approval', 'approved')
+   AND base_checkpoint_hash IS DISTINCT FROM $4`,
+		caller, keepPlanID, planSuperseded, newCheckpointHash)
 	return err
 }

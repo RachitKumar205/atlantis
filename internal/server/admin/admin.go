@@ -952,12 +952,18 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 	if err := markPlanApplied(ctx, tx, gotPlanID, version); err != nil {
 		return nil, fmt.Errorf("close out plan %s: %w", gotPlanID, err)
 	}
-	if err := supersedePlansFor(ctx, tx, req.GetCaller(), gotPlanID); err != nil {
+
+	// Read before superseding, because superseding now depends on it: a plan
+	// is only stale if the checkpoint it was computed against has actually
+	// moved. An apply that changes no schema — a comment-only edit lowers to
+	// an identical IR and an empty diff — leaves the checkpoint where it was,
+	// and retiring a pending destructive request on the strength of it was
+	// retiring a decision somebody was waiting on for no reason.
+	newHash, _ := loadCheckpointHashTx(ctx, tx)
+
+	if err := supersedePlansFor(ctx, tx, req.GetCaller(), gotPlanID, newHash); err != nil {
 		return nil, fmt.Errorf("supersede outstanding plans for %s: %w", req.GetCaller(), err)
 	}
-
-	// Read the newly written content hash for the response.
-	newHash, _ := loadCheckpointHashTx(ctx, tx)
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
