@@ -64,6 +64,11 @@ func (h *SweepExpiredHandler) Handle(ctx context.Context, argsJSON []byte) error
 	}
 
 	total := int64(0)
+	// Entities whose DELETE was actually issued. The denominator of the error
+	// below, and it has to be counted rather than derived: an entity can leave
+	// this loop three ways — no ttl_field, skipped as RLS-blocked, or swept —
+	// and only the third is something a failure count can be "out of".
+	attempted := 0
 	var failures []string
 	for _, e := range ir.Entities {
 		if e.TtlField == "" {
@@ -119,6 +124,7 @@ func (h *SweepExpiredHandler) Handle(ctx context.Context, argsJSON []byte) error
 			     SELECT ctid FROM %s.%s WHERE %s < now() LIMIT %d))`,
 			quoteIdent(schema), quoteIdent(table),
 			quoteIdent(schema), quoteIdent(table), quoteIdent(e.TtlField), limit)
+		attempted++
 		tag, err := h.Pool.Exec(ctx, sql)
 		if err != nil {
 			// Collected, not swallowed. The previous version logged a Warn and
@@ -148,9 +154,21 @@ func (h *SweepExpiredHandler) Handle(ctx context.Context, argsJSON []byte) error
 	if total > 0 {
 		_ = Checkpoint(ctx, 100, fmt.Sprintf("swept %d expired row(s)", total))
 	}
+	// The denominator is entities ATTEMPTED, not len(failures)+1.
+	//
+	// It used to be the latter, which is not a count of anything. It reported
+	// "1 of 2 entities failed" when one entity of one failed, and "3 of 4" when
+	// all three did — an operator reading it would conclude something swept
+	// successfully when nothing had. The only case it happened to get right was
+	// exactly one survivor.
+	//
+	// The same shape as the two failures this file's own comments describe: a
+	// number that is not connected to the thing it is reported as. TestSweeperSurfacesFailure
+	// asserted only that the error was non-nil, so the arithmetic was free to
+	// say anything.
 	if len(failures) > 0 {
 		return fmt.Errorf("sweep: %d of %d entities failed: %s",
-			len(failures), len(failures)+1, strings.Join(failures, "; "))
+			len(failures), attempted, strings.Join(failures, "; "))
 	}
 	return nil
 }

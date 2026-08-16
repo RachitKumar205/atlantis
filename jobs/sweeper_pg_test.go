@@ -123,10 +123,109 @@ ON CONFLICT (id) DO UPDATE SET ir = EXCLUDED.ir`, raw); err != nil {
 	})
 
 	h := &SweepExpiredHandler{Pool: pool, Logger: quietLogger(), BatchLimit: 10}
-	if err := h.Handle(ctx, nil); err == nil {
-		t.Error("a sweep that could not delete anything reported success. The job " +
+	err := h.Handle(ctx, nil)
+	if err == nil {
+		t.Fatal("a sweep that could not delete anything reported success. The job " +
 			"runtime marks it complete, no retry happens, nothing is dead-lettered, " +
 			"and a sweeper broken for months looks exactly like one with no work")
+	}
+	// And it must COUNT correctly. One entity exists and it failed, so the only
+	// truthful denominator is 1. The denominator used to be len(failures)+1,
+	// which is a count of nothing: this case reported "1 of 2 entities failed",
+	// telling an operator that something swept when nothing had.
+	if !strings.Contains(err.Error(), "1 of 1 entities failed") {
+		t.Errorf("the failure says %q. One entity was swept and it failed, so the "+
+			"denominator must be 1 — anything larger claims a success that did "+
+			"not happen", err)
+	}
+}
+
+// The denominator counts what was attempted, across a mix.
+//
+// The single-entity case above pins it at 1 of 1, and that alone catches
+// len(failures)+1. This adds the case where the two disagree by more than one,
+// so a fix that swapped one wrong expression for another — say len(ir.Entities)
+// — does not pass: two of these three entities sweep fine, and one of them has
+// no ttl_field at all and is never a candidate.
+func TestSweeperCountsEntitiesItActuallyAttempted(t *testing.T) {
+	pool, ctx := schedTestPool(t)
+
+	reset := func() {
+		_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS atlantis.swpn_alpha, atlantis.swpn_beta`)
+	}
+	reset()
+	t.Cleanup(reset)
+
+	for _, sql := range []string{
+		`CREATE TABLE atlantis.swpn_alpha (id bigint PRIMARY KEY, expires_at timestamptz NOT NULL)`,
+		`CREATE TABLE atlantis.swpn_beta  (id bigint PRIMARY KEY, expires_at timestamptz NOT NULL)`,
+		`INSERT INTO atlantis.swpn_alpha VALUES (1, now() - INTERVAL '1 hour')`,
+		`INSERT INTO atlantis.swpn_beta  VALUES (1, now() - INTERVAL '1 hour')`,
+	} {
+		if _, err := pool.Exec(ctx, sql); err != nil {
+			t.Fatalf("exec %q: %v", sql, err)
+		}
+	}
+
+	ttl := func(name string) dsl.Entity {
+		return dsl.Entity{
+			Name: name, Namespace: "swpn", TtlField: "expires_at",
+			Fields: []dsl.Field{
+				{Name: "id", Type: dsl.FieldType{Name: "bigint"}, Primary: true},
+				{Name: "expires_at", Type: dsl.FieldType{Name: "timestamptz"}, NotNull: true},
+			},
+		}
+	}
+	ir := &dsl.IR{Entities: []dsl.Entity{
+		ttl("Alpha"),
+		ttl("Beta"),
+		ttl("Gone"), // no table — the one failure
+		// No ttl_field, so never a sweep candidate and never part of the
+		// denominator. Its presence is what makes len(ir.Entities) wrong.
+		{Name: "Bystander", Namespace: "swpn",
+			Fields: []dsl.Field{{Name: "id", Type: dsl.FieldType{Name: "bigint"}, Primary: true}}},
+	}}
+	raw, merr := json.Marshal(ir)
+	if merr != nil {
+		t.Fatalf("marshal ir: %v", merr)
+	}
+	var saved []byte
+	_ = pool.QueryRow(ctx, `SELECT ir FROM atlantis.ir_checkpoint WHERE id = 1`).Scan(&saved)
+	if _, err := pool.Exec(ctx, `
+INSERT INTO atlantis.ir_checkpoint (id, ir, applied_by) VALUES (1, $1, 'sweeper-test')
+ON CONFLICT (id) DO UPDATE SET ir = EXCLUDED.ir`, raw); err != nil {
+		t.Fatalf("write checkpoint: %v", err)
+	}
+	t.Cleanup(func() {
+		if saved != nil {
+			_, _ = pool.Exec(ctx, `UPDATE atlantis.ir_checkpoint SET ir = $1 WHERE id = 1`, saved)
+		} else {
+			_, _ = pool.Exec(ctx, `DELETE FROM atlantis.ir_checkpoint WHERE id = 1`)
+		}
+	})
+
+	h := &SweepExpiredHandler{Pool: pool, Logger: quietLogger(), BatchLimit: 100}
+	err := h.Handle(ctx, nil)
+	if err == nil {
+		t.Fatal("a sweep with a missing table reported success")
+	}
+	if !strings.Contains(err.Error(), "1 of 3 entities failed") {
+		t.Errorf("the failure says %q, want \"1 of 3 entities failed\".\n"+
+			"  \"1 of 2\" → the denominator is still len(failures)+1\n"+
+			"  \"1 of 4\" → it counts every entity, including one with no ttl_field "+
+			"that was never a sweep candidate", err)
+	}
+
+	// The two healthy entities must still have swept. A denominator is only
+	// meaningful if the work it counts happened.
+	var remaining int
+	if qerr := pool.QueryRow(ctx, `
+SELECT (SELECT count(*) FROM atlantis.swpn_alpha) + (SELECT count(*) FROM atlantis.swpn_beta)`).Scan(&remaining); qerr != nil {
+		t.Fatalf("count: %v", qerr)
+	}
+	if remaining != 0 {
+		t.Errorf("%d expired rows survived on the healthy entities; one broken "+
+			"entity stopped the others being swept", remaining)
 	}
 }
 
