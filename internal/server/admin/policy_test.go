@@ -61,6 +61,47 @@ func TestEveryChangeClassHasAPolicyKey(t *testing.T) {
 
 // Fail-closed, stated three ways, because all three are the same rule and a
 // future edit is likely to handle one and forget the others.
+// Every class the gate can actually be asked about must be settable.
+//
+// This is what keeps gateOnChangePolicy's `!policyClassIsSettable` arm
+// unreachable — and unreachable is what it is today, which is precisely why it
+// has no test of its own. policyClassIsSettable is DEFINED as the image of
+// ChangeClasses(), and the gate only ever asks about members of
+// ClassesPresent(), which returns the same four values. Writing a test that
+// drives that arm would mean fabricating a state the code cannot produce, which
+// is the vacuous-guard shape this whole exercise is about removing.
+//
+// So the invariant is pinned instead of the branch. The hazard it catches is
+// real and would be silent: a fifth bucket added to ClassesPresent that
+// ChangeClasses does not know about makes the arm reachable, and because it
+// fires before any rule is consulted, EVERY apply carrying that class is
+// refused with a message about plan classes rather than about the change.
+func TestEveryClassPresentIsSettable(t *testing.T) {
+	// All four buckets populated, so ClassesPresent returns its full set rather
+	// than whichever one a sparser fixture happened to include.
+	d := &codegen.Diff{
+		Additive:         []codegen.Change{{}},
+		BackfillRequired: []codegen.Change{{}},
+		Destructive:      []codegen.Change{{}},
+		Breaking:         []codegen.Change{{}},
+	}
+	present := d.ClassesPresent()
+	if len(present) != len(ChangeClasses()) {
+		t.Fatalf("ClassesPresent returned %d classes for a diff with every bucket "+
+			"populated, want %d — the two enumerations have diverged",
+			len(present), len(ChangeClasses()))
+	}
+	for _, c := range present {
+		pb := planClassToPB(translateClass(c))
+		if !policyClassIsSettable(pb) {
+			t.Errorf("ClassesPresent yields %v, which maps to %s, which no rule can "+
+				"govern. gateOnChangePolicy refuses this before it reads any policy, "+
+				"so every apply carrying this class fails with a message about plan "+
+				"classes and no operator can turn it off", c, pb)
+		}
+	}
+}
+
 func TestAnythingOtherThanAStoredRuleRequiresApproval(t *testing.T) {
 	stored := map[adminpb.PlanClass]ChangePolicy{
 		adminpb.PlanClass_PLAN_CLASS_ADDITIVE: {

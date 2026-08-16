@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -44,6 +45,17 @@ entity Ledger in dsgate {
 	gateLedgerV2 = `
 entity Ledger in dsgate {
   id bigint primary
+}
+`
+	// Additive relative to V1, and therefore UNGATED: migration 0026 seeds
+	// PLAN_CLASS_ADDITIVE with require_approval = false. That is what makes it
+	// the right probe for the fail-closed path — a refusal of this change can
+	// only have come from the policy read failing, never from a rule.
+	gateLedgerV3Additive = `
+entity Ledger in dsgate {
+  id    bigint primary
+  note  text
+  extra text
 }
 `
 )
@@ -238,6 +250,222 @@ UPDATE atlantis.schema_plans SET expires_at = now() - interval '1 hour'
 	}
 	if tag.RowsAffected() != 1 {
 		t.Fatalf("backdating %s updated %d rows, want 1", planID, tag.RowsAffected())
+	}
+}
+
+// The superseded arm of the same fix, which nothing constrained.
+//
+// bedca6a re-opens a plan in THREE places — superseded, expired-approved, and
+// diverged-approved — and shipped tests for two of them. Deleting the
+// recordPendingPlan call from this arm left the whole admin package green,
+// which is how a guard ends up present in the source and absent in effect.
+//
+// It is also the arm the commit is named after, and the one with the widest
+// reach: supersedePlansFor marks every other pending or approved plan for a
+// caller superseded on each apply, so any caller with two changes in flight
+// reaches this state as a matter of course, not as an edge case.
+func TestASupersededPlanReopensRatherThanBricking(t *testing.T) {
+	svc := depScopeService(t)
+	depScopePlanAndApply(t, svc, "dssup", "ledger.atl", gateLedgerV1)
+
+	plan := depScopePlan(t, svc, "dssup", "ledger.atl", gateLedgerV2)
+	if err := depScopeApply(t, svc, "dssup", "ledger.atl", gateLedgerV2, plan); err == nil {
+		t.Fatal("the destructive change applied without approval")
+	}
+
+	// Set directly, the same way the diverged test fakes divergence. Reaching
+	// it through supersedePlansFor needs a second apply that moves the
+	// checkpoint while leaving this plan's content current — a longer road to
+	// the same row state, and it would be testing supersedePlansFor rather than
+	// the arm below.
+	if _, err := svc.pool.Exec(context.Background(),
+		`UPDATE atlantis.schema_plans SET state = 'superseded' WHERE plan_id = $1`,
+		plan.GetPlanId()); err != nil {
+		t.Fatalf("supersede the plan: %v", err)
+	}
+
+	err := depScopeApply(t, svc, "dssup", "ledger.atl", gateLedgerV2, plan)
+	if err == nil {
+		t.Fatal("a superseded plan applied with no fresh decision behind it")
+	}
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Errorf("refusal code = %s, want FailedPrecondition", got)
+	}
+	if !strings.Contains(err.Error(), "re-opened") {
+		t.Errorf("the refusal does not tell the operator the request is live "+
+			"again, so the next step is to wait for a decision nobody knows to "+
+			"make: %v", err)
+	}
+	if got := storedPlanState(t, svc, plan.GetPlanId()); got != planPending {
+		t.Errorf("plan state = %q, want %q", got, planPending)
+	}
+
+	// The consequence, which the state column alone does not establish. The id
+	// is deterministic in (caller, files, dependency hash), so re-planning
+	// returns this same id, and ApproveSchemaPlan only touches a row awaiting a
+	// decision. Left superseded, the plan is one nobody can apply and nobody can
+	// approve. approveStoredPlan fails this test unless exactly one pending row
+	// matched, so it IS the assertion.
+	approveStoredPlan(t, svc, plan.GetPlanId())
+	if err := depScopeApply(t, svc, "dssup", "ledger.atl", gateLedgerV2, plan); err != nil {
+		t.Errorf("the re-opened plan was approved and still would not apply, so "+
+			"re-opening moved the row without making it usable: %v", err)
+	}
+}
+
+// A pending request that outlived its TTL is renewed, not left to rot.
+//
+// The fifth recordPendingPlan site, and the last one with no test. Reached by
+// the most ordinary sequence there is: a pipeline files a request, nobody
+// decides within defaultPlanTTL, and the pipeline is re-run. Without the
+// renewal the row keeps an expires_at in the past, and ApproveSchemaPlan —
+// which will not act on an expired row — leaves the reviewer with a request
+// they can see and cannot decide.
+func TestAPendingPlanThatExpiredIsRenewed(t *testing.T) {
+	svc := depScopeService(t)
+	depScopePlanAndApply(t, svc, "dsren", "ledger.atl", gateLedgerV1)
+
+	plan := depScopePlan(t, svc, "dsren", "ledger.atl", gateLedgerV2)
+	if err := depScopeApply(t, svc, "dsren", "ledger.atl", gateLedgerV2, plan); err == nil {
+		t.Fatal("the destructive change applied without approval")
+	}
+	// Pending, NOT approved — that is what separates this from
+	// TestAnExpiredApprovalReopens, which backdates an approval instead.
+	if got := storedPlanState(t, svc, plan.GetPlanId()); got != planPending {
+		t.Fatalf("plan state = %q, want %q before backdating", got, planPending)
+	}
+	backdatePlanExpiry(t, svc, plan.GetPlanId())
+
+	err := depScopeApply(t, svc, "dsren", "ledger.atl", gateLedgerV2, plan)
+	if err == nil {
+		t.Fatal("the destructive change applied on the retry")
+	}
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Errorf("refusal code = %s, want FailedPrecondition", got)
+	}
+	if !strings.Contains(err.Error(), "renewed") {
+		t.Errorf("the refusal does not say the request was renewed, so an operator "+
+			"reading it cannot tell a live request from one that quietly aged out: %v", err)
+	}
+
+	// The renewal has to move expires_at, or "renewed" is a word in a message
+	// and nothing else — the row stays undecidable and the next retry says the
+	// same thing forever.
+	var expiresAt time.Time
+	if err := svc.pool.QueryRow(context.Background(),
+		`SELECT expires_at FROM atlantis.schema_plans WHERE plan_id = $1`,
+		plan.GetPlanId()).Scan(&expiresAt); err != nil {
+		t.Fatalf("read expires_at: %v", err)
+	}
+	if !expiresAt.After(time.Now()) {
+		t.Errorf("expires_at is %s, still in the past — the request was reported "+
+			"renewed and was not", expiresAt)
+	}
+	if got := storedPlanState(t, svc, plan.GetPlanId()); got != planPending {
+		t.Errorf("plan state = %q, want %q", got, planPending)
+	}
+	// And it is decidable, which is the point of renewing it.
+	approveStoredPlan(t, svc, plan.GetPlanId())
+}
+
+// An applied plan is terminal, and re-submitting it does not run the DDL twice.
+//
+// Untested until now: plans_pg_test.go names planApplied only as a
+// ListSchemaPlans filter, never to drive the gate. The arm matters on a
+// rollback-then-reapply, where the checkpoint moves back under a plan id that
+// has already executed once.
+func TestAnAppliedPlanIsNotReapplied(t *testing.T) {
+	svc := depScopeService(t)
+	depScopePlanAndApply(t, svc, "dsapp", "ledger.atl", gateLedgerV1)
+
+	plan := depScopePlan(t, svc, "dsapp", "ledger.atl", gateLedgerV2)
+	if err := depScopeApply(t, svc, "dsapp", "ledger.atl", gateLedgerV2, plan); err == nil {
+		t.Fatal("the destructive change applied without approval")
+	}
+	if _, err := svc.pool.Exec(context.Background(),
+		`UPDATE atlantis.schema_plans SET state = 'applied' WHERE plan_id = $1`,
+		plan.GetPlanId()); err != nil {
+		t.Fatalf("mark the plan applied: %v", err)
+	}
+
+	err := depScopeApply(t, svc, "dsapp", "ledger.atl", gateLedgerV2, plan)
+	if err == nil {
+		t.Fatal("a plan recorded as already applied ran again. The DDL here drops " +
+			"a column; running it twice is running a destructive change nobody " +
+			"approved a second time")
+	}
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Errorf("refusal code = %s, want FailedPrecondition", got)
+	}
+	if !strings.Contains(err.Error(), "already been applied") {
+		t.Errorf("the refusal does not say the plan was already applied: %v", err)
+	}
+
+	// Terminal means terminal: it must NOT have been re-opened. Re-opening here
+	// would make an executed plan decidable again, which is an approval for
+	// work that has already happened.
+	if got := storedPlanState(t, svc, plan.GetPlanId()); got != planApplied {
+		t.Errorf("plan state = %q, want %q — an applied plan that re-opens invites "+
+			"a reviewer to approve DDL that already ran", got, planApplied)
+	}
+	// And the column survives, because the refused apply must not have run.
+	var n int
+	if err := svc.pool.QueryRow(context.Background(), `
+SELECT count(*) FROM information_schema.columns
+ WHERE table_schema = 'atlantis' AND table_name = 'dsgate_ledger' AND column_name = 'note'`).Scan(&n); err != nil {
+		t.Fatalf("check the column: %v", err)
+	}
+	if n != 1 {
+		t.Error("the refused apply dropped the column anyway")
+	}
+}
+
+// A policy that cannot be read refuses everything, including what no rule gates.
+//
+// The failure this closes is the one the gate's own comment names: a dropped
+// table or a revoked GRANT turning every gated class into an unattended apply.
+// It is the hardest kind to notice, because nothing errors — applies simply
+// stop being held.
+//
+// The probe is an ADDITIVE change, which 0026 seeds ungated. A refusal of this
+// change cannot have come from a rule, so it can only have come from the read
+// failing, which is what makes the assertion mean what it says.
+func TestTheGateFailsClosedWhenThePolicyCannotBeRead(t *testing.T) {
+	svc := depScopeService(t)
+	depScopePlanAndApply(t, svc, "dsfail", "ledger.atl", gateLedgerV1)
+
+	// Planned while the table is still readable: PlanSchema reports the rule for
+	// the class it produced, so it needs the table too.
+	plan := depScopePlan(t, svc, "dsfail", "ledger.atl", gateLedgerV3Additive)
+
+	if _, err := svc.pool.Exec(context.Background(),
+		`DROP TABLE atlantis.change_policy`); err != nil {
+		t.Fatalf("drop the policy table: %v", err)
+	}
+
+	err := depScopeApply(t, svc, "dsfail", "ledger.atl", gateLedgerV3Additive, plan)
+	if err == nil {
+		t.Fatal("an apply proceeded with no readable change policy. Every gated " +
+			"class is now an unattended apply, and nothing anywhere reports it")
+	}
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Errorf("refusal code = %s, want FailedPrecondition", got)
+	}
+	if !strings.Contains(err.Error(), "could not be read") {
+		t.Errorf("the refusal does not name the policy read as the cause, so an "+
+			"operator cannot tell it from an ordinary approval requirement: %v", err)
+	}
+
+	// The additive column must not exist: fail-closed means the DDL did not run.
+	var n int
+	if qerr := svc.pool.QueryRow(context.Background(), `
+SELECT count(*) FROM information_schema.columns
+ WHERE table_schema = 'atlantis' AND table_name = 'dsgate_ledger' AND column_name = 'extra'`).Scan(&n); qerr != nil {
+		t.Fatalf("check the column: %v", qerr)
+	}
+	if n != 0 {
+		t.Error("the apply ran its DDL despite refusing, so the refusal is a " +
+			"message rather than a gate")
 	}
 }
 

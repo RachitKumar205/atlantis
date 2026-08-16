@@ -113,6 +113,16 @@ func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateReque
 		// there are only two: UNSPECIFIED, meaning the diff produced nothing a
 		// class maps to, and UNPARSEABLE, meaning the DSL did not compile and
 		// the apply was refused long before here. Neither may proceed quietly.
+		//
+		// UNREACHABLE as written, and deliberately kept. policyClassIsSettable
+		// is defined as the image of ChangeClasses(), and ClassesPresent()
+		// returns those same four values, so pb is always settable. There is
+		// therefore no test that drives this arm — one would have to fabricate a
+		// state the code cannot produce. TestEveryClassPresentIsSettable pins
+		// the invariant instead, and is what would fail if a fifth bucket
+		// arrived in ClassesPresent without a matching entry in ChangeClasses.
+		// Keep the arm: it costs nothing, it fails closed, and the day the
+		// invariant breaks is the day it stops being unreachable.
 		if !policyClassIsSettable(pb) {
 			return status.Errorf(codes.FailedPrecondition,
 				"admin: plan class %s cannot be evaluated against the change policy", pb)
