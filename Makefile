@@ -426,16 +426,37 @@ tidy: ## go mod tidy
 
 # codegen-check: re-run codegen and fail if gen/, clients/go/client/,
 # atlantis/consumer/, or atlantis/vendorpkg/ diverges from the checked-in
-# tree. CI gate; run `make codegen` and commit the diff to recover.
+# tree. Run `make codegen` and commit the diff to recover.
 #
-# `mkdir -p` on both sides of each diff handles the gen-less-repo case:
-# on a fresh clone with no .atl fixtures the output dirs don't exist at
-# all, and `diff -ruN` (which treats absent FILES as empty) still errors
-# on a missing root directory. The mkdirs make both sides empty-but-
-# present so an absent .atl fixture diffs cleanly.
+# WHAT THIS DOES AND DOES NOT COVER
+#
+# Only useful in a tree that HAS .atl files — a caller's repo, or this one
+# with --workspace pointed at one. This repo ships none by design, so here
+# the command emits nothing and there is nothing to compare.
+#
+# It used to report "codegen-check ok" in exactly that case: gen/ is
+# gitignored and absent on a fresh checkout, the mkdir -p below made both
+# sides of every diff empty-but-present, and comparing empty to empty
+# succeeded. So as a CI gate on this repo it passed unconditionally, for
+# any change to any emitter, and the green tick meant nothing. Meanwhile it
+# FAILED for developers whose working tree still held output generated
+# against a schema that has since moved to a caller repo — noisy where it
+# was wrong, silent where it mattered.
+#
+# It now says which of those two situations it is in, and emitter drift is
+# covered where it can actually be checked: TestEmittersMatchGolden in
+# internal/codegen runs every emitter against a committed fixture schema
+# and diffs the result against committed golden files. That runs under
+# plain `go test`, so it needs no .atl files anywhere and cannot go
+# vacuous.
 .PHONY: codegen-check
-codegen-check: ## Verify gen/ + clients/go/ + atlantis/*.proto are up to date with current .atl files
-	@tmp=$$(mktemp -d) && \
+codegen-check: ## Verify gen/ + clients/go/ + atlantis/*.proto match the current .atl files
+	@if [ -z "$$(find testdata/schema -name '*.atl' 2>/dev/null)" ]; then \
+	  echo "codegen-check: no .atl files in testdata/schema — nothing to compare."; \
+	  echo "  This repo ships no schema; emitter drift is covered by"; \
+	  echo "  'go test ./internal/codegen -run Golden' against testdata/schema.atl."; \
+	else \
+	  tmp=$$(mktemp -d) && \
 	  $(GO) run ./cmd/tidectl codegen --out "$$tmp" --ir-checkpoint gen/.last-ir.json && \
 	  mkdir -p gen "$$tmp/gen" clients/go/client "$$tmp/clients/go/client" \
 	           atlantis/consumer "$$tmp/atlantis/consumer" \
@@ -445,7 +466,8 @@ codegen-check: ## Verify gen/ + clients/go/ + atlantis/*.proto are up to date wi
 	  diff -ruN atlantis/consumer "$$tmp/atlantis/consumer" >/dev/null && \
 	  diff -ruN atlantis/vendorpkg "$$tmp/atlantis/vendorpkg" >/dev/null && \
 	  rm -rf "$$tmp" && echo "codegen-check ok" || \
-	  (echo "codegen-check FAILED. Run 'make codegen' and commit the diff."; rm -rf "$$tmp"; exit 1)
+	  (echo "codegen-check FAILED. Run 'make codegen' and commit the diff."; rm -rf "$$tmp"; exit 1); \
+	fi
 
 # CI gate: up/down/up against fresh DB to catch broken .down.sql.
 #

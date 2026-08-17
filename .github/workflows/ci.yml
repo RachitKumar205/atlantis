@@ -161,9 +161,16 @@ jobs:
         run: go test -race -timeout=25m ./cmd/server ./cmd/tide ./cmd/tidectl ./internal/... ./jobs/...
 
       - name: codegen freshness
-        # Catches "edited .atl but forgot to regenerate." If make codegen
-        # produces different bytes than gen/, fail loudly so the PR author
-        # knows to run codegen + commit before merging.
+        # Catches "edited .atl but forgot to regenerate" — in a tree that has
+        # .atl files. This repo has none, so here the target reports that it
+        # has nothing to compare and exits 0.
+        #
+        # It is kept because the same Makefile ships to caller repos, where the
+        # check is real. What it is NOT is a gate on THIS repo's emitters: it
+        # used to print "codegen-check ok" on every run regardless, because
+        # gen/ is gitignored and it was comparing empty to empty. Emitter drift
+        # is covered by TestEmittersMatchGolden in internal/codegen, which runs
+        # in the unit-test step above against a committed fixture schema.
         run: make codegen-check
 
       - name: integration tests

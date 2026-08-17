@@ -1,0 +1,40 @@
+// Fixture schema for TestEmittersMatchGolden.
+//
+// Not a realistic application schema — a deliberately small one chosen so the
+// golden output stays reviewable while still crossing the emitter paths where a
+// silent change would matter:
+//
+//   - nullable AND not-null columns of each Go shape, because nullability
+//     selects between two different emissions in the cursor extractor, the
+//     bind arms and the scan targets
+//   - a nullable ordering column, which is what the keyset predicate branches on
+//   - `partition by`, which adds the tenant argument, the RLS policy and the
+//     boundary WITH CHECK
+//   - a foreign key into the other entity, which drives the include slots
+//   - `ttl_field`, which the sweeper reads
+//
+// Adding a field here changes the golden files. That is the point: the diff is
+// the review. Regenerate with `go test ./internal/codegen -run Golden -update`.
+
+entity Author in library {
+  id         bigint primary
+  name       text not null
+  bio        text
+  rating     double
+  created_at timestamptz not null default now()
+}
+
+entity Book in library {
+  id         bigint primary
+  tenant     varchar(32) not null
+  title      text not null
+  author_id  bigint not null references library.Author.id
+  score      real
+  page_count int
+  summary    text
+  expires_at timestamptz
+  created_at timestamptz not null default now()
+
+  partition by tenant
+  ttl_field expires_at
+}
