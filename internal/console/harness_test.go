@@ -83,26 +83,8 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 	t.Setenv("TMPDIR", t.TempDir())
 
 	const dbName = "atlantis_console_http"
-	drop := func() {
-		pgcatalog.Exec(t, adminDSN,
-			`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '`+dbName+`'`,
-			`DROP DATABASE IF EXISTS `+dbName)
-	}
-	drop()
-	t.Cleanup(drop)
-	pgcatalog.Exec(t, adminDSN, `CREATE DATABASE `+dbName)
+	dsn := pgcatalog.PrivateDatabase(t, adminDSN, dbName)
 
-	i := strings.LastIndex(adminDSN, "/atlantis?")
-	if i < 0 {
-		t.Fatalf("cannot derive a DSN for %s from %q", dbName, adminDSN)
-	}
-	dsn := adminDSN[:i] + "/" + dbName + adminDSN[i+len("/atlantis"):]
-
-	pgcatalog.Exec(t, dsn,
-		`CREATE EXTENSION IF NOT EXISTS citext`,
-		`CREATE EXTENSION IF NOT EXISTS vector`,
-		`CREATE EXTENSION IF NOT EXISTS timescaledb`,
-	)
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if err := migrate.Run(dsn, "../../migrations", quiet); err != nil {
 		t.Fatalf("migrate %s: %v", dbName, err)

@@ -413,26 +413,7 @@ WHERE change_class = 'PLAN_CLASS_BACKFILL_REQUIRED'`).Scan(&got); err != nil {
 // migration tree needs, and drops it afterwards.
 func freshMigrationDatabase(t *testing.T, adminDSN, name string) string {
 	t.Helper()
-	drop := func() {
-		pgcatalog.Exec(t, adminDSN,
-			`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '`+name+`'`,
-			`DROP DATABASE IF EXISTS `+name)
-	}
-	drop()
-	t.Cleanup(drop)
-	pgcatalog.Exec(t, adminDSN, `CREATE DATABASE `+name)
-
-	i := strings.LastIndex(adminDSN, "/atlantis?")
-	if i < 0 {
-		t.Fatalf("cannot derive a DSN for %s from %q", name, adminDSN)
-	}
-	dsn := adminDSN[:i] + "/" + name + adminDSN[i+len("/atlantis"):]
-	pgcatalog.Exec(t, dsn,
-		`CREATE EXTENSION IF NOT EXISTS citext`,
-		`CREATE EXTENSION IF NOT EXISTS vector`,
-		`CREATE EXTENSION IF NOT EXISTS timescaledb`,
-	)
-	return dsn
+	return pgcatalog.PrivateDatabase(t, adminDSN, name)
 }
 
 // openInfraMigrate drives the infra migration tree by version, which

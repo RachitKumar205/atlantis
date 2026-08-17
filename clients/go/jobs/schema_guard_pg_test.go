@@ -54,14 +54,19 @@ func guardDB(t *testing.T, name string) *pgxpool.Pool {
 	// drop, then close.
 	t.Cleanup(admin.Close)
 
+	// WITH (FORCE) rather than pg_terminate_backend followed by a DROP.
+	// pg_terminate_backend signals a backend, it does not wait for it to exit, so
+	// the DROP that follows can still see the connection and fail — which is a
+	// database left behind, and the next run inherits it.
+	//
+	// The same helper inside the repo is internal/testsupport/pgcatalog.
+	// PrivateDatabase. This module cannot import it: clients/go is a separate
+	// module, and internal/ is unreachable from outside the one that declares it.
 	drop := func() {
-		if _, err := admin.Exec(context.Background(),
-			`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '`+name+`'`); err != nil {
-			t.Logf("terminating backends on %s: %v", name, err)
-		}
 		// Reported rather than discarded. A cleanup that cannot say it failed is
 		// how the leak above went unseen.
-		if _, err := admin.Exec(context.Background(), `DROP DATABASE IF EXISTS `+name); err != nil {
+		if _, err := admin.Exec(context.Background(),
+			`DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`); err != nil {
 			t.Errorf("could not drop %s, so it is left behind and the next run "+
 				"inherits it: %v", name, err)
 		}

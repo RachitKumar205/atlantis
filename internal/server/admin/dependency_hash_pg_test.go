@@ -46,31 +46,8 @@ func depScopeService(t *testing.T) *Service {
 	}
 
 	const dbName = "atlantis_depscope"
-	drop := func() {
-		pgcatalog.Exec(t, adminDSN,
-			// Terminate first: DROP DATABASE refuses while any connection to it
-			// remains, and a pool closed a moment ago may still be draining.
-			`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '`+dbName+`'`,
-			`DROP DATABASE IF EXISTS `+dbName)
-	}
-	drop()
-	t.Cleanup(drop)
-	pgcatalog.Exec(t, adminDSN, `CREATE DATABASE `+dbName)
+	dsn := pgcatalog.PrivateDatabase(t, adminDSN, dbName)
 
-	dsn := adminDSN
-	i := strings.LastIndex(dsn, "/atlantis?")
-	if i < 0 {
-		t.Fatalf("cannot derive a DSN for %s from %q — expected it to end in /atlantis?...", dbName, adminDSN)
-	}
-	dsn = dsn[:i] + "/" + dbName + dsn[i+len("/atlantis"):]
-
-	// Extensions are per-database. A fresh one has none, and the migrations
-	// reference all three.
-	pgcatalog.Exec(t, dsn,
-		`CREATE EXTENSION IF NOT EXISTS citext`,
-		`CREATE EXTENSION IF NOT EXISTS vector`,
-		`CREATE EXTENSION IF NOT EXISTS timescaledb`,
-	)
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if err := migrate.Run(dsn, "../../../migrations", quiet); err != nil {
 		t.Fatalf("migrate %s: %v", dbName, err)

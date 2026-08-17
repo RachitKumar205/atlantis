@@ -241,33 +241,9 @@ func bootOnce(t *testing.T, pgURL, require string) string {
 func bootDatabase(t *testing.T, adminDSN, dbName string) string {
 	t.Helper()
 
-	drop := func() {
-		pgcatalog.Exec(t, adminDSN,
-			// Terminate first: a child that has not fully exited still holds
-			// connections, and DROP DATABASE refuses while any remain.
-			`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '`+dbName+`'`,
-			`DROP DATABASE IF EXISTS `+dbName)
-	}
-	drop()
-	t.Cleanup(drop)
-	pgcatalog.Exec(t, adminDSN, `CREATE DATABASE `+dbName)
-
-	// Swap the database component of the DSN, leaving credentials and options.
-	dsn := adminDSN
-	if i := strings.LastIndex(dsn, "/atlantis?"); i >= 0 {
-		dsn = dsn[:i] + "/" + dbName + dsn[i+len("/atlantis"):]
-	} else {
-		t.Fatalf("cannot derive a DSN for %s from %q — expected it to end in /atlantis?...", dbName, adminDSN)
-	}
-
-	// Extensions are per-database, so a fresh one has none of them and the pool
-	// fails on `register pgvector: vector type not found` long before the gate.
-	// The shared test database carries these four; a private one has to be told.
-	pgcatalog.Exec(t, dsn,
-		`CREATE EXTENSION IF NOT EXISTS citext`,
-		`CREATE EXTENSION IF NOT EXISTS vector`,
-		`CREATE EXTENSION IF NOT EXISTS timescaledb`,
-	)
+	// A child that has not fully exited still holds connections, which is why
+	// the drop inside this helper uses FORCE rather than terminating and hoping.
+	dsn := pgcatalog.PrivateDatabase(t, adminDSN, dbName)
 
 	if err := migrate.Run(dsn, "../../migrations", quietBootLogger()); err != nil {
 		t.Fatalf("migrate %s: %v", dbName, err)
