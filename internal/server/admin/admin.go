@@ -885,6 +885,28 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 		}
 	}
 
+	// Refuse to turn on tenant isolation over rows nobody will be able to read.
+	//
+	// `''` is a legal value for a NOT NULL text column and is what a legacy
+	// discriminator carries after an ADD COLUMN with a default. Once the
+	// boundary exists, no caller can bind to it — set_partition refuses '' —
+	// so those rows become unreachable silently, with no error anywhere,
+	// because the policy is doing exactly what it says.
+	//
+	// Read inside the locked tx so the verdict is authoritative, and beside
+	// the drift checks because it is the same kind of question: something true
+	// of the live DATA that the declaration cannot see. The operator assigns
+	// the rows a tenant, deletes them, or sets the override knowingly.
+	if os.Getenv("ATLANTIS_ALLOW_UNREACHABLE_TENANT") != "1" {
+		stranded, uerr := detectUnreachableTenantRows(ctx, tx, d, newIR)
+		if uerr != nil {
+			return nil, fmt.Errorf("apply: unreachable-tenant check failed: %w", uerr)
+		}
+		if len(stranded) > 0 {
+			return nil, unreachableTenantError(stranded)
+		}
+	}
+
 	// Refuse to apply while CHECK constraints diverge between the .atl and
 	// the live table — the differ doesn't manage CHECKs, so applying would
 	// silently leave the divergence in place (the carts `awaiting_checkout`

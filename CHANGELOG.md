@@ -25,7 +25,46 @@ a substitute: it is a different Postgres type, so declaring `text` against a
 grammar could not produce it. Widening `varchar(N)` to `varchar` is additive;
 going the other way needs a backfill, as any other narrowing does.
 
+### Added
+
+#### `tide apply` refuses to strand rows with an empty tenant
+
+**New environment variable: `ATLANTIS_ALLOW_UNREACHABLE_TENANT`.** This can refuse
+an apply that previously succeeded.
+
+Adding `partition by` to a table whose discriminator column already holds empty
+strings makes those rows readable by nobody. `atlantis.set_partition` refuses an
+empty tenant — that is what makes an unbound request fail closed — but `''` is a
+legal value for a `not null` column, and it is exactly what a legacy column
+carries after being added and backfilled with a default. Nothing reported this,
+because the policy was behaving precisely as written.
+
+Apply now refuses, naming the table, the column and how many rows are affected,
+and telling you to assign them a tenant or delete them. Set the variable to `1`
+to apply anyway, accepting that those rows become unreadable.
+
+The check runs only when `partition by` is being added. An already-partitioned
+table cannot acquire such a row, because the boundary's `WITH CHECK` refuses the
+write.
+
 ### Fixed
+
+#### Widening a tenant column no longer waits for a reviewer
+
+Changing a tenant column from `varchar(16)` to `varchar(32)` was classified
+cross-caller-breaking, which requires approval by default. The policy it rebuilt
+was byte-identical before and after: both types are text-shaped, so neither takes
+a cast and the condition is the same condition. The reviewer was asked to approve
+a change to what callers can read, on a change where nothing callers can read had
+moved.
+
+The class now follows the policy's **predicate** rather than the column's
+rendered type. A change that alters the predicate — `varchar` to `uuid`, where
+the discriminator gains a `::uuid` cast — is still cross-caller-breaking. One
+that cannot is additive.
+
+The rebuild itself is unaffected and still happens either way: PostgreSQL refuses
+to alter a column a policy depends on.
 
 #### A tenant-column rebuild left the table readable across tenants
 

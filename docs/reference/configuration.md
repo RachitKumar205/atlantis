@@ -162,6 +162,24 @@ do not have.
 |---|---|---|
 | `ATLANTIS_ALLOW_INDEX_DRIFT` | (unset / `0`) | Default refuses the apply with a `DROP INDEX` remediation. Set to exactly `1` to apply anyway with a warning. |
 
+## Unreachable tenant rows
+
+`ATLANTIS_ALLOW_UNREACHABLE_TENANT` controls whether `tide apply` proceeds when adding `partition by` to a table that already holds rows whose discriminator is the **empty string**.
+
+No caller can bind to an empty tenant — `atlantis.set_partition` refuses it, which is what makes an unbound request fail closed — but `''` is still a legal value for a `not null` column, and it is what a legacy column carries after being added and backfilled with a default. Applying isolation over those rows makes them readable by nobody, and nothing reports it, because the policy is behaving exactly as written.
+
+Apply therefore refuses by default, naming the table, the column and how many rows are affected. Assign them a real tenant, or delete them if they are meant to be retired:
+
+```sql
+UPDATE billing.invoice SET tenant = '<tenant>' WHERE tenant = '';
+```
+
+| Variable | Default | Notes |
+|---|---|---|
+| `ATLANTIS_ALLOW_UNREACHABLE_TENANT` | (unset / `0`) | Default refuses the apply and reports the row count. Set to exactly `1` to apply anyway, accepting that those rows become unreadable. |
+
+The check runs only when `partition by` is being **added**. An already-partitioned table cannot acquire such a row — the boundary's `WITH CHECK` refuses the write — so there is nothing to scan afterwards.
+
 Note the differences from the `ATL_*` gating variables:
 
 - The prefix is `ATLANTIS_`, not `ATL_`.
