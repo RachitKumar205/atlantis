@@ -76,13 +76,13 @@ func emitAll(t *testing.T, ir *dsl.IR) string {
 		}
 	}
 
-	fs, err := EmitGoServer(ir)
+	fs, err := EmitGoServer(ir, GenConfig{})
 	add("go-server", fs, err)
 	fs, err = EmitGoClient(ir, GenConfig{})
 	add("go-client", fs, err)
 	fs, err = EmitGoCacheKeys(ir)
 	add("go-keys", fs, err)
-	fs, err = EmitCustomServer(ir)
+	fs, err = EmitCustomServer(ir, GenConfig{})
 	add("custom-server", fs, err)
 	fs, err = EmitCustomClient(ir, GenConfig{})
 	add("custom-client", fs, err)

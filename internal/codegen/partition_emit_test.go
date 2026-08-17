@@ -40,7 +40,7 @@ entity Doc in shop {
   partition by tenant
 }
 `)
-	files, err := EmitGoServer(ir)
+	files, err := EmitGoServer(ir, GenConfig{})
 	if err != nil {
 		t.Fatalf("EmitGoServer: %v", err)
 	}
@@ -126,7 +126,7 @@ entity Account in consumer {
   email text not null unique
 }
 `)
-	files, err := EmitGoServer(ir)
+	files, err := EmitGoServer(ir, GenConfig{})
 	if err != nil {
 		t.Fatalf("EmitGoServer: %v", err)
 	}
@@ -175,7 +175,7 @@ entity Line in shop {
   partition by tenant
 }
 `)
-	files, err := EmitGoServer(ir)
+	files, err := EmitGoServer(ir, GenConfig{})
 	if err != nil {
 		t.Fatalf("EmitGoServer: %v", err)
 	}
@@ -271,7 +271,7 @@ entity Vec in shop {
   partition by tenant
 }
 `)
-	files, err := EmitGoServer(ir)
+	files, err := EmitGoServer(ir, GenConfig{})
 	if err != nil {
 		t.Fatalf("EmitGoServer: %v", err)
 	}
@@ -321,7 +321,7 @@ procedure BlankDoc for Doc {
   }
 }
 `)
-	files, err := EmitCustomServer(ir)
+	files, err := EmitCustomServer(ir, GenConfig{})
 	if err != nil {
 		t.Fatalf("EmitCustomServer: %v", err)
 	}

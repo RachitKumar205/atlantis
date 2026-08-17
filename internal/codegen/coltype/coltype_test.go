@@ -31,7 +31,9 @@ func TestGoType(t *testing.T) {
 		{"boolean nn", ft("boolean"), true, "bool"},
 		{"timestamptz nn", ft("timestamptz"), true, "time.Time"},
 		{"date nn", ft("date"), true, "time.Time"},
-		{"interval nn", ft("interval"), true, "time.Duration"},
+		// pgtype.Interval for both nullabilities: it carries Valid itself, so
+		// the nullable form takes no pointer. See the skip list in GoType.
+		{"interval nn", ft("interval"), true, "pgtype.Interval"},
 		{"uuid nn", ft("uuid"), true, "string"},
 		{"numeric nn", ft("numeric"), true, "string"},
 
@@ -43,7 +45,7 @@ func TestGoType(t *testing.T) {
 		{"varchar null", ft("varchar"), false, "*string"},
 		{"boolean null", ft("boolean"), false, "*bool"},
 		{"timestamptz null", ft("timestamptz"), false, "*time.Time"},
-		{"interval null", ft("interval"), false, "*time.Duration"},
+		{"interval null", ft("interval"), false, "pgtype.Interval"},
 		{"uuid null", ft("uuid"), false, "*string"},
 		{"numeric null", ft("numeric"), false, "*string"},
 
@@ -89,7 +91,7 @@ func TestProtoType(t *testing.T) {
 		{"boolean", ft("boolean"), "bool"},
 		{"timestamptz", ft("timestamptz"), "google.protobuf.Timestamp"},
 		{"date", ft("date"), "google.protobuf.Timestamp"},
-		{"interval", ft("interval"), "google.protobuf.Duration"},
+		{"interval", ft("interval"), "atlantis.common.v1.Interval"},
 		{"uuid", ft("uuid"), "string"},
 		{"bytea", ft("bytea"), "bytes"},
 		{"jsonb", ft("jsonb"), "bytes"},
@@ -152,7 +154,8 @@ func TestScanFragments(t *testing.T) {
 		{"date nn", ft("date"), true,
 			"var x time.Time", "&x", "out.Y = runtime.TimeToProto(x)"},
 		{"interval nn", ft("interval"), true,
-			"var x string", "&x", "out.Y = x"},
+			"var x pgtype.Interval", "&x",
+			"if x.Valid {\n\t\tout.Y = &commonpb.Interval{Months: x.Months, Days: x.Days, Microseconds: x.Microseconds}\n\t}"},
 
 		// Nullable scalars route through sql.NullX.
 		{"int null", ft("int"), false,
@@ -163,8 +166,11 @@ func TestScanFragments(t *testing.T) {
 			"var x sql.NullString", "&x", "out.Y = runtime.StringPtrFromNull(x)"},
 		{"boolean null", ft("boolean"), false,
 			"var x sql.NullBool", "&x", "out.Y = runtime.BoolPtrFromNull(x)"},
+		// Identical to the nn case: pgtype.Interval carries Valid, so one
+		// declaration serves both and IntervalToProto returns nil for NULL.
 		{"interval null", ft("interval"), false,
-			"var x sql.NullString", "&x", "out.Y = runtime.StringPtrFromNull(x)"},
+			"var x pgtype.Interval", "&x",
+			"if x.Valid {\n\t\tout.Y = &commonpb.Interval{Months: x.Months, Days: x.Days, Microseconds: x.Microseconds}\n\t}"},
 
 		// Naturally-nullable shapes ignore the nullability flag.
 		{"bytea nn", ft("bytea"), true,
@@ -238,14 +244,16 @@ func TestBindExpr(t *testing.T) {
 		{"text nn", ft("text"), true, getter},
 		{"numeric nn", ft("numeric"), true, getter},
 		{"boolean nn", ft("boolean"), true, getter},
-		{"interval nn", ft("interval"), true, getter},
+		{"interval nn", ft("interval"), true, "pgtype.Interval{Months: in.GetX().GetMonths(), Days: in.GetX().GetDays(), " +
+			"Microseconds: in.GetX().GetMicroseconds(), Valid: in.GetX() != nil}"},
 
 		// Nullable scalars route the pointer through runtime helpers.
 		{"int null", ft("int"), false, "runtime.NullableInt32(in.X)"},
 		{"bigint null", ft("bigint"), false, "runtime.NullableInt64(in.X)"},
 		{"text null", ft("text"), false, "runtime.NullableString(in.X)"},
 		{"boolean null", ft("boolean"), false, "runtime.NullableBool(in.X)"},
-		{"interval null", ft("interval"), false, "runtime.NullableString(in.X)"},
+		{"interval null", ft("interval"), false, "pgtype.Interval{Months: in.GetX().GetMonths(), Days: in.GetX().GetDays(), " +
+			"Microseconds: in.GetX().GetMicroseconds(), Valid: in.GetX() != nil}"},
 
 		// Timestamps use the proto conversion helpers in both directions.
 		{"timestamptz nn", ft("timestamptz"), true, "runtime.ProtoToTime(in.GetX())"},

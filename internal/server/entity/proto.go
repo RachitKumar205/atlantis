@@ -304,10 +304,19 @@ func setProtoType(fd *descriptorpb.FieldDescriptorProto, t dsl.FieldType) {
 		typ := descriptorpb.FieldDescriptorProto_TYPE_BYTES
 		fd.Type = &typ
 	case "interval":
-		// Rendered as string (Postgres INTERVAL has no native proto type
-		// and the codegen historically maps it to string).
-		typ := descriptorpb.FieldDescriptorProto_TYPE_STRING
+		// The same message coltype.ProtoType names, so a caller's generated
+		// client and this dispatcher agree on the wire.
+		//
+		// It used to be TYPE_STRING, justified by "the codegen historically
+		// maps it to string" — which was false when it was written: codegen
+		// said google.protobuf.Duration. A generated client putting a message
+		// on the wire against a descriptor declaring a string unmarshals
+		// without error and leaves the field unset, so the value vanished
+		// silently. documented_types_test.go gated the divergence as a known
+		// defect; that gate is now deleted.
+		typ := descriptorpb.FieldDescriptorProto_TYPE_MESSAGE
 		fd.Type = &typ
+		fd.TypeName = strPtr(".atlantis.common.v1.Interval")
 	case "vector":
 		typ := descriptorpb.FieldDescriptorProto_TYPE_FLOAT
 		fd.Type = &typ

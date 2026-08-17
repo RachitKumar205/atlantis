@@ -146,21 +146,20 @@ func entityHasTimestampField(e *dsl.Entity) bool {
 	return false
 }
 
-// entityHasDurationField reports whether any field maps to
-// google.protobuf.Duration, which today means `interval`.
+// entityHasIntervalField reports whether any field needs
+// atlantis/common/v1/interval.proto imported.
 //
-// Its absence was not cosmetic: coltype.ProtoType has always returned
-// google.protobuf.Duration for interval, so the emitted .proto named a type
-// the file never imported and protoc refused it with
-// `"google.protobuf.Duration" is not defined`. The failure landed at
-// `tide generate`, after `tide apply` had run the DDL and the checkpoint was
-// written, because nothing in this package compiles what it emits.
+// Its absence was not cosmetic: the emitted .proto named a type the file never
+// imported, and protoc refused it. The failure landed at `tide generate`, after
+// `tide apply` had run the DDL and written the checkpoint, because nothing in
+// this package compiled what it emitted.
 //
-// This makes the emitted file self-consistent. It does NOT settle whether
-// Duration is the right wire type for interval — the runtime dispatcher
-// publishes the same column as a string, so the two still disagree, which is
-// tracked separately.
-func entityHasDurationField(e *dsl.Entity) bool {
+// It was fixed once already, for google.protobuf.Duration, and broke again the
+// moment interval's wire type changed — the predicate was right and the import
+// it guarded was stale. That is the argument for the compile fixture in
+// internal/codegen/compilecheck: this exact class is invisible to a test that
+// only parses.
+func entityHasIntervalField(e *dsl.Entity) bool {
 	for _, f := range e.Fields {
 		if f.Type.Name == "interval" {
 			return true
@@ -217,8 +216,8 @@ func emitProtoEntity(e *dsl.Entity, inbound []inboundRef) (ProtoFile, error) {
 	if entityHasTimestampField(e) {
 		b.WriteString("import \"google/protobuf/timestamp.proto\";\n")
 	}
-	if entityHasDurationField(e) {
-		b.WriteString("import \"google/protobuf/duration.proto\";\n")
+	if entityHasIntervalField(e) {
+		b.WriteString("import \"atlantis/common/v1/interval.proto\";\n")
 	}
 	b.WriteString("import \"google/protobuf/field_mask.proto\";\n")
 	b.WriteString("import \"atlantis/common/v1/predicates.proto\";\n")

@@ -8,8 +8,8 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/cache/queryresult"
 	"github.com/rachitkumar205/atlantis/internal/runtime"
 
-	library "github.com/rachitkumar205/atlantis/gen/go/server/library"
-	pblibrary "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/library/v1"
+	library "github.com/rachitkumar205/atlantis/internal/codegen/compilecheck/server/library"
+	pblibrary "github.com/rachitkumar205/atlantis/internal/codegen/compilecheck/pb/atlantis/library/v1"
 )
 
 // ServerDeps bundles the runtime-tier handles every entity server

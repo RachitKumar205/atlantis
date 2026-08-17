@@ -50,7 +50,7 @@ entity Doc in library {
 `)
 	AssignProtoNumbers(nil, ir)
 
-	goFiles, err := EmitGoServer(ir)
+	goFiles, err := EmitGoServer(ir, GenConfig{})
 	if err != nil {
 		t.Fatalf("EmitGoServer: %v", err)
 	}

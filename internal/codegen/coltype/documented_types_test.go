@@ -56,7 +56,7 @@ var samples = map[string]typeSample{
 	// letting the assertion be skipped.
 	"timestamptz": {ft: dsl.FieldType{Name: "timestamptz"}, goOverride: "time.Time"},
 	"date":        {ft: dsl.FieldType{Name: "date"}, goOverride: "time.Time"},
-	"interval":    {ft: dsl.FieldType{Name: "interval"}, goOverride: "time.Duration"},
+	"interval":    {ft: dsl.FieldType{Name: "interval"}, goOverride: "pgtype.Interval"},
 	"vector(N)":   {ft: dsl.FieldType{Name: "vector", VecDim: 3}, placeholders: map[string]string{"N": "3"}, goOverride: "[]float32"},
 }
 
@@ -111,7 +111,9 @@ func TestEveryDocumentedTypeIsImplemented(t *testing.T) {
 			gotNullable := coltype.GoType(s.ft, false)
 			wantNullable := "*" + wantGo
 			switch wantGo {
-			case "[]byte", "[]float32":
+			// pgtype.Interval joins these: it carries its own Valid flag, so
+			// the nullable form is the same type rather than a pointer to it.
+			case "[]byte", "[]float32", "pgtype.Interval":
 				wantNullable = wantGo
 			}
 			if gotNullable != wantNullable {

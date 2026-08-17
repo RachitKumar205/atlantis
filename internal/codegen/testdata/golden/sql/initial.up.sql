@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS "atlantis"."library_author" (
   "name" TEXT NOT NULL,
   "bio" TEXT,
   "rating" DOUBLE PRECISION,
+  "tenure" INTERVAL,
   "created_at" TIMESTAMPTZ NOT NULL DEFAULT now(),
   CONSTRAINT "library_author_pkey" PRIMARY KEY ("id")
 );

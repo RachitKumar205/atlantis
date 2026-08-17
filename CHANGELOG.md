@@ -11,7 +11,54 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ## Unreleased
 
+### Changed
+
+#### `interval` changes wire type — breaking
+
+**`interval` columns now travel as `atlantis.common.v1.Interval`, not
+`google.protobuf.Duration` or a string.**
+
+```proto
+message Interval {
+  int32 months       = 1;
+  int32 days         = 2;
+  int64 microseconds = 3;
+}
+```
+
+Postgres stores those three components separately because converting between
+them needs a calendar: `1 month` is 28 to 31 days depending on the month it is
+added to, and `1 day` is 23, 24 or 25 hours across a daylight-saving boundary.
+`Duration` is seconds and nanos, so it cannot hold a month-bearing interval
+without assuming a month length. The reference page previously documented that
+assumption — "months are normalized as 30 days" — and a data layer should not
+make it. Intervals now round-trip exactly, including months and years.
+
+**This is breaking on paper and not in practice, because `interval` did not
+work anywhere before.** Five layers each named a different type: the proto said
+`Duration`, the Go type said `time.Duration`, the scan fragment declared a
+`string` and assigned it to the proto field, and the dynamic dispatcher
+published a plain string. Generated code with an `interval` column did not
+compile, so no caller can have been using one through `tide codegen`. A caller
+reading such a column through the dynamic dispatcher would have received a
+string; that is the only reachable form, and it changes.
+
 ### Added
+
+#### Generated server code is compiled
+
+`internal/codegen/compilecheck` holds the emitted server for a fixture schema as
+an ordinary package, so `go build ./...` type-checks it. Nothing compiled
+generated code before: the emitter tests parse without type-checking, and the
+emitted pb import path resolved in no module — it named `atlantis-go`, which is
+in neither `go.mod` nor `go.sum`. A signature change on either side of the
+emitter boundary was therefore discovered in a caller's build rather than here,
+which has happened at least once.
+
+`EmitGoServer` now takes a `GenConfig` like `EmitGoClient`, so the pb and
+package paths it writes are configurable; the default is this repository's own
+`clients/go/pb`, which is where `buf` actually generates and what `go.mod`
+already resolves.
 
 #### Float columns are filterable
 

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	pgvector "github.com/pgvector/pgvector-go"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
@@ -55,7 +56,7 @@ func bindColumnValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) an
 	}
 
 	switch t.Name {
-	case "text", "varchar", "citext", "uuid", "numeric", "interval":
+	case "text", "varchar", "citext", "uuid", "numeric":
 		if !cm.nullable {
 			return msg.Get(fd).String()
 		}
@@ -63,6 +64,20 @@ func bindColumnValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) an
 			return sql.NullString{Valid: true, String: msg.Get(fd).String()}
 		}
 		return sql.NullString{}
+
+	case "interval":
+		// Split out of the string arm above, where it silently did the wrong
+		// thing once the wire type became a message: msg.Get(fd).String() on a
+		// message field returns its debug rendering, and pgx would have sent
+		// that text to an INTERVAL column.
+		//
+		// An absent field binds an invalid pgtype.Interval, which is SQL NULL.
+		// That is distinct from a present '0 seconds', which a NOT NULL column
+		// can legitimately hold.
+		if !msg.Has(fd) {
+			return pgtype.Interval{}
+		}
+		return intervalFromProto(msg.Get(fd).Message())
 
 	case "bigint":
 		if !cm.nullable {
@@ -147,6 +162,24 @@ func bindColumnValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) an
 
 	// Fallback.
 	return msg.Get(fd).Interface()
+}
+
+// intervalFromProto reads the three components back out of a dynamic
+// atlantis.common.v1.Interval message. The mirror of setIntervalField in
+// scan.go, and dynamic for the same reason.
+func intervalFromProto(sub protoreflect.Message) pgtype.Interval {
+	out := pgtype.Interval{Valid: true}
+	d := sub.Descriptor()
+	if f := d.Fields().ByName("months"); f != nil {
+		out.Months = int32(sub.Get(f).Int())
+	}
+	if f := d.Fields().ByName("days"); f != nil {
+		out.Days = int32(sub.Get(f).Int())
+	}
+	if f := d.Fields().ByName("microseconds"); f != nil {
+		out.Microseconds = sub.Get(f).Int()
+	}
+	return out
 }
 
 // bindPKValue uses the non-nullable path (PKs are always NOT NULL).

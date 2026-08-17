@@ -9,27 +9,33 @@ import (
 
 // The exact call sequence the emitter generates, compiled.
 //
-// # Why this file exists
+// # This file is no longer the primary check
 //
-// Nothing compiles a generated server. The emitter tests call `parseAsGo`,
-// which parses and does not typecheck, and the generated code imports a
-// caller's `atlantis-go` protobuf package that is not a dependency of this
-// module — so CI never builds any of it.
+// It was written when nothing compiled a generated server: the emitter tests
+// call `parseAsGo`, which parses without type-checking, and the emitted code
+// imported a pb path that resolved in no module. A review shipped a change
+// where `runtime.CallerPartition` returned `(any, error)` and
+// `queryresult.Hash` took a `string`, and every generated server for a
+// partitioned entity failed to compile in the caller's repository while this
+// suite stayed green — the emitter test asserted the broken text as correct.
 //
-// A review shipped an emitter change where `runtime.CallerPartition` returns
-// `(any, error)` and `queryresult.Hash` takes a `string`. Every generated
-// server for a partitioned entity failed to compile in the caller's repository.
-// The whole suite here was green, and the emitter test even asserted the
-// broken text as if it were correct.
+// The real output is now compiled. internal/codegen/compilecheck holds the
+// emitted server for the testdata fixture as an ordinary package, so
+// `go build ./...` type-checks it, and TestEmittersMatchGolden keeps the
+// committed copy identical to what the emitter produces. That is the substitute
+// this comment used to say did not exist.
 //
-// So the type boundaries the emitter depends on are written out here as real
-// Go. They are never called. If a signature on either side moves, this file
-// stops compiling and the failure lands in THIS repository rather than in a
-// caller's build.
+// # Why it is kept
 //
-// Add a line here whenever the emitter starts calling something new across a
-// package boundary. It is not a substitute for compiling the real output — see
-// the note in partition_emit_test.go — but it catches the shape that broke.
+// The fixture reaches most of the emitter's boundary but not all of it: a
+// schema shape it does not contain is a call this package still does not
+// compile. Snippets here cover those, and cost nothing.
+//
+// It was deliberately not deleted in the same change that introduced its
+// replacement — removing the safety net and the proof at once leaves nothing to
+// fall back on if the new one turns out to have a hole. Prefer extending the
+// fixture over adding lines here; a case the fixture covers is covered by the
+// compiler, which is stronger than a hand-written echo of it.
 
 var _ = func(ctx context.Context) (string, error) {
 	// Emitted at the top of Query<E> for a `partition by` entity.

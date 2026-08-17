@@ -41,10 +41,10 @@ Notes:
 |---|---|---|---|
 | `timestamptz` | `TIMESTAMPTZ` | `google.protobuf.Timestamp` | `*timestamppb.Timestamp` |
 | `date` | `DATE` | `google.protobuf.Timestamp` | `*timestamppb.Timestamp` |
-| `interval` | `INTERVAL` | `google.protobuf.Duration` | `*durationpb.Duration` |
+| `interval` | `INTERVAL` | `atlantis.common.v1.Interval` | `*commonpb.Interval` |
 
 - `date` carries `00:00:00 UTC` as the time-of-day. A caller sending a non-zero time-of-day has the time fraction truncated to midnight on insert.
-- `interval` is lossy in conversion: PostgreSQL stores months, days, and microseconds separately, while `google.protobuf.Duration` is a single nanosecond count. Months are normalized as 30 days; days are normalized as 24 hours. Round-trip-stable for sub-month intervals; not stable across months/years.
+- `interval` round-trips exactly, including months and years. PostgreSQL stores months, days and microseconds as three separate components, and `atlantis.common.v1.Interval` carries the same three unchanged. No conversion happens at the wire boundary, because none is possible there: `1 month` is 28 to 31 days depending on the month it is added to, and `1 day` is 23, 24 or 25 hours across a daylight-saving boundary. A caller that wants a single duration has the date to compute it against; this layer does not.
 
 ## Vectors
 
@@ -86,7 +86,7 @@ Fields are non-nullable by default; declaring `not null` is redundant for `prima
 | `boolean` | `bool` | `*bool` |
 | `varchar(N)`, `text`, `citext`, `uuid`, `numeric(p,s)` | `string` | `*string` |
 | `timestamptz`, `date` | `*timestamppb.Timestamp` | `*timestamppb.Timestamp` (nil = null) |
-| `interval` | `*durationpb.Duration` | `*durationpb.Duration` (nil = null) |
+| `interval` | `*commonpb.Interval` | `*commonpb.Interval` (nil = null) |
 | `jsonb`, `bytea` | `[]byte` | `[]byte` (nil = null) |
 | `vector(N)` | `[]float32` | `[]float32` (nil = null) |
 | `[]T` | `[]T-Go` | `[]T-Go` (nil = null) |

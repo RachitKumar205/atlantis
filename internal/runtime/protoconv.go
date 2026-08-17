@@ -43,6 +43,24 @@ func ProtoToTimePtr(p *timestamppb.Timestamp) *time.Time {
 	return &t
 }
 
+// There is deliberately NO IntervalToProto / ProtoToInterval helper here.
+//
+// Both existed briefly and could not work. A helper has to name a concrete Go
+// type for atlantis.common.v1.Interval, and there is no single one: each
+// generated tree carries its own copy of the message, so this package's
+// commonpb.Interval and an emitted server's are different Go types that will
+// not assign to each other. The compile fixture in internal/codegen/compilecheck
+// reported exactly that, on the first build.
+//
+// The helpers above are safe because timestamppb and sql.NullX come from shared
+// modules — there is one timestamppb.Timestamp. atlantis's own messages have no
+// such guarantee, so codegen constructs them inline in the pb package the
+// emitted file already imports. See coltype.ScanFragments / coltype.BindExpr.
+//
+// The dispatcher has its own pair (setIntervalField / intervalFromProto in
+// internal/server/entity) because it works in dynamicpb and names no generated
+// type at all.
+
 // The generated INSERT / UPDATE handlers receive proto messages where
 // nullable scalars are `*T` (proto3 `optional` semantics). pgx wants
 // `sql.NullX`-shaped values for nullable columns. These helpers turn

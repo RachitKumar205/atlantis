@@ -38,16 +38,17 @@ import (
 // protoKindForATL maps what coltype.ProtoType returns to the descriptor kind
 // the dispatcher must produce for the same column.
 var protoKindForATL = map[string]descriptorpb.FieldDescriptorProto_Type{
-	"int32":                     descriptorpb.FieldDescriptorProto_TYPE_INT32,
-	"int64":                     descriptorpb.FieldDescriptorProto_TYPE_INT64,
-	"float":                     descriptorpb.FieldDescriptorProto_TYPE_FLOAT,
-	"double":                    descriptorpb.FieldDescriptorProto_TYPE_DOUBLE,
-	"string":                    descriptorpb.FieldDescriptorProto_TYPE_STRING,
-	"bool":                      descriptorpb.FieldDescriptorProto_TYPE_BOOL,
-	"bytes":                     descriptorpb.FieldDescriptorProto_TYPE_BYTES,
-	"google.protobuf.Timestamp": descriptorpb.FieldDescriptorProto_TYPE_MESSAGE,
-	"google.protobuf.Duration":  descriptorpb.FieldDescriptorProto_TYPE_MESSAGE,
-	"repeated float":            descriptorpb.FieldDescriptorProto_TYPE_FLOAT,
+	"int32":                       descriptorpb.FieldDescriptorProto_TYPE_INT32,
+	"int64":                       descriptorpb.FieldDescriptorProto_TYPE_INT64,
+	"float":                       descriptorpb.FieldDescriptorProto_TYPE_FLOAT,
+	"double":                      descriptorpb.FieldDescriptorProto_TYPE_DOUBLE,
+	"string":                      descriptorpb.FieldDescriptorProto_TYPE_STRING,
+	"bool":                        descriptorpb.FieldDescriptorProto_TYPE_BOOL,
+	"bytes":                       descriptorpb.FieldDescriptorProto_TYPE_BYTES,
+	"google.protobuf.Timestamp":   descriptorpb.FieldDescriptorProto_TYPE_MESSAGE,
+	"google.protobuf.Duration":    descriptorpb.FieldDescriptorProto_TYPE_MESSAGE,
+	"atlantis.common.v1.Interval": descriptorpb.FieldDescriptorProto_TYPE_MESSAGE,
+	"repeated float":              descriptorpb.FieldDescriptorProto_TYPE_FLOAT,
 }
 
 // samples mirrors the concrete FieldTypes used by the coltype test. Kept here
@@ -80,24 +81,16 @@ func TestDispatcherPublishesTheSameWireTypeAsCodegen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// interval diverges: coltype names google.protobuf.Duration, the
-	// dispatcher publishes TYPE_STRING. This is a KNOWN DEFECT, not a
-	// deliberate design — an earlier version of this comment called it
-	// deliberate, which is exactly how a broken type stays broken.
+	// This map used to hold {"interval": true}, with a comment saying it must
+	// be DELETED rather than extended once interval was settled. It is settled
+	// — every layer now names atlantis.common.v1.Interval — so the entry is
+	// gone and the loop below is exact for every documented type.
 	//
-	// The divergence is not even the whole of it. `interval` does not work on
-	// the codegen side either: emitProtoEntity writes
-	// `google.protobuf.Duration` into the .proto and imports only
-	// timestamp.proto — duration.proto appears nowhere in internal/codegen —
-	// so protoc fails with "google.protobuf.Duration is not defined". coltype
-	// is also split against itself, GoType saying time.Duration while
-	// ScanFragments declares `var v string`.
-	//
-	// Choosing the wire type is a user-facing decision and is tracked
-	// separately. This entry keeps the loop exact for every other type while
-	// the choice is open; it must be DELETED, not extended, when interval is
-	// settled.
-	knownDivergent := map[string]bool{"interval": true}
+	// It stays as an empty map rather than being removed outright because the
+	// next type to diverge should have to ADD itself here and say why, in a
+	// place a reviewer already reads. An empty map is a visible zero; deleting
+	// the variable makes the next divergence look like it needs no explanation.
+	knownDivergent := map[string]bool{}
 
 	seen := map[string]bool{}
 

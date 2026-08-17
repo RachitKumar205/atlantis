@@ -67,10 +67,10 @@ func cmdCodegen(args []string) int {
 		name string
 		fn   func() ([]codegen.GoFile, error)
 	}{
-		{"go server", func() ([]codegen.GoFile, error) { return codegen.EmitGoServer(newIR) }},
+		{"go server", func() ([]codegen.GoFile, error) { return codegen.EmitGoServer(newIR, codegen.GenConfig{}) }},
 		{"go client", func() ([]codegen.GoFile, error) { return codegen.EmitGoClient(newIR, codegen.GenConfig{}) }},
 		{"go keys", func() ([]codegen.GoFile, error) { return codegen.EmitGoCacheKeys(newIR) }},
-		{"go custom server", func() ([]codegen.GoFile, error) { return codegen.EmitCustomServer(newIR) }},
+		{"go custom server", func() ([]codegen.GoFile, error) { return codegen.EmitCustomServer(newIR, codegen.GenConfig{}) }},
 		{"go custom client", func() ([]codegen.GoFile, error) { return codegen.EmitCustomClient(newIR, codegen.GenConfig{}) }},
 		{"go jobs handlers", func() ([]codegen.GoFile, error) { return codegen.EmitJobsHandlers(newIR) }},
 		{"go workflows", func() ([]codegen.GoFile, error) { return codegen.EmitWorkflows(newIR) }},

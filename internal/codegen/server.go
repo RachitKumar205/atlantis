@@ -56,7 +56,7 @@ type EmittedGoServer struct {
 // `entityserver "github.com/rachitkumar205/atlantis/gen/go/server"` and calls
 // `entityserver.Register(srv, entityserver.ServerDeps{...})` — that line
 // never changes.
-func EmitGoServer(newIR *dsl.IR) ([]GoFile, error) {
+func EmitGoServer(newIR *dsl.IR, cfg GenConfig) ([]GoFile, error) {
 	if newIR == nil {
 		return nil, fmt.Errorf("EmitGoServer: newIR is required")
 	}
@@ -64,13 +64,13 @@ func EmitGoServer(newIR *dsl.IR) ([]GoFile, error) {
 	var out []GoFile
 	for i := range newIR.Entities {
 		e := &newIR.Entities[i]
-		f, err := emitGoServerEntity(e, inboundByEntity[e.ID()])
+		f, err := emitGoServerEntity(e, inboundByEntity[e.ID()], cfg)
 		if err != nil {
 			return nil, fmt.Errorf("entity %s: %w", e.ID(), err)
 		}
 		out = append(out, f)
 	}
-	out = append(out, emitGoServerRegister(newIR))
+	out = append(out, emitGoServerRegister(newIR, cfg))
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
 }
@@ -90,7 +90,7 @@ func EmitGoServer(newIR *dsl.IR) ([]GoFile, error) {
 // stays short. Every emitted New<Entity>Server takes the same four
 // arguments, so the aggregator can hand each one ServerDeps's fields
 // without per-entity wiring.
-func emitGoServerRegister(newIR *dsl.IR) GoFile {
+func emitGoServerRegister(newIR *dsl.IR, cfg GenConfig) GoFile {
 	// Group entities by namespace so the import block lists each
 	// namespace once and method calls cluster by namespace for diff
 	// stability.
@@ -122,8 +122,8 @@ func emitGoServerRegister(newIR *dsl.IR) GoFile {
 	b.WriteString("\t\"github.com/rachitkumar205/atlantis/internal/runtime\"\n\n")
 	for _, ns := range namespaces {
 		gn := goNamespace(ns)
-		fmt.Fprintf(&b, "\t%s \"github.com/rachitkumar205/atlantis/gen/go/server/%s\"\n", gn, gn)
-		fmt.Fprintf(&b, "\tpb%s \"github.com/rachitkumar205/atlantis-go/pb/atlantis/%s/v1\"\n", gn, gn)
+		fmt.Fprintf(&b, "\t%s %q\n", gn, cfg.serverPkgPrefix()+"/"+gn)
+		fmt.Fprintf(&b, "\tpb%s %q\n", gn, cfg.serverPBPrefix()+"/atlantis/"+gn+"/v1")
 	}
 	b.WriteString(")\n\n")
 
@@ -186,7 +186,7 @@ func namespacesWithCustom(ir *dsl.IR) []string {
 	return out
 }
 
-func emitGoServerEntity(e *dsl.Entity, inbound []inboundRef) (GoFile, error) {
+func emitGoServerEntity(e *dsl.Entity, inbound []inboundRef, cfg GenConfig) (GoFile, error) {
 	spec, err := buildPKSpec(e)
 	if err != nil {
 		return GoFile{}, err
@@ -218,11 +218,17 @@ func emitGoServerEntity(e *dsl.Entity, inbound []inboundRef) (GoFile, error) {
 	if e.HasVectorField() {
 		b.WriteString("\tpgvector \"github.com/pgvector/pgvector-go\"\n")
 	}
+	// An interval column scans into pgtype.Interval. Conditional for the same
+	// reason pgvector is: an unused import does not compile, and most entities
+	// have neither.
+	if entityHasIntervalField(e) {
+		b.WriteString("\t\"github.com/jackc/pgx/v5/pgtype\"\n")
+	}
 	b.WriteString("\t\"google.golang.org/grpc/codes\"\n")
 	b.WriteString("\t\"google.golang.org/grpc/status\"\n")
 	b.WriteString("\t\"google.golang.org/protobuf/proto\"\n\n")
-	fmt.Fprintf(&b, "\tpb \"github.com/rachitkumar205/atlantis-go/pb/atlantis/%s/v1\"\n", goNamespace(e.Namespace))
-	b.WriteString("\tcommonpb \"github.com/rachitkumar205/atlantis-go/pb/atlantis/common/v1\"\n")
+	fmt.Fprintf(&b, "\tpb %q\n", cfg.serverPBPrefix()+"/atlantis/"+goNamespace(e.Namespace)+"/v1")
+	fmt.Fprintf(&b, "\tcommonpb %q\n", cfg.serverPBPrefix()+"/atlantis/common/v1")
 	b.WriteString("\t\"github.com/rachitkumar205/atlantis/internal/cache/queryresult\"\n")
 	b.WriteString("\t\"github.com/rachitkumar205/atlantis/internal/codegen/query\"\n")
 	b.WriteString("\t\"github.com/rachitkumar205/atlantis/internal/runtime\"\n")

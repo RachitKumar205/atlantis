@@ -154,7 +154,7 @@ query OutfitsForConsumer for SavedOutfit {
   }
 }
 `)
-	files, err := EmitCustomServer(ir)
+	files, err := EmitCustomServer(ir, GenConfig{})
 	if err != nil {
 		t.Fatalf("EmitCustomServer: %v", err)
 	}
@@ -195,7 +195,7 @@ query CountOutfits for Account {
   }
 }
 `)
-	files, _ := EmitCustomServer(ir)
+	files, _ := EmitCustomServer(ir, GenConfig{})
 	c := files[0].Content
 	parseAsGo(t, c)
 	for _, want := range []string{
@@ -223,7 +223,7 @@ procedure DeleteConsumerCascade for Account {
   }
 }
 `)
-	files, err := EmitCustomServer(ir)
+	files, err := EmitCustomServer(ir, GenConfig{})
 	if err != nil {
 		t.Fatalf("EmitCustomServer: %v", err)
 	}
@@ -263,7 +263,7 @@ procedure RawCascade for SavedOutfit {
   }
 }
 `)
-	files, _ := EmitCustomServer(ir)
+	files, _ := EmitCustomServer(ir, GenConfig{})
 	c := files[0].Content
 	parseAsGo(t, c)
 	for _, want := range []string{
@@ -322,7 +322,7 @@ query Sample for Account {
   sql touches(Account) { SELECT id FROM consumer_account WHERE id = $x }
 }
 `)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	var reg string
 	for _, f := range files {
 		if f.Path == "gen/go/server/register.go" {
@@ -436,7 +436,7 @@ query VectorSearch for vendor.ProductVariant {
   }
 }
 `)
-	files, err := EmitCustomServer(ir)
+	files, err := EmitCustomServer(ir, GenConfig{})
 	if err != nil {
 		t.Fatalf("EmitCustomServer: %v", err)
 	}
@@ -479,7 +479,7 @@ query VectorFetch for vendor.ProductVariant {
   }
 }
 `)
-	files, _ := EmitCustomServer(ir)
+	files, _ := EmitCustomServer(ir, GenConfig{})
 	var c string
 	for _, f := range files {
 		if strings.HasSuffix(f.Path, "/vendorpkg/custom_server.go") {
@@ -517,7 +517,7 @@ query VariantIDs for vendor.ProductVariant {
   }
 }
 `)
-	files, _ := EmitCustomServer(ir)
+	files, _ := EmitCustomServer(ir, GenConfig{})
 	var c string
 	for _, f := range files {
 		if strings.HasSuffix(f.Path, "/vendorpkg/custom_server.go") {
@@ -556,7 +556,7 @@ query OutfitsForConsumer for SavedOutfit {
   }
 }
 `)
-	files, _ := EmitCustomServer(ir)
+	files, _ := EmitCustomServer(ir, GenConfig{})
 	c := files[0].Content
 	parseAsGo(t, c)
 	if strings.Contains(c, "pgvector") {

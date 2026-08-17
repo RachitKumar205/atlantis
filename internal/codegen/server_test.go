@@ -46,7 +46,7 @@ entity Account in consumer {
   email text not null unique
 }
 `)
-	files, err := EmitGoServer(ir)
+	files, err := EmitGoServer(ir, GenConfig{})
 	if err != nil {
 		t.Fatalf("EmitGoServer: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestEmitGoServer_PathFormat(t *testing.T) {
 	// Mirrors the proto layout so consumer.CartItem and vendorpkg.CartItem land in
 	// different Go packages instead of colliding on the same flat name.
 	ir := lower(t, `entity SavedOutfit in consumer { id bigint primary }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	if files[0].Path != "gen/go/server/consumer/saved_outfit_server.go" {
 		t.Errorf("path: %s", files[0].Path)
 	}
@@ -73,7 +73,7 @@ func TestEmitGoServer_PathFormat(t *testing.T) {
 
 func TestEmitGoServer_PackageHeader(t *testing.T) {
 	ir := lower(t, `entity Account in consumer { id bigint primary }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	// `package consumer`, not `package server` — per the per-namespace
 	// layout. Vendor entities would be `package vendor`.
 	assertContains(t, entityServerFile(t, files), "package consumer")
@@ -84,7 +84,7 @@ func TestEmitGoServer_EmitsAllSixCoreMethods(t *testing.T) {
 	// Method names match the buf-generated XxxServiceServer interface
 	// (verb + entity, e.g. GetAccount, not Get + Server-typed Get).
 	ir := lower(t, `entity A in x { id bigint primary  v text }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 	for _, sig := range []string{
 		"func (s *AServer) GetA(",
@@ -103,7 +103,7 @@ func TestEmitGoServer_NativeProtoSignatures(t *testing.T) {
 	// This is the load-bearing assertion: the handler IS the
 	// buf-generated service interface; no adapter shim.
 	ir := lower(t, `entity Account in consumer { id bigint primary  email text not null }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 	for _, sig := range []string{
 		"GetAccount(ctx context.Context, req *pb.GetAccountRequest) (*pb.GetAccountResponse, error)",
@@ -122,7 +122,7 @@ func TestEmitGoServer_InterfaceSatisfactionAssertion(t *testing.T) {
 	// line is what catches a handler-signature drift at `go build` time
 	// — way before a real RPC is ever issued. The assert is the cheapest place to catch a generator/proto drift.
 	ir := lower(t, `entity Account in consumer { id bigint primary  email text not null }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	assertContains(t, entityServerFile(t, files), "var _ pb.AccountServiceServer = (*AccountServer)(nil)")
 }
 
@@ -131,7 +131,7 @@ func TestEmitGoServer_EmbedsUnimplementedServer(t *testing.T) {
 	// AccountServiceServer interface requires the embed. Without it,
 	// adding a new RPC to the .proto would break every existing server.
 	ir := lower(t, `entity Account in consumer { id bigint primary }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	assertContains(t, entityServerFile(t, files), "pb.UnimplementedAccountServiceServer")
 }
 
@@ -140,13 +140,13 @@ func TestEmitGoServer_NoLegacyRowStruct(t *testing.T) {
 	// canonical row type. A stray `type AccountRow struct` would signal
 	// a partial revert.
 	ir := lower(t, `entity Account in consumer { id bigint primary }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	assertNotContains(t, entityServerFile(t, files), "type AccountRow struct")
 }
 
 func TestEmitGoServer_BakedSQLStatements(t *testing.T) {
 	ir := lower(t, `entity Account in consumer { id bigint primary  email text not null }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 	// SQL constants are baked into the emitter and don't depend on the proto-typed I/O layer.
 	// Identifiers are
@@ -175,7 +175,7 @@ entity Thing in consumer {
   paid_at       timestamptz
 }
 `)
-	files, err := EmitGoServer(ir)
+	files, err := EmitGoServer(ir, GenConfig{})
 	if err != nil {
 		t.Fatalf("EmitGoServer: %v", err)
 	}
@@ -205,7 +205,7 @@ entity Thing in consumer {
   created_at  timestamptz not null default now()
 }
 `)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 
 	// Bind expressions for every NOT-NULL-WITH-DEFAULT field should use the
@@ -220,7 +220,7 @@ func TestEmitGoServer_InsertNoDefaultColumnsUnchanged(t *testing.T) {
 	// Regression: entities with zero default columns should emit the
 	// original plain $N placeholder shape — no COALESCE wrapping.
 	ir := lower(t, `entity Plain in consumer { id bigint primary  name text not null }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 	assertContains(t, c, `VALUES ($1, $2) RETURNING`)
 	if strings.Contains(c, "COALESCE(") {
@@ -234,7 +234,7 @@ func TestEmitGoServer_ScanIntoAndBindForHelpers(t *testing.T) {
 	// the three SELECT-shape variants; bindFor<E>Insert + bindFor<E>Update
 	// for the two write-shape variants.
 	ir := lower(t, `entity Account in consumer { id bigint primary  email text not null }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 	for _, sig := range []string{
 		"func scanIntoAccount(src interface{ Scan(dest ...any) error }, out *pb.Account) error",
@@ -261,7 +261,7 @@ func TestEmitGoServer_ScanIntoNullableFields(t *testing.T) {
   alias text
   age   int
 }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 	for _, sub := range []string{
 		"var emailLocal string",                             // not null → bare string
@@ -282,7 +282,7 @@ func TestEmitGoServer_BindForNullableFields(t *testing.T) {
   alias text
   age   int
 }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 	// Required string field reads via getter (returns "" if absent).
 	assertContains(t, c, "in.GetEmail()")
@@ -300,7 +300,7 @@ func TestEmitGoServer_TimestampHandling(t *testing.T) {
   created_at timestamptz not null
   deleted_at timestamptz
 }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 	assertContains(t, c, "var createdAtLocal time.Time")
 	assertContains(t, c, "out.CreatedAt = runtime.TimeToProto(createdAtLocal)")
@@ -316,7 +316,7 @@ func TestEmitGoServer_VectorHandling(t *testing.T) {
   id  bigint primary
   vec vector(8)
 }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 	assertContains(t, c, "pgvector \"github.com/pgvector/pgvector-go\"")
 	assertContains(t, c, "var vecLocal *pgvector.Vector")
@@ -328,7 +328,7 @@ func TestEmitGoServer_NoPgvectorImportWithoutVectorField(t *testing.T) {
 	// Entities without a vector field shouldn't pull the pgvector dep
 	// into their generated file.
 	ir := lower(t, `entity A in x { id bigint primary  email text not null }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	assertNotContains(t, entityServerFile(t, files), "github.com/pgvector/pgvector-go")
 }
 
@@ -340,7 +340,7 @@ entity ProductVariant in vendor {
   index hnsw on search_vec ops cosine
 }
 `)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 	parseAsGo(t, c)
 
@@ -361,14 +361,14 @@ func TestEmitGoServer_OtherVectorOps(t *testing.T) {
 	}
 	for ops, op := range cases {
 		ir := lower(t, "entity P in x { id bigint primary  v vector(8)  index hnsw on v ops "+ops+" }")
-		files, _ := EmitGoServer(ir)
+		files, _ := EmitGoServer(ir, GenConfig{})
 		assertContains(t, entityServerFile(t, files), `"v" `+op+" $1::vector")
 	}
 }
 
 func TestEmitGoServer_NoVectorSearchWithoutHNSW(t *testing.T) {
 	ir := lower(t, `entity A in x { id bigint primary  v vector(8) }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 	// No HNSW index → no search method emitted.
 	assertNotContains(t, c, "SearchA")
@@ -376,13 +376,13 @@ func TestEmitGoServer_NoVectorSearchWithoutHNSW(t *testing.T) {
 
 func TestEmitGoServer_CustomQueryTimeout(t *testing.T) {
 	ir := lower(t, `entity A in x { id bigint primary  query_timeout = 30s }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	assertContains(t, entityServerFile(t, files), "const aQueryTimeoutMS = 30000")
 }
 
 func TestEmitGoServer_DefaultQueryTimeout(t *testing.T) {
 	ir := lower(t, `entity A in x { id bigint primary }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	assertContains(t, entityServerFile(t, files), "const aQueryTimeoutMS = 2000")
 }
 
@@ -393,7 +393,7 @@ func TestEmitGoServer_DefaultQueryTimeout(t *testing.T) {
 // Removing this shim later is one emitter delete.
 func TestEmitGoServer_GetWrapsQuery(t *testing.T) {
 	ir := lower(t, `entity Account in consumer { id varchar(15) primary  email text not null }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 
 	// Wrapper body constructs the typed filter on the PK column,
@@ -436,7 +436,7 @@ func TestEmitGoServer_GetWrapsQuery(t *testing.T) {
 // move to keyset without leaving the legacy RPC entirely.
 func TestEmitGoServer_ListRejectsOffset(t *testing.T) {
 	ir := lower(t, `entity Account in consumer { id varchar(15) primary  email text not null }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 
 	for _, sub := range []string{
@@ -460,7 +460,7 @@ func TestEmitGoServer_ListRejectsOffset(t *testing.T) {
 // types route through predicateListGoName to the matching wrapper.
 func TestEmitGoServer_BatchGetCappedAt200(t *testing.T) {
 	ir := lower(t, `entity Account in consumer { id varchar(15) primary  email text not null }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 
 	for _, sub := range []string{
@@ -483,7 +483,7 @@ func TestEmitGoServer_BatchGetCappedAt200(t *testing.T) {
 // arrives.
 func TestEmitGoServer_BatchGetFallsBackForUnsupportedPK(t *testing.T) {
 	ir := lower(t, `entity Snapshot in x { taken_at timestamptz primary  payload bytea }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 
 	// Fallback emits the direct-PG ANY($1) form on sqlBatchGet rather
@@ -498,7 +498,7 @@ func TestEmitGoServer_BatchGetFallsBackForUnsupportedPK(t *testing.T) {
 
 func TestEmitGoServer_CacheAndOutboxWiring(t *testing.T) {
 	ir := lower(t, `entity A in x { id bigint primary  v text }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 
 	// Constructor takes the four runtime dependencies; QueryCache is the
@@ -535,10 +535,10 @@ entity A in x { id bigint primary  v text  vec vector(16)  index hnsw on vec ops
 entity B in y { id bigint primary  ref bigint references x.A.id }
 `
 	ir1 := lower(t, src)
-	files1, _ := EmitGoServer(ir1)
+	files1, _ := EmitGoServer(ir1, GenConfig{})
 
 	ir2 := lower(t, src)
-	files2, _ := EmitGoServer(ir2)
+	files2, _ := EmitGoServer(ir2, GenConfig{})
 
 	if len(files1) != len(files2) {
 		t.Fatalf("file count mismatch")
@@ -561,7 +561,7 @@ hypertable Purchase in vendor on purchased_at {
   purchased_at timestamptz not null
 }
 `)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	// 2 = the hypertable's entity file + register.go aggregator.
 	if len(files) != 2 {
 		t.Fatalf("want 2 files (entity + register.go), got %d", len(files))
@@ -584,7 +584,7 @@ entity CartItem in consumer {
   primary by cart_id, variant_id
 }
 `)
-	files, err := EmitGoServer(ir)
+	files, err := EmitGoServer(ir, GenConfig{})
 	if err != nil {
 		t.Fatalf("EmitGoServer: %v", err)
 	}
@@ -643,8 +643,8 @@ entity CartItem in consumer {
   primary by cart_id, variant_id
 }
 `
-	a, _ := EmitGoServer(lower(t, src))
-	b, _ := EmitGoServer(lower(t, src))
+	a, _ := EmitGoServer(lower(t, src), GenConfig{})
+	b, _ := EmitGoServer(lower(t, src), GenConfig{})
 	if len(a) != len(b) || a[0].Content != b[0].Content {
 		t.Fatalf("composite-PK handler emission is not deterministic across runs")
 	}
@@ -666,7 +666,7 @@ entity CartItem in consumer {
   primary by cart_id, variant_id
 }
 `)
-	files, err := EmitGoServer(ir)
+	files, err := EmitGoServer(ir, GenConfig{})
 	if err != nil {
 		t.Fatalf("EmitGoServer: %v", err)
 	}
@@ -703,13 +703,16 @@ entity CartItem in consumer {
 	// for the buf-generated proto. Avoids collision with arbitrary
 	// namespace names.
 	assertContains(t, reg, `consumer "github.com/rachitkumar205/atlantis/gen/go/server/consumer"`)
-	assertContains(t, reg, `pbconsumer "github.com/rachitkumar205/atlantis-go/pb/atlantis/consumer/v1"`)
+	// The repo's own pb path, not atlantis-go. The server compiles only inside
+	// this module — it imports internal/ — so the import has to resolve here,
+	// and atlantis-go is in neither go.mod nor go.sum.
+	assertContains(t, reg, `pbconsumer "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/consumer/v1"`)
 	// The DSL namespace `vendor` collides with Go's reserved vendor/
 	// directory name, so codegen remaps it to `vendorpkg` for the Go +
 	// proto layer (see goNamespace in proto.go). DSL stays `entity X in
 	// vendor`; SQL table prefix stays `vendor_*`.
 	assertContains(t, reg, `vendorpkg "github.com/rachitkumar205/atlantis/gen/go/server/vendorpkg"`)
-	assertContains(t, reg, `pbvendorpkg "github.com/rachitkumar205/atlantis-go/pb/atlantis/vendorpkg/v1"`)
+	assertContains(t, reg, `pbvendorpkg "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/vendorpkg/v1"`)
 
 	// Every entity gets a registration line — single-PK and composite-PK
 	// alike. Order: namespace alphabetical, then entity alphabetical
@@ -722,7 +725,7 @@ entity CartItem in consumer {
 
 func TestEmitGoServer_DoNotEditBanner(t *testing.T) {
 	ir := lower(t, `entity A in x { id bigint primary }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	if !strings.Contains(entityServerFile(t, files), "DO NOT EDIT") {
 		t.Errorf("missing DO NOT EDIT banner")
 	}
@@ -770,7 +773,7 @@ entity Account in consumer {
   age   int
 }
 `)
-	files, err := EmitGoServer(ir)
+	files, err := EmitGoServer(ir, GenConfig{})
 	if err != nil {
 		t.Fatalf("EmitGoServer: %v", err)
 	}
@@ -801,7 +804,7 @@ entity Order in consumer {
   is_open     boolean not null
 }
 `)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 	assertContains(t, c, `"id": {Column: "id", Kind: query.PredicateInt64}`)
 	assertContains(t, c, `"amount": {Column: "amount", Kind: query.PredicateNumeric}`)
@@ -818,7 +821,7 @@ entity Account in consumer {
   soft_delete by deleted_at
 }
 `)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 	// The QueryX handler should inject the soft-delete filter as an extra
 	// predicate. The translator AND-joins extras; caller filter can't
@@ -856,7 +859,7 @@ func TestEmitGoServer_PartitionEmitterStillRendersThePredicate(t *testing.T) {
 	}}}
 	AssignProtoNumbers(nil, ir)
 
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 	// Partition predicate uses $1; caller filter placeholders start at $2.
 	// PartitionKey, not CallerPartition. CallerPartition returns `any`; the
@@ -872,7 +875,7 @@ func TestEmitGoServer_PartitionEmitterStillRendersThePredicate(t *testing.T) {
 
 func TestEmitGoServer_QueryHandlerLimitCap(t *testing.T) {
 	ir := lower(t, `entity A in x { id bigint primary }`)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 	assertContains(t, c, "limit = 100")  // default
 	assertContains(t, c, "limit = 1000") // cap
@@ -888,7 +891,7 @@ entity Address in consumer {
   consumer_id bigint not null references consumer.Account.id
 }
 `)
-	files, err := EmitGoServer(ir)
+	files, err := EmitGoServer(ir, GenConfig{})
 	if err != nil {
 		t.Fatalf("EmitGoServer: %v", err)
 	}
@@ -918,7 +921,7 @@ entity Account in consumer {
   score real
 }
 `)
-	files, _ := EmitGoServer(ir)
+	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
 	// One case arm per orderable field, mapping the typed enum to the
 	// quoted SQL identifier ready for ORDER BY and the keyset predicate.

@@ -14,8 +14,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
-	pb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/library/v1"
-	commonpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/common/v1"
+	pb "github.com/rachitkumar205/atlantis/internal/codegen/compilecheck/pb/atlantis/library/v1"
+	commonpb "github.com/rachitkumar205/atlantis/internal/codegen/compilecheck/pb/atlantis/common/v1"
 	"github.com/rachitkumar205/atlantis/internal/cache/queryresult"
 	"github.com/rachitkumar205/atlantis/internal/codegen/query"
 	"github.com/rachitkumar205/atlantis/internal/runtime"

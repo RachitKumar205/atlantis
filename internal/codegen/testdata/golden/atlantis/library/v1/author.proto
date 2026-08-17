@@ -5,6 +5,7 @@ syntax = "proto3";
 package atlantis.library.v1;
 
 import "google/protobuf/timestamp.proto";
+import "atlantis/common/v1/interval.proto";
 import "google/protobuf/field_mask.proto";
 import "atlantis/common/v1/predicates.proto";
 import "atlantis/library/v1/book.proto";
@@ -14,7 +15,8 @@ message Author {
   string name = 2;
   optional string bio = 3;
   optional double rating = 4;
-  optional google.protobuf.Timestamp created_at = 5;
+  optional atlantis.common.v1.Interval tenure = 5;
+  optional google.protobuf.Timestamp created_at = 6;
   repeated Book included_book_by_author_id = 1001;
 }
 
@@ -55,7 +57,7 @@ message AuthorFilter {
   optional atlantis.common.v1.StringPredicate name = 2;
   optional atlantis.common.v1.StringPredicate bio = 3;
   optional atlantis.common.v1.DoublePredicate rating = 4;
-  optional atlantis.common.v1.TimestampPredicate created_at = 5;
+  optional atlantis.common.v1.TimestampPredicate created_at = 6;
   repeated AuthorFilter and = 100;
   repeated AuthorFilter or = 101;
   optional AuthorFilter not = 102;
@@ -67,7 +69,8 @@ enum AuthorOrderField {
   AUTHOR_ORDER_FIELD_NAME = 2;
   AUTHOR_ORDER_FIELD_BIO = 3;
   AUTHOR_ORDER_FIELD_RATING = 4;
-  AUTHOR_ORDER_FIELD_CREATED_AT = 5;
+  AUTHOR_ORDER_FIELD_TENURE = 5;
+  AUTHOR_ORDER_FIELD_CREATED_AT = 6;
 }
 
 message AuthorOrderBy {

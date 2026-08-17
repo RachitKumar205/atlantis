@@ -6,6 +6,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	pgvector "github.com/pgvector/pgvector-go"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
@@ -70,6 +71,7 @@ const (
 	scanNullFloat
 	scanVector
 	scanNullVector
+	scanInterval
 	scanFloat32Slice
 	scanFloat64Slice
 	scanStringSlice
@@ -159,13 +161,15 @@ func makeScanTarget(cm columnMeta) scanTarget {
 		return scanTarget{ptr: &v, tag: scanNullVector}
 
 	case "interval":
-		// Interval is scanned as string.
-		if !cm.nullable {
-			v := new(string)
-			return scanTarget{ptr: v, tag: scanString}
-		}
-		v := new(sql.NullString)
-		return scanTarget{ptr: v, tag: scanNullString}
+		// pgtype.Interval for both nullabilities — it carries Valid itself.
+		//
+		// This used to scan a string, which was consistent with the descriptor
+		// when that also said string. Now that both name
+		// atlantis.common.v1.Interval, setting a string on a message field
+		// would panic inside protoreflect rather than fail a comparison, so
+		// the two have to move together.
+		v := new(pgtype.Interval)
+		return scanTarget{ptr: v, tag: scanInterval}
 	}
 
 	// Fallback.
@@ -288,6 +292,14 @@ func setProtoFieldFromScan(msg *dynamicpb.Message, fd protoreflect.FieldDescript
 			}
 		}
 
+	case scanInterval:
+		// A NULL interval leaves the field unset, so presence carries nullness
+		// the same way it does for every other nullable column.
+		v := *(st.ptr.(*pgtype.Interval))
+		if v.Valid {
+			setIntervalField(msg, fd, v)
+		}
+
 	case scanVector:
 		v := *(st.ptr.(*pgvector.Vector))
 		sl := v.Slice()
@@ -369,6 +381,31 @@ func setTimestampField(msg *dynamicpb.Message, fd protoreflect.FieldDescriptor, 
 	msg.Set(fd, protoreflect.ValueOfMessage(sub))
 }
 
+// setIntervalField writes the three components of a Postgres interval into the
+// atlantis.common.v1.Interval sub-message, unmodified.
+//
+// Built field-by-field through protoreflect rather than by constructing a
+// commonpb.Interval, because the dispatcher's descriptors are built at run time
+// and its messages are dynamicpb — the generated struct is a different type
+// from the one this field expects.
+func setIntervalField(msg *dynamicpb.Message, fd protoreflect.FieldDescriptor, iv pgtype.Interval) {
+	subMsgDesc := fd.Message()
+	if subMsgDesc == nil {
+		return
+	}
+	sub := dynamicpb.NewMessage(subMsgDesc)
+	if f := subMsgDesc.Fields().ByName("months"); f != nil {
+		sub.Set(f, protoreflect.ValueOfInt32(iv.Months))
+	}
+	if f := subMsgDesc.Fields().ByName("days"); f != nil {
+		sub.Set(f, protoreflect.ValueOfInt32(iv.Days))
+	}
+	if f := subMsgDesc.Fields().ByName("microseconds"); f != nil {
+		sub.Set(f, protoreflect.ValueOfInt64(iv.Microseconds))
+	}
+	msg.Set(fd, protoreflect.ValueOfMessage(sub))
+}
+
 // setRepeatedFloat32 appends float32 values to a repeated float field.
 func setRepeatedFloat32(msg *dynamicpb.Message, fd protoreflect.FieldDescriptor, vals []float32) {
 	list := msg.Mutable(fd).List()
@@ -406,8 +443,23 @@ func protoValueForCursor(msg *dynamicpb.Message, fd protoreflect.FieldDescriptor
 	}
 	t := cm.field.Type
 	switch t.Name {
-	case "text", "varchar", "citext", "uuid", "numeric", "interval":
+	case "text", "varchar", "citext", "uuid", "numeric":
 		return msg.Get(fd).String()
+	case "interval":
+		// Not a cursor coordinate. `interval` is orderable in SQL, but its
+		// wire form is now a message and EncodePageToken has no arm for one —
+		// it would return "unsupported cursor type", failing the request that
+		// tried to page on it rather than issuing a token nothing can decode.
+		//
+		// Returning nil here would be worse: the null arm encodes fine, so the
+		// page would advance past a coordinate that means "no interval" and
+		// silently skip rows. Falling through to the unsupported-type error is
+		// the loud option, and the one that names the real limitation.
+		//
+		// Ordering by an interval column still works; only paging on one is
+		// refused. Making it pageable needs an Interval arm in the page token,
+		// which is a wire change and its own decision.
+		return msg.Get(fd).Interface()
 	case "bigint":
 		return msg.Get(fd).Int()
 	case "int", "smallint":

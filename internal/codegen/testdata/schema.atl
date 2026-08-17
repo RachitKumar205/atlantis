@@ -12,6 +12,9 @@
 //     boundary WITH CHECK
 //   - a foreign key into the other entity, which drives the include slots
 //   - `ttl_field`, which the sweeper reads
+//   - `interval`, deliberately: it is the type whose emitted code did not
+//     compile, so a fixture without it would leave the compile check blind to
+//     the one case it was built for
 //
 // Adding a field here changes the golden files. That is the point: the diff is
 // the review. Regenerate with `go test ./internal/codegen -run Golden -update`.
@@ -21,6 +24,7 @@ entity Author in library {
   name       text not null
   bio        text
   rating     double
+  tenure     interval
   created_at timestamptz not null default now()
 }
 

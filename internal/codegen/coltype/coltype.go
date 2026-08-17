@@ -46,7 +46,17 @@ func GoType(t dsl.FieldType, notNull bool) string {
 	case "timestamptz", "date":
 		base = "time.Time"
 	case "interval":
-		base = "time.Duration"
+		// The scan-side type, which is what this function returns (the docs
+		// page's Go column describes the proto-generated type instead).
+		// pgtype.Interval is the only Go shape that holds a Postgres interval
+		// without converting between months, days and microseconds — see
+		// runtime.IntervalToProto for why that conversion cannot be done here.
+		//
+		// This used to say time.Duration while ScanFragments declared a
+		// `string`, so the two halves of the same column disagreed and the
+		// generated code did not compile. Nothing noticed, because nothing
+		// compiled it.
+		base = "pgtype.Interval"
 	case "uuid":
 		base = "string"
 	case "bytea":
@@ -61,7 +71,11 @@ func GoType(t dsl.FieldType, notNull bool) string {
 		base = "any"
 	}
 	switch base {
-	case "[]byte", "[]float32":
+	// pgtype.Interval joins the naturally-nullable shapes for the same reason
+	// []byte does: it carries its own Valid flag, so a pointer would put a
+	// second, redundant absence signal in front of one that already exists —
+	// and two ways to say "absent" is two ways to disagree.
+	case "[]byte", "[]float32", "pgtype.Interval":
 		return base
 	}
 	if !notNull {
@@ -104,7 +118,10 @@ func ProtoType(t dsl.FieldType) (string, error) {
 		// boundary; the server converts to Postgres `date` on read/write.
 		return "google.protobuf.Timestamp", nil
 	case "interval":
-		return "google.protobuf.Duration", nil
+		// Not google.protobuf.Duration. Duration is one magnitude (seconds +
+		// nanos); a Postgres interval is three, and collapsing them needs a
+		// calendar this layer does not have. See atlantis/common/v1/interval.proto.
+		return "atlantis.common.v1.Interval", nil
 	case "uuid":
 		return "string", nil
 	case "bytea":
@@ -211,15 +228,31 @@ func ScanFragments(t dsl.FieldType, notNull bool, local, protoField string) (dec
 	}`, local, protoField, local)
 		}
 	case "interval":
-		// Postgres INTERVAL has no native pgx Go type; rendered as text
-		// and parsed in the caller.
-		if notNull {
-			decl = fmt.Sprintf("var %s string", local)
-			assign = fmt.Sprintf("%s = %s", protoField, local)
-		} else {
-			decl = fmt.Sprintf("var %s sql.NullString", local)
-			assign = fmt.Sprintf("%s = runtime.StringPtrFromNull(%s)", protoField, local)
-		}
+		// One declaration for both nullabilities, because pgtype.Interval
+		// carries Valid itself and IntervalToProto returns nil for an invalid
+		// one — so the NULL case needs no separate shape.
+		//
+		// The previous version claimed "Postgres INTERVAL has no native pgx Go
+		// type". pgx v5 has pgtype.Interval, with exactly the three components
+		// Postgres stores. The old text form also assigned a `string` to a
+		// proto field the emitter declared as a message, which is why an
+		// entity with an interval column emitted code that did not compile.
+		//
+		// The message is constructed INLINE rather than by a runtime helper,
+		// and that is not a style choice. A helper would have to name a
+		// concrete Go type for atlantis.common.v1.Interval, and there is no
+		// single one: every generated tree has its own copy of the message, so
+		// runtime's commonpb.Interval and the emitted server's are different
+		// Go types that will not assign to each other. The compile fixture
+		// caught exactly that. Well-known types like timestamppb are safe
+		// because there is one of them; atlantis's own messages are not.
+		//
+		// Writing the fields here keeps the emitted code in terms of the pb
+		// package it already imports.
+		decl = fmt.Sprintf("var %s pgtype.Interval", local)
+		assign = fmt.Sprintf(`if %s.Valid {
+		%s = &commonpb.Interval{Months: %s.Months, Days: %s.Days, Microseconds: %s.Microseconds}
+	}`, local, protoField, local, local, local)
 	case "bytea", "jsonb":
 		decl = fmt.Sprintf("var %s []byte", local)
 		assign = fmt.Sprintf("%s = %s", protoField, local)
@@ -294,10 +327,18 @@ func BindExpr(t dsl.FieldType, notNull bool, protoGetter, protoFieldPtr string) 
 		}
 		return "runtime.ProtoToTimePtr(" + protoFieldPtr + ")"
 	case "interval":
-		if notNull {
-			return protoGetter
-		}
-		return "runtime.NullableString(" + protoFieldPtr + ")"
+		// Constructed inline for the same reason the scan side is: a runtime
+		// helper cannot take atlantis.common.v1.Interval without naming one
+		// generated copy of it, and the emitted server has its own.
+		//
+		// Valid tracks presence, so a nil message binds SQL NULL while a
+		// present '0 seconds' binds zero — different values, kept different.
+		// `notNull` is unused rather than forgotten: the message's own absence
+		// is the signal at both nullabilities.
+		return fmt.Sprintf(
+			"pgtype.Interval{Months: %s.GetMonths(), Days: %s.GetDays(), "+
+				"Microseconds: %s.GetMicroseconds(), Valid: %s != nil}",
+			protoGetter, protoGetter, protoGetter, protoGetter)
 	case "bytea", "jsonb":
 		return protoGetter
 	case "vector":

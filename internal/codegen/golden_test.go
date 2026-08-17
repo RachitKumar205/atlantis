@@ -70,10 +70,10 @@ func TestEmittersMatchGolden(t *testing.T) {
 		name string
 		fn   func() ([]GoFile, error)
 	}{
-		{"go server", func() ([]GoFile, error) { return EmitGoServer(ir) }},
+		{"go server", func() ([]GoFile, error) { return EmitGoServer(ir, GenConfig{}) }},
 		{"go client", func() ([]GoFile, error) { return EmitGoClient(ir, GenConfig{}) }},
 		{"go keys", func() ([]GoFile, error) { return EmitGoCacheKeys(ir) }},
-		{"go custom server", func() ([]GoFile, error) { return EmitCustomServer(ir) }},
+		{"go custom server", func() ([]GoFile, error) { return EmitCustomServer(ir, GenConfig{}) }},
 		{"go custom client", func() ([]GoFile, error) { return EmitCustomClient(ir, GenConfig{}) }},
 		{"go jobs handlers", func() ([]GoFile, error) { return EmitJobsHandlers(ir) }},
 		{"go workflows", func() ([]GoFile, error) { return EmitWorkflows(ir) }},
@@ -132,8 +132,10 @@ func TestEmittersMatchGolden(t *testing.T) {
 			}
 		}
 		t.Logf("wrote %d golden files; review the diff before committing", len(got))
+		writeCompilecheckServer(t, ir)
 		return
 	}
+	compareCompilecheckServer(t, ir)
 
 	want, err := readGolden(goldenDir)
 	if err != nil {
