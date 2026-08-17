@@ -22,9 +22,9 @@ USER signer
 
 COPY --from=builder /out/atlantis-signer /usr/local/bin/atlantis-signer
 
-# Container-internal port. The compose bundle maps host
-# 127.0.0.1:${SIGNER_PORT:-7071} → 7070; the Makefile self-host-caller-cert
-# target talks to the host-side mapping.
+# Container-internal port. A deployment maps this to a loopback-only host port;
+# the CA key is behind it, so it must never be reachable from a public
+# interface.
 EXPOSE 7070
 
 ENV CA_DIR=/ca-private \

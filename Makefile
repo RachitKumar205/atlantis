@@ -8,15 +8,6 @@ export
 
 PG_URL ?= postgres://atlantis:atlantis@localhost:5432/atlantis?sslmode=disable
 
-# Directory for operator-issued caller certs (gitignored via .dev/).
-# Callers get their cert here; they point tide.yaml at it to reach the
-# self-host stack. Operator runs: make self-host-caller-cert CALLER=<name>
-CALLER_CERT_DIR ?= .dev/caller-certs
-
-# Host port the signer service exposes (127.0.0.1 only).
-# Matches SIGNER_PORT in docker-compose.self-host.yml and .env.
-SIGNER_PORT ?= 7071
-
 # Two migration histories: infra (hand-written) and tidectl (codegen).
 MIGRATIONS_INFRA_DIR := ./migrations/infra
 MIGRATIONS_TIDECTL_DIR := ./.dev/migrations/tidectl
@@ -28,7 +19,7 @@ GOFLAGS ?=
 
 BIN_DIR := ./bin
 
-# Docker image tag and VERSION string for `make image` / `make deploy`.
+# Docker image tag and VERSION string for `make image`.
 # VERSION is passed as --build-arg to the Dockerfile, baked into the binary
 # via -ldflags '-X main.version=...', and emitted on startup. Default is
 # `git describe`, which is a non-semver SHA — `make release-clis-native` rejects
@@ -240,10 +231,10 @@ test-codegen-golden: ## Run codegen golden-file tests
 # this is the first step of any local run — the server, the console and every
 # CLI need certificates.
 #
-# Same script the self-host bundle runs, so a developer's trust setup has the
-# same shape an operator's does. It is incremental: unchanged files are left
-# alone, a missing leaf is reissued without disturbing the CA, and the server
-# cert is reissued when ATLANTIS_DOMAIN stops being covered by it.
+# The same script a deployed stack runs, so a developer's trust setup has the
+# shape the real one does. It is incremental: unchanged files are left alone, a
+# missing leaf is reissued without disturbing the CA, and the server cert is
+# reissued when ATLANTIS_DOMAIN stops being covered by it.
 DEV_CERT_DIR ?= ./certs
 
 .PHONY: dev-certs
@@ -388,93 +379,23 @@ dev-reset-db: ## Drop local schema + both migration history tables + reapply all
 	@echo "==> re-applying migrations..."
 	@$(MAKE) migrate-up
 
-# ---------- deploy ----------
+# ---------- images ----------
 #
-# Single-VM production deploy: the atlantis server runs as a systemd-managed
-# Docker container (deploy/atlantis.service) against host-native Postgres +
-# memcached. The docker run lives in the unit, not here, so the service boots
-# independently of this checkout. See docs/guides/deploy-to-production.md.
-
-.PHONY: self-host-up
-self-host-up: image build-console-image build-signer-image ## Start the self-host bundle (builds 3 images; on first run copies deploy/.env.example to .env — edit PG_PASSWORD and CONSOLE_SESSION_SECRET before exposing 5432/3000 to any untrusted network)
-	@test -f .env || (echo "==> copying deploy/.env.example to .env — fill PG_PASSWORD and CONSOLE_SESSION_SECRET" && cp deploy/.env.example .env)
-	docker compose -f docker-compose.self-host.yml up -d
-
-.PHONY: self-host-down
-self-host-down: ## Tear down the self-hosting bundle (preserves volumes)
-	docker compose -f docker-compose.self-host.yml down
-
-.PHONY: self-host-caller-cert
-self-host-caller-cert: ## Issue a caller mTLS cert via the signer service (stack must be running): make self-host-caller-cert CALLER=<name>
-	@test -n "$(CALLER)" || { \
-	  echo "Usage:   make self-host-caller-cert CALLER=<name>"; \
-	  echo "Example: make self-host-caller-cert CALLER=backend"; \
-	  exit 1; \
-	}
-	@which openssl >/dev/null 2>&1 || (echo "openssl not found"; exit 1)
-	@which curl    >/dev/null 2>&1 || (echo "curl not found"; exit 1)
-	@which python3 >/dev/null 2>&1 || (echo "python3 not found"; exit 1)
-	@mkdir -p "$(abspath $(CALLER_CERT_DIR)/$(CALLER))"
-	@# Generate the private key and a CSR on the host machine.
-	@# The private key never leaves the host; only the CSR is sent to the signer.
-	openssl ecparam -genkey -name prime256v1 -noout \
-	  -out "$(abspath $(CALLER_CERT_DIR)/$(CALLER))/client.key"
-	openssl req -new \
-	  -key "$(abspath $(CALLER_CERT_DIR)/$(CALLER))/client.key" \
-	  -subj '/CN=$(CALLER)' \
-	  -out "$(abspath $(CALLER_CERT_DIR)/$(CALLER))/client.csr"
-	@# POST the CSR to the signer service (exposed at 127.0.0.1:SIGNER_PORT).
-	@# python3 json.dumps encodes the PEM newlines correctly for the JSON body.
-	@CSR_JSON=$$(python3 -c "import json,sys; print(json.dumps(open('$(abspath $(CALLER_CERT_DIR)/$(CALLER))/client.csr').read()))"); \
-	 RESP=$$(curl -sf --max-time 15 -X POST "http://localhost:$(SIGNER_PORT)/issue" \
-	   -H "Content-Type: application/json" \
-	   -d "{\"caller\":\"$(CALLER)\",\"csr_pem\":$$CSR_JSON}" 2>&1) \
-	   || { echo "==> signer request failed. Is the stack running?  make self-host-up"; \
-	        echo "    Response: $$RESP"; exit 1; }; \
-	 echo "$$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); \
-	   open('$(abspath $(CALLER_CERT_DIR)/$(CALLER))/client.crt','w').write(d['cert_pem']); \
-	   open('$(abspath $(CALLER_CERT_DIR)/$(CALLER))/ca.crt','w').write(d['ca_pem']); \
-	   print('[certs] issued CN=$(CALLER) · expires',d['expires_at'])"
-	@rm -f "$(abspath $(CALLER_CERT_DIR)/$(CALLER))/client.csr"
-	@chmod 644 "$(abspath $(CALLER_CERT_DIR)/$(CALLER))/client.crt" \
-	            "$(abspath $(CALLER_CERT_DIR)/$(CALLER))/ca.crt"
-	@chmod 600 "$(abspath $(CALLER_CERT_DIR)/$(CALLER))/client.key"
-	@echo ""
-	@echo "==> $(CALLER_CERT_DIR)/$(CALLER)/"
-	@echo "    client.crt  signed leaf   (CN=$(CALLER))"
-	@echo "    client.key  private key   (keep secret)"
-	@echo "    ca.crt      trust anchor"
-	@echo ""
-	@echo "tide.yaml:"
-	@echo "  caller:   $(CALLER)"
-	@echo "  endpoint: localhost:9090"
-	@echo "  tls:"
-	@printf "    cert: %s/client.crt\n" "$(abspath $(CALLER_CERT_DIR)/$(CALLER))"
-	@printf "    key:  %s/client.key\n" "$(abspath $(CALLER_CERT_DIR)/$(CALLER))"
-	@printf "    ca:   %s/ca.crt\n" "$(abspath $(CALLER_CERT_DIR)/$(CALLER))"
-
-.PHONY: self-host-logs
-self-host-logs: ## Tail logs from the self-hosting bundle
-	docker compose -f docker-compose.self-host.yml logs -f
+# atlantis is a managed cloud product. It is not shipped as a bundle anyone
+# else runs, so there are no self-host targets here — the compose file, the
+# systemd unit, the reverse-proxy configs and their env template are gone.
+#
+# What remains is image building, which the platform needs to deploy a stack.
+# For local certificates use `make dev-certs` and `make dev-caller-cert`; the
+# signer service issues them in a deployed stack.
 
 .PHONY: image
 image: ## Build the production image, version-stamped from git
 	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE) .
 
-.PHONY: deploy
-deploy: image ## Rebuild the image and restart the atlantis service (run git pull first)
-	sudo systemctl restart atlantis
-	@echo "==> deployed $(IMAGE) ($(VERSION))"
-
-.PHONY: systemd-install
-systemd-install: ## Install/refresh the systemd unit, then enable + start
-	sudo install -m 0644 deploy/atlantis.service /etc/systemd/system/atlantis.service
-	sudo systemctl daemon-reload
-	sudo systemctl enable --now atlantis
-
-.PHONY: logs
-logs: ## Tail the atlantis service logs (journald)
-	journalctl -u atlantis -f
+# `deploy`, `systemd-install` and `logs` are gone with the systemd unit they
+# managed. A stack is deployed by the platform, not by `sudo systemctl restart`
+# on the machine that happens to hold this checkout.
 
 # ---------- lint / quality ----------
 

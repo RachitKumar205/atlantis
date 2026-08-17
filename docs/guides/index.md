@@ -12,5 +12,4 @@ Task-oriented recipes.
 - [Recover a dropped table or column](recover-a-dropped-table.md). Removals are parked for 30 days, not dropped. How to get one back.
 - [Set up caller CI](set-up-caller-ci.md). Run `tide plan` on every PR.
 - [Approve a schema change](approve-a-schema-change.md). What happens when a change needs a human, and how to decide it.
-- [Deploy to production](deploy-to-production.md). Checklist for self-hosting.
-- [Run behind a reverse proxy](run-behind-a-reverse-proxy.md). Terminate client mTLS at nginx/Caddy/Envoy and forward verified identity.
+- [Deploy to production](deploy-to-production.md). What a production stack needs and how schema reaches it.

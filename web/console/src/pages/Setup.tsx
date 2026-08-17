@@ -113,9 +113,13 @@ export function Setup() {
 
   const serverHealthy = healthQ.data?.overall === 'ok'
 
-  // Sync the endpoint input with what the BFF reports it dials —
-  // the input is a display aid in self-host mode, not a configuration
-  // surface (the address comes from ATL_ENDPOINT, not the form).
+  // Sync the endpoint input with what the BFF reports it dials. The input is a
+  // readout, not a configuration surface: the address comes from the console's
+  // own environment, and typing here changes nothing.
+  //
+  // That is the whole reason this step is going away. It asks an operator to
+  // verify infrastructure they do not own and cannot repair — see the multi-org
+  // console plan, where provisioning supplies the endpoint and the certificate.
   useEffect(() => {
     if (healthQ.data?.endpoint) setEndpoint(healthQ.data.endpoint)
   }, [healthQ.data?.endpoint])

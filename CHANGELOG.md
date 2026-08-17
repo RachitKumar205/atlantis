@@ -11,6 +11,34 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ## Unreleased
 
+### Removed
+
+#### The self-host bundle — breaking
+
+atlantis is a managed cloud product and is no longer shipped as a bundle to run
+yourself. Gone:
+
+- `docker-compose.self-host.yml` and `deploy/.env.example`
+- `deploy/atlantis.service` (systemd unit) and `deploy/pg-init.sql`
+- `deploy/reverse-proxy/` (nginx, Caddy and Envoy sample configs)
+- `make self-host-up`, `self-host-down`, `self-host-logs`,
+  `self-host-caller-cert`, `deploy`, `systemd-install`, `logs`
+- `docs/guides/run-behind-a-reverse-proxy.md`
+
+**What did not go.** `deploy/init-certs.sh` stays — `make dev-certs` uses it to
+write local mTLS material. `cmd/signer` stays too: it is the only thing that
+issues caller certificates, which a managed atlantis needs more than a
+self-hosted one did. It belongs with provisioning rather than in the product
+repo, and is marked accordingly until that move.
+
+Trusted front-proxy mode (`ATL_TRUSTED_PROXY_CALLERS`) is unaffected — the
+feature is a server capability, and it is now documented in [the configuration
+reference](docs/reference/configuration.md) rather than in a guide whose
+substance was three sample proxy configs.
+
+Local development is unchanged: `make dev-certs`, `make dev-server` (or
+`make dev`), `make dev-console`.
+
 ### Changed
 
 #### mTLS is required everywhere — breaking

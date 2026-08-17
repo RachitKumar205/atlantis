@@ -202,9 +202,9 @@ function CallerCard({
   onManageAliases: () => void
 }) {
   // cert_expires_at is populated whenever a cert is issued through the
-  // console — see `RecordCallerCertExpiry` on the server. Callers that
-  // were minted out-of-band (e.g. `make self-host-caller-cert`) have an
-  // absent value and the meter renders in its "unknown" state.
+  // console — see `RecordCallerCertExpiry` on the server. Callers whose cert
+  // was minted out-of-band (`make dev-caller-cert`, or straight from the
+  // signer) have an absent value and the meter renders in its "unknown" state.
   const certDays = (() => {
     if (!caller.cert_expires_at) return undefined
     const exp = new Date(caller.cert_expires_at).getTime()

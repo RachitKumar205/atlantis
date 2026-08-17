@@ -7,8 +7,8 @@
 -- lets the console render a cert-validity meter without re-asking the
 -- signer on every page load.
 --
--- Out-of-band issuances (e.g. `make self-host-caller-cert` or anything
--- that bypasses the console BFF) won't update this column — the meter
+-- Out-of-band issuances (`make dev-caller-cert`, or anything that reaches the
+-- signer without going through the console BFF) won't update this column — the meter
 -- will then reflect "last issued from here," which is the honest
 -- semantic. A future signer.ListLeaves RPC would replace this with
 -- ground truth.

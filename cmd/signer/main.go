@@ -6,6 +6,23 @@
 // (POST /issue) and returns a signed leaf cert.  The CN in the CSR must
 // match the caller name in the request body, and it must not be on the
 // reserved-CN denylist — those names belong to atlantis infrastructure.
+//
+// # This is platform code living in the product repo
+//
+// It arrived with the self-host bundle, which is gone — the compose file, the
+// systemd unit and the reverse-proxy configs went with it. The signer did not,
+// because it is the only thing that issues caller certificates, and a managed
+// atlantis needs that more than a self-hosted one did: every caller
+// authenticates by client certificate, and the multi-org console needs one
+// certificate per org so a scoping bug is refused at the handshake instead of
+// returning another org's data.
+//
+// It belongs in atlantis-cloud, alongside provisioning and the CA it would
+// serve. It is kept here until that move so the capability is not lost in the
+// gap — deleting it would leave nothing able to issue a caller a certificate.
+//
+// Nothing in the product dials it today: the console's handleIssueCert reaches
+// it through ATL_SIGNER_ADDR, which no deployment now sets.
 package main
 
 import (

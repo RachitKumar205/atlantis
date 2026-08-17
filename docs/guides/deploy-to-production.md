@@ -171,80 +171,17 @@ grpcurl -cacert ca.crt -cert client.crt -key client.key \
 
 A success response returns the current merged schema as JSON. Anything else (TLS handshake failure, no response) indicates a problem; check the server logs.
 
-## Single-VM deploy (systemd + Docker)
+## Terminating TLS at the edge
 
-The steps above are the general flow. For a single VM with **host-native Postgres and memcached**, atlantis runs as a systemd-managed Docker container. The repo ships the unit (`deploy/atlantis.service`) and Makefile targets that reduce the flow to a few commands.
+Keep mTLS terminating **at atlantis** and run any reverse proxy in TCP/L4
+passthrough mode. Caller identity is the client certificate's CN, so a plain
+TLS-terminating proxy strips that certificate and collapses every caller into
+one identity.
 
-**Build the image** (`make image` — version-stamped from `git describe`; see [step 5](#5-ship-the-artifacts)):
-
-```
-make image
-```
-
-**Lay down config and certs** under `/etc/atlantis`. The container runs as uid 10001, so the server key must be readable by that uid:
-
-```
-sudo mkdir -p /etc/atlantis/tls
-# copy ca.crt, server.crt, server.key into /etc/atlantis/tls
-sudo chown 10001:10001 /etc/atlantis/tls/server.key
-sudo chmod 600 /etc/atlantis/tls/server.key
-
-sudo tee /etc/atlantis/atlantis.env > /dev/null <<'EOF'
-# Host-native postgres and memcached on this VM. sslmode=disable is only
-# safe over loopback — switch to require if Postgres ever moves off-host.
-PG_URL=postgres://atlantis:CHANGEME@127.0.0.1:5432/atlantis?sslmode=disable
-MEMCACHED_ADDR=127.0.0.1:11211
-
-# mTLS material. All three required together; server.key must be readable by uid 10001.
-TLS_CERT_FILE=/etc/atlantis/tls/server.crt
-TLS_KEY_FILE=/etc/atlantis/tls/server.key
-TLS_CA_FILE=/etc/atlantis/tls/ca.crt
-
-# true: caller CI runs `tide apply` directly. false: regulated opt-in
-# (SOX/HIPAA/PCI) — see step 6.
-ATL_ALLOW_APPLY_MUTATION=true
-
-# Two replicas racing the same boot-time migration is a real outage; run
-# `tidectl migrate-up` from the deploy pipeline instead.
-AUTO_MIGRATE=false
-
-LOG_LEVEL=info
-EOF
-sudo chmod 600 /etc/atlantis/atlantis.env
-```
-
-That's the minimum. Pool sizing, cache, outbox, and rate limits are all optional overrides — `deploy/.env.example` lists every knob with its default and [the configuration reference](../reference/configuration.md) explains semantics.
-
-**Apply migrations** ([step 7](#7-run-migrations)) with `./tidectl migrate-up` — not `make migrate-up`, whose tidectl path is dev-only. Then install the service:
-
-```
-make systemd-install    # installs the unit, daemon-reload, enable --now
-```
-
-**Verify:**
-
-```
-systemctl status atlantis
-curl -fsS http://127.0.0.1:8081/readyz && echo OK
-make logs               # journalctl -u atlantis -f
-```
-
-**Redeploy** after pulling new code:
-
-```
-git pull
-make deploy             # rebuild image, then sudo systemctl restart atlantis
-```
-
-The unit is self-contained — it runs `docker run` directly rather than shelling out to `make`, so the service boots independently of this checkout:
-
-- `--network host` so the container reaches host-native Postgres/memcached on `127.0.0.1`.
-- `After=postgresql.service memcached.service` to order boot behind its dependencies.
-- `TimeoutStopSec=45` to cover the server's ~30s drain window (15s gRPC stop + 10s outbox drain + 5s health shutdown; see [Shutdown](#shutdown)) before systemd sends `SIGKILL`.
-
-This is single-node only: there's no rolling deploy, so `make deploy` causes a brief gap on restart.
-
-For a public endpoint, the default is to keep mTLS terminating **at atlantis** (the caller identity is the client-cert CN) and run any reverse proxy in TCP/L4 passthrough mode — a plain TLS-terminating proxy would strip the client cert and collapse every caller into one identity. If you need an L7 ingress that terminates TLS, use [trusted front-proxy mode](run-behind-a-reverse-proxy.md): the proxy forwards the verified client cert and the server re-validates it, so per-caller identity is preserved.
+Where an L7 ingress must terminate TLS, `ATL_TRUSTED_PROXY_CALLERS` lets the
+proxy forward the verified client certificate for the origin to re-validate, so
+per-caller identity survives. See [the configuration
+reference](../reference/configuration.md) for the full set.
 
 ## Schema change workflow
 

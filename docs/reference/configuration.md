@@ -72,7 +72,7 @@ Durations use Go syntax (`5m`, `30s`, `1h`, `500ms`).
 |---|---|---|
 | `RATE_LIMIT_DEFAULT_QPS` | `1000` | Token-bucket refill rate per caller without a `RATE_LIMIT_PER_CALLER` entry. |
 | `RATE_LIMIT_BURST` | `200` | Maximum bucket capacity (the largest instantaneous burst allowed before throttling). A caller out of tokens gets `RESOURCE_EXHAUSTED`. |
-| `RATE_LIMIT_PER_CALLER` | (unset) | Comma-separated `caller=qps` overrides. The self-host compose bundle seeds this with `atlantis-console=${CONSOLE_RATE_LIMIT_QPS:-5000}`; setting it via env replaces the seed entirely. |
+| `RATE_LIMIT_PER_CALLER` | (unset) | Comma-separated `caller=qps` overrides, keyed by the caller's certificate CN. The console needs a high one — it fans out many reads per page — so a deployment typically sets `atlantis-console=5000`. |
 | `RATE_LIMIT_SATURATION_CUTOFF` | `0.80` | Pool-saturation threshold. When pgxpool `AcquiredConns/MaxConns` crosses this, the server returns `RESOURCE_EXHAUSTED` on low-priority RPCs (today hard-coded as method names starting with `List` or `Search`; CRUD and Get never shed). Set to `0` to disable shedding entirely — Postgres then becomes your only backpressure. |
 
 `RATE_LIMIT_PER_CALLER` format: `caller1=qps1,caller2=qps2`. Whitespace around tokens is trimmed. Pairs where the QPS does not parse as a positive integer, or where the `caller=` form is malformed, are silently dropped. Check startup logs to confirm the parsed map.
@@ -194,7 +194,11 @@ Drift does not change the plan class or the exit code. See [`tide plan` / `tide 
 
 ## Trusted front proxy
 
-Lets a TLS-terminating reverse proxy (nginx, Caddy, Envoy) forward a verified client certificate to the server, instead of each client connecting over mTLS directly. The server re-validates the forwarded cert against its own client CA and derives caller identity from it. Inert until `ATL_TRUSTED_PROXY_CALLERS` is set, and requires mTLS to be configured. SNI/L4 passthrough is the recommended default; reach for this mode only when the proxy must terminate TLS. See [Run behind a reverse proxy](../guides/run-behind-a-reverse-proxy.md).
+Lets a TLS-terminating reverse proxy (nginx, Caddy, Envoy) forward a verified client certificate to the server, instead of each client connecting over mTLS directly. The server re-validates the forwarded cert against its own client CA and derives caller identity from it. Inert until `ATL_TRUSTED_PROXY_CALLERS` is set.
+
+SNI/L4 passthrough is the recommended default; reach for this mode only when the proxy must terminate TLS. A plain TLS-terminating proxy without it strips the client certificate and collapses every caller into one identity.
+
+The proxy needs a client certificate of its own whose CN appears in `ATL_TRUSTED_PROXY_CALLERS`, carrying `clientAuth` key usage — that is what the origin's re-validation checks for. The CN must not collide with a real caller. One limit: the leaf must be issued directly off the atlantis CA, because forwarding a chain with intermediates is not handled and fails closed.
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -216,7 +220,7 @@ These variables enable the local-development workflow where the server mirrors c
 
 ## Console BFF
 
-Read by `cmd/console`, not the Atlantis server. The self-host compose bundle wires these through `${VAR:-default}` substitutions in `docker-compose.self-host.yml`.
+Read by `cmd/console`, not the Atlantis server.
 
 | Variable | Default | Notes |
 |---|---|---|

@@ -56,9 +56,10 @@ WORKDIR /app
 COPY --from=build /out/atlantis /app/atlantis
 COPY migrations /app/migrations
 
-# /app/schema is writable so `tide apply` can mirror submitted .atl files
-# when ATL_MIRROR_SCHEMA=true (dev-only — see deploy/.env.example). Owned
-# by the non-root atlantis user so the server never runs as root.
+# /app/schema is writable so `tide apply` can mirror submitted .atl files when
+# ATL_MIRROR_SCHEMA=true, which is a local-development aid — see the
+# configuration reference. Owned by the non-root atlantis user so the server
+# never runs as root.
 RUN mkdir -p /app/schema && chown -R atlantis:atlantis /app
 
 USER atlantis

@@ -29,11 +29,10 @@ set -e
 CERT_DIR="${CERT_DIR:-/certs}"
 CA_PRIVATE_DIR="${CA_PRIVATE_DIR:-/ca-private}"
 ATLANTIS_DOMAIN="${ATLANTIS_DOMAIN:-}"
-# 10-year CA + leaf. There is no online rotation path today; the
-# self-host bundle assumes operators run against this CA for the
-# cluster's life. To rotate: stop stack, delete files in atl-certs and
-# atl-ca-private, restart 'certs' service, re-issue every caller cert
-# via `make self-host-caller-cert CALLER=<name>`.
+# 10-year CA + leaf. There is no online rotation path today, so a stack runs
+# against this CA for its life. To rotate: stop the stack, delete the files in
+# CERT_DIR and CA_PRIVATE_DIR, re-run this script, then re-issue every caller
+# certificate.
 DAYS=3650
 
 mkdir -p "$CERT_DIR" "$CA_PRIVATE_DIR"
@@ -198,8 +197,8 @@ fi
 # Nothing else in the compose stack ever sees the CA key.
 chmod 644 "$CERT_DIR/"*.key "$CERT_DIR/"*.crt
 chmod 644 "$CA_PRIVATE_DIR/ca.key" "$CA_PRIVATE_DIR/ca.crt"
-# (Caller-side keys issued via `make self-host-caller-cert` get 600 because
-# they live on the host filesystem, not inside a scoped volume.)
+# (Caller-side keys get 600 because they live on a host filesystem, not inside
+# a scoped volume.)
 
 echo "[certs] generated:"
 ls -la "$CERT_DIR/"
