@@ -27,4 +27,5 @@ type ServerDeps struct {
 func Register(srv *grpc.Server, deps ServerDeps) {
 	pblibrary.RegisterAuthorServiceServer(srv, library.NewAuthorServer(deps.Pool, deps.Cache, deps.Outbox, deps.QueryCache))
 	pblibrary.RegisterBookServiceServer(srv, library.NewBookServer(deps.Pool, deps.Cache, deps.Outbox, deps.QueryCache))
+	pblibrary.RegisterCustomServiceServer(srv, library.NewCustomServer(deps.Pool, deps.Outbox))
 }

@@ -58,10 +58,28 @@ var compilecheckConfig = GenConfig{
 // import paths, keyed by path relative to compilecheckServerDir.
 func emitCompilecheckServer(t *testing.T, ir *dsl.IR) map[string]string {
 	t.Helper()
-	files, err := EmitGoServer(ir, compilecheckConfig)
+
+	// Both server-side Go emitters. EmitCustomServer is here because it emits
+	// the same KIND of code as EmitGoServer — importing pb and runtime, with
+	// the same pb prefix — and its output had never been compiled either. It
+	// carried the identical unresolvable `atlantis-go` import.
+	//
+	// Every server-side emitter belongs in this list. The client, keys, jobs,
+	// workflow and ephemeral emitters are not here yet; see the coverage note
+	// on TestCompilecheckCoversTheServerEmitters.
+	var files []GoFile
+	entityFiles, err := EmitGoServer(ir, compilecheckConfig)
 	if err != nil {
 		t.Fatalf("EmitGoServer for compilecheck: %v", err)
 	}
+	files = append(files, entityFiles...)
+
+	customFiles, err := EmitCustomServer(ir, compilecheckConfig)
+	if err != nil {
+		t.Fatalf("EmitCustomServer for compilecheck: %v", err)
+	}
+	files = append(files, customFiles...)
+
 	const emitPrefix = "gen/go/server/"
 	out := map[string]string{}
 	for _, gf := range files {
@@ -73,9 +91,55 @@ func emitCompilecheckServer(t *testing.T, ir *dsl.IR) map[string]string {
 		out[rel] = gf.Content
 	}
 	if len(out) == 0 {
-		t.Fatal("the server emitter produced nothing for the fixture")
+		t.Fatal("the server emitters produced nothing for the fixture")
 	}
 	return out
+}
+
+// Everything the emitters put under gen/go/server/ must be compiled.
+//
+// emitCompilecheckServer names its emitters by hand, so one added to
+// cmd/tidectl and not to that list would emit server code this package never
+// builds — the gap that existed for EmitCustomServer until today, and the one
+// its output was found to have on first compile.
+//
+// The check is derived rather than listed: the golden set already holds every
+// emitter's output for the fixture, so anything in it under gen/go/server/ and
+// absent from the compile fixture is a hole, whatever emitter produced it.
+//
+// # What this deliberately does NOT cover
+//
+// Only the server side. gen/go/keys and clients/go/client are emitted and
+// golden-compared but not compiled: the client is caller code that imports the
+// caller's own pb, so compiling it here would need a second fixture module.
+// That is worth doing and is not done. The gap is stated here rather than left
+// for someone to infer from the absence of a test.
+func TestCompilecheckCoversTheServerEmitters(t *testing.T) {
+	const serverPrefix = "gen/go/server/"
+	goldenDir := filepath.Join("testdata", "golden")
+
+	want, err := readGolden(goldenDir)
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	var serverFiles []string
+	for path := range want {
+		if strings.HasPrefix(path, serverPrefix) && strings.HasSuffix(path, ".go") {
+			serverFiles = append(serverFiles, strings.TrimPrefix(path, serverPrefix))
+		}
+	}
+	if len(serverFiles) == 0 {
+		t.Fatal("the golden set has no files under gen/go/server/, so this test " +
+			"is comparing two empty sets and proving nothing")
+	}
+
+	for _, rel := range serverFiles {
+		if _, err := os.Stat(filepath.Join(compilecheckServerDir, rel)); err != nil {
+			t.Errorf("%s%s is emitted but has no counterpart in %s, so it is never "+
+				"compiled. Add its emitter to emitCompilecheckServer: %v",
+				serverPrefix, rel, compilecheckServerDir, err)
+		}
+	}
 }
 
 func writeCompilecheckServer(t *testing.T, ir *dsl.IR) {

@@ -42,3 +42,27 @@ entity Book in library {
   partition by tenant
   ttl_field expires_at
 }
+
+// A custom query and a custom procedure, because EmitCustomServer emits Go of
+// the same kind as the entity server — it imports pb and runtime and had the
+// same unresolvable pb prefix — and nothing had ever compiled its output.
+//
+// Declared against Author rather than Book on purpose: Book is partitioned, and
+// a partitioned custom query takes the tenant-binding path, which is worth
+// covering separately from the plain one rather than only in combination.
+
+query BooksByAuthor for Book {
+  input { author_id: bigint }
+  output as Book
+  sql touches(Book) {
+    SELECT id, tenant, title, author_id, score, page_count, summary, expires_at, created_at
+    FROM library_book WHERE author_id = $author_id
+  }
+}
+
+procedure RetireAuthor for Author {
+  input { author_id: bigint }
+  steps {
+    update Author set bio = "retired" where id = $author_id
+  }
+}
