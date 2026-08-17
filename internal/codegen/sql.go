@@ -161,10 +161,14 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 	for _, r := range rebuilt {
 		up.commentf("rebuild tenant isolation on %s: PostgreSQL refuses to alter a column a policy depends on", r.entityID)
 		emitPartitionIndexDrop(up, r.oldE)
+		// The lock goes up BEFORE the boundary comes down, so no statement
+		// boundary in this script has the table open. See emitRebuildLock.
+		emitRebuildLock(up, r.oldE)
 		up.linef("DROP POLICY IF EXISTS %s ON %s;",
 			quoteIdent(partitionPolicyName(r.oldE)), qualifiedTable(r.oldE))
 		up.blank()
 		emitPartitionIndexDrop(down, r.newE)
+		emitRebuildLock(down, r.newE)
 		down.linef("DROP POLICY IF EXISTS %s ON %s;",
 			quoteIdent(partitionPolicyName(r.newE)), qualifiedTable(r.newE))
 		down.blank()
@@ -199,8 +203,13 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 
 	for _, r := range rebuilt {
 		emitPartitionPolicy(up, r.newE)
+		// After the boundary is back, never before. Unconditional, because a
+		// migration that REMOVES `partition by` emits no boundary here at all
+		// and would otherwise leave the lock standing forever.
+		emitRebuildUnlock(up, r.oldE, r.newE)
 		up.blank()
 		emitPartitionPolicy(down, r.oldE)
+		emitRebuildUnlock(down, r.newE, r.oldE)
 		down.blank()
 	}
 
@@ -2259,6 +2268,76 @@ func partitionPolicyName(e *dsl.Entity) string {
 // dropping the other removes tenant isolation.
 func partitionDefaultPolicyName(e *dsl.Entity) string {
 	return truncateIdent(tableName(e) + "_default_access")
+}
+
+// partitionRebuildLockName names the deny-all policy that stands in for the
+// boundary while the boundary is down.
+func partitionRebuildLockName(e *dsl.Entity) string {
+	return truncateIdent(tableName(e) + "_rebuild_lock")
+}
+
+// emitRebuildLock closes the table before the tenant boundary comes down.
+//
+// # What it is for
+//
+// The rebuild bracket has to drop the boundary, because PostgreSQL refuses to
+// alter a column a policy depends on. Dropping it alone does not leave the
+// table shut: the permissive `<table>_default_access USING (true)` grant is
+// still there, and the operator may have replaced it with grants of their own.
+// Either way the table spends the middle of the migration with row-level
+// security ENABLED, no boundary, and something that admits rows — which is
+// every tenant's rows to every caller.
+//
+// A previous version of this note called the intermediate state deny-all. That
+// was true when the boundary was the only policy and it was PERMISSIVE. Since
+// the boundary moved to the restrictive slot the same drop inverts: it stopped
+// denying everything and started admitting everything, which is the direction
+// that matters.
+//
+// # Why a policy rather than dropping the grant
+//
+// Dropping `<table>_default_access` would shut the table only when the operator
+// still has atlantis's grant. Replacing that grant is a documented, supported
+// thing to do, so a fix that only handles atlantis's own name fixes the case in
+// front of it and leaves the case the docs invite. A RESTRICTIVE `USING (false)`
+// ANDs with every permissive policy on the table, whoever wrote it, and touches
+// none of them.
+//
+// It also names no column, so it does not itself block the ALTER the bracket
+// exists to allow.
+//
+// # The failure mode this chooses
+//
+// A migration that dies between the lock and the unlock leaves the table
+// deny-all: an outage, immediately visible, fixed by dropping one policy. That
+// is the trade being made deliberately — inside ApplyMigration's transaction
+// the ALTER holds ACCESS EXCLUSIVE and nobody observes either state, so this is
+// entirely about the hand-run and the --no-transaction runner, where the
+// alternative is a cross-tenant read nobody notices.
+//
+// DROP before CREATE for the same reason the boundary has one: CREATE POLICY has
+// no IF NOT EXISTS, and a re-applied script must not fail on the statement that
+// closes the table.
+func emitRebuildLock(b *sqlBuilder, e *dsl.Entity) {
+	table := qualifiedTable(e)
+	name := quoteIdent(partitionRebuildLockName(e))
+	b.linef("DROP POLICY IF EXISTS %s ON %s;", name, table)
+	b.linef("CREATE POLICY %s ON %s AS RESTRICTIVE USING (false) WITH CHECK (false);", name, table)
+}
+
+// emitRebuildUnlock reopens the table once the boundary is back.
+//
+// nameFrom is the entity the lock was named after and tableFrom is where the
+// table lives by the time this runs; they differ only if the migration also
+// moved the table, and a policy keeps its name across that.
+//
+// Unconditional, and deliberately not folded into emitPartitionPolicy: when the
+// migration REMOVES `partition by`, the epilogue creates no policy at all, and a
+// lock dropped only alongside a boundary would stay behind as a permanent
+// deny-all on a table that was supposed to end up open.
+func emitRebuildUnlock(b *sqlBuilder, nameFrom, tableFrom *dsl.Entity) {
+	b.linef("DROP POLICY IF EXISTS %s ON %s;",
+		quoteIdent(partitionRebuildLockName(nameFrom)), qualifiedTable(tableFrom))
 }
 
 // partitionRebuild names an entity whose isolation policy must come down for

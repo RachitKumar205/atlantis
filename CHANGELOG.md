@@ -27,6 +27,32 @@ going the other way needs a backfill, as any other narrowing does.
 
 ### Fixed
 
+#### A tenant-column rebuild left the table readable across tenants
+
+Changing the type of a column that `partition by` names — widening a
+`varchar`, say — requires taking the isolation policy down, because PostgreSQL
+refuses to alter a column a policy depends on. The generated migration dropped
+the boundary and left the permissive `<table>_default_access USING (true)` grant
+standing, so between those two statements the table had row-level security
+enabled, nothing restricting it, and something admitting rows: every tenant's
+rows to every caller.
+
+`tide apply` runs the whole script in one transaction, and the `ALTER` holds an
+ACCESS EXCLUSIVE lock throughout, so no reader ever observed this. It mattered
+for a script run by hand, or a runner configured without a transaction, that
+died between the two — which left the table cross-tenant readable rather than
+merely unavailable.
+
+The migration now raises a `<table>_rebuild_lock` policy — `RESTRICTIVE
+USING (false)` — before the boundary comes down, and drops it after the boundary
+is back. Restrictive policies AND with every permissive one, so this closes the
+table whoever wrote the grants, including an operator who replaced the default
+one. If a hand-run now dies mid-rebuild the table denies everything, which is an
+outage you can see rather than a leak you cannot.
+
+Nothing about the end state changes, and no action is needed on existing
+databases.
+
 #### A `clients/go` worker no longer starts against a server that is too old
 
 `clients/go` is its own Go module, versioned independently of the atlantis
