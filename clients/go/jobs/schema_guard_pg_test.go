@@ -42,12 +42,29 @@ func guardDB(t *testing.T, name string) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer admin.Close()
+	// t.Cleanup, NOT defer, and registered before the drop below.
+	//
+	// `defer admin.Close()` closes the pool when guardDB RETURNS, which is long
+	// before the test ends — so the cleanup drop then ran against a closed pool,
+	// discarded the "closed pool" error like every other error there, and left
+	// the database behind. Three of them were sitting in the cluster before this
+	// was noticed, one per test, growing on every run.
+	//
+	// t.Cleanup runs LIFO, so registering the close first makes it run LAST:
+	// drop, then close.
+	t.Cleanup(admin.Close)
 
 	drop := func() {
-		_, _ = admin.Exec(context.Background(),
-			`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '`+name+`'`)
-		_, _ = admin.Exec(context.Background(), `DROP DATABASE IF EXISTS `+name)
+		if _, err := admin.Exec(context.Background(),
+			`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '`+name+`'`); err != nil {
+			t.Logf("terminating backends on %s: %v", name, err)
+		}
+		// Reported rather than discarded. A cleanup that cannot say it failed is
+		// how the leak above went unseen.
+		if _, err := admin.Exec(context.Background(), `DROP DATABASE IF EXISTS `+name); err != nil {
+			t.Errorf("could not drop %s, so it is left behind and the next run "+
+				"inherits it: %v", name, err)
+		}
 	}
 	drop()
 	if _, err := admin.Exec(ctx, `CREATE DATABASE `+name); err != nil {
