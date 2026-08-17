@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -65,6 +66,36 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if len(c.SessionSecret) < 32 {
 		return Config{}, fmt.Errorf("CONSOLE_SESSION_SECRET must be at least 32 characters")
+	}
+	// mTLS is required, matching the server. The console is an ordinary caller
+	// on that channel — it authenticates by client certificate as CN=
+	// atlantis-console, and its capability grants hang off that identity.
+	//
+	// This used to be optional, and the fallback reached further than its own
+	// warning suggested: the setup wizard's connectivity step reported
+	// overall="err" for a TLS-less console, and the only button out of the
+	// wizard is disabled on that value. So the insecure mode did not merely
+	// weaken the console — it could not finish first-run setup at all.
+	var missing []string
+	for _, v := range []struct{ name, val string }{
+		{"ATL_TLS_CERT", c.ATLTLSCert},
+		{"ATL_TLS_KEY", c.ATLTLSKey},
+		{"ATL_TLS_CA", c.ATLTLSCA},
+	} {
+		if v.val == "" {
+			missing = append(missing, v.name)
+		}
+	}
+	if len(missing) > 0 {
+		return Config{}, fmt.Errorf(
+			"mTLS is required: %s not set.\n\n"+
+				"The console authenticates to atlantis by client certificate. "+
+				"There is no mode that skips it.\n\n"+
+				"For local development run `make dev-certs`, then:\n"+
+				"  ATL_TLS_CERT=./certs/console.crt \\\n"+
+				"  ATL_TLS_KEY=./certs/console.key \\\n"+
+				"  ATL_TLS_CA=./certs/ca.crt",
+			strings.Join(missing, ", "))
 	}
 	return c, nil
 }

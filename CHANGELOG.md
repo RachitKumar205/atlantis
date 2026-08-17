@@ -11,6 +11,55 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ## Unreleased
 
+### Changed
+
+#### mTLS is required everywhere — breaking
+
+**The server refuses to start without `TLS_CERT_FILE`, `TLS_KEY_FILE` and
+`TLS_CA_FILE`.** The console refuses to start without `ATL_TLS_CERT`,
+`ATL_TLS_KEY` and `ATL_TLS_CA`. `tide`, `tidectl` and the Go SDK refuse to dial
+without a client certificate. Every insecure transport path is gone.
+
+This reads as a security-hardening change and is really an authorization one.
+`cfg.TLSCertFile != ""` was the switch behind three separate controls in
+`cmd/server/main.go`: the caller allowlist, the caller-to-cert binding, and
+admin capability enforcement. atlantis identifies a caller by the CN on its
+client certificate, so with no certificate the caller name came from an
+`x-caller` header the client writes itself — which the code already described as
+"an appearance of authorization rather than authorization".
+
+So the mode that existed was not a less-encrypted atlantis. It was one running
+with authentication and authorization off, and it was the mode a developer
+reached by default. Every authorization behaviour was unreachable locally,
+including whichever one was being worked on.
+
+The specific defect that surfaced it: the console's first-run setup wizard could
+not be completed. Its connectivity step reported `overall: "err"` whenever
+`ATL_TLS_CERT` was unset — honestly, since it was reporting a real gap — and
+"Finish setup" is disabled unless that value is `ok`. Following the documented
+TLS-free local setup led to a wizard with no exit.
+
+**To upgrade.** Deployments already running mTLS are unaffected. Anything else
+needs certificates before it will start:
+
+```bash
+make dev-certs                      # local CA + server and console certs in ./certs
+make dev-caller-cert CALLER=backend # a client cert for tide
+```
+
+`docker compose --profile isolated up` generates its own into a volume.
+
+`deploy/init-certs.sh` is now incremental rather than all-or-nothing. It leaves
+current files alone, reissues one that is missing or expired without disturbing
+the CA, and reissues the server certificate when `ATLANTIS_DOMAIN` names a host
+its SAN does not cover. Previously a five-of-six state regenerated the CA —
+orphaning every caller certificate already issued — and a six-of-six state
+skipped even when the server certificate no longer matched the domain.
+
+**Not covered:** `jobs/remote.go` dials caller-hosted job workers in plaintext
+and has no TLS option at all. That is a missing capability rather than a
+fallback to remove, and it is tracked separately.
+
 ### Added
 
 #### Expiry works on tenant-isolated tables

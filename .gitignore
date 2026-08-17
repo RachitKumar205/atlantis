@@ -65,6 +65,12 @@ atlantis.dev.yaml
 # the result to *their* repo at the conventional path).
 .dev/
 
+# Local mTLS material from `make dev-certs`: a CA and its private key, the
+# server and console leaf certs, and any caller certs from
+# `make dev-caller-cert`. Machine-specific and secret — a committed CA key
+# would let anyone mint a certificate every developer's server trusts.
+certs/
+
 # Local tide cache (in case someone runs `tide` from within this repo)
 .tide-cache/
 

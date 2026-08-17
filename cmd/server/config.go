@@ -43,7 +43,9 @@ type config struct {
 	OutboxAlertLag      time.Duration
 	OutboxPointerTTL    time.Duration
 
-	// mTLS — empty paths disable TLS (development only).
+	// mTLS. All three are required; loadConfig refuses a config without them.
+	// There is no development mode that skips TLS — see the note there for why
+	// the empty case cannot exist.
 	TLSCertFile string
 	TLSKeyFile  string
 	TLSCAFile   string
@@ -262,20 +264,40 @@ func loadConfig() (config, error) {
 	if c.PGURL == "" {
 		return c, fmt.Errorf("PG_URL is required")
 	}
-	// All three TLS files must be present together; a partial set is an error
-	// because it almost certainly means a misconfiguration rather than an
-	// intentional dev mode.
-	cert, key, ca := c.TLSCertFile, c.TLSKeyFile, c.TLSCAFile
-	hasAny := cert != "" || key != "" || ca != ""
-	hasAll := cert != "" && key != "" && ca != ""
-	if hasAny && !hasAll {
-		return c, fmt.Errorf("TLS_CERT_FILE, TLS_KEY_FILE, TLS_CA_FILE must all be set (or all empty for dev)")
+	// mTLS is required. There is no dev mode without it.
+	//
+	// The empty configuration used to be accepted and select an insecure
+	// listener. That was never only about encryption: main.go reads
+	// `TLSCertFile != ""` as the answer to "is this deployment authenticated"
+	// and uses it to switch off the caller allowlist, the caller-to-cert
+	// binding, and admin capability enforcement. So the mode existed in which
+	// atlantis ran with no authorization, and it was the mode a developer
+	// reached by default — which is to say every authorization behaviour was
+	// unreachable locally, including the ones under active development.
+	//
+	// `make dev-certs` writes a local CA plus the leaf certs into ./certs.
+	var missing []string
+	for _, v := range []struct{ name, val string }{
+		{"TLS_CERT_FILE", c.TLSCertFile},
+		{"TLS_KEY_FILE", c.TLSKeyFile},
+		{"TLS_CA_FILE", c.TLSCAFile},
+	} {
+		if v.val == "" {
+			missing = append(missing, v.name)
+		}
 	}
-	// Trusted-proxy mode requires mTLS: the proxy authenticates to the
-	// server as an mTLS client (its CN is what gates the forwarded header),
-	// and forwarded certs are re-validated against the same ClientCAs.
-	if len(c.TrustedProxyCallers) > 0 && !hasAll {
-		return c, fmt.Errorf("ATL_TRUSTED_PROXY_CALLERS requires mTLS (set TLS_CERT_FILE, TLS_KEY_FILE, TLS_CA_FILE)")
+	if len(missing) > 0 {
+		return c, fmt.Errorf(
+			"mTLS is required: %s not set.\n\n"+
+				"atlantis authenticates every caller by client certificate, and the "+
+				"caller allowlist, the caller-to-cert binding and admin capability "+
+				"enforcement are all keyed to that identity. There is no mode that "+
+				"skips it.\n\n"+
+				"For local development run `make dev-certs`, then:\n"+
+				"  TLS_CERT_FILE=./certs/server.crt \\\n"+
+				"  TLS_KEY_FILE=./certs/server.key \\\n"+
+				"  TLS_CA_FILE=./certs/ca.crt",
+			strings.Join(missing, ", "))
 	}
 	if err := rejectRetiredAuthzEnv(); err != nil {
 		return c, err

@@ -8,7 +8,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"google.golang.org/protobuf/proto"
 
@@ -41,16 +40,20 @@ func dialAdmin(cfg adminDialConfig) (*adminClient, error) {
 	if cfg.Endpoint == "" {
 		return nil, fmt.Errorf("endpoint is required")
 	}
-	var creds credentials.TransportCredentials
-	if cfg.TLSCert != "" {
-		c, err := buildTLS(cfg)
-		if err != nil {
-			return nil, err
-		}
-		creds = c
-	} else {
-		fmt.Fprintln(os.Stderr, "tidectl: TLS not configured — using insecure transport (dev only)")
-		creds = insecure.NewCredentials()
+	// TLS material is required. atlantis demands a client certificate on every
+	// connection, so a client without one gets no channel rather than a
+	// degraded one — and the insecure fallback that used to be here turned that
+	// into a handshake error naming neither the cause nor the fix.
+	if cfg.TLSCert == "" {
+		return nil, fmt.Errorf(
+			"no client certificate configured, and atlantis requires one.\n\n"+
+				"Pass --tls-cert, --tls-key and --tls-ca, or set ATL_TLS_CERT, "+
+				"ATL_TLS_KEY and ATL_TLS_CA.\n\n"+
+				"Endpoint: %s", cfg.Endpoint)
+	}
+	creds, err := buildTLS(cfg)
+	if err != nil {
+		return nil, err
 	}
 	// No ForceCodecV2: the default proto codec applies. That option set the
 	// content-subtype for the whole connection, which is why the JSON and

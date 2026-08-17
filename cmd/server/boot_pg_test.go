@@ -191,9 +191,17 @@ func bootOnce(t *testing.T, pgURL, require string) string {
 	cmd := exec.Command(os.Args[0],
 		"-test.run", "^TestServerRefusesToBootWhenAPartitionedTableHasNoPolicy$",
 		"-test.timeout", "90s")
+	// mTLS is required to boot, so the child needs certificates. Generated into
+	// the test's temp dir rather than committed, and the same material the
+	// production posture uses — which is the point: this test starts the real
+	// binary, so it should start it configured the way a deployment is.
+	certFile, keyFile, caFile := writeServerPKI(t, t.TempDir())
 	cmd.Env = append(os.Environ(),
 		bootChildEnv+"=1",
 		"PG_URL="+pgURL,
+		"TLS_CERT_FILE="+certFile,
+		"TLS_KEY_FILE="+keyFile,
+		"TLS_CA_FILE="+caFile,
 		"ATL_REQUIRE_TENANT_ISOLATION="+require,
 		// Port 0 on loopback: the health server binds before the gate, and a
 		// fixed port would collide with a real server or a parallel run.

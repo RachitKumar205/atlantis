@@ -274,7 +274,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	}()
 
 	log.Debug("init: build transport creds")
-	creds, err := transportCreds(cfg, log)
+	creds, err := transportCreds(cfg)
 	if err != nil {
 		return err
 	}
@@ -318,8 +318,11 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	//
 	// Health and reflection stay exempt: they are infrastructure probes.
 	authChecker := interceptors.NewAuthChecker(interceptors.AuthConfig{
-		Allowlist:         authAllowlist,
-		Enforce:           cfg.TLSCertFile != "",
+		Allowlist: authAllowlist,
+		// Unconditional. This used to read `cfg.TLSCertFile != ""`, so a
+		// deployment without TLS ran with the allowlist off. loadConfig now
+		// requires mTLS, which leaves nothing for the condition to select.
+		Enforce:           true,
 		CallerFromContext: callerFromContext,
 		ExemptPrefixes: []string{
 			"/grpc.health.v1.Health/",
@@ -399,7 +402,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// the DB round-trip across two parallel caches.
 	certBindingChecker := interceptors.NewCertBindingChecker(interceptors.CertBindingConfig{
 		Lookup:            adminSvc.LookupCallerCertBinding,
-		Enforce:           cfg.TLSCertFile != "",
+		Enforce:           true,
 		CallerFromContext: callerFromContext,
 		ExemptCallers:     cfg.CertBindingExemptCallers,
 		Log:               log,
@@ -424,19 +427,18 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// Capability enforcement goes after identity is resolved and the cert is
 	// bound, and before any work happens.
 	//
-	// It turns on with the same condition as the auth and cert-binding
-	// checkers, because all three answer questions about an identity and only
-	// mTLS produces one. Without a listener cert the caller name comes from an
-	// x-caller header the client writes itself, so a capability check against
-	// it would deny whoever is honest and pass whoever types a different
-	// string — an appearance of authorization rather than authorization. The
-	// three turning on together also means an operator reading the config sees
-	// one answer to "is this deployment authenticated", not three.
-	if identityEnforced := cfg.TLSCertFile != ""; identityEnforced {
-		unary = append(unary, adminPolicy.UnaryInterceptor(adminGrants))
-	} else {
-		log.Warn("admin capability enforcement is OFF: no TLS_CERT_FILE, so caller identity is a self-asserted header. Every admin RPC is reachable by any client that can open a connection. Development only.")
-	}
+	// Unconditional, like the auth and cert-binding checkers above. All three
+	// answer questions about an identity, and only mTLS produces one: without a
+	// listener cert the caller name comes from an x-caller header the client
+	// writes itself, so a capability check against it would deny whoever is
+	// honest and pass whoever types a different string — an appearance of
+	// authorization rather than authorization.
+	//
+	// That is why the three used to switch off together when TLS_CERT_FILE was
+	// empty, and why the empty case is now refused at loadConfig instead. A
+	// deployment that answers "no" to "is this authenticated" is not a
+	// deployment atlantis will start.
+	unary = append(unary, adminPolicy.UnaryInterceptor(adminGrants))
 	unary = append(unary, rateLimit, loggingInterceptor(log))
 
 	srv := grpc.NewServer(

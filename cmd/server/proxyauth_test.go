@@ -19,6 +19,8 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
+
+	"github.com/rachitkumar205/atlantis/internal/testsupport/testpki"
 )
 
 // --- test PKI helpers ---
@@ -92,6 +94,18 @@ func (ca *testCA) clientCert(t *testing.T, cn string) *x509.Certificate {
 
 func certPEM(c *x509.Certificate) string {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw}))
+}
+
+// writeServerPKI writes the mTLS material a boot child needs, and returns the
+// three paths in TLS_CERT_FILE / TLS_KEY_FILE / TLS_CA_FILE order.
+//
+// A thin wrapper over testpki so the boot tests read as "get certs, pass them
+// to the child". The generation itself lives in internal/testsupport/testpki
+// because internal/console needs the same thing.
+func writeServerPKI(t *testing.T, dir string) (certFile, keyFile, caFile string) {
+	t.Helper()
+	p := testpki.New(t, dir)
+	return p.CertFile, p.KeyFile, p.CAFile
 }
 
 func urlEncodedPEM(c *x509.Certificate) string { return url.PathEscape(certPEM(c)) }

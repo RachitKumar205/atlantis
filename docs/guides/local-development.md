@@ -6,8 +6,28 @@ Prereqs:
 
 - A Postgres instance the operator can reach. A local snapshot of staging or prod is the common case; see [Adopt an existing database](adopt-an-existing-database.md) for the snapshot + restore path.
 - A memcached instance on `localhost:11211` (or wherever; the address is configurable). `docker run -d -p 11211:11211 memcached:1.6-alpine` is enough.
-- `buf` and `go` (1.25+) on `$PATH`.
+- `buf`, `go` (1.25+) and `openssl` on `$PATH`.
 - One or more caller repos with `.atl` files. They don't need to be committed.
+
+## 0. Generate certificates
+
+```bash
+make dev-certs
+```
+
+**atlantis accepts no plaintext connection, locally or anywhere else,** so this comes before everything. The command writes a CA plus server and console certificates into `./certs`, which is gitignored.
+
+Local development is mTLS because the alternative is not "the same thing without encryption". Caller identity is the CN on the client certificate, and the caller allowlist, the caller-to-cert binding and the admin capability grants all read it. A server with no certificate has no identity to authorize, so every authorization behaviour — including whichever one you are working on — is unreachable.
+
+The script is incremental. Re-running it leaves current files alone, reissues a missing or expired one, and reissues the server certificate when `ATLANTIS_DOMAIN` names a host it does not cover.
+
+For a client certificate `tide` can use:
+
+```bash
+make dev-caller-cert CALLER=backend
+```
+
+It prints the three `TIDE_TLS_*` values to export.
 
 ## 1. Write `atlantis.dev.yaml`
 
@@ -42,6 +62,9 @@ For mixed setups (one caller pinned via git, one local), each row independently 
 PG_URL="postgres://atlantis:atlantis@localhost:5432/atlantis" \
 MEMCACHED_ADDR="localhost:11211" \
 ATL_ALLOW_APPLY_MUTATION=true \
+TLS_CERT_FILE=./certs/server.crt \
+TLS_KEY_FILE=./certs/server.key \
+TLS_CA_FILE=./certs/ca.crt \
   tidectl dev
 ```
 
@@ -76,6 +99,8 @@ The two manifests can coexist in the same atlantis deployment repo. Commit `atla
 - `atlantis.dev.yaml not found` — create the manifest at the repo root, or pass `--workspace <path>`.
 - `caller api: local path ../api: stat ...: no such file or directory` — the path in the manifest doesn't exist on disk. Check the relative path resolves against the manifest's directory, not your shell's cwd.
 - `caller api: path is not allowed for source: git` — you set both `path:` and `repo:`/`ref:` on one caller. Pick one mode per row.
+- `mTLS is required: TLS_CERT_FILE, ... not set` — run `make dev-certs` and pass the three paths. There is no way to start without them.
+- `no client certificate configured` from `tide` or `tidectl` — run `make dev-caller-cert CALLER=<name>` and export what it prints.
 - `pg pool init: ...` from the server — `PG_URL` is wrong or Postgres isn't reachable.
 - `memcached: ...` from the server — `MEMCACHED_ADDR` is wrong, or memcached isn't running.
 - `permission denied for table ...` — the role in `PG_URL` doesn't have grants on the caller schemas. See [Adopt an existing database](adopt-an-existing-database.md) §3 for the grant SQL.

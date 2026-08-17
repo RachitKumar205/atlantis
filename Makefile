@@ -236,23 +236,92 @@ test-codegen-golden: ## Run codegen golden-file tests
 
 # ---------- dev ----------
 
+# Local mTLS material, gitignored. atlantis accepts no plaintext connection, so
+# this is the first step of any local run — the server, the console and every
+# CLI need certificates.
+#
+# Same script the self-host bundle runs, so a developer's trust setup has the
+# same shape an operator's does. It is incremental: unchanged files are left
+# alone, a missing leaf is reissued without disturbing the CA, and the server
+# cert is reissued when ATLANTIS_DOMAIN stops being covered by it.
+DEV_CERT_DIR ?= ./certs
+
+.PHONY: dev-certs
+dev-certs: ## Generate the local CA + server and console certs into ./certs
+	@which openssl >/dev/null 2>&1 || (echo "openssl not found"; exit 1)
+	CERT_DIR="$(DEV_CERT_DIR)" \
+		CA_PRIVATE_DIR="$(DEV_CERT_DIR)/ca-private" \
+		sh deploy/init-certs.sh
+
+# dev-server, not dev, when Postgres and memcached are already running.
+#
+# `dev` starts the compose services first, which fails outright if something
+# else already holds 5432 — a Postgres container started by hand, or one from
+# another project. That is a working setup, not a broken one, so it gets a
+# target rather than an error: PG_URL points wherever you like and this runs
+# the server against it.
+.PHONY: dev-server
+dev-server: dev-certs ## Run the server against Postgres/memcached you started yourself
+	AUTO_MIGRATE=true \
+		ATL_MIRROR_SCHEMA=true \
+		ATL_ALLOW_APPLY_MUTATION=true \
+		TLS_CERT_FILE="$(DEV_CERT_DIR)/server.crt" \
+		TLS_KEY_FILE="$(DEV_CERT_DIR)/server.key" \
+		TLS_CA_FILE="$(DEV_CERT_DIR)/ca.crt" \
+		$(GO) run ./cmd/server
+
 .PHONY: dev
-dev: ## Run the server locally against docker-compose stack
+dev: dev-certs ## Start compose Postgres + memcached, then run the server
 	docker compose up -d postgres memcached
 	AUTO_MIGRATE=true \
 		ATL_MIRROR_SCHEMA=true \
 		ATL_ALLOW_APPLY_MUTATION=true \
+		TLS_CERT_FILE="$(DEV_CERT_DIR)/server.crt" \
+		TLS_KEY_FILE="$(DEV_CERT_DIR)/server.key" \
+		TLS_CA_FILE="$(DEV_CERT_DIR)/ca.crt" \
 		$(GO) run ./cmd/server
 
 .PHONY: dev-console
-dev-console: build-console ## Run the management console BFF against the local dev server (no TLS)
+dev-console: dev-certs build-console ## Run the management console BFF against the local dev server
 	CONSOLE_PG_URL="$(PG_URL)" \
 		ATL_ENDPOINT="localhost:9090" \
 		CONSOLE_SESSION_SECRET="$${CONSOLE_SESSION_SECRET:-dev-secret-change-in-prod-32chars!!}" \
 		CONSOLE_LISTEN=":3000" \
 		ATL_HEALTH_LISTEN="localhost:8081" \
 		CONSOLE_COOKIE_SECURE=false \
+		ATL_TLS_CERT="$(DEV_CERT_DIR)/console.crt" \
+		ATL_TLS_KEY="$(DEV_CERT_DIR)/console.key" \
+		ATL_TLS_CA="$(DEV_CERT_DIR)/ca.crt" \
 		$(BIN_DIR)/atlantis-console
+
+.PHONY: dev-caller-cert
+dev-caller-cert: dev-certs ## Issue a local caller cert signed by the dev CA: make dev-caller-cert CALLER=<name>
+	@test -n "$(CALLER)" || { \
+	  echo "Usage:   make dev-caller-cert CALLER=<name>"; \
+	  echo "Example: make dev-caller-cert CALLER=backend"; \
+	  exit 1; \
+	}
+	@# Signed directly by the dev CA. The signer service issues these in a
+	@# deployed stack; locally there is no stack to ask.
+	@mkdir -p "$(DEV_CERT_DIR)/callers/$(CALLER)"
+	openssl ecparam -genkey -name prime256v1 -noout \
+	  -out "$(DEV_CERT_DIR)/callers/$(CALLER)/client.key"
+	openssl req -new -subj '/CN=$(CALLER)' \
+	  -key "$(DEV_CERT_DIR)/callers/$(CALLER)/client.key" \
+	  -out "$(DEV_CERT_DIR)/callers/$(CALLER)/client.csr"
+	openssl x509 -req -days 3650 \
+	  -in "$(DEV_CERT_DIR)/callers/$(CALLER)/client.csr" \
+	  -CA "$(DEV_CERT_DIR)/ca.crt" \
+	  -CAkey "$(DEV_CERT_DIR)/ca-private/ca.key" \
+	  -CAcreateserial \
+	  -out "$(DEV_CERT_DIR)/callers/$(CALLER)/client.crt"
+	@rm -f "$(DEV_CERT_DIR)/callers/$(CALLER)/client.csr"
+	@chmod 600 "$(DEV_CERT_DIR)/callers/$(CALLER)/client.key"
+	@echo
+	@echo "Issued $(DEV_CERT_DIR)/callers/$(CALLER)/client.crt (CN=$(CALLER))"
+	@echo "  export TIDE_TLS_CERT=$(DEV_CERT_DIR)/callers/$(CALLER)/client.crt"
+	@echo "  export TIDE_TLS_KEY=$(DEV_CERT_DIR)/callers/$(CALLER)/client.key"
+	@echo "  export TIDE_TLS_CA=$(DEV_CERT_DIR)/ca.crt"
 
 .PHONY: dev-isolated
 dev-isolated: ## Full local stack via docker-compose (server + pg + memcached)

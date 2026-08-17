@@ -17,11 +17,15 @@ Parse errors are silent: `PG_MAX_CONNS=fifty` runs with the default of `50` and 
 | Variable | Default | Notes |
 |---|---|---|
 | `GRPC_LISTEN` | `:9090` | Address the gRPC server binds to. |
-| `TLS_CERT_FILE` | (unset) | Server's TLS certificate. |
-| `TLS_KEY_FILE` | (unset) | Server's TLS key. |
-| `TLS_CA_FILE` | (unset) | CA certificate for verifying client certs (mTLS). |
+| `TLS_CERT_FILE` | **required** | Server's TLS certificate. |
+| `TLS_KEY_FILE` | **required** | Server's TLS key. |
+| `TLS_CA_FILE` | **required** | CA certificate for verifying client certs (mTLS). |
 
-The three TLS variables must be set together or all left empty. A partial set is rejected at startup. The server does not support TLS without client-certificate verification; mTLS is mandatory whenever TLS is enabled. With all three empty, TLS is disabled (dev only).
+**All three are required. The server refuses to start without them,** and there is no mode that accepts a plaintext connection.
+
+This is not only about encryption. atlantis identifies a caller by the CN on its client certificate, and three separate controls read that identity: the caller allowlist, the caller-to-cert binding, and the admin capability grants. A connection with no client certificate has no identity, so none of the three has anything to check. A server without TLS is a server without authorization.
+
+For local development, `make dev-certs` writes a CA and the server and console certificates into `./certs`. `make dev-caller-cert CALLER=<name>` issues a client certificate for `tide`.
 
 ## Postgres pool
 
@@ -222,7 +226,7 @@ Read by `cmd/console`, not the Atlantis server. The self-host compose bundle wir
 | `CONSOLE_COOKIE_SECURE` | `false` | Sets the `Secure` flag on session cookies. Default false so `http://localhost` works for first boot; flip to `true` once a TLS terminator (reverse proxy, LB) sits in front. |
 | `CONSOLE_AUDIT_RETENTION_DAYS` | `365` | Audit-row retention. Covers the typical SOC 2 audit window and PCI DSS §10.5.1's 12-month online minimum. HIPAA = 2190 (6 years); SOX = 2555 (7 years). `0` keeps every partition forever. |
 | `ATL_ENDPOINT` | `localhost:9090` | atlantis-server endpoint the BFF dials over mTLS. |
-| `ATL_TLS_CERT`, `ATL_TLS_KEY`, `ATL_TLS_CA` | (unset) | Client cert / key / CA for the BFF's mTLS connection to atlantis-server. |
+| `ATL_TLS_CERT`, `ATL_TLS_KEY`, `ATL_TLS_CA` | (unset; **all three required**) | Client cert / key / CA for the BFF's mTLS connection to atlantis-server. The console is an ordinary caller on that channel and authenticates as `CN=atlantis-console`. It refuses to start without them. `make dev-certs` writes a matching set into `./certs`. |
 | `ATL_HEALTH_LISTEN` | `localhost:8081` | atlantis-server HTTP health endpoint the BFF surfaces on the console's Health page. |
 | `ATL_SIGNER_ADDR` | (unset) | Signer HTTP endpoint for cert issuance from the console's Callers page. |
 | `SANDBOX_PER_USER_LIMIT` | `3` | Maximum concurrent sandboxes per authenticated user. A boot beyond this returns HTTP `429`. The limit also caps fork count — forking N children requires `N + parent` headroom. |

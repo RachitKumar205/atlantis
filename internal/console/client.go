@@ -22,7 +22,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
@@ -32,17 +31,14 @@ type adminClient struct {
 	conn *grpc.ClientConn
 }
 
+// dialAdmin opens the console's mTLS channel to atlantis.
+//
+// There is no insecure branch. ConfigFromEnv requires all three ATL_TLS_*
+// paths, so a Config that reaches here always carries them.
 func dialAdmin(cfg Config) (*adminClient, error) {
-	var creds credentials.TransportCredentials
-	if cfg.ATLTLSCert != "" {
-		c, err := buildAdminTLS(cfg.ATLTLSCert, cfg.ATLTLSKey, cfg.ATLTLSCA)
-		if err != nil {
-			return nil, err
-		}
-		creds = c
-	} else {
-		fmt.Fprintln(os.Stderr, "console: ATL_TLS_CERT not set — using insecure transport (dev only)")
-		creds = insecure.NewCredentials()
+	creds, err := buildAdminTLS(cfg.ATLTLSCert, cfg.ATLTLSKey, cfg.ATLTLSCA)
+	if err != nil {
+		return nil, err
 	}
 	// No ForceCodecV2: the default proto codec applies. That option set the
 	// content-subtype connection-wide, which is why a client could never mix

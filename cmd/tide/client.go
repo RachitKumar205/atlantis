@@ -8,7 +8,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/rachitkumar205/atlantis/clients/go/adminjson"
@@ -29,17 +28,25 @@ type adminClient struct {
 	conn *grpc.ClientConn
 }
 
+// dial opens the mTLS channel to atlantis.
+//
+// TLS material is required. The server presents a certificate and demands one
+// back on every connection, so a client with none does not get a degraded
+// channel — it gets no channel. The insecure fallback that used to be here
+// printed a warning and then failed at the handshake with an error naming
+// neither the cause nor the fix.
 func dial(cfg *tideConfig) (*adminClient, error) {
-	var creds credentials.TransportCredentials
-	if cfg.TLS.Cert != "" || cfg.TLS.CertPEM != "" {
-		var err error
-		creds, err = buildTLS(cfg)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		fmt.Fprintln(os.Stderr, "tide: TLS not configured — using insecure transport (dev only)")
-		creds = insecure.NewCredentials()
+	if cfg.TLS.Cert == "" && cfg.TLS.CertPEM == "" {
+		return nil, fmt.Errorf(
+			"no client certificate configured, and atlantis requires one.\n\n"+
+				"Set tls.cert / tls.key / tls.ca in tide.yaml, or the TIDE_TLS_CERT, "+
+				"TIDE_TLS_KEY and TIDE_TLS_CA environment variables (the _PEM "+
+				"variants take the contents instead of a path).\n\n"+
+				"Endpoint: %s", cfg.Endpoint)
+	}
+	creds, err := buildTLS(cfg)
+	if err != nil {
+		return nil, err
 	}
 	// No ForceCodecV2: the default proto codec applies. That option set the
 	// content-subtype connection-wide, which is why the JSON and protobuf

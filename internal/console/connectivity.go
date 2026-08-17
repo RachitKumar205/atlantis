@@ -19,7 +19,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	grpcreflectv1 "google.golang.org/grpc/reflection/grpc_reflection_v1"
 )
@@ -85,23 +84,16 @@ func (s *Server) handleSetupConnectivity(w http.ResponseWriter, r *http.Request)
 		Meta:   fmt.Sprintf("%dms", rtt.Milliseconds()),
 	})
 
-	// Dev mode (no ATL_TLS_CERT) — surface the three TLS rows as
-	// err/wait so the user sees the gap rather than fabricated success.
-	// gRPC reflection still runs on the insecure channel so they get
-	// one real reachability signal.
-	if s.cfg.ATLTLSCert == "" {
-		resp.Probes = append(resp.Probes,
-			probeResult{Label: "TLS 1.3 handshake", Status: probeErr, Meta: "TLS not configured"},
-			probeResult{Label: "Server cert chain", Status: probeWait},
-			probeResult{Label: "Client cert accepted", Status: probeWait},
-		)
-		// gRPC reflection still works without TLS — try it on the
-		// insecure transport so the user sees gRPC reachability.
-		appendReflectionProbe(r.Context(), endpoint, insecure.NewCredentials(), &resp)
-		resp.Overall = probeErr
-		jsonOK(w, resp)
-		return
-	}
+	// There is no branch for "TLS not configured". ConfigFromEnv refuses a
+	// console without all three ATL_TLS_* paths, so by the time a request
+	// reaches here the material exists and every probe below is a real one.
+	//
+	// The branch that used to be here reported the three TLS rows as err/wait
+	// and set Overall to err — honest about the gap, and a dead end: the
+	// wizard's only exit button is disabled unless Overall is ok, so a
+	// developer following the documented TLS-free setup could not create the
+	// first admin account. Requiring TLS removes the state rather than the
+	// symptom.
 
 	// ── 2 + 3. TLS handshake + server cert chain ────────────────────────
 	// One TLS dial covers both: handshake success → row 2 ok; the

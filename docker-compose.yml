@@ -44,6 +44,30 @@ services:
       - "11211:11211"
     command: ["-m", "256", "-I", "5m", "-v"]
 
+  # Local CA + server/console leaf certs, into the shared atl-dev-certs volume.
+  # Runs to completion, then the atlantis service starts.
+  #
+  # Not optional. atlantis accepts no plaintext connection: the caller
+  # allowlist, the caller-to-cert binding and the capability grants all key off
+  # the client certificate's CN, so a listener with no certificate has no
+  # identity for any of them to be about.
+  #
+  # Incremental — a second `up` reuses what is already there.
+  certs:
+    image: alpine:3.20
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "apk add --no-cache openssl >/dev/null 2>&1 && sh /scripts/init-certs.sh"
+    volumes:
+      - atl-dev-certs:/certs
+      - atl-dev-ca-private:/ca-private
+      - ./deploy/init-certs.sh:/scripts/init-certs.sh:ro
+    environment:
+      CERT_DIR: /certs
+      CA_PRIVATE_DIR: /ca-private
+    restart: "no"
+    profiles: ["isolated"]
+
   atlantis:
     build: .
     depends_on:
@@ -51,9 +75,16 @@ services:
         condition: service_healthy
       memcached:
         condition: service_started
+      certs:
+        condition: service_completed_successfully
+    volumes:
+      - atl-dev-certs:/certs:ro
     environment:
       PG_URL: postgres://atlantis:atlantis@postgres:5432/atlantis?sslmode=disable
       MEMCACHED_ADDR: memcached:11211
+      TLS_CERT_FILE: /certs/server.crt
+      TLS_KEY_FILE: /certs/server.key
+      TLS_CA_FILE: /certs/ca.crt
       LOG_LEVEL: debug
       # Apply migrations on boot. Off in production; operators run tidectl migrate-up explicitly.
       AUTO_MIGRATE: "true"
@@ -69,3 +100,8 @@ services:
 
 volumes:
   atl-pg:
+  atl-dev-certs:
+  # Separate volume, mounted by the certs service alone. The CA private key
+  # never reaches the atlantis container, which needs only its own leaf and the
+  # CA certificate.
+  atl-dev-ca-private:

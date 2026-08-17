@@ -75,6 +75,20 @@ func (r *RemoteHandler) getConn() (*grpc.ClientConn, error) {
 	if r.conn != nil {
 		return r.conn, nil
 	}
+	// PLAINTEXT, and the only channel in atlantis that still is.
+	//
+	// Every other transport requires mTLS: the server's listener, the console,
+	// tide, tidectl and the Go SDK all refuse to run without certificates,
+	// because caller identity is the client certificate's CN. This one was left
+	// out of that change for a reason worth stating rather than leaving as an
+	// apparent oversight — it has no TLS capability to fall back FROM. There is
+	// no env var, no config field, and no credential source; adding one is new
+	// work, not a deletion.
+	//
+	// What crosses it is the job payload, which is caller-supplied application
+	// data, and the handler's response. The address comes from
+	// ATL_JOBS_REMOTE_HANDLERS, so an operator chooses it. Treat it as an
+	// in-cluster hop until this is fixed.
 	conn, err := grpc.NewClient(r.addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.ForceCodecV2(remoteCodec{})),

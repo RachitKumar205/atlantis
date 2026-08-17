@@ -3,16 +3,27 @@
 // (the typed Go SDK, custom dialers like the job submitter, tide / tidectl)
 // reads the same env-var contract and uses the same TLS material.
 //
-// Env-var contract:
+// Env-var contract — all three are required:
 //
 //	ATL_TLS_CERT  path to the caller's mTLS client cert (PEM)
 //	ATL_TLS_KEY   path to the caller's mTLS private key (PEM)
 //	ATL_TLS_CA    path to the atlantis server's CA bundle (PEM)
 //
-// When ATL_TLS_CERT is unset, [Credentials] returns plain
-// insecure.NewCredentials — that's the correct choice for dev / same-cluster
-// prod where atlantis is reachable on a private bridge. Cross-network /
-// public-endpoint deployments must set all three.
+// # Why there is no insecure mode
+//
+// [Credentials] used to return insecure.NewCredentials when ATL_TLS_CERT was
+// unset, and this doc called that "the correct choice for dev / same-cluster
+// prod where atlantis is reachable on a private bridge". Both halves were
+// wrong once the server stopped accepting plaintext:
+//
+//   - The server requires a client certificate on every connection. A caller
+//     without one does not get a private-bridge channel; it gets a handshake
+//     failure, one layer below where the cause is legible.
+//   - The certificate is not only transport security. atlantis identifies the
+//     caller by its certificate CN, and the caller allowlist, the
+//     caller-to-cert binding and the capability grants all key off it. A
+//     connection with no client cert has no identity, so there is nothing for
+//     authorization to be about.
 package atltransport
 
 import (
@@ -20,10 +31,10 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // Credentials returns gRPC transport credentials for the atlantis client.
@@ -31,13 +42,25 @@ import (
 // the atlantis server's listener so any downgrade attempt fails cleanly.
 func Credentials() (credentials.TransportCredentials, error) {
 	certPath := os.Getenv("ATL_TLS_CERT")
-	if certPath == "" {
-		return insecure.NewCredentials(), nil
-	}
 	keyPath := os.Getenv("ATL_TLS_KEY")
 	caPath := os.Getenv("ATL_TLS_CA")
-	if keyPath == "" || caPath == "" {
-		return nil, fmt.Errorf("atltransport: ATL_TLS_CERT set but ATL_TLS_KEY or ATL_TLS_CA missing")
+
+	var missing []string
+	for _, v := range []struct{ name, val string }{
+		{"ATL_TLS_CERT", certPath},
+		{"ATL_TLS_KEY", keyPath},
+		{"ATL_TLS_CA", caPath},
+	} {
+		if v.val == "" {
+			missing = append(missing, v.name)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf(
+			"atltransport: %s not set. atlantis authenticates every caller by "+
+				"client certificate and accepts no plaintext connection, so all "+
+				"three of ATL_TLS_CERT, ATL_TLS_KEY and ATL_TLS_CA are required",
+			strings.Join(missing, ", "))
 	}
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {

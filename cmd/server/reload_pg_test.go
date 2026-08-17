@@ -156,9 +156,14 @@ func startReloadChild(t *testing.T, pgURL string) (*exec.Cmd, <-chan string) {
 	cmd := exec.Command(os.Args[0],
 		"-test.run", "^TestReloadRefusesASchemaTheDatabaseIsNotEnforcing$",
 		"-test.timeout", "120s")
+	// mTLS is required to boot; see the note in bootOnce.
+	certFile, keyFile, caFile := writeServerPKI(t, t.TempDir())
 	cmd.Env = append(os.Environ(),
 		reloadChildEnv+"=1",
 		"PG_URL="+pgURL,
+		"TLS_CERT_FILE="+certFile,
+		"TLS_KEY_FILE="+keyFile,
+		"TLS_CA_FILE="+caFile,
 		// The refusal only fires when isolation is required, matching boot.
 		"ATL_REQUIRE_TENANT_ISOLATION=true",
 		"HEALTH_LISTEN=127.0.0.1:0",

@@ -13,11 +13,13 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/migrate"
 	"github.com/rachitkumar205/atlantis/internal/server/admin"
 	"github.com/rachitkumar205/atlantis/internal/testsupport/pgcatalog"
+	"github.com/rachitkumar205/atlantis/internal/testsupport/testpki"
 )
 
 // The console's first HTTP test harness.
@@ -97,13 +99,21 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 	}
 	t.Cleanup(pool.Close)
 
-	// The real admin service, on a real listener.
+	// The real admin service, on a real listener, over real mTLS.
+	//
+	// The listener demands and verifies a client certificate, exactly as
+	// cmd/server's does. That is not extra rigour for its own sake: the console
+	// has no insecure transport any more, so a plaintext test listener would be
+	// a channel the console cannot dial at all.
+	pki := testpki.New(t, t.TempDir())
+	consoleCert, consoleKey := pki.ClientCert(t, "atlantis-console")
+
 	adminSv := admin.New(pool, admin.Config{AllowApplyMutation: true})
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	grpcSrv := grpc.NewServer()
+	grpcSrv := grpc.NewServer(grpc.Creds(credentials.NewTLS(pki.ServerTLS(t))))
 	admin.RegisterGenerated(grpcSrv, adminSv)
 	go func() { _ = grpcSrv.Serve(lis) }()
 	t.Cleanup(grpcSrv.Stop)
@@ -114,6 +124,9 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 		SessionSecret:       strings.Repeat("k", 32),
 		SandboxPerUserLimit: 1,
 		SandboxTTL:          time.Minute,
+		ATLTLSCert:          consoleCert,
+		ATLTLSKey:           consoleKey,
+		ATLTLSCA:            pki.CAFile,
 	}, nil, quiet)
 	if err != nil {
 		t.Fatalf("console New: %v", err)

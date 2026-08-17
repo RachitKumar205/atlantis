@@ -125,7 +125,9 @@ One safety override breaks the `ATL_` convention: **`ATLANTIS_ALLOW_INDEX_DRIFT`
 
 ### TLS
 
-atlantis requires mTLS whenever TLS is enabled — there is no server-only-TLS mode. `TLS_CA_FILE` is the CA that verifies client certificates presented by callers. If you set any one of `TLS_CERT_FILE` / `TLS_KEY_FILE` / `TLS_CA_FILE`, you must set all three; partial sets are rejected at startup.
+atlantis requires mTLS. `TLS_CERT_FILE`, `TLS_KEY_FILE` and `TLS_CA_FILE` are all mandatory and the server refuses to start without them — there is no server-only-TLS mode and no plaintext mode. `TLS_CA_FILE` is the CA that verifies client certificates presented by callers.
+
+Caller identity is the client certificate's CN, and the caller allowlist, the caller-to-cert binding and the admin capability grants are all keyed to it. So this is the authentication configuration, not a transport option layered over it.
 
 atlantis reads TLS material on startup only; there is no SIGHUP reload. To rotate, deploy new cert material and restart the server (a rolling restart is sufficient).
 

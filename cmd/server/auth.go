@@ -11,7 +11,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
@@ -20,22 +19,28 @@ import (
 )
 
 // transportCreds builds the gRPC credentials.TransportCredentials for the
-// listener. mTLS is the production mode; when no TLS material is configured
-// the server falls back to insecure mode for local dev.
+// listener. mTLS is the only mode:
 //
-// In mTLS mode:
 //   - Server presents Cert from TLSCertFile / TLSKeyFile.
 //   - Clients are REQUIRED to present a cert signed by TLSCAFile.
 //   - ClientAuth = RequireAndVerifyClientCert.
 //
-// The internal CA management is out of scope here; atlantis just
-// consumes the resulting PEM files. cmd/server expects all three paths
-// populated together; loadConfig enforces that invariant.
-func transportCreds(cfg config, log *slog.Logger) (credentials.TransportCredentials, error) {
-	if cfg.TLSCertFile == "" {
-		log.Warn("mTLS disabled — TLS_CERT_FILE not set; running in insecure mode (dev only)")
-		return insecure.NewCredentials(), nil
-	}
+// # Why there is no insecure mode
+//
+// There used to be one, taken whenever TLS_CERT_FILE was empty, and it did far
+// more than skip encryption. The same emptiness turned off the caller
+// allowlist, the caller-to-cert binding, and admin capability enforcement,
+// because all three read `cfg.TLSCertFile != ""` as "is this deployment
+// authenticated". A developer running it was not running a less-encrypted
+// atlantis; they were running one with no authorization at all, against which
+// no authorization change could be tested.
+//
+// loadConfig now requires all three paths, so this function cannot be reached
+// without them. `make dev-certs` writes a local CA and the leaf certs.
+//
+// The internal CA management is out of scope here; atlantis just consumes the
+// resulting PEM files.
+func transportCreds(cfg config) (credentials.TransportCredentials, error) {
 	cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("load server cert: %w", err)
