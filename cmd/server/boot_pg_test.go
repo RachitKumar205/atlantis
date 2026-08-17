@@ -374,3 +374,135 @@ ON CONFLICT (id) DO UPDATE SET ir = EXCLUDED.ir`, raw); err != nil {
 		t.Fatalf("write checkpoint: %v", err)
 	}
 }
+
+// The gate must refuse when it could not ASK, not only when the answer was bad.
+//
+// # What is uncovered without this
+//
+// partitionGate's decision is proved by TestPartitionGate, and both call sites
+// are proved to be reached by TestServerRefusesToBootWhenAPartitionedTableHasNoPolicy
+// and TestReloadRefusesASchemaTheDatabaseIsNotEnforcing. None of them checks the
+// ARGUMENTS. Replacing `perr` with nil at either call site left the whole suite
+// green — the gate would then see "no error, no problems" and start the server
+// with tenant isolation nominally required and never actually verified.
+//
+// That is not a theoretical mutation. A locked-down catalogue, a pooler that
+// rewrites current_user, or a statement timeout all produce exactly this: a
+// probe that errors. The operator set ATL_REQUIRE_TENANT_ISOLATION and would be
+// served a database nobody checked.
+//
+// # How the probe is made to fail
+//
+// SELECT on pg_catalog.pg_policy is revoked. VerifyPartitionPolicies reads
+// pg_class, pg_namespace and pg_policy in one query, so the role keeps
+// answering the first two and errors on the third — the shape a locked-down
+// catalogue actually has, rather than a broken connection that would fail
+// everything and prove nothing about this branch specifically.
+//
+// Verified before this test was written: the revoke yields `permission denied
+// for table pg_policy`, pg_class stays readable, and because pg_policy is a
+// per-database catalogue (relisshared = false) the revoke cannot escape this
+// throwaway database into the shared one or a parallel package.
+//
+// # Why the fixture carries a VALID policy
+//
+// If the probe could run, it would find nothing wrong and the server would
+// start. So a refusal here can only have come from the probe failing. A fixture
+// with a broken policy would refuse for two possible reasons and distinguish
+// neither.
+func TestServerRefusesToBootWhenThePolicyProbeCannotRun(t *testing.T) {
+	// Shares the child with the other boot test: -test.run in bootOnce names
+	// that test, and the child dispatches on the env var rather than the name.
+	if os.Getenv(bootChildEnv) != "" {
+		bootChild()
+		return
+	}
+
+	adminDSN := os.Getenv("ATLANTIS_TEST_PG")
+	if adminDSN == "" {
+		t.Skip("set ATLANTIS_TEST_PG to boot the server against a database")
+	}
+	// Its own database. The sibling test drops atlantis_bootgate on cleanup, and
+	// sharing the name means whichever finishes first destroys the other's while
+	// it is still booting children against it.
+	dsn := bootDatabase(t, adminDSN, "atlantis_bootprobe")
+
+	for _, tc := range []struct {
+		name        string
+		require     string
+		wantRefusal bool
+		why         string
+	}{
+		{
+			name: "probe cannot run, enforcement on", require: "true",
+			wantRefusal: true,
+			why: "a verification that could not run is not a verification that " +
+				"passed, and the operator asked atlantis not to start in a state " +
+				"it could not confirm",
+		},
+		{
+			// Kills `cfg.RequireTenantIsolation -> true` at this call site. If the
+			// gate is handed a constant, an unreadable catalogue stops a default
+			// deployment from starting — and pg_policy being unreadable is not by
+			// itself a reason to refuse someone who never asked for enforcement.
+			name: "probe cannot run, enforcement off", require: "false",
+			wantRefusal: false,
+			why: "ATL_REQUIRE_TENANT_ISOLATION defaults false, which downgrades an " +
+				"unverifiable probe to a warning",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bootFixture(t, dsn, true)
+			probeDSN := bootProbeRole(t, dsn)
+			revokePolicyCatalogue(t, dsn, "bootgate_probe")
+
+			out := bootOnce(t, probeDSN, tc.require)
+
+			refused := strings.HasPrefix(out, bootRefused)
+			switch {
+			case tc.wantRefusal && !refused:
+				t.Errorf("the server started. It should have refused: %s.\nchild said: %s",
+					tc.why, out)
+			case !tc.wantRefusal && refused:
+				t.Errorf("the server refused to start, and should not have: %s.\nchild said: %s",
+					tc.why, out)
+			}
+
+			// The refusal must be THIS gate's, and the phrase has to be one only
+			// this gate produces.
+			//
+			// "could not determine" is not that phrase: tenantIsolationError says
+			// "could not determine whether the database role enforces row-level
+			// security" for a failed DetectRolePrivileges, which is a different
+			// check earlier in the same boot. Asserting on the shared prefix would
+			// pass if the revoke had broken role detection instead of the policy
+			// probe — a test green for a refusal it did not cause.
+			if tc.wantRefusal && refused &&
+				!strings.Contains(out, "partitioned entities carry an enforced") {
+				t.Errorf("the refusal did not come from the partition policy gate. "+
+					"Either the probe is not what failed, or the message no longer "+
+					"says the check could not run — and an operator reading it would "+
+					"go looking for a missing policy on a table that has one: %s", out)
+			}
+		})
+	}
+}
+
+// revokePolicyCatalogue makes VerifyPartitionPolicies fail the way a locked-down
+// database does.
+//
+// Both statements are needed: Postgres grants SELECT on system catalogues to
+// PUBLIC, and a role-level revoke alone leaves the PUBLIC grant standing.
+//
+// No cleanup. pg_policy's ACL lives in the database being revoked in — it is not
+// a shared catalogue — and bootDatabase drops that database on cleanup, so the
+// revoke goes with it. Revoking in the shared database would break every other
+// test in the repo that reads a policy, which is why this only ever runs against
+// a DSN bootDatabase produced.
+func revokePolicyCatalogue(t *testing.T, dsn, role string) {
+	t.Helper()
+	pgcatalog.Exec(t, dsn,
+		`REVOKE SELECT ON pg_catalog.pg_policy FROM PUBLIC`,
+		`REVOKE SELECT ON pg_catalog.pg_policy FROM `+role,
+	)
+}

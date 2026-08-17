@@ -372,3 +372,104 @@ func reloadProbeRole(t *testing.T, dsn string) string {
 	)
 	return strings.Replace(dsn, "//atlantis:atlantis@", "//reloadgate_probe:probe@", 1)
 }
+
+// The reload hook must refuse when it could not ASK, just as boot does.
+//
+// # The gap this closes
+//
+// partitionGate's probe-failure branch is reached from two call sites.
+// TestServerRefusesToBootWhenThePolicyProbeCannotRun covers the one at startup;
+// this covers the reload hook. Until both existed, replacing `perr` with nil at
+// either site left the whole suite green — the gate would see "no error, no
+// problems" and swap in a schema whose isolation nothing had verified.
+//
+// The reload site is the worse of the two to leave uncovered. Boot refusing is
+// loud: the process does not come up. A reload that wrongly accepts is silent —
+// the server keeps serving, the health surface stays green, and the dispatcher
+// now believes a table is tenant-isolated on the word of a check that errored.
+//
+// # Why the revoke happens AFTER the child is listening
+//
+// The boot-time probe runs against an intact catalogue and passes, so the child
+// gets all the way up. Only the RELOAD's probe fails. A revoke before boot would
+// refuse at startup and never reach this call site at all — the test would pass
+// while proving nothing about the reload.
+//
+// # Why both cases use a table WITH a valid policy
+//
+// The two cases differ by exactly one thing: whether pg_policy is readable. The
+// fixture is identical and correct in both. So an accepted verdict cannot be
+// explained by the probe failing, and a refused verdict cannot be explained by
+// the policy being wrong — which is what makes the refusal attributable to the
+// probe rather than merely coincident with it.
+func TestReloadRefusesWhenThePolicyProbeCannotRun(t *testing.T) {
+	if os.Getenv(reloadChildEnv) != "" {
+		reloadChild()
+		return
+	}
+	adminDSN := os.Getenv("ATLANTIS_TEST_PG")
+	if adminDSN == "" {
+		t.Skip("set ATLANTIS_TEST_PG to exercise the reload gate")
+	}
+
+	for _, tc := range []struct {
+		name       string
+		revoke     bool
+		wantAccept bool
+		why        string
+	}{
+		{
+			// The control. Without it, a hook that refused every reload would
+			// pass the case below and this test would be worthless.
+			name: "the probe can run", revoke: false, wantAccept: true,
+			why: "the table carries an enforced policy and the catalogue is " +
+				"readable, so there is nothing to object to",
+		},
+		{
+			name: "the probe cannot run", revoke: true, wantAccept: false,
+			why: "a verification that could not run is not a verification that " +
+				"passed, and accepting here swaps in a schema whose isolation " +
+				"nothing confirmed while the health surface stays green",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Its own database: the sibling reload test drops atlantis_reloadgate
+			// on cleanup, and sharing the name destroys one while the other is
+			// still booting a child against it.
+			dsn := bootDatabase(t, adminDSN, "atlantis_reloadprobe")
+			probeDSN := reloadProbeRole(t, dsn)
+
+			// Boot clean: no `partition by` yet, and the table already carries the
+			// policy it will need.
+			seedCheckpoint(t, dsn, reloadIR(false), "clean")
+			reloadTable(t, dsn, true)
+
+			child, lines := startReloadChild(t, probeDSN)
+			defer func() { _ = child.Process.Kill() }()
+
+			if !awaitLine(t, lines, "schema listener: LISTEN active", 60*time.Second) {
+				t.Fatal("the child never began listening, so nothing below tests the reload path")
+			}
+
+			if tc.revoke {
+				revokePolicyCatalogue(t, dsn, "reloadgate_probe")
+			}
+
+			// Turn on `partition by` at a running server.
+			seedCheckpoint(t, dsn, reloadIR(true), "partitioned")
+
+			accepted, refused := awaitVerdict(t, lines, 60*time.Second)
+			t.Logf("reload verdict: accepted=%v refused=%v", accepted, refused)
+			if !accepted && !refused {
+				t.Fatal("no verdict observed; the assertions below would pass for a " +
+					"server that never reloaded at all")
+			}
+			switch {
+			case tc.wantAccept && !accepted:
+				t.Errorf("the reload was refused and should not have been: %s", tc.why)
+			case !tc.wantAccept && accepted:
+				t.Errorf("the reload was accepted and should not have been: %s", tc.why)
+			}
+		})
+	}
+}

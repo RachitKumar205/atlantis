@@ -630,10 +630,17 @@ func mentionsIdent(expr ast.Expr, name string) bool {
 // the two outcomes the running server logs. It drives the accepted case too,
 // so a gate that refused every reload would not pass it.
 //
-// Still open, and worth stating rather than implying coverage: `perr`, the
-// probe-failure path, at either call site. Inducing it needs a database that
-// answers pg_class but not pg_policy — a role with SELECT revoked on pg_policy
-// is the likely route.
+// `perr`, the probe-failure path, was the last one open and is now closed at
+// both call sites — TestServerRefusesToBootWhenThePolicyProbeCannotRun and
+// TestReloadRefusesWhenThePolicyProbeCannotRun. Both revoke SELECT on
+// pg_catalog.pg_policy in their own throwaway database, so the role keeps
+// answering pg_class and errors on pg_policy: the shape a locked-down catalogue
+// actually has, rather than a dead connection that fails everything and would
+// prove nothing about this branch. Each drives the accepted case with the same
+// fixture, so a gate that refused unconditionally would not pass either.
+//
+// All six of the argument mutations named above are now dead. Nothing about the
+// gate is covered by source-reading alone.
 func TestPartitionGate(t *testing.T) {
 	probeFailed := errors.New("permission denied for table pg_policy")
 	findings := []string{"shop.Doc declares `partition by` but has no policy"}
