@@ -11,6 +11,47 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ## Unreleased
 
+### Added
+
+#### Expiry works on tenant-isolated tables
+
+An entity with both `partition by` and `ttl_field` never expired anything. The
+sweeper runs on a schedule with no request behind it, so it binds no tenant;
+row-level security still applied to its `DELETE`, which matched nothing and
+succeeded. Expired rows accumulated forever.
+
+**Declare the entity a `hypertable` on its TTL column and expiry now drops whole
+chunks.** Dropping a chunk is DDL, and row-level security filters queries rather
+than `DROP TABLE`, so this needs no tenant bound, no registry of tenants to
+enumerate, and no database role exempt from the policy — the three routes that
+each collided with a decision already made. It is also one operation per chunk
+instead of one per row.
+
+`ttl_field` must name the same column the hypertable is declared `on`. Chunks
+are selected by the time dimension, so a TTL on a different column could drop a
+chunk still holding rows whose TTL has not passed.
+
+A chunk is dropped only once its entire range is past, so a row can outlive its
+TTL by up to one `chunk_time_interval`. That interval is the retention precision.
+
+New counter, incremented on every sweep including by zero:
+
+```
+atlantis_sweeper_chunks_dropped_total{entity="..."}
+```
+
+**`tide apply` now refuses `partition by` + `ttl_field` in any other form.** This
+can reject a schema that previously applied. It is deliberate and has no override:
+the combination does not work, so accepting it means recording a retention rule
+atlantis silently will not honour — and retention is usually a compliance
+control, which surfaces as an audit finding rather than a bug report. The error
+names all three fixes.
+
+Uses `drop_chunks`, which is Apache-2 licensed. The automated
+`add_retention_policy` scheduler is Community/TSL-only and is **not** used —
+atlantis schedules the call from its own sweeper, keeping the emitted surface
+inside the Apache-2 subset the TimescaleDB pin requires.
+
 ### Changed
 
 #### `interval` changes wire type — breaking

@@ -261,6 +261,8 @@ Only Apache-2.0-licensed TimescaleDB functionality is emitted (`create_hypertabl
 
 Hypertables accept every entity-body clause (indexes, unique constraints, soft delete, cache block).
 
+**Every unique index must contain the time column, including the primary key.** TimescaleDB enforces this — a chunk covers a time range, so uniqueness it cannot check per chunk is uniqueness it cannot enforce. Use `primary by id, recorded_at` rather than `id primary`; the same applies to any `unique` clause. atlantis does not check this before applying, so a single-column primary key on a hypertable fails during `tide apply` with `cannot create a unique index without the column ... (used in partitioning)`, `SQLSTATE TS103`.
+
 ## Identifiers
 
 ```

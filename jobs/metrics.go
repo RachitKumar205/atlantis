@@ -79,6 +79,24 @@ var (
 		Help:      "Expired rows deleted by the TTL sweeper. Labels: entity.",
 	}, []string{"entity"})
 
+	// sweptChunksTotal counts hypertable chunks the TTL sweeper dropped.
+	//
+	// A separate series from rows_swept_total rather than a conversion into it:
+	// the two are different units, and a chunk holds an unknown number of rows.
+	// Adding an estimate would put a number nobody measured onto a dashboard,
+	// which is the shape of defect this sweeper has already had twice.
+	//
+	// Added by zero on every sweep, for the same reason rows_swept_total is —
+	// see its comment. `rate() == 0` on a hypertable that should be aging out
+	// is the alert.
+	sweptChunksTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "atlantis",
+		Subsystem: "sweeper",
+		Name:      "chunks_dropped_total",
+		Help: "Hypertable chunks dropped by the TTL sweeper, for entities whose " +
+			"ttl_field is their time dimension. Labels: entity.",
+	}, []string{"entity"})
+
 	// sweepBlockedTotal counts sweeps skipped because row-level security would
 	// have hidden every row from the statement.
 	//

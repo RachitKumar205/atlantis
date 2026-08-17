@@ -49,35 +49,55 @@ SELECT count(*) FROM consumer.sessions WHERE expires_at < now();
 - A sweep that fails is reported to the job runtime, so it retries and eventually dead-letters rather than failing silently. Check `tide job dead` if rows are not disappearing.
 - Operators can tune the cadence by updating `atlantis.job_schedules` directly (`UPDATE ... SET cron_spec = '*/5 * * * *'`) or disable with `enabled = false`.
 
-## `ttl_field` and `partition by` do not work together
+## Expiring rows on a tenant-isolated table
 
-An entity that declares both is **not swept**. Its expired rows stay.
+A `DELETE` sweep cannot work on a table with tenant isolation. The sweeper is a background job with no request behind it, so it binds no tenant; row-level security still applies to its `DELETE`, `atlantis.current_partition()` is `NULL`, the statement matches nothing and reports success. Binding some tenant would not fix it — expiry has to cover every tenant, and there is no single correct value to bind.
 
-The sweeper is a background job with no request behind it, so it binds no tenant. On a table with tenant isolation, row-level security is enforced against the sweeper too — `atlantis.current_partition()` is `NULL`, the `DELETE` matches nothing, and it reports success. Binding some tenant would not fix it: expiry has to cover every tenant, and there is no single correct value to bind.
+**Declare the entity a hypertable on its TTL column, and expiry drops whole chunks instead.**
 
-Rather than delete nothing quietly, the sweeper skips the entity and says so:
+```atl
+hypertable Event in shop on occurred_at {
+  id          bigint not null
+  tenant      varchar(32) not null
+  occurred_at timestamptz not null
+  body        text
+
+  primary by id, occurred_at
+  chunk_time_interval 1d
+  partition by tenant
+  ttl_field occurred_at
+}
+```
+
+The primary key includes `occurred_at` because TimescaleDB refuses a unique index that does not contain the time column. A single-column `id primary` fails the apply with `SQLSTATE TS103`.
+
+Dropping a chunk is DDL, and row-level security filters queries, not `DROP TABLE`. So this needs no tenant bound, no registry of tenants to iterate, and no database role exempt from the policy. It is also far cheaper: one operation per chunk rather than one per row.
+
+### The TTL column must be the time dimension
+
+`ttl_field` has to name the same column the hypertable is declared `on`. Chunks are selected by the time dimension, so if `ttl_field` named a different column a chunk whose time range has passed could still hold rows whose TTL has not — and dropping it would delete live data.
+
+`tide apply` refuses any other combination of `partition by` and `ttl_field`, rather than accepting a retention rule it would silently not honour. The error names all three ways out: declare the hypertable, drop `partition by`, or expire from your caller.
+
+### Granularity
+
+A chunk is dropped only once its **entire** time range is in the past, so rows can outlive their TTL by up to one `chunk_time_interval`. Choose the interval for the retention precision you need — `1d` means a row expires within a day of its TTL, `1h` within an hour.
+
+### What to watch
 
 ```
-WARN sweep: skipped, row-level security hides every row from the sweeper
-     entity=shop.Session table=atlantis.shop_session
+atlantis_sweeper_chunks_dropped_total{entity="shop.Event"}
 ```
 
-and increments a counter you can alert on:
+Incremented on every sweep, including by zero, so `rate() == 0` on a hypertable that should be ageing out is a question you can alert on.
+
+The older counter still exists for entities carrying a checkpoint written before apply started refusing them:
 
 ```
 atlantis_sweeper_sweeps_blocked_total{entity="shop.Session"}
 ```
 
-**Any non-zero value on that counter means expired rows are accumulating.** Alert on it.
-
-Two ways forward:
-
-| If you want | Do this |
-|---|---|
-| Tenant isolation on the table | Expire the rows from your own caller, which binds a tenant on every request and can issue the `DELETE` itself |
-| Automatic expiry | Drop `partition by` from the entity |
-
-The check asks the database, not your `.atl` file. An entity that declares `partition by` but whose policy has not been applied yet is still swept normally, because nothing is hiding its rows.
+**Any non-zero value there means expired rows are accumulating.** Alert on it.
 
 ## Related
 

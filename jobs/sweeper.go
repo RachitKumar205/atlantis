@@ -10,6 +10,7 @@ import (
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/runtime"
+	"github.com/rachitkumar205/atlantis/internal/schema"
 	"github.com/rachitkumar205/atlantis/internal/storage/pg"
 )
 
@@ -33,6 +34,53 @@ type SweepExpiredHandler struct {
 	Pool       *pgxpool.Pool
 	Logger     *slog.Logger
 	BatchLimit int
+}
+
+// dropExpiredChunks removes whole chunks whose time range has entirely passed,
+// returning how many were dropped.
+//
+// # Why this is not a DELETE
+//
+// The caller has already established that this entity is a hypertable whose
+// ttl_field is its time dimension. Dropping a chunk is DDL, so the tenant
+// policy does not filter it — which is the only reason expiry can work at all
+// on a `partition by` entity. See schema.ExpiryFor for the full argument.
+//
+// # Why the interval is zero
+//
+// `older_than => now()` drops every chunk lying entirely in the past, which is
+// exactly "the ttl has passed for every row it holds". A chunk straddling now()
+// is left alone: it contains rows whose ttl has NOT passed, and drop_chunks
+// only removes chunks whose range falls completely before the bound. Rows in
+// that chunk expire when it closes and the next sweep runs — the lag is one
+// chunk_time_interval, which is the granularity the schema author chose.
+//
+// # Why the count is rows, not a boolean
+//
+// drop_chunks returns one row per dropped chunk. Counting them gives the
+// metric something real to report; a bare Exec would leave "dropped nothing"
+// and "did not run" indistinguishable, which is the failure this sweeper has
+// now had twice.
+func (h *SweepExpiredHandler) dropExpiredChunks(
+	ctx context.Context, sqlSchema, table string, e *dsl.Entity,
+) (int, error) {
+	// The relation is passed as a regclass VALUE, not interpolated: a
+	// `table "..."` override is author-supplied text reaching a function call.
+	rows, err := h.Pool.Query(ctx,
+		`SELECT drop_chunks(relation => $1::regclass, older_than => now())`,
+		sqlSchema+"."+table)
+	if err != nil {
+		return 0, fmt.Errorf("drop_chunks %s.%s: %w", sqlSchema, table, err)
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("drop_chunks %s.%s: %w", sqlSchema, table, err)
+	}
+	return n, nil
 }
 
 // Handle is the jobs.Handler implementation.
@@ -74,7 +122,32 @@ func (h *SweepExpiredHandler) Handle(ctx context.Context, argsJSON []byte) error
 		if e.TtlField == "" {
 			continue
 		}
-		schema, table := resolvePhysical(&e)
+		// Named sqlSchema, not schema: the internal/schema package is imported
+		// here now and a local of that name would shadow it silently.
+		sqlSchema, table := resolvePhysical(&e)
+
+		// A hypertable whose ttl_field IS its time dimension expires by dropping
+		// chunks, which is DDL and therefore not filtered by the tenant policy.
+		// That is the whole reason it works where the DELETE below cannot: no
+		// tenant to bind, no registry to enumerate, no role exempt from RLS.
+		// See schema.ExpiryFor.
+		if schema.ExpiryFor(&e) == schema.ExpiryDropChunks {
+			attempted++
+			n, derr := h.dropExpiredChunks(ctx, sqlSchema, table, &e)
+			if derr != nil {
+				h.log().Error("sweep: drop_chunks failed", "entity", e.ID(), "err", derr)
+				failures = append(failures, fmt.Sprintf("%s: %v", e.ID(), derr))
+				continue
+			}
+			// Counted at zero for the same reason the DELETE path is: "nothing
+			// has aged out" and "this stopped working a month ago" must not
+			// look identical from outside.
+			sweptChunksTotal.WithLabelValues(e.ID()).Add(float64(n))
+			if n > 0 {
+				h.log().Info("sweep: dropped expired chunks", "entity", e.ID(), "chunks", n)
+			}
+			continue
+		}
 
 		// Skipped, loudly, rather than run into a guaranteed zero.
 		//
@@ -90,23 +163,24 @@ func (h *SweepExpiredHandler) Handle(ctx context.Context, argsJSON []byte) error
 		// delete" — arrived at by a different route, and worse, because there is
 		// no error to collect this time.
 		//
-		// Binding a tenant here would be wrong rather than incomplete, for the
-		// reason refuseBackfillOnBlockedTables gives: expiry has to cover every
-		// tenant, so there is no single correct value to bind. Enumerating
-		// tenants needs a cross-tenant read, which is the thing being prevented.
-		// A per-tenant sweep is a design change, and it is deferred.
+		// `tide apply` now refuses this combination outright
+		// (admin.unexpirableEntities), so the route in is a checkpoint written
+		// before that guard existed. This is the runtime's side of the same
+		// property: the state where expiry silently stops must not be reachable
+		// without a counter moving.
 		//
 		// The job is NOT failed. Other entities sweep normally, and a handler
 		// that dead-letters every five minutes is a handler somebody disables.
 		// The counter is the durable signal.
-		if blocked[schema+"."+table] {
+		if blocked[sqlSchema+"."+table] {
 			sweepBlockedTotal.WithLabelValues(e.ID()).Inc()
 			h.log().Warn("sweep: skipped, row-level security hides every row from the sweeper",
 				"entity", e.ID(),
-				"table", schema+"."+table,
+				"table", sqlSchema+"."+table,
 				"detail", "the sweeper binds no tenant, so this DELETE would succeed and "+
-					"match nothing while expired rows accumulate. Remove `partition by` from "+
-					"the entity, or expire its rows from the caller, which can bind a tenant")
+					"match nothing while expired rows accumulate. Declare the entity a "+
+					"hypertable on its ttl_field so expiry can drop chunks, remove "+
+					"`partition by`, or expire its rows from the caller, which can bind a tenant")
 			continue
 		}
 
@@ -122,8 +196,8 @@ func (h *SweepExpiredHandler) Handle(ctx context.Context, argsJSON []byte) error
 		sql := fmt.Sprintf(
 			`DELETE FROM %s.%s WHERE ctid = ANY (ARRAY(
 			     SELECT ctid FROM %s.%s WHERE %s < now() LIMIT %d))`,
-			quoteIdent(schema), quoteIdent(table),
-			quoteIdent(schema), quoteIdent(table), quoteIdent(e.TtlField), limit)
+			quoteIdent(sqlSchema), quoteIdent(table),
+			quoteIdent(sqlSchema), quoteIdent(table), quoteIdent(e.TtlField), limit)
 		attempted++
 		tag, err := h.Pool.Exec(ctx, sql)
 		if err != nil {

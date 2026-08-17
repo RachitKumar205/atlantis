@@ -907,6 +907,25 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 		}
 	}
 
+	// Refuse a declaration whose expiry the platform cannot perform.
+	//
+	// `partition by` + `ttl_field` on a table the sweeper cannot chunk-drop is
+	// a promise atlantis will not keep: the sweeper binds no tenant, so its
+	// DELETE matches nothing and expired rows accumulate forever. #48 made that
+	// state loud with a counter; this makes it unreachable, which is the half a
+	// counter cannot do.
+	//
+	// Refused rather than warned, and with no override env var, because unlike
+	// the checks around it there is nothing an operator can knowingly accept —
+	// the outcome is not "risky", it is "does not work". The fix is in the
+	// schema and the message names all three forms of it.
+	//
+	// A pure declaration check, so it needs no database read and sits before
+	// the ones that do.
+	if bad := unexpirableEntities(newIR); len(bad) > 0 {
+		return nil, unexpirableExpiryError(bad)
+	}
+
 	// Refuse to apply while CHECK constraints diverge between the .atl and
 	// the live table — the differ doesn't manage CHECKs, so applying would
 	// silently leave the divergence in place (the carts `awaiting_checkout`
