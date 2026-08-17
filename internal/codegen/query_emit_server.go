@@ -92,6 +92,11 @@ func emitProtoQueryMethod(b *strings.Builder, e *dsl.Entity, srv string, inbound
 			e.Name, screamingSnake(e.Name+"OrderField"), strings.ToUpper(f.Name))
 		fmt.Fprintf(&keysetCases, "\t\tcase %s:\n", caseLabel)
 		fmt.Fprintf(&keysetCases, "\t\t\tident = %q\n", quoteIdent(f.Name))
+		// Nullability travels with the column because it decides the SHAPE of
+		// the keyset predicate: a row-value comparison drops every row whose
+		// ordering column is NULL, so runtime.KeysetPredicate needs to know
+		// before it looks at the cursor.
+		fmt.Fprintf(&keysetCases, "\t\t\tnullable = %t\n", !f.NotNull)
 		fmt.Fprintf(&keysetCases, "\t\t\tif %s == %s {\n", caseLabel, pkOrderFieldConst)
 		keysetCases.WriteString("\t\t\t\tseenPK = true\n")
 		keysetCases.WriteString("\t\t\t}\n")
@@ -333,14 +338,18 @@ func (s *%s) build%sKeysetCols(orders []*pb.%sOrderBy) []runtime.KeysetColumn {
 	seenPK := false
 	for _, o := range orders {
 		var ident string
+		var nullable bool
 		switch o.GetField() {
 %s		default:
 			continue
 		}
-		cols = append(cols, runtime.KeysetColumn{QuotedIdent: ident, Desc: o.GetDesc()})
+		cols = append(cols, runtime.KeysetColumn{QuotedIdent: ident, Desc: o.GetDesc(), Nullable: nullable})
 	}
 	if !seenPK {
-		cols = append(cols, runtime.KeysetColumn{QuotedIdent: %q, Desc: false})
+		// The primary key is never nullable, which is what guarantees the
+		// keyset predicate always ends in a strict comparison over a total
+		// order and therefore always advances.
+		cols = append(cols, runtime.KeysetColumn{QuotedIdent: %q, Desc: false, Nullable: false})
 	}
 	return cols
 }
@@ -413,13 +422,31 @@ func extract%sCursor(ent *pb.%s, orders []*pb.%sOrderBy) []any {
 // value for field f to the `out` slice. Timestamps come back from
 // proto as *timestamppb.Timestamp and need .AsTime(); other scalars
 // ride through unchanged.
+//
+// # Nullable columns go through runtime.PresentOrNil
+//
+// A getter cannot express NULL: it returns 0, "" or the epoch for an unset
+// field, which is indistinguishable from a row that really holds that value.
+// A cursor built from those getters names a coordinate no row sits at, so the
+// next page comes back empty and — being shorter than the limit — carries no
+// token, leaving every row past the first NULL unreachable.
+//
+// The presence test is deliberately NOT emitted as `ent.Score != nil` against
+// the struct field. The emitted server is parsed by this package's tests but
+// never type-checked, so a wrong or renamed struct field would compile only in
+// the caller's repo. Naming the PROTO field instead keeps the string identical
+// to the one proto.go declared, and TestEmittedCursorFieldsExistInTheProto
+// holds the two emitters together.
 func cursorExtractorExpr(f dsl.Field, _ *dsl.Entity) string {
 	getter := "ent.Get" + snakeToCamel(f.Name) + "()"
 	switch f.Type.Name {
 	case "timestamptz", "date":
-		return "out = append(out, " + getter + ".AsTime())"
+		getter += ".AsTime()"
 	}
-	return "out = append(out, " + getter + ")"
+	if f.NotNull {
+		return "out = append(out, " + getter + ")"
+	}
+	return fmt.Sprintf("out = append(out, runtime.PresentOrNil(ent, %q, %s))", f.Name, getter)
 }
 
 // includeAttachFuncName returns the Go method name that attaches one

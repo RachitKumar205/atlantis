@@ -915,6 +915,7 @@ func TestEmitGoServer_KeysetCasesMatchEnum(t *testing.T) {
 entity Account in consumer {
   id    bigint primary
   email text not null
+  score real
 }
 `)
 	files, _ := EmitGoServer(ir)
@@ -925,7 +926,17 @@ entity Account in consumer {
 	assertContains(t, c, `ident = "\"id\""`)
 	assertContains(t, c, "case pb.AccountOrderField_ACCOUNT_ORDER_FIELD_EMAIL:")
 	assertContains(t, c, `ident = "\"email\""`)
+
+	// Nullability rides along with the identifier, because it decides the
+	// SHAPE of the keyset predicate rather than just its contents: a row-value
+	// comparison silently drops every row whose ordering column is NULL, so
+	// KeysetPredicate has to know before it looks at the cursor. `score` has no
+	// `not null`, which is the DSL default and exactly how the bug was reached.
+	assertContains(t, c, "nullable = true")
+	assertContains(t, c, "nullable = false")
+
 	// PK is always appended as an ASC tiebreaker if the caller didn't
-	// list it explicitly.
-	assertContains(t, c, `cols = append(cols, runtime.KeysetColumn{QuotedIdent: "\"id\"", Desc: false})`)
+	// list it explicitly, and never nullable — that is what guarantees the
+	// predicate ends in a strict comparison over a total order.
+	assertContains(t, c, `cols = append(cols, runtime.KeysetColumn{QuotedIdent: "\"id\"", Desc: false, Nullable: false})`)
 }

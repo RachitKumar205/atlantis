@@ -49,6 +49,34 @@ write.
 
 ### Fixed
 
+#### Paging on a nullable column no longer stops short
+
+**Pages that used to end early now continue.** A caller that walked a query to
+exhaustion will start receiving rows it never saw.
+
+Ordering by a column that can hold NULL dropped every row from the first NULL
+onward. The cursor was a row-value comparison — `("score","id") > ($1,$2)` —
+which PostgreSQL evaluates to NULL for any row whose `score` is NULL, so those
+rows were filtered out rather than ordered. The page came back empty; empty is
+shorter than the limit, so no `next_page_token` was emitted; and the caller,
+seeing no token, concluded it had read everything.
+
+Two things had to change together:
+
+- The `ORDER BY` now states `ASC NULLS LAST` / `DESC NULLS FIRST`. These are
+  already PostgreSQL's defaults, so no plan and no index choice changes — what
+  they buy is that the cursor predicate can rely on the ordering rather than
+  assume it.
+- A nullable ordering column switches the predicate to an expanded form that
+  reaches the NULL group and advances past it. The primary key tiebreaker is
+  never nullable, so every page still ends in a strict comparison and the walk
+  always terminates.
+
+Page tokens gained a null arm, so a token issued by an older server still
+decodes and a token issued by this one is not readable by an older server. Both
+are opaque to callers, and a token that fails to decode is rejected as it always
+was, so the caller restarts the walk rather than receiving a wrong page.
+
 #### An explicit zero was stored as NULL
 
 **Only affects the dynamic dispatcher** — the server that publishes descriptors

@@ -28,5 +28,18 @@ message PageTokenValue {
     google.protobuf.Timestamp ts = 4;
     bytes raw = 5;
     string num = 6;
+    // A NULL ordering key.
+    //
+    // The ARM's presence is the whole signal; the bool carries nothing and
+    // is always true. It cannot be expressed by omitting the value instead:
+    // a PageToken holds one entry per ORDER BY column positionally, so a
+    // missing entry would shift every later column onto the wrong one.
+    //
+    // A distinct arm is also what keeps NULL distinguishable from a real
+    // zero. Before this existed, an unset optional scalar reached the cursor
+    // as 0 or "" and the encoder could not tell the two apart, so a page
+    // boundary landing on a NULL was written as a value that compares
+    // in-range — which is how rows past it became unreachable.
+    bool null = 7;
   }
 }

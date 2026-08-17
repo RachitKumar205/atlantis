@@ -657,8 +657,10 @@ func (s *Server) handleQuery(ctx context.Context, meta *entityMeta, dec func(any
 		// Trim to limit.
 		entities.Truncate(int(limit))
 
-		cursorOut := extractCursorValues(meta, boundaryEntity, keysetCols)
-		nextToken, _ := runtime.EncodePageToken(meta.entityID, cursorOut)
+		nextToken, err := nextPageToken(meta, boundaryEntity, keysetCols)
+		if err != nil {
+			return nil, err
+		}
 		nextTokenFD := meta.queryResponseDesc.Fields().ByName("next_page_token")
 		if nextTokenFD != nil {
 			resp.Set(nextTokenFD, protoreflect.ValueOfString(nextToken))
@@ -674,26 +676,62 @@ func buildDefaultKeysetCols(meta *entityMeta) []runtime.KeysetColumn {
 		cols = append(cols, runtime.KeysetColumn{
 			QuotedIdent: schema.QuoteIdent(pk.sqlName),
 			Desc:        false,
+			// Never nullable, and not because the DSL says so — PRIMARY KEY
+			// implies NOT NULL in Postgres whatever the declaration carries.
+			// columnMeta.nullable would be the wrong source here: it holds
+			// schema.IsEffectivelyNullable, which reports TRUE for any column
+			// with a default, so a serial PK would come through as nullable.
+			// That is the right answer for the write path it was built for and
+			// the wrong one for ordering.
+			Nullable: false,
 		})
 	}
 	return cols
 }
 
+// nextPageToken renders the cursor for the boundary row of a page.
+//
+// Extracted from handleQuery so the error path has somewhere to be tested from.
+// Both halves used to be inline, and the encode's error was assigned to `_`:
+// the token came back as the empty string, which on the wire is
+// indistinguishable from "that was the last page". A caller that trusted it
+// stopped early believing it had read everything, and nothing — not a log line,
+// not a metric, not a status code — said otherwise. Returning the error makes
+// one request fail loudly instead of every request after it lying quietly.
+func nextPageToken(meta *entityMeta, boundary *dynamicpb.Message, cols []runtime.KeysetColumn) (string, error) {
+	vals, err := extractCursorValues(meta, boundary, cols)
+	if err != nil {
+		return "", err
+	}
+	return runtime.EncodePageToken(meta.entityID, vals)
+}
+
 // extractCursorValues extracts cursor values for keyset pagination.
-func extractCursorValues(meta *entityMeta, entity *dynamicpb.Message, keysetCols []runtime.KeysetColumn) []any {
+//
+// A keyset column with no matching entry in meta.columns is an error rather
+// than a skip. Silently emitting a shorter slice produces a token whose arity
+// does not match the column list, and nothing rejects that until the NEXT
+// request decodes it — at which point the failure names KeysetPredicate and
+// points nowhere near the entity whose metadata is inconsistent.
+func extractCursorValues(meta *entityMeta, entity *dynamicpb.Message, keysetCols []runtime.KeysetColumn) ([]any, error) {
 	out := make([]any, 0, len(keysetCols))
 	for _, kc := range keysetCols {
 		// Strip quotes from the ident to match column names.
 		colName := strings.Trim(kc.QuotedIdent, `"`)
+		found := false
 		for _, cm := range meta.columns {
 			if cm.sqlName == colName {
 				fd := meta.msgDesc.Fields().ByNumber(cm.protoNum)
 				out = append(out, protoValueForCursor(entity, fd, cm))
+				found = true
 				break
 			}
 		}
+		if !found {
+			return nil, fmt.Errorf("entity %s: keyset column %q has no column metadata", meta.entityID, colName)
+		}
 	}
-	return out
+	return out, nil
 }
 
 // goValueFromProto extracts a Go value for SQL arguments.

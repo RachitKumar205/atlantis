@@ -381,8 +381,27 @@ func setRepeatedFloat32(msg *dynamicpb.Message, fd protoreflect.FieldDescriptor,
 // cursor from a scanned column. Mirrors extractSessionCursor in the
 // generated code: the cursor carries the raw Go type (string, int64,
 // time.Time, etc.), not proto shapes.
+//
+// Returns nil for a column that was NULL in the row, which the page token
+// carries as its own arm.
+//
+// # Why HasPresence and not a bare Has
+//
+// scanRow leaves a field UNSET when the database gave it NULL, and codegen
+// emits nullable columns as proto3 `optional`, so presence is a faithful record
+// of nullness — but only for fields that HAVE presence. An implicit-presence
+// scalar reports Has() == false for a legitimate zero, so checking Has() alone
+// would report `id = 0` or `name = ""` as NULL and encode a cursor that skips
+// or repeats rows around those values.
+//
+// Reading through msg.Get() without any presence check is what caused the
+// defect this fixes: a NULL arrived as the type's zero value, indistinguishable
+// from a real one, and the cursor it produced named a position no row sat at.
 func protoValueForCursor(msg *dynamicpb.Message, fd protoreflect.FieldDescriptor, cm columnMeta) any {
 	if fd == nil {
+		return nil
+	}
+	if fd.HasPresence() && !msg.Has(fd) {
 		return nil
 	}
 	t := cm.field.Type

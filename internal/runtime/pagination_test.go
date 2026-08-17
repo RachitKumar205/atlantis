@@ -1,9 +1,14 @@
 package runtime
 
 import (
+	"encoding/base64"
 	"errors"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/proto"
+
+	commonpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/common/v1"
 )
 
 func TestPageToken_RoundTrip_Scalars(t *testing.T) {
@@ -76,9 +81,54 @@ func TestPageToken_RejectsCorruptedProto(t *testing.T) {
 	}
 }
 
-func TestPageToken_EncodeRejectsNil(t *testing.T) {
-	if _, err := EncodePageToken("consumer.Account", []any{nil}); err == nil {
-		t.Errorf("expected error on nil cursor value")
+// A nil cursor coordinate round-trips as NULL.
+//
+// This test used to assert the opposite — that encoding nil was an error —
+// which was the contract right up until it was reached. A NULL ordering column
+// arrives here as nil, and rejecting it means the handler cannot issue a token
+// for the page it just served. The error was never observed only because the
+// cursor came out of proto getters that turn an unset field into 0 or "", so
+// the NULL was already lost by the time it got here.
+func TestPageToken_NullRoundTrips(t *testing.T) {
+	tok, err := EncodePageToken("consumer.Account", []any{nil, int64(7)})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if tok == "" {
+		t.Fatal("encoded token is empty; an empty token reads as 'no more pages'")
+	}
+	out, err := DecodePageToken(tok, "consumer.Account")
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("decoded %d values, want 2", len(out))
+	}
+	if out[0] != nil {
+		t.Errorf("values[0] = %#v, want nil — a NULL that decodes as a typed zero "+
+			"puts the cursor at a position no row occupies", out[0])
+	}
+	if out[1] != int64(7) {
+		t.Errorf("values[1] = %#v, want int64(7)", out[1])
+	}
+}
+
+// An absent oneof arm is still an error, and stays distinguishable from the
+// null arm. Both decode paths could plausibly be written to return nil; only
+// one of them is a well-formed token.
+func TestPageToken_EmptyArmStillErrors(t *testing.T) {
+	tok := &commonpb.PageToken{
+		EntityId: "consumer.Account",
+		Values:   []*commonpb.PageTokenValue{{}},
+	}
+	raw, err := proto.Marshal(tok)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	_, err = DecodePageToken(base64.RawURLEncoding.EncodeToString(raw), "consumer.Account")
+	if err == nil {
+		t.Fatal("a PageTokenValue with no arm set decoded without error; " +
+			"a corrupt token now reads as a legitimate NULL")
 	}
 }
 
@@ -188,20 +238,26 @@ func TestOrderByClauseFromKeyset(t *testing.T) {
 		want string
 	}{
 		{"empty", nil, ""},
+		// The NULLS placement is written out on every column, nullable or
+		// not. It matches PostgreSQL's own default, so no plan and no index
+		// choice changes — what it buys is that KeysetPredicate's null arms
+		// are derived from an ordering the query STATES rather than one it
+		// assumes. Emitting it only for nullable columns would make the
+		// clause depend on a flag the reader has to go and check.
 		{"single asc",
 			[]KeysetColumn{{QuotedIdent: `"id"`}},
-			` ORDER BY "id" ASC`,
+			` ORDER BY "id" ASC NULLS LAST`,
 		},
 		{"single desc",
 			[]KeysetColumn{{QuotedIdent: `"created_at"`, Desc: true}},
-			` ORDER BY "created_at" DESC`,
+			` ORDER BY "created_at" DESC NULLS FIRST`,
 		},
 		{"two columns mixed",
 			[]KeysetColumn{
 				{QuotedIdent: `"created_at"`, Desc: true},
 				{QuotedIdent: `"id"`, Desc: false},
 			},
-			` ORDER BY "created_at" DESC, "id" ASC`,
+			` ORDER BY "created_at" DESC NULLS FIRST, "id" ASC NULLS LAST`,
 		},
 	}
 	for _, tc := range cases {
@@ -209,6 +265,30 @@ func TestOrderByClauseFromKeyset(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// A NULL cursor value for a column declared NOT NULL is refused.
+//
+// The two paths it could otherwise take both end in silence. The row-value
+// fast path binds nil and compares every row against NULL; the expanded form
+// renders FALSE for that position. Either way the page is empty, empty is
+// shorter than the limit so no token is issued, and the caller stops believing
+// it read everything — which is the defect, arrived at from the other side.
+func TestKeysetPredicate_RejectsNullForANotNullColumn(t *testing.T) {
+	cols := []KeysetColumn{
+		{QuotedIdent: `"score"`, Nullable: true},
+		{QuotedIdent: `"id"`, Nullable: false},
+	}
+	if _, _, err := KeysetPredicate(cols, []any{1.5, nil}, 1); err == nil {
+		t.Error("KeysetPredicate accepted a NULL cursor value for a NOT NULL " +
+			"column; the predicate it builds can never match and the walk stops " +
+			"with no signal")
+	}
+	// The same NULL against the column that IS nullable is legitimate and
+	// must still work, or the guard has just re-broken the feature.
+	if _, _, err := KeysetPredicate(cols, []any{nil, int64(7)}, 1); err != nil {
+		t.Errorf("KeysetPredicate rejected a NULL for the nullable column: %v", err)
 	}
 }
 

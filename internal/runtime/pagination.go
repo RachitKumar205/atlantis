@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	commonpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/common/v1"
@@ -32,6 +33,49 @@ import (
 // decoded, fails proto unmarshal, or names an entity_id that does not
 // match the request. Callers should surface it as codes.InvalidArgument.
 var ErrInvalidPageToken = errors.New("runtime: invalid page token")
+
+// PresentOrNil returns v when protoField is present on m, and nil when it is
+// absent. Generated cursor extractors call it for every nullable ordering
+// column.
+//
+// # Why the generated code cannot just check the struct field
+//
+// A NULL column is scanned into an unset proto field, and codegen emits
+// nullable columns with explicit presence, so the information is there — but
+// the getter erases it, returning 0 or "" exactly as if the row held a real
+// zero. The obvious fix is for the emitted code to test the pointer field
+// directly (`ent.Score != nil`), and that is a worse trade than it looks: the
+// emitted server is only ever PARSED by the test suite, never type-checked, so
+// a wrong or renamed struct field would compile in the caller's repo and
+// nowhere else. Routing through protoreflect means the emitted code names the
+// PROTO field, which is the same string codegen wrote into the .proto, and the
+// pairing is checkable inside this repo.
+//
+// # Behaviour when the field is unknown
+//
+// Returns v unchanged. That is the pre-existing behaviour for every column and
+// so cannot introduce a new failure, and codegen never emits a name it did not
+// also declare — TestEmittedCursorFieldsExistInTheProto holds those two
+// emitters together. Returning nil instead would turn a codegen slip into every
+// row looking NULL, which is a far worse silent outcome than the one this
+// function exists to remove.
+func PresentOrNil(m proto.Message, protoField string, v any) any {
+	if m == nil {
+		return v
+	}
+	r := m.ProtoReflect()
+	fd := r.Descriptor().Fields().ByName(protoreflect.Name(protoField))
+	if fd == nil {
+		return v
+	}
+	// HasPresence first: an implicit-presence scalar reports Has() == false for
+	// a legitimate zero, so testing Has() alone would report `count = 0` as
+	// NULL and page around a value that is really there.
+	if fd.HasPresence() && !r.Has(fd) {
+		return nil
+	}
+	return v
+}
 
 // EncodePageToken packs the cursor coordinates for one row into a
 // base64url-encoded opaque string. values are taken in the order the
@@ -147,11 +191,23 @@ func encodePageTokenValue(v any) (*commonpb.PageTokenValue, error) {
 		}
 		return &commonpb.PageTokenValue{V: &commonpb.PageTokenValue_Ts{Ts: timestamppb.New(*x)}}, nil
 	case nil:
-		// NULL ordering keys are not supportable in keyset pagination
-		// without an explicit NULLS FIRST / NULLS LAST contract from
-		// the caller. Generated handlers strip nullable columns from
-		// the order spec; receiving nil here is a bug.
-		return nil, fmt.Errorf("nil value in cursor")
+		// A NULL ordering key, carried as its own arm.
+		//
+		// This used to return an error, justified by a comment asserting that
+		// "generated handlers strip nullable columns from the order spec".
+		// They never did — orderableType rejects only arrays and vectors, and
+		// nullable is the DSL default. The error was also unreachable, because
+		// the cursor was read through proto getters that return 0 or "" for an
+		// unset field, so a NULL arrived as a plausible in-range value instead
+		// of as nil. A page landing on a NULL then encoded a cursor no row
+		// could be found after, the next page came back empty, and because
+		// empty is shorter than the limit no token was emitted at all: every
+		// row past the first NULL was unreachable, silently.
+		//
+		// Ordering is now explicit — ASC NULLS LAST, DESC NULLS FIRST, written
+		// into the ORDER BY by OrderByClauseFromKeyset — so a NULL cursor has a
+		// defined position and KeysetPredicate can advance past it.
+		return &commonpb.PageTokenValue{V: &commonpb.PageTokenValue_Null{Null: true}}, nil
 	default:
 		return nil, fmt.Errorf("unsupported cursor type %T", v)
 	}
@@ -167,6 +223,19 @@ type KeysetColumn struct {
 	// wrapped in double quotes by the emitter.
 	QuotedIdent string
 	Desc        bool
+	// Nullable reports whether the column may hold NULL.
+	//
+	// It decides the SHAPE of the predicate, not just its contents, which is
+	// why it is a property of the column rather than something inferred from
+	// the cursor value. A row-value comparison — `("a","b") > ($1,$2)` —
+	// evaluates to NULL for any row whose "a" is NULL, so Postgres drops
+	// exactly the rows the next page is trying to reach. That happens whether
+	// or not the CURSOR holds a NULL, so reading the cursor is not enough to
+	// know the fast path is safe.
+	//
+	// The PK tiebreaker is never nullable, which is what guarantees the
+	// predicate always ends in a strict comparison over a total order.
+	Nullable bool
 }
 
 // KeysetPredicate renders the WHERE fragment that advances past a
@@ -204,13 +273,44 @@ func KeysetPredicate(cols []KeysetColumn, cursor []any, placeholderStart int) (s
 		return "", nil, fmt.Errorf("runtime: KeysetPredicate: %d cols vs %d cursor values", len(cols), len(cursor))
 	}
 
-	allAsc, allDesc := true, true
-	for _, c := range cols {
+	allAsc, allDesc, anyNullable := true, true, false
+	for i, c := range cols {
 		if c.Desc {
 			allAsc = false
 		} else {
 			allDesc = false
 		}
+		if c.Nullable {
+			anyNullable = true
+			continue
+		}
+		// A NULL against a column declared NOT NULL is a contradiction, and
+		// left alone it fails in the worst available way. The row-value fast
+		// path would bind nil and compare every row against NULL, and the
+		// expanded form would render `FALSE` for that position — either way an
+		// empty page, no token, and a caller that stops believing it read
+		// everything. That is the exact shape this whole file exists to remove,
+		// so it is refused rather than rendered.
+		//
+		// Reachable only through a wiring mistake: a Nullable flag that
+		// disagrees with the schema, or a cursor extractor returning nil for a
+		// column that cannot hold one. Both are bugs worth a loud failure.
+		if cursor[i] == nil {
+			return "", nil, fmt.Errorf(
+				"runtime: KeysetPredicate: cursor[%d] is NULL but column %s is not nullable",
+				i, c.QuotedIdent)
+		}
+	}
+
+	// A nullable column anywhere forces the expanded form, whatever the cursor
+	// holds. Row-value comparison is not merely awkward with NULLs — it is
+	// wrong: `("score","id") > ($1,$2)` evaluates to NULL for every row whose
+	// "score" is NULL, so those rows are filtered out rather than ordered, and
+	// they are precisely the rows the next page exists to return. The result is
+	// an empty page, and because empty is shorter than the limit the handler
+	// emits no token, so paging stops with rows still unread.
+	if anyNullable {
+		return nullAwareKeysetPredicate(cols, cursor, placeholderStart)
 	}
 
 	args := make([]any, 0, len(cursor))
@@ -264,9 +364,120 @@ func KeysetPredicate(cols []KeysetColumn, cursor []any, placeholderStart int) (s
 	return sb.String(), args, nil
 }
 
+// nullAwareKeysetPredicate builds the page-advance predicate when any ordering
+// column may be NULL.
+//
+// # The shape
+//
+// The same nested-OR expansion the mixed-direction case uses, with both halves
+// made null-aware. For column i with cursor value v, under the ordering
+// OrderByClauseFromKeyset writes (ASC NULLS LAST, DESC NULLS FIRST):
+//
+//	equal(c, v)   v non-NULL          c = $n
+//	              v NULL              c IS NULL
+//
+//	after(c, v)   v non-NULL, ASC     (c > $n OR c IS NULL)
+//	              v non-NULL, DESC    c < $n
+//	              v NULL, ASC         FALSE
+//	              v NULL, DESC        c IS NOT NULL
+//
+// Read them against the ordering and each falls out. Ascending, NULLs sort
+// last, so everything after a non-NULL value is either a larger value or a
+// NULL — and nothing at all comes after a NULL, because NULLs are the tail.
+// Descending, NULLs sort first, so a NULL cursor is followed by every non-NULL
+// row, and a non-NULL cursor has already left the NULLs behind.
+//
+// # Why FALSE rather than omitting the disjunct
+//
+// `after` returning FALSE for a NULL ascending cursor is not a degenerate case
+// to skip: the disjunct still has to exist so the LATER columns' equality
+// prefix is built on it. Dropping it would silently shorten the chain and let a
+// row equal on this column but past it on the tiebreaker escape the predicate.
+//
+// # Termination
+//
+// The last column is the PK tiebreaker, which is never nullable, so the final
+// disjunct is always `... AND pk > $n` — a strict comparison over a total
+// order. Every page therefore advances, including one whose entire boundary
+// prefix is NULL.
+func nullAwareKeysetPredicate(cols []KeysetColumn, cursor []any, placeholderStart int) (string, []any, error) {
+	var args []any
+	next := placeholderStart
+
+	// Placeholders are allocated as the SQL is written, not by position: a NULL
+	// renders as `IS NULL` and consumes no argument, so `placeholderStart+i`
+	// stops being the right number for every column after the first NULL.
+	// Getting this wrong shifts every later bind and the predicate compares the
+	// wrong column against the wrong value — which SQL accepts happily when the
+	// types line up.
+	equal := func(sb *strings.Builder, c KeysetColumn, v any) {
+		if v == nil {
+			fmt.Fprintf(sb, "%s IS NULL", c.QuotedIdent)
+			return
+		}
+		fmt.Fprintf(sb, "%s = $%d", c.QuotedIdent, next)
+		args = append(args, v)
+		next++
+	}
+	after := func(sb *strings.Builder, c KeysetColumn, v any) {
+		switch {
+		case v == nil && c.Desc:
+			fmt.Fprintf(sb, "%s IS NOT NULL", c.QuotedIdent)
+		case v == nil:
+			sb.WriteString("FALSE")
+		case c.Desc:
+			fmt.Fprintf(sb, "%s < $%d", c.QuotedIdent, next)
+			args = append(args, v)
+			next++
+		default:
+			// The `OR ... IS NULL` is what reaches the NULL tail. Without it an
+			// ascending page stops at the last non-NULL row and every NULL row
+			// is unreachable — the defect this function exists for.
+			fmt.Fprintf(sb, "(%s > $%d OR %s IS NULL)", c.QuotedIdent, next, c.QuotedIdent)
+			args = append(args, v)
+			next++
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteByte('(')
+	for i := range cols {
+		if i > 0 {
+			sb.WriteString(" OR ")
+		}
+		sb.WriteByte('(')
+		for j := 0; j < i; j++ {
+			if j > 0 {
+				sb.WriteString(" AND ")
+			}
+			equal(&sb, cols[j], cursor[j])
+		}
+		if i > 0 {
+			sb.WriteString(" AND ")
+		}
+		after(&sb, cols[i], cursor[i])
+		sb.WriteByte(')')
+	}
+	sb.WriteByte(')')
+	return sb.String(), args, nil
+}
+
 // OrderByClauseFromKeyset renders the SQL " ORDER BY ..." clause from
 // the keyset column list. The empty list yields the empty string —
 // callers concatenate directly without an interior conditional.
+//
+// # Why the NULLS placement is written out
+//
+// ASC NULLS LAST and DESC NULLS FIRST are already PostgreSQL's defaults, so
+// emitting them changes no plan and no index choice — a default btree provides
+// exactly these orderings. What they change is that KeysetPredicate can RELY on
+// them. Before, the predicate's correctness depended on an ordering nothing in
+// the query stated, which is a contract only in the sense that both halves
+// happened to agree.
+//
+// Stating it also makes the pair reviewable: flip one of these and the
+// corresponding arm in KeysetPredicate is wrong, and the test that walks a page
+// boundary over NULLs says so.
 func OrderByClauseFromKeyset(cols []KeysetColumn) string {
 	if len(cols) == 0 {
 		return ""
@@ -279,9 +490,9 @@ func OrderByClauseFromKeyset(cols []KeysetColumn) string {
 		}
 		sb.WriteString(c.QuotedIdent)
 		if c.Desc {
-			sb.WriteString(" DESC")
+			sb.WriteString(" DESC NULLS FIRST")
 		} else {
-			sb.WriteString(" ASC")
+			sb.WriteString(" ASC NULLS LAST")
 		}
 	}
 	return sb.String()
@@ -304,6 +515,11 @@ func decodePageTokenValue(ptv *commonpb.PageTokenValue) (any, error) {
 		return arm.Raw, nil
 	case *commonpb.PageTokenValue_Num:
 		return arm.Num, nil
+	case *commonpb.PageTokenValue_Null:
+		// nil, and distinct from the case below. An absent oneof is a
+		// malformed token; this arm is a well-formed token saying the boundary
+		// row's value for that column was NULL.
+		return nil, nil
 	case nil:
 		return nil, fmt.Errorf("empty oneof arm")
 	default:
