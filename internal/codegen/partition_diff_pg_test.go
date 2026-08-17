@@ -524,8 +524,17 @@ entity Doc in ptype {
 	if d.IsEmpty() {
 		t.Fatal("changing the tenant column's type produced an empty plan")
 	}
+	// Across every bucket, not d.Breaking alone.
+	//
+	// This test is about whether the REBUILD is planned; the bucket the change
+	// lands in is a separate question owned by
+	// TestAWideningThatCannotMoveVisibilityIsNotBreaking. varchar(16) -> text
+	// leaves the policy predicate byte-identical — both are text-shaped, so
+	// neither takes a cast — so the change is additive, and scanning only
+	// Breaking reported "the plan does not rebuild the policy" for a plan that
+	// rebuilds it perfectly well.
 	var sawRebuild bool
-	for _, ch := range d.Breaking {
+	for _, ch := range d.All() {
 		if ch.Kind == KindPartitionChanged {
 			sawRebuild = true
 		}
@@ -558,5 +567,176 @@ SELECT coalesce(max(pg_get_expr(p.polqual, p.polrelid)), '')
 	}
 	if !strings.Contains(qual, "current_partition") || !strings.Contains(qual, "tenant") {
 		t.Errorf("the rebuilt policy does not scope the tenant column: %q", qual)
+	}
+}
+
+// The class of a tenant-column type change follows the POLICY PREDICATE, not
+// the column type.
+//
+// # Why this is not pedantry
+//
+// 0026 seeds PLAN_CLASS_CROSS_CALLER_BREAKING with require_approval=true, so
+// the class decides whether an apply stops and waits for a human. Widening
+// varchar(16) to varchar(32) on a tenant column used to stop it — while the
+// policy it rebuilt was byte-identical before and after, because both types are
+// text-shaped and neither takes a cast. The reviewer was being asked to approve
+// a change to what callers can read, and nothing about what callers can read
+// had moved.
+//
+// The rebuild is not in question and happens either way: PostgreSQL refuses to
+// alter a column a policy depends on. Only the class moves.
+//
+// # Both directions, deliberately
+//
+// Asserting only that a widening is additive would pass against a differ that
+// classified EVERYTHING additive — which would send a genuine change to what
+// the policy matches through unattended. The uuid case is what makes the
+// additive case mean something.
+func TestAWideningThatCannotMoveVisibilityIsNotBreaking(t *testing.T) {
+	partitioned := func(tenantDecl string) string {
+		return `
+entity Doc in pclass {
+  id     bigint primary
+  tenant ` + tenantDecl + ` not null
+  body   text
+  partition by tenant
+}
+`
+	}
+
+	for _, tc := range []struct {
+		name      string
+		from, to  string
+		wantClass ChangeClass
+		why       string
+	}{
+		{
+			name: "varchar widened", from: "varchar(16)", to: "varchar(32)",
+			wantClass: ClassAdditive,
+			why: "both are text-shaped so neither takes a cast; the policy " +
+				"predicate is byte-identical and no caller can observe the change",
+		},
+		{
+			name: "varchar to text", from: "varchar(16)", to: "text",
+			wantClass: ClassAdditive,
+			why:       "same reason — text is text-shaped and takes no cast either",
+		},
+		{
+			name: "varchar to uuid", from: "varchar(36)", to: "uuid",
+			wantClass: ClassCrossCallerBreaking,
+			why: "the discriminator gains a ::uuid cast, so the policy compares on " +
+				"different terms and the class is earned",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := lower(t, partitioned(tc.from))
+			after := lower(t, partitioned(tc.to))
+			AssignProtoNumbers(nil, before)
+			AssignProtoNumbers(before, after)
+
+			var got ChangeClass
+			var found bool
+			for _, ch := range ComputeDiff(before, after).All() {
+				if ch.Kind == KindPartitionChanged {
+					got, found = ch.Class, true
+				}
+			}
+			if !found {
+				t.Fatalf("no partition change emitted for %s -> %s, so the rebuild is "+
+					"not planned at all and PostgreSQL will refuse the ALTER", tc.from, tc.to)
+			}
+			if got != tc.wantClass {
+				t.Errorf("%s -> %s classified %v, want %v: %s",
+					tc.from, tc.to, got, tc.wantClass, tc.why)
+			}
+		})
+	}
+}
+
+// A bracketed partition change must never reach a class group, whatever its
+// class.
+//
+// # The guard this protects
+//
+// emitClass's KindPartitionChanged arm carries `if oldE.PartitionField ==
+// newE.PartitionField { break }`, because a same-column rebuild is owned by the
+// prologue/epilogue bracket — emitting it in the group as well creates the
+// policy twice, and on the DOWN path the group's copy recreates it BEFORE the
+// column is reverted, which is the SQLSTATE 0A000 wedge the bracket exists to
+// remove.
+//
+// That guard was unreachable and therefore untestable: withoutBracketedPartitionChanges
+// stripped bracketed partition changes from BREAKING, and every partition change
+// was breaking, so nothing ever reached the arm. Deleting the guard changed
+// nothing and the whole package stayed green.
+//
+// Classifying a predicate-preserving widening as ADDITIVE changes that. Additive
+// is a different group, and the filter used to run on BREAKING alone — so the
+// change would have arrived in emitClass with only that dead guard between it
+// and a duplicate policy. The filter now runs on every group.
+//
+// # Two mechanisms, and neither is individually killable
+//
+// Stated rather than implied, because the mutation results are otherwise
+// confusing. The group filter and the arm guard BOTH prevent this for a
+// same-column change, so removing either alone leaves this test green. It fails
+// only when both go.
+//
+// They are not duplicates of each other. The filter is the general rule —
+// class-independent, and the only thing covering KindPartitionAdded and
+// KindPartitionRemoved on a bracketed entity, which the guard's same-column
+// condition cannot see. The guard is the narrow backstop inside the arm. Keeping
+// both is deliberate; what is asserted here is the OUTCOME they exist for,
+// because a test tied to either one would pass while the other did the work and
+// tell you nothing about which.
+func TestABracketedPartitionChangeReachesNoClassGroup(t *testing.T) {
+	before := lower(t, `
+entity Doc in pbrk {
+  id     bigint primary
+  tenant varchar(16) not null
+  partition by tenant
+}
+`)
+	after := lower(t, `
+entity Doc in pbrk {
+  id     bigint primary
+  tenant varchar(32) not null
+  partition by tenant
+}
+`)
+	AssignProtoNumbers(nil, before)
+	AssignProtoNumbers(before, after)
+	d := ComputeDiff(before, after)
+
+	if len(partitionRebuilds(d, indexByID(after), indexByID(before))) == 0 {
+		t.Fatal("a same-column type change did not produce a bracket, so this test " +
+			"is asserting nothing about bracketed changes")
+	}
+
+	scripts, err := EmitSQL(before, after, d)
+	if err != nil {
+		t.Fatalf("EmitSQL: %v", err)
+	}
+
+	// Counted in the EMITTED SCRIPT, not by calling
+	// withoutBracketedPartitionChanges here.
+	//
+	// The first version of this test called that helper itself and asserted on
+	// what came back. It passed with the ADDITIVE group left unfiltered in
+	// EmitSQL — because it was checking that the helper works, which was never
+	// in doubt, rather than that EmitSQL uses it on every group. A test that
+	// re-implements the call it is meant to be verifying cannot fail for the
+	// reason it exists.
+	create := "CREATE POLICY " + quoteIdent(partitionPolicyName(&before.Entities[0]))
+	for _, s := range []struct {
+		name   string
+		script string
+	}{{"up", scripts.Up}, {"down", scripts.Down}} {
+		if n := strings.Count(s.script, create); n != 1 {
+			t.Errorf("the %s script creates the boundary policy %d times, want 1. The "+
+				"bracket already drops and recreates it; a second copy from a class "+
+				"group lands before the column change on the down path — SQLSTATE "+
+				"0A000, the wedge the bracket exists to remove:\n%s", s.name, n, s.script)
+		}
 	}
 }

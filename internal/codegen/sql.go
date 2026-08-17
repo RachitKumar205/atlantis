@@ -179,18 +179,25 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 		label   string
 		changes []Change
 	}{
-		{"ADDITIVE", d.Additive},
-		{"BACKFILL REQUIRED", d.BackfillRequired},
+		// EVERY group is filtered, not just BREAKING.
+		//
+		// Bracketed entities have their partition change removed, because the
+		// bracket owns the drop and the recreate. Leaving the change in a group
+		// as well emits the policy twice, and on the DOWN path the group's copy
+		// recreates it BEFORE the column is reverted — the exact SQLSTATE 0A000
+		// the bracket exists to remove.
+		//
+		// This used to filter BREAKING alone, which was correct only while every
+		// partition change was classified cross-caller-breaking. A same-column
+		// type change whose policy predicate does not move is now ADDITIVE, so
+		// an unfiltered group would carry it straight back into emitClass. The
+		// rule is a property of being bracketed, not of a class, so it is
+		// applied where the grouping happens rather than per group.
+		{"ADDITIVE", withoutBracketedPartitionChanges(d.Additive, rebuilt)},
+		{"BACKFILL REQUIRED", withoutBracketedPartitionChanges(d.BackfillRequired, rebuilt)},
 		// Destructive before breaking: a parked object must be out of the way
 		// before anything that might recreate a name it still holds.
-		{"DESTRUCTIVE — PARKED, REAPED AFTER THE RETENTION WINDOW", d.Destructive},
-		// Bracketed entities have their partition change removed from the
-		// group. The bracket owns the drop and the recreate for them, and
-		// leaving the change here as well emitted the policy twice — on the
-		// DOWN path the group's copy recreated it BEFORE the column was
-		// reverted, reproducing the exact SQLSTATE 0A000 the bracket removes.
-		// The same duplication was already fixed for the same-column arm; this
-		// makes it true for all three.
+		{"DESTRUCTIVE — PARKED, REAPED AFTER THE RETENTION WINDOW", withoutBracketedPartitionChanges(d.Destructive, rebuilt)},
 		{"BREAKING — REVIEW CAREFULLY", withoutBracketedPartitionChanges(d.Breaking, rebuilt)},
 	} {
 		gd := &sqlBuilder{}
@@ -2037,10 +2044,7 @@ func emitPartitionPolicy(b *sqlBuilder, e *dsl.Entity) {
 	// policy cannot be created at all: `operator does not exist: uuid = text`,
 	// surfacing at apply time as an opaque Postgres error against DDL nobody
 	// hand-wrote.
-	discriminator := "atlantis.current_partition()"
-	if ct := partitionCastType(e); ct != "" {
-		discriminator += "::" + ct
-	}
+	predicate := partitionPolicyPredicate(e)
 
 	b.linef("ALTER TABLE %s ENABLE ROW LEVEL SECURITY;", table)
 	b.linef("ALTER TABLE %s FORCE ROW LEVEL SECURITY;", table)
@@ -2084,8 +2088,8 @@ func emitPartitionPolicy(b *sqlBuilder, e *dsl.Entity) {
 	// Both are required on the boundary: USING alone lets a caller INSERT a row
 	// attributed to another tenant, which it then cannot see — a write leak
 	// rather than a read leak, and just as much a breach.
-	b.linef("CREATE POLICY %s ON %s AS RESTRICTIVE USING (%s = %s) WITH CHECK (%s = %s);",
-		quoteIdent(partitionPolicyName(e)), table, col, discriminator, col, discriminator)
+	b.linef("CREATE POLICY %s ON %s AS RESTRICTIVE USING (%s) WITH CHECK (%s);",
+		quoteIdent(partitionPolicyName(e)), table, predicate, predicate)
 
 	// The default grant, created only when the table would otherwise admit
 	// nothing.
@@ -2209,6 +2213,31 @@ func emitPartitionIndexDrop(b *sqlBuilder, e *dsl.Entity) {
 	}
 	b.linef("DROP INDEX IF EXISTS %s.%s;",
 		quoteIdent(entitySchema(e)), quoteIdent(partitionIndexName(e)))
+}
+
+// partitionPolicyPredicate renders the boundary policy's condition, and is the
+// single definition of it.
+//
+// Both the emitter and the DIFFER need this string, and for different reasons:
+// emitPartitionPolicy writes it into CREATE POLICY, and diffPartition compares
+// the old and new forms to decide whether a change alters what any caller can
+// read. A second rendering in the differ would be two descriptions of the same
+// text, free to disagree — and the disagreement would be silent, because each
+// looks correct alone. That is the shape behind most of the defects this file's
+// comments describe, so there is one function and two callers.
+//
+// The cast is part of the predicate, not decoration: it is what makes
+// `varchar` -> `uuid` a real change to what the policy matches, while
+// `varchar(16)` -> `varchar(32)` leaves the text byte-identical.
+func partitionPolicyPredicate(e *dsl.Entity) string {
+	if e == nil || e.PartitionField == "" {
+		return ""
+	}
+	discriminator := "atlantis.current_partition()"
+	if ct := partitionCastType(e); ct != "" {
+		discriminator += "::" + ct
+	}
+	return quoteIdent(e.PartitionField) + " = " + discriminator
 }
 
 // partitionCastType returns the SQL type the discriminator must be cast to for

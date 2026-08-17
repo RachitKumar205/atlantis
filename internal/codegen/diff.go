@@ -1654,8 +1654,36 @@ func diffPartition(oldE, newE *dsl.Entity, d *Diff) {
 	// so the drop lands ahead of the ALTER.
 	if oldField != "" && oldField == newField {
 		if partitionColumnType(oldE) != partitionColumnType(newE) {
+			// The class follows the POLICY PREDICATE, not the column type.
+			//
+			// The rebuild happens either way — PostgreSQL refuses to alter a
+			// column a policy depends on, so the boundary comes down and goes
+			// back up regardless. What varies is whether anything a caller can
+			// READ moves, and that is a property of the predicate.
+			//
+			// varchar(16) -> varchar(32) leaves it byte-identical: both are
+			// text-shaped, so neither takes a cast and the comparison is the
+			// same comparison. Classifying that cross-caller-breaking made an
+			// apply wait for a reviewer over a change nobody could observe —
+			// 0026 seeds that class require_approval=true — while telling the
+			// reviewer, accurately, that nothing about visibility changed.
+			//
+			// varchar -> uuid does move it: the discriminator gains a ::uuid
+			// cast, so the policy matches on different terms and the class is
+			// earned.
+			class := ClassAdditive
+			detail := fmt.Sprintf("the type of the tenant column %q changed, so the "+
+				"isolation policy is rebuilt — PostgreSQL refuses to alter a column a "+
+				"policy depends on. The policy's condition is unchanged, so what each "+
+				"caller can see does not move", newField)
+			if partitionPolicyPredicate(oldE) != partitionPolicyPredicate(newE) {
+				class = ClassCrossCallerBreaking
+				detail = fmt.Sprintf("the type of the tenant column %q changed and the "+
+					"isolation policy's condition changes with it, so the policy must be "+
+					"rebuilt and what each caller can see may move", newField)
+			}
 			d.append(Change{
-				Class:    ClassCrossCallerBreaking,
+				Class:    class,
 				Kind:     KindPartitionChanged,
 				EntityID: newE.ID(),
 				Field:    newField,
@@ -1664,9 +1692,7 @@ func diffPartition(oldE, newE *dsl.Entity, d *Diff) {
 				// "%s/%s: %s" over EntityID, Field and Detail, so repeating it
 				// here produced "shop.Doc/tenant: shop.Doc: the type of...".
 				// These four were the only Details in the file that did.
-				Detail: fmt.Sprintf("the type of the tenant column %q changed, so "+
-					"the isolation policy must be rebuilt — PostgreSQL refuses to alter "+
-					"a column a policy depends on", newField),
+				Detail: detail,
 			})
 		}
 		return
