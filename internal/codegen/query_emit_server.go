@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/schema"
 )
 
 // Emitters for the per-entity QueryX surface: FilterSpec package var,
@@ -570,25 +571,17 @@ func primaryPKName(e *dsl.Entity) string {
 // Mirrors predicateMessageForField in query_emit.go — keep both in sync;
 // adding a new filterable type means a new arm here, in query_emit.go,
 // AND a new switch arm in translator.translatePredicate.
+// predicateKindForField forwards to schema.PredicateKindForField.
+//
+// It used to be a byte-for-byte copy of it. The copy is how `real` and `double`
+// reached the emitted .proto without reaching the emitted FilterSpec: adding
+// them to schema.PredicateKindForField and to both predicateMessageForField
+// tables produced a filter message with a float field and a FilterSpec with no
+// entry for it, so the column was advertised as filterable and then rejected as
+// unknown at request time.
+//
+// Kept as a forwarder rather than deleted outright because the call site reads
+// better unqualified and the wrapper is where this note belongs.
 func predicateKindForField(t dsl.FieldType) (string, bool) {
-	if t.Array {
-		return "", false
-	}
-	switch t.Name {
-	case "text", "varchar", "citext", "uuid":
-		return "PredicateString", true
-	case "numeric":
-		return "PredicateNumeric", true
-	case "int", "smallint":
-		return "PredicateInt32", true
-	case "bigint":
-		return "PredicateInt64", true
-	case "boolean":
-		return "PredicateBool", true
-	case "timestamptz", "date":
-		return "PredicateTimestamp", true
-	case "jsonb", "bytea":
-		return "PredicateBytes", true
-	}
-	return "", false
+	return schema.PredicateKindForField(t)
 }

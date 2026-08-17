@@ -414,6 +414,10 @@ func kindString(k sim.ColKind) string {
 		return "bytes"
 	case sim.KindNumeric:
 		return "numeric"
+	case sim.KindFloat32:
+		return "real"
+	case sim.KindFloat64:
+		return "double"
 	case sim.KindVector:
 		return "vector"
 	}

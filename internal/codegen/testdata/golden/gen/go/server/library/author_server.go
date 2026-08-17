@@ -62,6 +62,7 @@ var authorFilterSpec = query.FilterSpec{
 		"id": {Column: "id", Kind: query.PredicateInt64},
 		"name": {Column: "name", Kind: query.PredicateString},
 		"bio": {Column: "bio", Kind: query.PredicateString},
+		"rating": {Column: "rating", Kind: query.PredicateDouble},
 		"created_at": {Column: "created_at", Kind: query.PredicateTimestamp},
 	},
 }

@@ -117,6 +117,69 @@ message NumericPredicate {
   }
 }
 
+// FloatPredicate covers `real` (PG float4); DoublePredicate covers `double`
+// (float8). Two messages rather than one, and the arm width is the point.
+//
+// # Why the widths are kept apart
+//
+// float8 is a strict superset of float4, so a single double-carrying message
+// would be expressive enough. It would also sit on the wrong side of a real
+// hazard: PG promotes a float4 column to float8 to compare it against a float8
+// value, and a row storing 0.1 in a `real` column promotes to
+// 0.10000000149011612. `WHERE score = 0.1::float8` therefore returns nothing
+// while the value plainly reads back as 0.1 — measured, not reasoned.
+//
+// Carrying the caller's value at the column's own width keeps the comparison
+// inside float4. The SQL side casts the placeholder to match (see
+// translateFloatPredicate), and pgx independently negotiates the parameter type
+// with PG, so today all three agree and any one would do. The width being
+// stated in the message is the half a CALLER can see: a client library reading
+// this proto binds a float32 for a float4 column without having to know what
+// the server does with it.
+//
+// # What this does NOT fix
+//
+// Float equality is still float equality. `eq` on a value that was computed
+// rather than round-tripped from the same literal can miss, on either width.
+// The arms exist because a caller who knows their data expects them, not
+// because they are safe in general.
+//
+// # Ordering is float8, deliberately
+//
+// ORDER BY and the keyset cursor compare a `real` column after promotion to
+// float8, because the page token carries the promoted value (see
+// runtime.EncodePageToken). Filtering therefore compares at float4 and ordering
+// at float8. For `double` the two coincide; for `real` they can disagree at the
+// boundary, and a PG test pins that a filtered page still returns every matching
+// row exactly once.
+message FloatPredicate {
+  oneof op {
+    float eq = 1;
+    float neq = 2;
+    float lt = 3;
+    float lte = 4;
+    float gt = 5;
+    float gte = 6;
+    FloatList in = 7;
+    bool is_null = 8;
+    bool is_not_null = 9;
+  }
+}
+
+message DoublePredicate {
+  oneof op {
+    double eq = 1;
+    double neq = 2;
+    double lt = 3;
+    double lte = 4;
+    double gt = 5;
+    double gte = 6;
+    DoubleList in = 7;
+    bool is_null = 8;
+    bool is_not_null = 9;
+  }
+}
+
 message StringList {
   repeated string values = 1;
 }
@@ -131,6 +194,14 @@ message Int64List {
 
 message BytesList {
   repeated bytes values = 1;
+}
+
+message FloatList {
+  repeated float values = 1;
+}
+
+message DoubleList {
+  repeated double values = 1;
 }
 
 message Int32Range {

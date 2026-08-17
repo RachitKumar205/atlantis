@@ -195,6 +195,10 @@ func (w *walker) translatePredicate(pred protoreflect.Message, fs FieldSpec) (st
 		return w.translateBytesPredicate(pred, fs)
 	case PredicateNumeric:
 		return w.translateNumericPredicate(pred, fs)
+	case PredicateFloat:
+		return w.translateFloatPredicate(pred, fs, "::real")
+	case PredicateDouble:
+		return w.translateFloatPredicate(pred, fs, "")
 	default:
 		return "", fmt.Errorf("unsupported predicate kind %d for column %s", fs.Kind, fs.Column)
 	}
@@ -462,6 +466,99 @@ func (w *walker) translateNumericPredicate(m protoreflect.Message, fs FieldSpec)
 		return nullFragment(fs.Column, val.Bool(), true), nil
 	default:
 		return "", fmt.Errorf("unknown numeric predicate arm %q", arm)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Float predicate (native float comparison; placeholder cast to column width)
+
+// translateFloatPredicate renders `real` and `double` comparisons. cast is
+// "::real" for float4 columns and "" for float8.
+//
+// # The column stays bare and the placeholder carries the cast
+//
+// The reverse — `"score"::real > $1` — would compare the same values and defeat
+// any btree index on the column, because the indexed expression is the column
+// and the query's is a function of it. Casting the parameter instead leaves the
+// index usable, and the parameter is one value per query rather than one per
+// row.
+//
+// # Why the cast is there at all
+//
+// The hazard is real and verified: on a float4 column holding 0.1,
+// `WHERE score = 0.1::float8` returns ZERO rows. PG resolves float4-vs-float8
+// by promoting the COLUMN, and the promotion of a stored 0.1 is
+// 0.10000000149011612, which is not the 0.1 on the other side. A bare decimal
+// literal is worse still — it is `numeric`, resolves the same way, and also
+// returns nothing. See TestFloat4ComparisonNeedsTheWidth.
+//
+// # Three things prevent that here, and only one is this cast
+//
+// The arm also binds a float32 rather than a float64, and pgx separately
+// negotiates the placeholder's type with PG — for `score = $1` against a float4
+// column PG answers float4, so pgx encodes float4 whatever Go value it was
+// handed. Any ONE of the three is currently enough, which is worth saying
+// plainly: removing this cast alone does not break a test, because the other
+// two still hold.
+//
+// They are kept together because which one survives is not knowable in advance.
+// pgx's negotiation depends on the placeholder appearing in a position PG can
+// resolve, and this function's output is composed into larger expressions by
+// translateFilter; a future arm comparing against an expression rather than a
+// bare column would lose it. The cast is the only one of the three that is
+// visible in the SQL, so it is the one a reader can check.
+//
+// # `eq` is still float equality
+//
+// The cast fixes the width mismatch, not the nature of floats. A value that was
+// computed rather than round-tripped from the same literal can still miss on
+// either width. The arm exists because callers who know their data expect it.
+func (w *walker) translateFloatPredicate(m protoreflect.Message, fs FieldSpec, cast string) (string, error) {
+	fd, val, ok := oneofArm(m)
+	if !ok {
+		return "", nil
+	}
+	// protoreflect returns float64 for both float and double fields. Narrowing
+	// to float32 for the float4 case is what makes the bound value and the
+	// ::real cast describe the same number — binding a float64 and casting it
+	// in SQL would round at the database instead, which is the same answer by a
+	// less obvious route, and diverges if the cast is ever dropped.
+	bind := func(v protoreflect.Value) any {
+		if cast == "" {
+			return v.Float()
+		}
+		return float32(v.Float())
+	}
+
+	arm := string(fd.Name())
+	switch arm {
+	case "eq", "neq", "lt", "lte", "gt", "gte":
+		op := comparisonOp(arm)
+		return fmt.Sprintf("%s %s %s%s", fs.Column, op, w.allocate(bind(val)), cast), nil
+	case "in":
+		lm := val.Message()
+		lfd := lm.Descriptor().Fields().ByName("values")
+		if lfd == nil {
+			return "", fmt.Errorf("float list missing `values` field")
+		}
+		list := lm.Get(lfd).List()
+		if list.Len() == 0 {
+			return "", nil
+		}
+		if list.Len() > MaxInListSize {
+			return "", fmt.Errorf("in list exceeds %d (got %d)", MaxInListSize, list.Len())
+		}
+		phs := make([]string, list.Len())
+		for i := 0; i < list.Len(); i++ {
+			phs[i] = w.allocate(bind(list.Get(i))) + cast
+		}
+		return fmt.Sprintf("%s IN (%s)", fs.Column, strings.Join(phs, ", ")), nil
+	case "is_null":
+		return nullFragment(fs.Column, val.Bool(), false), nil
+	case "is_not_null":
+		return nullFragment(fs.Column, val.Bool(), true), nil
+	default:
+		return "", fmt.Errorf("unknown float predicate arm %q", arm)
 	}
 }
 

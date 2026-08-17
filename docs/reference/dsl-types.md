@@ -67,6 +67,14 @@ Notes:
 - Element type `T` is any scalar above (no `vector`, no nested arrays).
 - A null array (nil slice in Go, missing field on the wire) is distinguishable from an empty array (`[]T{}` in Go, present-but-empty on the wire); both round-trip.
 
+## Filtering
+
+Every type above is filterable through `Query<Entity>` except three: `vector`, `interval`, and arrays (`[]T`). A column of one of those types can still be selected and written; it just has no predicate field on the generated `<Entity>Filter` message.
+
+Ordering is separate and wider: every scalar type is orderable, including `real` and `double`. `vector` and arrays are not.
+
+Two notes on floats. Comparisons run at the column's own width, so a `real` column is compared as float4 rather than being widened — which is what makes `eq` on a `real` column match the literal you wrote. And `eq` on a float is still float equality: a value that was computed rather than stored from the same literal may not compare equal at either width.
+
 ## Nullability
 
 Fields are non-nullable by default; declaring `not null` is redundant for `primary` (which implies it). A field declared *without* `not null` is nullable. The proto field gets the `optional` keyword and the Go field becomes a pointer:

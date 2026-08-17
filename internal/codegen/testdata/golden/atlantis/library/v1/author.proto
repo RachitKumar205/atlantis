@@ -54,6 +54,7 @@ message AuthorFilter {
   optional atlantis.common.v1.Int64Predicate id = 1;
   optional atlantis.common.v1.StringPredicate name = 2;
   optional atlantis.common.v1.StringPredicate bio = 3;
+  optional atlantis.common.v1.DoublePredicate rating = 4;
   optional atlantis.common.v1.TimestampPredicate created_at = 5;
   repeated AuthorFilter and = 100;
   repeated AuthorFilter or = 101;

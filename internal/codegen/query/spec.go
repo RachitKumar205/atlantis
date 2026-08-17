@@ -67,6 +67,16 @@ const (
 	PredicateTimestamp
 	PredicateBytes
 	PredicateNumeric
+	// PredicateFloat is `real` (PG float4), PredicateDouble is `double`
+	// (float8). Split by width because the translator casts the placeholder to
+	// the column's own type, which is what makes `eq` usable on a float4
+	// column — see translateFloatPredicate.
+	//
+	// Appended rather than inserted. Nothing persists these by number, but a
+	// value that silently changes meaning is a bad habit to acquire in a table
+	// six other places have to agree with.
+	PredicateFloat
+	PredicateDouble
 )
 
 // Safety caps.

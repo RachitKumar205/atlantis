@@ -192,6 +192,10 @@ func colKindFor(ft dsl.FieldType) (sim.ColKind, error) {
 		return sim.KindBytes, nil
 	case "numeric":
 		return sim.KindNumeric, nil
+	case "real":
+		return sim.KindFloat32, nil
+	case "double":
+		return sim.KindFloat64, nil
 	case "vector":
 		return sim.KindVector, nil
 	}

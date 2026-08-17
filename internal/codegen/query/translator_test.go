@@ -43,6 +43,8 @@ func testFilterDescriptor(t *testing.T) protoreflect.MessageDescriptor {
 					optMsg(5, "created_at", ".atlantis.common.v1.TimestampPredicate"),
 					optMsg(6, "raw", ".atlantis.common.v1.BytesPredicate"),
 					optMsg(7, "price", ".atlantis.common.v1.NumericPredicate"),
+					optMsg(8, "score", ".atlantis.common.v1.FloatPredicate"),
+					optMsg(9, "weight", ".atlantis.common.v1.DoublePredicate"),
 					repMsg(100, "and", ".atlantis.test.v1.TestFilter"),
 					repMsg(101, "or", ".atlantis.test.v1.TestFilter"),
 					optMsg(102, "not", ".atlantis.test.v1.TestFilter"),
@@ -107,6 +109,12 @@ func testSpec() FilterSpec {
 			"created_at": {Column: "created_at", Kind: PredicateTimestamp},
 			"raw":        {Column: "raw", Kind: PredicateBytes},
 			"price":      {Column: "price", Kind: PredicateNumeric},
+			// score is `real` (float4) and weight is `double` (float8). Both
+			// are here because the two kinds render differently — the float4
+			// arm casts its placeholder — and a fixture with only one would
+			// let the other's arm be wrong.
+			"score":  {Column: "score", Kind: PredicateFloat},
+			"weight": {Column: "weight", Kind: PredicateDouble},
 		},
 	}
 }

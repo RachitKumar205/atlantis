@@ -13,6 +13,32 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Added
 
+#### Float columns are filterable
+
+`real` and `double` columns can now be used in a `Query<Entity>` filter. They
+were already orderable, so a float column could be sorted on and not filtered —
+the field was simply absent from the generated filter message, with no error to
+say why.
+
+Two new predicate messages, `FloatPredicate` and `DoublePredicate`, carrying the
+arms every other numeric type has: `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `in`,
+`is_null`, `is_not_null`.
+
+**Comparisons run at the column's own width.** A `real` column is compared as
+float4 rather than widened to float8, and that is load-bearing rather than
+tidiness: on a float4 column holding `0.1`, `WHERE score = 0.1::float8` matches
+nothing, because the stored value widens to `0.10000000149011612`. Comparing at
+the declared width is what makes `eq` on a `real` column find the row.
+
+`eq` on a float is still float equality. A value that was computed rather than
+stored from the same literal may not compare equal at either width — the arm
+exists because callers who know their data expect it, not because it is safe in
+general.
+
+Also fixed alongside: `real` and `double` in the **sandbox**, which mapped them
+to the fallback used for types it does not recognise. A float column round-tripped
+as opaque bytes and any comparison against it failed in the executor.
+
 #### `varchar` without a length
 
 `varchar` may now be declared with no length limit, matching Postgres. Previously

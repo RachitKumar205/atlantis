@@ -57,6 +57,7 @@ message BookFilter {
   optional atlantis.common.v1.StringPredicate tenant = 2;
   optional atlantis.common.v1.StringPredicate title = 3;
   optional atlantis.common.v1.Int64Predicate author_id = 4;
+  optional atlantis.common.v1.FloatPredicate score = 5;
   optional atlantis.common.v1.Int32Predicate page_count = 6;
   optional atlantis.common.v1.StringPredicate summary = 7;
   optional atlantis.common.v1.TimestampPredicate expires_at = 8;

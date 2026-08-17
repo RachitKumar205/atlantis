@@ -63,6 +63,7 @@ var bookFilterSpec = query.FilterSpec{
 		"tenant": {Column: "tenant", Kind: query.PredicateString},
 		"title": {Column: "title", Kind: query.PredicateString},
 		"author_id": {Column: "author_id", Kind: query.PredicateInt64},
+		"score": {Column: "score", Kind: query.PredicateFloat},
 		"page_count": {Column: "page_count", Kind: query.PredicateInt32},
 		"summary": {Column: "summary", Kind: query.PredicateString},
 		"expires_at": {Column: "expires_at", Kind: query.PredicateTimestamp},

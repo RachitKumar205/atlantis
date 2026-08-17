@@ -6,6 +6,13 @@ modules:
     excludes:
       - gen
       - tests
+      # Golden output for TestEmittersMatchGolden. These are the .proto files
+      # the emitter produced for a fixture schema, checked in so a change to
+      # any emitter shows up as a reviewable diff — they are expected VALUES,
+      # not part of this module. buf would try to compile them and fail on the
+      # cross-file references they carry (author.proto imports book.proto,
+      # which resolves only inside a caller's generated tree).
+      - internal/codegen/testdata/golden
 lint:
   use:
     - STANDARD

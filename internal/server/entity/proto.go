@@ -632,6 +632,10 @@ func predicateMessageForField(t dsl.FieldType) (string, bool) {
 		return "StringPredicate", true
 	case "numeric":
 		return "NumericPredicate", true
+	case "real":
+		return "FloatPredicate", true
+	case "double":
+		return "DoublePredicate", true
 	case "int", "smallint":
 		return "Int32Predicate", true
 	case "bigint":

@@ -158,6 +158,14 @@ func generateValue(c sim.Column, rng *rand.Rand, pkCounter *int64, isPK bool, ro
 		// generate decimal-formatted strings to match.
 		v := rng.Float64() * 1000
 		return fmt.Sprintf("%.2f", v)
+	case sim.KindFloat32:
+		// Generated at the column's own width. Producing a float64 and
+		// narrowing at use would give the sandbox values Postgres could not
+		// store in a float4, so a fixture row would compare differently in the
+		// two engines — the one difference a sandbox may not have.
+		return rng.Float32() * 1000
+	case sim.KindFloat64:
+		return rng.Float64() * 1000
 	case sim.KindBytes:
 		// JSONB-shaped opaque bytes — small object so existing
 		// JSONB-naive code paths don't choke on huge blobs.

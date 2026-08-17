@@ -264,6 +264,10 @@ func predicateKindFromString(s string) query.PredicateKind {
 		return query.PredicateBytes
 	case "PredicateNumeric":
 		return query.PredicateNumeric
+	case "PredicateFloat":
+		return query.PredicateFloat
+	case "PredicateDouble":
+		return query.PredicateDouble
 	}
 	return query.PredicateUnknown
 }

@@ -24,7 +24,22 @@ const (
 	KindTime    // timestamptz / date — stored as time.Time
 	KindBytes   // bytea / jsonb (opaque) — stored as []byte
 	KindNumeric // numeric(P,S) — stored as string to preserve precision
-	KindVector  // pgvector vector(N) — stored as []float32; supports <=>, <->, <#> distance ops in projection / ORDER BY / WHERE.
+	// KindFloat32 is `real` (PG float4) and KindFloat64 is `double` (float8),
+	// stored as the matching Go type.
+	//
+	// Split by width for the same reason the wire predicates are: comparing a
+	// float4 value at float8 changes the answer. A row storing 0.1 in a float4
+	// column is 0.10000000149011612 once widened, so a sandbox that kept every
+	// float as float64 would disagree with Postgres about which rows a filter
+	// selects — and disagreeing with Postgres is the one thing a sandbox may
+	// not do.
+	//
+	// Both are pure additions to compareValues, which already handles float32
+	// and float64; before this, `real` and `double` fell through colKindFor to
+	// KindBytes and every comparison against them failed in the executor.
+	KindFloat32
+	KindFloat64
+	KindVector // pgvector vector(N) — stored as []float32; supports <=>, <->, <#> distance ops in projection / ORDER BY / WHERE.
 	// KindArray stores PG array columns (text[], int[], etc.) as the
 	// caller's bound Go slice (typically []string / []int64). Sim
 	// supports basic INSERT/SELECT round-trip; PG array operators
