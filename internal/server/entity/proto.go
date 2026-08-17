@@ -88,15 +88,7 @@ func buildProtoDescriptors(e *dsl.Entity) (protoreflect.FileDescriptor, error) {
 	// unconditionally — protodesc tolerates unused deps.
 	file.Dependency = append(file.Dependency, "atlantis/common/v1/predicates.proto")
 
-	// Build a resolver that chains our custom built files with the
-	// global proto registry (which holds the compiled Timestamp,
-	// predicates, etc. from init()-time registration).
-	resolver := &fileResolver{
-		files:  make(map[string]protoreflect.FileDescriptor),
-		global: protoregistry.GlobalFiles,
-	}
-
-	fd, err := protodesc.NewFile(file, resolver)
+	fd, err := buildFileDescriptor(file)
 	if err != nil {
 		return nil, fmt.Errorf("building file descriptor for %s: %w", e.ID(), err)
 	}
@@ -150,12 +142,103 @@ func dslFieldToProtoField(f *dsl.Field) *descriptorpb.FieldDescriptorProto {
 
 	applyProtoFieldType(fd, f.Type)
 	// Nullable scalars are proto3-optional for presence tracking; repeated
-	// fields (array/vector) never take proto3-optional. protodesc.NewFile
-	// materializes the synthetic oneof from Proto3Optional.
+	// fields (array/vector) never take proto3-optional. Setting the flag is
+	// only half of it — materializeProto3Optional supplies the synthetic
+	// oneof that actually carries the presence.
 	if !f.Type.Array && f.Type.Name != "vector" && schema.IsEffectivelyNullable(f) {
 		fd.Proto3Optional = boolPtr(true)
 	}
 	return fd
+}
+
+// buildFileDescriptor is the only way this package turns a
+// FileDescriptorProto into a live descriptor.
+//
+// It exists so materializeProto3Optional cannot be skipped. There are three
+// descriptor builders here — entities, custom queries, custom procedures — and
+// a fix applied at one call site is a fix that the next builder, or the next
+// message added to an existing one, silently does not get. Only the entity
+// builder marks fields proto3-optional today; routing every builder through
+// here is what stops that from mattering.
+func buildFileDescriptor(file *descriptorpb.FileDescriptorProto) (protoreflect.FileDescriptor, error) {
+	for _, msg := range file.MessageType {
+		materializeProto3Optional(msg)
+	}
+	// The resolver chains files built here with the global proto registry,
+	// which holds the compiled Timestamp, predicates and so on from
+	// init()-time registration.
+	resolver := &fileResolver{
+		files:  make(map[string]protoreflect.FileDescriptor),
+		global: protoregistry.GlobalFiles,
+	}
+	return protodesc.NewFile(file, resolver)
+}
+
+// materializeProto3Optional gives every proto3-optional field in msg, and in
+// every message nested inside it, the single-field synthetic oneof that proto3
+// presence is built on.
+//
+// # Why this is not protodesc's job
+//
+// It reads like it should be: protoc synthesizes these oneofs when it compiles
+// a .proto, so `optional int64 x = 1;` needs no oneof in the source. But protoc
+// writes the oneof into the FileDescriptorProto it emits, and protodesc.NewFile
+// consumes that descriptor as given. It VALIDATES the pairing — a
+// proto3-optional field inside a oneof must be the only member — and does not
+// create it. A descriptor built in Go with the flag set and no oneof passes
+// validation and produces a field with no presence at all.
+//
+// # What that cost
+//
+// This code carried a comment asserting the opposite for as long as it existed,
+// so every nullable scalar column served by the dynamic dispatcher had
+// HasPresence() == false, and Has() degraded to "differs from the zero value".
+// Two paths depended on it and both were wrong in the same direction:
+//
+//   - bindColumnValue read Has() to choose between binding a value and binding
+//     SQL NULL, so a client that explicitly sent `count = 0` or `note = ""` on a
+//     nullable column wrote NULL. The value the caller asked for was not stored
+//     and nothing reported a problem.
+//   - protoValueForCursor could not tell a NULL ordering column from a real
+//     zero, which is #71.
+//
+// Neither was visible to the tests, because a test that leaves a field UNSET
+// gets the right answer either way — it is only an EXPLICIT zero that separates
+// the two implementations.
+//
+// # Naming
+//
+// protoc names the oneof `_<field>` and prepends further underscores on
+// collision; this mirrors that so a descriptor built here and one compiled from
+// the equivalent .proto agree. Synthetic oneofs must also follow every real
+// one, which holds trivially here — no message this package builds declares a
+// real oneof — but the append order is what keeps it true if one ever does.
+func materializeProto3Optional(msg *descriptorpb.DescriptorProto) {
+	// Nested first, so a message added inside another one is covered without
+	// the caller knowing it is there. The custom-query builder nests its row
+	// message inside the response.
+	for _, nested := range msg.NestedType {
+		materializeProto3Optional(nested)
+	}
+	taken := make(map[string]bool, len(msg.OneofDecl))
+	for _, od := range msg.OneofDecl {
+		taken[od.GetName()] = true
+	}
+	for _, f := range msg.Field {
+		if !f.GetProto3Optional() || f.OneofIndex != nil {
+			continue
+		}
+		name := "_" + f.GetName()
+		for taken[name] {
+			name = "_" + name
+		}
+		taken[name] = true
+		idx := int32(len(msg.OneofDecl))
+		msg.OneofDecl = append(msg.OneofDecl, &descriptorpb.OneofDescriptorProto{
+			Name: strPtr(name),
+		})
+		f.OneofIndex = &idx
+	}
 }
 
 // applyProtoFieldType sets a field descriptor's Type and Label from a DSL

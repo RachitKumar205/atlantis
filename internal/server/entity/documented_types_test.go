@@ -234,6 +234,93 @@ func TestDispatcherBindsNullForEveryUnsetNullableColumn(t *testing.T) {
 	}
 }
 
+// The converse of the test above, and the half that was actually broken.
+//
+// The test above passes under two very different implementations: one that
+// reads proto PRESENCE, and one that merely compares against the zero value.
+// Only an EXPLICITLY SET zero separates them — and under the second, `count =
+// 0`, `note = ""` and `active = false` all bind SQL NULL. The caller's value is
+// not stored, the row reads back as NULL, and nothing anywhere reports a
+// problem.
+//
+// That was the live behaviour: dslFieldToProtoField set Proto3Optional without
+// the synthetic oneof it needs, so HasPresence() was false for every nullable
+// scalar and Has() degraded to exactly that zero comparison. See
+// materializeProto3Optional.
+//
+// Restricted to types whose proto zero can be set explicitly. Timestamps and
+// vectors are message/repeated fields, where "set" and "non-empty" already
+// coincide.
+func TestDispatcherBindsAnExplicitZeroAsAValue(t *testing.T) {
+	zeros := map[string]protoreflect.Value{
+		"bigint":     protoreflect.ValueOfInt64(0),
+		"int":        protoreflect.ValueOfInt32(0),
+		"smallint":   protoreflect.ValueOfInt32(0),
+		"real":       protoreflect.ValueOfFloat32(0),
+		"double":     protoreflect.ValueOfFloat64(0),
+		"boolean":    protoreflect.ValueOfBool(false),
+		"text":       protoreflect.ValueOfString(""),
+		"citext":     protoreflect.ValueOfString(""),
+		"uuid":       protoreflect.ValueOfString(""),
+		"varchar":    protoreflect.ValueOfString(""),
+		"varchar(N)": protoreflect.ValueOfString(""),
+	}
+	for name, zero := range zeros {
+		ft, ok := samples[name]
+		if !ok {
+			t.Fatalf("%s is not in samples; the two tables have drifted", name)
+		}
+		t.Run(name, func(t *testing.T) {
+			e := &dsl.Entity{
+				Name: "Probe", Namespace: "probe", Kind: dsl.EntityKindRegular,
+				Fields: []dsl.Field{
+					{Name: "id", Type: dsl.FieldType{Name: "bigint"}, Primary: true, NotNull: true, ProtoNumber: 1},
+					{Name: "f", Type: ft, ProtoNumber: 2},
+				},
+			}
+			meta := entityMetaFor(e, &dsl.IR{Version: 1})
+			fd, err := buildProtoDescriptors(e)
+			if err != nil {
+				t.Fatalf("buildProtoDescriptors: %v", err)
+			}
+			resolveProtoDescriptors(meta, fd)
+
+			var cm columnMeta
+			for _, c := range meta.columns {
+				if c.field.Name == "f" {
+					cm = c
+				}
+			}
+			if cm.field == nil {
+				t.Fatal("column f is missing from the entity metadata")
+			}
+			if !cm.nullable {
+				t.Fatalf("column f is not nullable, so this case proves nothing")
+			}
+
+			// The descriptor has to carry presence for the distinction to be
+			// expressible at all. Without this the assertion below could only
+			// ever fail, and the reason would look like a bind-arm bug rather
+			// than a descriptor one.
+			pfd := meta.msgDesc.Fields().ByNumber(cm.protoNum)
+			if !pfd.HasPresence() {
+				t.Fatalf("the dispatcher's descriptor gives nullable %s no presence, "+
+					"so an explicit zero is indistinguishable from an unset field on "+
+					"the wire and Has() can only compare against the zero value", name)
+			}
+
+			msg := dynamicpb.NewMessage(meta.msgDesc)
+			msg.Set(pfd, zero)
+			got := bindColumnValue(meta, cm, msg)
+			if carriesNull(got) {
+				t.Errorf("a nullable %s explicitly set to its zero binds %#v, which "+
+					"reaches Postgres as NULL. The caller asked for the zero and the "+
+					"row will read back as NULL, with no error anywhere", name, got)
+			}
+		})
+	}
+}
+
 // carriesNull reports whether a bind value represents SQL NULL: a sql.NullX
 // marked invalid, or a nil pointer. Anything else is a real value.
 func carriesNull(v any) bool {

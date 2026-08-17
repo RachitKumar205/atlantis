@@ -9,9 +9,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
-	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 
@@ -133,11 +131,7 @@ func buildCustomProcedureDescs(cp *dsl.CustomProcedure, ns string) (protoreflect
 		file.Dependency = append(file.Dependency, "google/protobuf/timestamp.proto")
 	}
 
-	resolver := &fileResolver{
-		files:  make(map[string]protoreflect.FileDescriptor),
-		global: protoregistry.GlobalFiles,
-	}
-	fd, err := protodesc.NewFile(file, resolver)
+	fd, err := buildFileDescriptor(file)
 	if err != nil {
 		return nil, fmt.Errorf("building custom procedure descriptors for %s: %w", cp.Name, err)
 	}
@@ -372,12 +366,7 @@ func buildCustomQueryDescs(cq *dsl.CustomQuery, ns string) (protoreflect.FileDes
 		file.Dependency = append(file.Dependency, "google/protobuf/timestamp.proto")
 	}
 
-	resolver := &fileResolver{
-		files:  make(map[string]protoreflect.FileDescriptor),
-		global: protoregistry.GlobalFiles,
-	}
-
-	fd, err := protodesc.NewFile(file, resolver)
+	fd, err := buildFileDescriptor(file)
 	if err != nil {
 		return nil, fmt.Errorf("building custom query descriptors for %s: %w", cq.Name, err)
 	}
