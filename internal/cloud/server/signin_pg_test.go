@@ -111,6 +111,23 @@ func codeAt(t *testing.T, secret string, at time.Time) string {
 	return code
 }
 
+// nextWindow is a moment inside the window after the current one.
+//
+// Enrolling spends the step its proving code came from, so a test signing in
+// afterwards needs a code from a LATER step. The obvious way to write that is
+// to add thirty-one seconds to the current time — and it is wrong about one run
+// in thirty. Thirty-one seconds from a moment near the end of a window lands two
+// windows out, and the server accepts one step of skew either side, so the code
+// is refused and the test fails for a reason unconnected to what it asserts.
+// These tests were written that way and flaked exactly that often.
+//
+// Anchoring to the window boundary instead of to now makes it exactly one step
+// ahead every time.
+func nextWindow() time.Time {
+	const period = 30 * time.Second
+	return time.Now().Truncate(period).Add(period + period/2)
+}
+
 // enrol returns the secret the server handed out, rather than reading it back
 // out of the database.
 //
@@ -271,7 +288,7 @@ func TestATOTPCodeIsSingleUse(t *testing.T) {
 	// The server checks against its own clock with one step of skew either
 	// side, so a code from step+1 is accepted now — and, being a later step,
 	// passes the spend check that the enrolling code's step would fail.
-	at := time.Now().Add(31 * time.Second)
+	at := nextWindow()
 	code := codeAt(t, secret, at)
 
 	first := f.postWithCookie(t, "/api/auth/2fa/verify",
@@ -352,7 +369,7 @@ func TestAWrongCodeKeepsThePendingLogin(t *testing.T) {
 		t.Fatal("000000 was accepted")
 	}
 
-	at := time.Now().Add(31 * time.Second)
+	at := nextWindow()
 	good := f.postWithCookie(t, "/api/auth/2fa/verify",
 		`{"code":`+jsonString(codeAt(t, secret, at))+`}`, pendingCookie, pending)
 	if good.Code != http.StatusOK {
@@ -440,7 +457,7 @@ func TestASealedSecretCannotBeMovedBetweenAccounts(t *testing.T) {
 	}
 
 	// My code must not open their account.
-	code := codeAt(t, mineSecret, time.Now().Add(31*time.Second))
+	code := codeAt(t, mineSecret, nextWindow())
 	login := f.postFrom(t, "198.51.100.50", "/api/auth/login",
 		`{"email":"theirs@example.com","password":"`+goodPassword+`"}`)
 	rec := f.postWithCookie(t, "/api/auth/2fa/verify",

@@ -94,6 +94,25 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureWith(t, nil)
+}
+
+// newFixtureWithoutProviders builds a server with no OAuth credentials.
+//
+// The difference is not cosmetic: with no credentials the provider routes are
+// never registered, which is the behaviour
+// TestAnUnconfiguredProviderDoesNotExist asserts. Clearing s.providers after
+// New() would not do it — the routes would already exist.
+func newFixtureWithoutProviders(t *testing.T) *fixture {
+	t.Helper()
+	return newFixtureWith(t, func(c *Config) {
+		c.GitHubClientID, c.GitHubClientSecret = "", ""
+		c.GoogleClientID, c.GoogleClientSecret = "", ""
+	})
+}
+
+func newFixtureWith(t *testing.T, adjust func(*Config)) *fixture {
+	t.Helper()
 	adminDSN := os.Getenv("ATLANTIS_TEST_PG")
 	if adminDSN == "" {
 		t.Skip("set ATLANTIS_TEST_PG to exercise Cloud's account routes")
@@ -134,12 +153,24 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatalf("keyset: %v", err)
 	}
 
-	f := &fixture{db: db, mailer: &recordingMailer{}}
-	f.srv, err = New(Config{
+	cfg := Config{
 		PublicURL:     "https://cloud.test",
 		CheckBreaches: false,
 		DataKeyset:    keyset,
-	}, db, iss, quiet)
+		// Enough for both providers to be registered, so their routes exist.
+		// The Provider values are swapped for fakes afterwards; these only
+		// decide whether the routes are there at all.
+		GitHubClientID:     "test-github-id",
+		GitHubClientSecret: "test-github-secret",
+		GoogleClientID:     "test-google-id",
+		GoogleClientSecret: "test-google-secret",
+	}
+	if adjust != nil {
+		adjust(&cfg)
+	}
+
+	f := &fixture{db: db, mailer: &recordingMailer{}}
+	f.srv, err = New(cfg, db, iss, quiet)
 	if err != nil {
 		t.Fatalf("server: %v", err)
 	}

@@ -351,21 +351,32 @@ func TestOneProviderAccountBelongsToOneUser(t *testing.T) {
 	if err := db.LinkIdentity(ctx, first.ID, "github", "555", ""); err != nil {
 		t.Fatalf("first link: %v", err)
 	}
-	// The upsert re-points the link rather than creating a second row, so the
-	// property to assert is that exactly one user owns it — not that the second
-	// link fails.
-	if err := db.LinkIdentity(ctx, second.ID, "github", "555", ""); err != nil {
-		t.Fatalf("second link: %v", err)
+
+	// Straight at the table, going around LinkIdentity on purpose — the same
+	// reasoning as TestTheDatabaseRefusesAnUnfoldedEmail. LinkIdentity's own
+	// refusal is asserted in identity_pg_test.go; what this proves is that the
+	// primary key would stop a second claim even from a statement that never
+	// went through it.
+	//
+	// This test previously called LinkIdentity twice and asserted the row count
+	// was still one, above a comment saying the upsert "re-points the link". It
+	// did not: the conflict branch only ever touched provider_email, so the
+	// second call changed nothing and the count was one for a reason unrelated
+	// to what was being claimed.
+	_, err = db.pool.Exec(ctx, `
+		INSERT INTO cloud.identities (provider, provider_subject, user_id)
+		VALUES ('github', '555', $1)
+	`, second.ID)
+	if !isUniqueViolation(err) {
+		t.Fatalf("a second account claimed one GitHub identity: %v", err)
 	}
 
-	var n int
-	if err := db.pool.QueryRow(ctx,
-		`SELECT count(*) FROM cloud.identities WHERE provider = 'github' AND provider_subject = '555'`).
-		Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
+	owner, err := db.UserByIdentity(ctx, "github", "555")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("one provider account is claimed by %d rows", n)
+	if owner.ID != first.ID {
+		t.Fatalf("the identity resolves to %s, want %s", owner.ID, first.ID)
 	}
 }
 

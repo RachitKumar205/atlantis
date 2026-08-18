@@ -314,7 +314,13 @@ func (s *Server) handleResetForm(w http.ResponseWriter, r *http.Request) {
 }
 
 // page writes a plain-text response.
+//
+// Every caller is a page reached with a single-use credential in the query
+// string — a verification token, a reset token, an OAuth authorization code —
+// so none of them may be stored. Referrer-Policy already stops the URL leaking
+// sideways; this stops it being written down.
 func page(w http.ResponseWriter, code int, body string) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(code)
 	_, _ = w.Write([]byte(body + "\n"))

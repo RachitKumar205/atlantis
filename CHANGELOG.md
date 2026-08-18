@@ -13,6 +13,79 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Added
 
+#### Sign in with GitHub or Google
+
+Set `CLOUD_GITHUB_CLIENT_ID` and `CLOUD_GITHUB_CLIENT_SECRET` (or the Google
+pair) and two routes appear: `GET /auth/github` starts a sign-in and
+`GET /auth/github/callback` finishes one. A provider with no credentials is not
+registered at all and its URLs answer 404 — an unconfigured sign-in method
+should not exist rather than exist and fail at the redirect. One of a pair
+without the other is refused at startup, because the missing half would
+otherwise be found by somebody who had already granted access.
+
+**A provider is one factor.** The callback produces the same pending login a
+password does, and the same second factor is still required. That is the
+sentence the rest of this entry is arranged around: a provider vouching for
+somebody is evidence about an address, not proof of possession of anything
+Cloud issued.
+
+- **Only a verified address is accepted** — GitHub's must be flagged both
+  primary and verified, Google's needs `email_verified`. The check lives inside
+  each provider rather than in the handler, so there is no shape in which an
+  unverified address reaches the code that would create an account from it.
+- **The link is keyed by the provider's subject, never by the address.** An
+  address a provider reports is not proof of control of that mailbox, and
+  matching on it would let anybody who can set one take over an account.
+- **A provider address matching an existing account connects the two, but only
+  when that account already has a second factor.** With one, the provider's
+  word gets an attacker as far as a challenge they cannot answer. With none it
+  would get them a pending login that could **enrol** a factor, which is
+  takeover in two clicks — so that case is refused before anything is written,
+  and the person is told to sign in with their password instead. The refusal is
+  what makes the connection above acceptable; it is not a separate policy that
+  can be relaxed on its own.
+- **The last way in cannot be removed.** `GET /api/account/identities` lists
+  connections and `POST /api/account/identities/{provider}/unlink` removes one
+  — unless it is the only thing that reaches the account, since resetting a
+  password requires having one. The rule is a clause in the `DELETE` rather than
+  a check a handler makes, so there is no call site that can forget it and no
+  window in which a concurrent password removal invalidates the answer.
+- **State and PKCE live in one short-lived cookie**, no new table. It proves a
+  callback belongs to the browser that started it; it never says *who*, so for
+  a connection the acting account comes from the session cookie. Its deadline
+  travels inside the value rather than relying on the browser's `MaxAge`. One
+  sign-in at a time per browser: starting a second in another tab replaces the
+  first, which then reports that it expired.
+- Both providers use PKCE with `S256`, and Cloud stores no provider token — it
+  reads the profile once during the callback and discards everything else.
+- With `CLOUD_SIGNIN_APP_URL` set, the callback redirects there with
+  `?next=enrol|verify`; unset, it answers with a plain page naming the next
+  step, which is what makes these routes usable before a sign-in app exists.
+
+**Three defects fixed underneath, all of the same shape** — a write that
+succeeded while doing something other than what it reported.
+
+`LinkIdentity` could not report a stolen link: connecting a provider account
+that already belonged to somebody else took the conflict branch, refreshed a
+display address, and returned success while the link still pointed elsewhere.
+Creating an account from a provider took three statements with two gaps, either
+of which left an account nobody could reach and whose address the retry then
+collided with; it is now one transaction. And the first version of the
+last-way-in rule counted all of an account's connections rather than the ones
+that would survive the delete — so an account with two GitHub connections and no
+password passed the check and lost both, which is precisely the lockout the rule
+exists to prevent.
+
+**One fix outside this feature.** `completeSignInWithCodes` was missing the
+account cross-check its sibling `completeSignIn` has. Enrolment resolves who is
+enrolling from the *session* cookie in preference to the pending login, so a
+browser holding one account's session and another's pending login would enrol a
+factor on the first while spending the second's login, and hand back a session
+for the first. That combination previously needed contriving; an OAuth callback
+makes it something a shared browser produces by accident. It now refuses, and
+the callback clears any session already in the browser when it signs somebody
+else in.
+
 #### People can sign in, with two factors — breaking for local development
 
 Cloud's sign-in is two-legged: a password produces a **pending login**, and only

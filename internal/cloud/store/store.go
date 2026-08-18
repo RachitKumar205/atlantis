@@ -57,6 +57,22 @@ var ErrNotFound = errors.New("not found")
 // impossible if the only signal is a constraint name in a driver error.
 var ErrAlreadyExists = errors.New("already exists")
 
+// ErrIdentityClaimed reports a provider account that belongs to another user.
+//
+// Distinct from ErrAlreadyExists, which says the row is there. This says it is
+// there and points somewhere else — the difference between "you already linked
+// this" and "somebody else did". Linking is refused rather than moved: a
+// provider account silently changing owner is how one person takes another's
+// sign-in method.
+var ErrIdentityClaimed = errors.New("already linked to another account")
+
+// ErrLastSignInMethod reports an unlink that would lock the account out.
+//
+// An account with no password and one identity has exactly one way in. Removing
+// it leaves nobody able to reach the account, support included, because the
+// reset flow needs a password to reset.
+var ErrLastSignInMethod = errors.New("this is the only way to sign in to this account")
+
 // uniqueViolation is PostgreSQL's SQLSTATE for a duplicate key.
 //
 // Matched on the code rather than the message: the message names the
@@ -360,20 +376,190 @@ type Identity struct {
 }
 
 // LinkIdentity records an OAuth account against a user.
+//
+// Idempotent for the user who already owns the link — re-linking refreshes the
+// display address and reports success, which is what a second sign-in through
+// the same provider does.
+//
+// # Why the conflict clause names the user
+//
+// Without `WHERE cloud.identities.user_id = EXCLUDED.user_id`, an attempt to
+// link a provider account that ALREADY BELONGS TO SOMEBODY ELSE takes the
+// conflict branch, updates only provider_email, and returns no error. The
+// caller is told the link was made. It was not, and it still points at the
+// other account.
+//
+// That is the shape this package keeps paying for: a write that succeeds while
+// changing nothing it claimed to change. With the predicate, the update matches
+// no row and the row count says so, which is what ErrIdentityClaimed reports.
 func (s *Store) LinkIdentity(ctx context.Context, userID, provider, subject, email string) error {
-	_, err := s.pool.Exec(ctx, `
+	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO cloud.identities (provider, provider_subject, user_id, provider_email)
 		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (provider, provider_subject) DO UPDATE SET provider_email = EXCLUDED.provider_email
+		ON CONFLICT (provider, provider_subject) DO UPDATE
+		   SET provider_email = EXCLUDED.provider_email
+		 WHERE cloud.identities.user_id = EXCLUDED.user_id
 	`, provider, subject, userID, email)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%s account %s: %w", provider, subject, ErrIdentityClaimed)
+	}
+	return nil
+}
+
+// UnlinkIdentity disconnects a provider from an account.
+//
+// Removes EVERY identity this user has for that provider, because "disconnect
+// GitHub" is the thing a person means and one account can hold two links from
+// one provider — the primary key is (provider, provider_subject), so linking a
+// second GitHub account is allowed.
+//
+// # Why the rule lives in the WHERE clause
+//
+// An account whose only way in is an OAuth link must not be able to remove it.
+// There is no recovery from that state: password reset needs a password to
+// reset, so the account is reachable by nobody, support included.
+//
+// The condition is part of the DELETE rather than a check the handler performs
+// first. Two reasons, and the second is the one that matters. A separate check
+// is one somebody can forget at the next call site — and between reading "this
+// account also has a password" and deleting the row, another request can remove
+// that password. One statement has no such window: Postgres evaluates the
+// predicate against the same snapshot it deletes from.
+//
+// # What the predicate counts, and the version of it that was wrong
+//
+// It counts identities belonging to OTHER providers. The first draft counted
+// all of the user's identities and asked for more than one, which passes for an
+// account with two GitHub links and no password — and then deletes both,
+// leaving exactly the locked-out account this function exists to prevent. The
+// count has to describe what survives the delete, not what exists before it.
+func (s *Store) UnlinkIdentity(ctx context.Context, userID, provider string) error {
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM cloud.identities
+		 WHERE user_id = $1 AND provider = $2
+		   AND (EXISTS (SELECT 1 FROM cloud.users
+		                 WHERE id = $1
+		                   AND password_hash IS NOT NULL AND password_hash <> '')
+		        OR EXISTS (SELECT 1 FROM cloud.identities
+		                    WHERE user_id = $1 AND provider <> $2))
+	`, userID, provider)
+	if err != nil {
+		return err
+	}
+	// One or more: the delete covers every link for this provider, and reporting
+	// "not found" after removing two of them would be the same shape of lie
+	// this file keeps closing.
+	if tag.RowsAffected() >= 1 {
+		return nil
+	}
+
+	// Nothing was deleted, and the two reasons need telling apart: the link was
+	// not there, or it was the last way in. Reported distinctly because one is
+	// somebody clicking twice and the other is somebody about to be locked out.
+	var linked bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM cloud.identities WHERE user_id = $1 AND provider = $2)`,
+		userID, provider).Scan(&linked); err != nil {
+		return err
+	}
+	if !linked {
+		return ErrNotFound
+	}
+	return ErrLastSignInMethod
+}
+
+// CreateUserWithIdentity creates an OAuth account and its link together.
+//
+// # Why this is not CreateUser followed by two more calls
+//
+// An account arriving through a provider needs three things written: the user,
+// the fact that the address is already verified, and the identity. CreateUser
+// cannot set email_verified_at, so done separately that is three statements
+// with two gaps in it, and a failure in either gap leaves a row somebody is
+// stuck behind — an account that cannot sign in because nothing verified it, or
+// one with no way in because the link never landed. Neither is visible as an
+// error to the person who just consented; both present as "it didn't work",
+// and the retry hits the UNIQUE constraint on the email.
+//
+// The address is stored verified because the provider attested it, and the
+// caller has already refused anything the provider did not flag as verified.
+func (s *Store) CreateUserWithIdentity(
+	ctx context.Context, email, name, provider, subject, providerEmail string,
+) (*User, error) {
+	email = NormalizeEmail(email)
+	if email == "" {
+		return nil, errors.New("email is required")
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		// Bounded, and on a context the request cannot cancel — the same
+		// discipline as UserStore.tx, for the same reason: pgx destroys the
+		// pooled connection when a rollback Exec fails, and a browser that
+		// closed mid-callback is the common case rather than an exotic one.
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bindTimeout)
+		defer cancel()
+		_ = tx.Rollback(rctx)
+	}()
+
+	id, err := newUserID()
+	if err != nil {
+		return nil, err
+	}
+	u := &User{ID: id, Email: email, Name: name}
+	err = tx.QueryRow(ctx, `
+		INSERT INTO cloud.users (id, email, name, email_verified_at)
+		VALUES ($1, $2, $3, NOW())
+		RETURNING created_at, email_verified_at
+	`, u.ID, u.Email, u.Name).Scan(&u.CreatedAt, &u.EmailVerifiedAt)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, fmt.Errorf("%s %w", email, ErrAlreadyExists)
+		}
+		return nil, err
+	}
+
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO cloud.identities (provider, provider_subject, user_id, provider_email)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (provider, provider_subject) DO NOTHING
+	`, provider, subject, u.ID, providerEmail)
+	if err != nil {
+		return nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		// The provider account was linked to somebody else between the caller's
+		// lookup and here. Rolling back takes the half-made user with it.
+		return nil, fmt.Errorf("%s account %s: %w", provider, subject, ErrIdentityClaimed)
+	}
+
+	// Committed on a context the request cannot cancel, so a browser that gives
+	// up mid-callback does not abort a write that has already happened —
+	// leaving an account the retry then collides with on the UNIQUE email.
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bindTimeout)
+	defer cancel()
+	if err := tx.Commit(cctx); err != nil {
+		return nil, fmt.Errorf("commit: %w", err)
+	}
+	committed = true
+	return u, nil
 }
 
 // IdentitiesOf lists a user's linked accounts.
 func (s *Store) IdentitiesOf(ctx context.Context, userID string) ([]Identity, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT provider, provider_subject, provider_email, created_at
-		FROM cloud.identities WHERE user_id = $1 ORDER BY provider
+		FROM cloud.identities WHERE user_id = $1 ORDER BY provider, created_at
 	`, userID)
 	if err != nil {
 		return nil, err

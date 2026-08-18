@@ -13,6 +13,7 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/cloud/authn"
 	"github.com/rachitkumar205/atlantis/internal/cloud/issuer"
 	cloudmail "github.com/rachitkumar205/atlantis/internal/cloud/mail"
+	"github.com/rachitkumar205/atlantis/internal/cloud/oauth"
 	"github.com/rachitkumar205/atlantis/internal/cloud/store"
 	"github.com/rachitkumar205/atlantis/internal/secrets"
 )
@@ -30,6 +31,14 @@ type Server struct {
 	// keys seals each account's TOTP secret. See internal/secrets for what that
 	// does and does not defend.
 	keys secrets.Keyring
+
+	// providers holds the OAuth providers that are configured, keyed by name.
+	//
+	// A provider with no client credentials is absent rather than present and
+	// broken, which is what makes its routes answer 404. Populated before
+	// routes() runs, and replaceable afterwards so a test can substitute a fake
+	// — the same seam as mailer, breach and sleep.
+	providers map[string]oauth.Provider
 
 	mux     *http.ServeMux
 	handler http.Handler
@@ -55,10 +64,11 @@ func New(cfg Config, db *store.Store, iss *issuer.Issuer, log *slog.Logger) (*Se
 
 	s := &Server{
 		cfg: cfg, db: db, iss: iss, log: log,
-		keys:  keys,
-		lim:   newLimiter(),
-		mux:   http.NewServeMux(),
-		sleep: realSleep,
+		keys:      keys,
+		providers: configuredProviders(cfg, log),
+		lim:       newLimiter(),
+		mux:       http.NewServeMux(),
+		sleep:     realSleep,
 	}
 
 	// No mail server means the logging mailer, which prints the link and warns
@@ -124,6 +134,23 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/auth/2fa/enrol/begin", s.handleEnrolBegin)
 	s.mux.HandleFunc("POST /api/auth/2fa/enrol/finish", s.handleEnrolFinish)
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
+
+	// Signing in through a provider. Registered per provider and only when it
+	// is configured, so an unconfigured one is absent rather than present and
+	// failing — see configuredProviders.
+	for name := range s.providers {
+		s.mux.HandleFunc("GET /auth/"+name, s.handleOAuthStart(name))
+		s.mux.HandleFunc("GET /auth/"+name+"/callback", s.handleOAuthCallback(name))
+	}
+
+	// Managing connected accounts, registered UNCONDITIONALLY.
+	//
+	// Not behind the same check as the routes above, and the difference matters:
+	// removing a provider's credentials must not strand the people who already
+	// linked it with no way to see the connection or remove it. The link exists
+	// in the database whether or not Cloud can still start a sign-in with it.
+	s.mux.HandleFunc("GET /api/account/identities", s.handleListIdentities)
+	s.mux.HandleFunc("POST /api/account/identities/{provider}/unlink", s.handleUnlinkIdentity)
 
 	// Reached from an email, by a person, in a browser. Plain pages rather than
 	// JSON for that reason. They are deliberately unstyled and framework-free:

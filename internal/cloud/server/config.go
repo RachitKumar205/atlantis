@@ -88,6 +88,30 @@ type Config struct {
 	// http://localhost works; true once a TLS terminator sits in front.
 	CookieSecure bool // CLOUD_COOKIE_SECURE
 
+	// OAuth provider credentials, from each provider's developer console.
+	//
+	// A provider with neither value set is not registered at all, and its
+	// routes answer 404. That is deliberate: the alternative is a route that
+	// exists, accepts the request, and fails at the redirect with an error
+	// about a missing client id — which reads to whoever hits it as a broken
+	// deployment rather than an unconfigured feature.
+	//
+	// One of a pair without the other IS an error, at boot. It means somebody
+	// intended to configure the provider and did half of it, and finding that
+	// out at the first sign-in attempt is worse than finding it out at start-up.
+	GitHubClientID     string // CLOUD_GITHUB_CLIENT_ID
+	GitHubClientSecret string // CLOUD_GITHUB_CLIENT_SECRET
+	GoogleClientID     string // CLOUD_GOOGLE_CLIENT_ID
+	GoogleClientSecret string // CLOUD_GOOGLE_CLIENT_SECRET
+
+	// SignInAppURL is where a finished OAuth callback sends the browser.
+	//
+	// Optional, and empty until a Cloud sign-in app exists. With no value the
+	// callback answers with a plain page naming the next step, which is what
+	// makes these routes usable — and testable — before there is a frontend.
+	// Setting it turns the same handler into a redirect without a code change.
+	SignInAppURL string // CLOUD_SIGNIN_APP_URL
+
 	// SendTimeout bounds a single mail send.
 	SendTimeout time.Duration
 }
@@ -108,6 +132,12 @@ func ConfigFromEnv() (Config, error) {
 		DataKeyset:    os.Getenv("CLOUD_DATA_KEY"),
 		CookieSecure:  os.Getenv("CLOUD_COOKIE_SECURE") == "true",
 		SendTimeout:   10 * time.Second,
+
+		GitHubClientID:     os.Getenv("CLOUD_GITHUB_CLIENT_ID"),
+		GitHubClientSecret: os.Getenv("CLOUD_GITHUB_CLIENT_SECRET"),
+		GoogleClientID:     os.Getenv("CLOUD_GOOGLE_CLIENT_ID"),
+		GoogleClientSecret: os.Getenv("CLOUD_GOOGLE_CLIENT_SECRET"),
+		SignInAppURL:       strings.TrimRight(os.Getenv("CLOUD_SIGNIN_APP_URL"), "/"),
 	}
 
 	for _, v := range []struct{ name, val string }{
@@ -145,6 +175,38 @@ func ConfigFromEnv() (Config, error) {
 	if c.SMTPAddr != "" && c.SMTPFrom == "" {
 		return Config{}, fmt.Errorf("CLOUD_SMTP_FROM is required when CLOUD_SMTP_ADDR is set: " +
 			"a message with no sender is refused by every receiver")
+	}
+
+	// Half a provider is a mistake, not a choice. Neither value set means the
+	// provider is off, which is a supported state; exactly one set means
+	// somebody meant to turn it on, and the first sign of the missing half
+	// would otherwise be a user who has already consented at GitHub.
+	for _, p := range []struct{ idName, id, secretName, secret string }{
+		{"CLOUD_GITHUB_CLIENT_ID", c.GitHubClientID, "CLOUD_GITHUB_CLIENT_SECRET", c.GitHubClientSecret},
+		{"CLOUD_GOOGLE_CLIENT_ID", c.GoogleClientID, "CLOUD_GOOGLE_CLIENT_SECRET", c.GoogleClientSecret},
+	} {
+		switch {
+		case p.id != "" && p.secret == "":
+			return Config{}, fmt.Errorf("%s is set but %s is not: "+
+				"a client id without its secret cannot complete a sign-in, and the "+
+				"failure would land on somebody who had already granted access",
+				p.idName, p.secretName)
+		case p.secret != "" && p.id == "":
+			return Config{}, fmt.Errorf("%s is set but %s is not: "+
+				"there is nothing to identify this deployment to the provider",
+				p.secretName, p.idName)
+		}
+	}
+
+	// Same reasoning as CLOUD_PUBLIC_URL, and it matters more here: this one is
+	// a redirect target. A value that does not parse would send every finished
+	// sign-in to a Location header nothing can follow.
+	if c.SignInAppURL != "" {
+		u, err := url.Parse(c.SignInAppURL)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return Config{}, fmt.Errorf("CLOUD_SIGNIN_APP_URL must be an absolute URL "+
+				"like https://cloud.atlantis.dev/signin, got %q", c.SignInAppURL)
+		}
 	}
 	return c, nil
 }

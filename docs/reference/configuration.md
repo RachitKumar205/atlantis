@@ -359,6 +359,9 @@ Read by `cmd/cloud`, which publishes the keys consoles verify against.
 | `CLOUD_SMTP_USER`, `CLOUD_SMTP_PASSWORD` | (unset) | SMTP credentials. Sent only over an encrypted connection — Go's `PlainAuth` refuses otherwise, which is why STARTTLS is attempted unconditionally. |
 | `CLOUD_HIBP_CHECK` | `true` | Refuse passwords found in a known breach, via Have I Been Pwned's k-anonymity range API. The password never leaves the process; only the first five characters of its SHA-1 are sent. |
 | `CLOUD_TRUST_PROXY` | `false` | Read `X-Forwarded-For` when rate limiting. Leave off unless something you control terminates in front — the header is spoofable, and a limiter keyed on a spoofable value is one an attacker resets per request. |
+| `CLOUD_GITHUB_CLIENT_ID`, `CLOUD_GITHUB_CLIENT_SECRET` | (unset) | Sign in with GitHub. Both or neither — one without the other is refused at startup. Unset means the provider is not registered and its URLs answer 404. |
+| `CLOUD_GOOGLE_CLIENT_ID`, `CLOUD_GOOGLE_CLIENT_SECRET` | (unset) | Sign in with Google. Same rule. |
+| `CLOUD_SIGNIN_APP_URL` | (unset) | Where a finished OAuth callback sends the browser. Unset, the callback answers with a plain page naming the next step. |
 
 ### Signing in takes two factors, always
 
@@ -384,6 +387,41 @@ mailbox sufficient on its own.
 **An unverified address cannot sign in at all**, so there is no
 half-authenticated account anywhere downstream. `POST /api/auth/verify/resend`
 issues another link and answers identically whether or not the address has one.
+
+### Signing in with GitHub or Google
+
+Set a provider's client id and secret and its routes appear:
+`GET /auth/github` starts a sign-in and `GET /auth/github/callback` finishes
+one. Register the callback with the provider as `CLOUD_PUBLIC_URL` plus
+`/auth/github/callback`. Cloud builds that value from `CLOUD_PUBLIC_URL` and
+never from the request, because a redirect target taken from a `Host` header
+is one an attacker chooses.
+
+**A provider is one factor, not two.** The callback produces the same pending
+login a password does, and the same second factor is still required — a
+provider vouching for somebody is evidence about an address, not proof of
+possession of anything Cloud issued. Nothing about the section above bends for
+OAuth.
+
+**Only an address the provider says is verified is accepted.** GitHub's must be
+flagged both primary and verified; Google's needs `email_verified`. An account
+with no such address is refused rather than asked to type one, because
+`cloud.users.email` is unique and an unproven address is a way to collide with
+somebody who proved theirs.
+
+**A provider address matching an existing account connects the two, but only
+when that account already has a second factor.** With one, the provider's word
+gets somebody as far as a challenge they cannot answer — exactly where a stolen
+password gets them. With none, there would be nothing between that word and the
+account, so the sign-in is refused and nothing is written; the person signs in
+with their password instead and connects the provider afterwards.
+
+**The last way in cannot be removed.** `GET /api/account/identities` lists
+connections and `POST /api/account/identities/{provider}/unlink` removes one,
+except when it is the only thing that can reach the account — an account with no
+password and one connection has no recovery path, because resetting a password
+requires having one. Connections remain listed and removable after a provider's
+credentials are taken out of the environment.
 
 ### Cloud needs its own database role
 

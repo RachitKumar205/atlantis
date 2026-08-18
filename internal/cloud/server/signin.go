@@ -415,8 +415,23 @@ func (s *Server) completeSignInWithCodes(w http.ResponseWriter, r *http.Request,
 		jsonError(w, "your sign-in has expired — start again", http.StatusUnauthorized)
 		return
 	}
-	if _, err := s.db.SpendPendingLogin(r.Context(), pendingToken.Value); err != nil {
+	spentUser, err := s.db.SpendPendingLogin(r.Context(), pendingToken.Value)
+	if err != nil {
 		jsonError(w, "your sign-in has expired — start again", http.StatusUnauthorized)
+		return
+	}
+	// The same cross-check completeSignIn makes, and it was missing here.
+	//
+	// This function's userID comes from requireEnrolable, which prefers a live
+	// SESSION over the pending login. So a browser holding one account's session
+	// and another's pending cookie enrols the factor on the session's account
+	// while spending the pending login of the other, and walks away with a
+	// session for the first. That combination used to need contriving; an OAuth
+	// callback makes it a thing a shared browser produces by accident.
+	if subtle.ConstantTimeCompare([]byte(spentUser), []byte(userID)) != 1 {
+		s.log.Error("pending login belongs to another account",
+			"enrolled", userID, "spent", spentUser)
+		jsonError(w, "could not sign in", http.StatusInternalServerError)
 		return
 	}
 	token, err := s.db.CreateSession(r.Context(), userID)
