@@ -186,21 +186,44 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 	}
 }
 
-// assertion mints a signed assertion for a user, as Cloud would.
+// defaultOrg is the organisation single-org tests run in. Tests about the
+// organisation boundary use assertionForOrg with two of them.
+const defaultOrg = "acme"
+
+// subjectFor is the Cloud subject the fixture mints for a user.
+//
+// Defined once so a test asserting on the actor does not hardcode the format —
+// two did, and both broke when the organisation was folded in.
+func subjectFor(org, email string) string { return "usr_" + org + "_" + email }
+
+// assertion mints a signed assertion for a user in the default organisation.
 func (f *consoleFixture) assertion(t *testing.T, email, role string) string {
 	t.Helper()
+	return f.assertionForOrg(t, defaultOrg, email, role)
+}
+
+// assertionForOrg mints a signed assertion, as Cloud would.
+//
+// The organisation is a parameter because it is the boundary under test. It
+// used to be hardcoded, which meant every test in the package ran as one
+// organisation and no test could observe the boundary at all — a policy that
+// isolated nothing would have passed the whole suite.
+func (f *consoleFixture) assertionForOrg(t *testing.T, org, email, role string) string {
+	t.Helper()
 	tok, err := f.iss.Mint(issuer.Grant{
-		// One subject per email keeps distinct test users distinct without
-		// the fixture having to hand out ids.
-		Subject:  "usr_" + email,
-		Org:      "acme",
+		// Subject is scoped by organisation as well as email. Cloud subjects
+		// are globally unique, and two organisations having genuinely
+		// different people at the same address is the case a shared subject
+		// would quietly merge.
+		Subject:  subjectFor(org, email),
+		Org:      org,
 		Role:     identity.Role(role),
 		Email:    email,
 		Name:     "Test User",
 		Audience: f.audience,
 	})
 	if err != nil {
-		t.Fatalf("mint assertion for %s: %v", email, err)
+		t.Fatalf("mint assertion for %s in %s: %v", email, org, err)
 	}
 	return tok
 }
@@ -212,21 +235,27 @@ func (f *consoleFixture) assertion(t *testing.T, email, role string) string {
 // a change that breaks it cannot pass by leaving a shortcut intact.
 func (f *consoleFixture) signIn(t *testing.T, email, role string) string {
 	t.Helper()
+	return f.signInToOrg(t, defaultOrg, email, role)
+}
 
-	body := fmt.Sprintf(`{"assertion":%q}`, f.assertion(t, email, role))
+// signInToOrg returns a session token for a user in a named organisation.
+func (f *consoleFixture) signInToOrg(t *testing.T, org, email, role string) string {
+	t.Helper()
+
+	body := fmt.Sprintf(`{"assertion":%q}`, f.assertionForOrg(t, org, email, role))
 	req := f.request(t, http.MethodPost, "/api/auth/exchange", body, "")
 	rec := httptest.NewRecorder()
 	f.srv.handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("exchange for %s: status %d, body %s", email, rec.Code, rec.Body.String())
+		t.Fatalf("exchange for %s in %s: status %d, body %s", email, org, rec.Code, rec.Body.String())
 	}
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == sessionCookieName {
 			return c.Value
 		}
 	}
-	t.Fatalf("exchange for %s set no session cookie", email)
+	t.Fatalf("exchange for %s in %s set no session cookie", email, org)
 	return ""
 }
 

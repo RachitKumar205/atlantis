@@ -271,6 +271,29 @@ credential — it lives for minutes and is spent immediately on a session.
 Revoking access means revoking the session, which is a row the console owns and
 can delete without reaching Cloud at all.
 
+### Organisations are separated by row-level security
+
+One console serves several organisations. The `org` claim on each assertion is
+bound to the database transaction serving the request, and a RESTRICTIVE policy
+on `console.audit_log` compares it against every row. A query that forgets to
+bind reads nothing rather than everything.
+
+There is nothing to configure. The console **refuses to start** if the boundary
+is not in place — enabled, forced, and backed by a policy that actually
+references the discriminator. That check is not decoration: binding an
+organisation succeeds whether or not a policy exists, and so does every query
+afterwards, so an operator signing in sees a working console either way.
+
+Two tables are deliberately exempt, and the console names them rather than
+leaving it implied. `console.sessions` is how a request *discovers* which
+organisation it belongs to, so it cannot be filtered by that organisation; its
+bulk operations are scoped in Go instead. `console.spent_assertions` is global
+because a per-organisation replay check would let the same assertion be spent
+once in each.
+
+Audit rows written before this existed carry `org = ''` and appear in no
+organisation's console. See the CHANGELOG for how to attribute them.
+
 ## Cloud identity service
 
 Read by `cmd/cloud`, which publishes the keys consoles verify against.

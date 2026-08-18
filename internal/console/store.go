@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -73,10 +74,21 @@ type User struct {
 
 type store struct {
 	pool *pgxpool.Pool
+
+	// log exists because audit writes are best-effort and their errors used to
+	// be discarded outright. See logAction.
+	log *slog.Logger
 }
 
-func newStore(ctx context.Context, pgURL string) (*store, error) {
-	pool, err := pgxpool.New(ctx, pgURL)
+func newStore(ctx context.Context, pgURL string, log *slog.Logger) (*store, error) {
+	// Built from a config rather than pgxpool.New so every new connection has
+	// its organisation discriminator cleared. See newPoolConfig for why that
+	// matters and why it is SET rather than RESET.
+	cfg, err := newPoolConfig(pgURL)
+	if err != nil {
+		return nil, err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +96,7 @@ func newStore(ctx context.Context, pgURL string) (*store, error) {
 		pool.Close()
 		return nil, err
 	}
-	return &store{pool: pool}, nil
+	return &store{pool: pool, log: log}, nil
 }
 
 func (s *store) close() { s.pool.Close() }
@@ -147,8 +159,36 @@ func (s *store) ensureAuditPartition(ctx context.Context, t time.Time) error {
 		name,
 		start.Format("2006-01-02 15:04:05-07"),
 		end.Format("2006-01-02 15:04:05-07"))
-	_, err := s.pool.Exec(ctx, stmt)
-	return err
+	if _, err := s.pool.Exec(ctx, stmt); err != nil {
+		return err
+	}
+
+	// A partition inherits NONE of its parent's row-level security.
+	//
+	// Measured on PostgreSQL 17 rather than assumed: a table created by
+	// CREATE TABLE ... PARTITION OF has relrowsecurity false,
+	// relforcerowsecurity false, and no policies — and reading it DIRECTLY
+	// returned every organisation's rows, bound or unbound, while the parent
+	// behaved correctly. The organisation boundary simply is not there.
+	//
+	// Enabling and forcing RLS with no policy of its own makes the child
+	// deny-all on direct access, which is what we want: the console only ever
+	// queries the parent, and dropAuditPartitionsOlderThan uses DROP TABLE,
+	// which is DDL and outside RLS entirely. So a direct read of a partition is
+	// either a bug or an attack, and both deserve nothing.
+	//
+	// This has to happen here, on every partition, forever — partitions are a
+	// function of the calendar, so a migration cannot create next March's.
+	// Migration 0004 did it for the partitions that existed when it ran.
+	for _, ddl := range []string{
+		fmt.Sprintf(`ALTER TABLE console.%s ENABLE ROW LEVEL SECURITY`, name),
+		fmt.Sprintf(`ALTER TABLE console.%s FORCE ROW LEVEL SECURITY`, name),
+	} {
+		if _, err := s.pool.Exec(ctx, ddl); err != nil {
+			return fmt.Errorf("isolate partition %s: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // dropAuditPartitionsOlderThan removes every audit_log partition whose
@@ -224,11 +264,29 @@ func (s *store) dropAuditPartitionsOlderThan(ctx context.Context, cutoff time.Ti
 // is read. An audit entry should say who acted at the time it happened; a
 // lookup would report whoever holds that identity now, which is a different
 // claim and occasionally a false one.
-func (s *store) logAction(ctx context.Context, actor, actorEmail, action string, detail map[string]any) {
+func (o *orgStore) logAction(ctx context.Context, actor, actorEmail, action string, detail map[string]any) {
 	detailJSON, _ := jsonMarshalBytes(detail)
-	_, _ = s.pool.Exec(ctx, `
-		INSERT INTO console.audit_log (actor, actor_email, action, detail) VALUES ($1, $2, $3, $4)
-	`, actor, actorEmail, action, detailJSON)
+	err := o.tx(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO console.audit_log (actor, actor_email, action, detail, org)
+			VALUES ($1, $2, $3, $4, $5)
+		`, actor, actorEmail, action, detailJSON, o.org)
+		return err
+	})
+	// Audit writes stay best-effort: an action that succeeded is not undone
+	// because recording it failed. What changed is that they can now fail in a
+	// new way — a WITH CHECK violation, meaning the bound organisation and the
+	// row's organisation disagree — and that is a bug in this file rather than
+	// a database being unavailable.
+	//
+	// This used to discard the error entirely (`_, _ = s.pool.Exec(...)`). An
+	// audit log that silently stops recording is the failure this codebase has
+	// already been bitten by once, in the TTL sweeper: months of a DELETE that
+	// matched nothing looked exactly like months with nothing to delete.
+	if err != nil {
+		o.db.log.Warn("audit write failed",
+			"action", action, "org", o.org, "actor", actor, "err", err)
+	}
 }
 
 // listAuditLog reads the most recent entries.
@@ -239,28 +297,43 @@ func (s *store) logAction(ctx context.Context, actor, actorEmail, action string,
 // entirely. Now that identity comes from Cloud there would have been no such
 // row for anybody, so the log would have been silently empty while continuing
 // to be written.
-func (s *store) listAuditLog(ctx context.Context, limit int) ([]auditEntry, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, actor, actor_email, action, detail, created_at
-		FROM console.audit_log
-		ORDER BY created_at DESC
-		LIMIT $1
-	`, limit)
+// listAuditLog reads the most recent entries for this organisation.
+//
+// There is no `WHERE org = …` here and that is deliberate: the RESTRICTIVE
+// policy on console.audit_log supplies it, so a query written without one
+// returns nothing rather than everything. A predicate in the SQL would be a
+// second boundary that has to be remembered, and the first thing to go wrong
+// would be somebody adding a query and not remembering it — which is exactly
+// how this method came to read every organisation's rows in the first place.
+func (o *orgStore) listAuditLog(ctx context.Context, limit int) ([]auditEntry, error) {
+	var out []auditEntry
+	err := o.tx(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT id, actor, actor_email, action, detail, created_at
+			FROM console.audit_log
+			ORDER BY created_at DESC
+			LIMIT $1
+		`, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		out = nil
+		for rows.Next() {
+			var e auditEntry
+			var detail []byte
+			if err := rows.Scan(&e.ID, &e.Actor, &e.ActorEmail, &e.Action, &detail, &e.CreatedAt); err != nil {
+				return err
+			}
+			e.Detail = detail
+			out = append(out, e)
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []auditEntry
-	for rows.Next() {
-		var e auditEntry
-		var detail []byte
-		if err := rows.Scan(&e.ID, &e.Actor, &e.ActorEmail, &e.Action, &detail, &e.CreatedAt); err != nil {
-			return nil, err
-		}
-		e.Detail = detail
-		out = append(out, e)
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 type auditEntry struct {
@@ -273,22 +346,36 @@ type auditEntry struct {
 }
 
 // deleteSessionsForSubjectExcept signs out every session belonging to a Cloud
-// subject except the one whose token is keepToken. Returns how many were
-// removed.
-func (s *store) deleteSessionsForSubjectExcept(ctx context.Context, subject, keepToken string) (int64, error) {
-	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM console.sessions WHERE subject = $1 AND token <> $2`,
-		subject, keepToken)
+// subject within this organisation, except the one whose token is keepToken.
+//
+// Scoped by organisation as well as subject even though Cloud subjects are
+// globally unique, so this would be correct without it today. One person can
+// belong to several organisations, and "sign out my other devices" should not
+// reach into a different organisation's session — that is a different account
+// from the user's point of view, whatever the subject says.
+func (o *orgStore) deleteSessionsForSubjectExcept(ctx context.Context, subject, keepToken string) (int64, error) {
+	tag, err := o.db.pool.Exec(ctx,
+		`DELETE FROM console.sessions WHERE org = $1 AND subject = $2 AND token <> $3`,
+		o.org, subject, keepToken)
 	if err != nil {
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
 }
 
-// deleteAllSessions removes every session in the table. Used by the
-// "Sign out all" danger-zone action; the caller is also signed out.
-func (s *store) deleteAllSessions(ctx context.Context) (int64, error) {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM console.sessions`)
+// deleteAllSessions removes every session belonging to this organisation. Used
+// by the "Sign out all" danger-zone action; the caller is also signed out.
+//
+// This was `DELETE FROM console.sessions` with no predicate at all, which was
+// correct while one console served one organisation and became a cross-tenant
+// action the moment it served several — an admin of one organisation signing
+// out every other organisation's users, from a button labelled as affecting
+// their own. Nobody decided that; the query simply predated the question.
+//
+// The organisation comes from the handle rather than an argument precisely so
+// that the question cannot be skipped again.
+func (o *orgStore) deleteAllSessions(ctx context.Context) (int64, error) {
+	tag, err := o.db.pool.Exec(ctx, `DELETE FROM console.sessions WHERE org = $1`, o.org)
 	if err != nil {
 		return 0, err
 	}
@@ -315,6 +402,23 @@ func (s *store) createSession(ctx context.Context, c *identity.Claims) (string, 
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`, token, c.Subject, c.Org, string(c.Role), c.Email, c.Name, time.Now().Add(sessionTTL))
 	return token, err
+}
+
+// rememberOrg records that an organisation exists.
+//
+// console.orgs is a registry, not organisation-scoped data, so it carries no
+// policy — a table listing organisations that only its own organisation could
+// read would be useless. Nothing sensitive is in it: the name is already in
+// every assertion.
+//
+// Written on exchange, where the claims have just been verified, so the only
+// way to enter this table is to have presented an assertion Cloud signed for
+// that organisation. Step 5 hangs per-organisation endpoints and client
+// certificates off these rows.
+func (s *store) rememberOrg(ctx context.Context, org string) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO console.orgs (org) VALUES ($1) ON CONFLICT (org) DO NOTHING`, org)
+	return err
 }
 
 // spendAssertion records an assertion id, and reports ErrAssertionSpent if it

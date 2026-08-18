@@ -13,6 +13,53 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Changed
 
+#### The organisation is now a database boundary in the console
+
+One console process serves several organisations, and until now nothing
+separated their rows. Two queries made that concrete rather than theoretical:
+the Activity page read `console.audit_log` with no filter of any kind, and
+**Sign out all** was `DELETE FROM console.sessions` with no `WHERE` — an admin
+of one organisation signing out every organisation on the stack, from a button
+labelled as affecting their own.
+
+`console.audit_log` gains an `org` column and a RESTRICTIVE row-level-security
+policy reading `console.current_org()`, bound per request from the verified
+assertion. Migration `0004` runs automatically.
+
+**What to check.** Nothing, if you have one organisation. Audit rows written
+before this migration have no recoverable organisation — `console.users` was
+dropped by `0003` and its sessions deleted — so they are parked at `org = ''`,
+a value `console.current_org()` never returns. They stay in the table and are
+readable by an operator with direct database access, but appear in no
+organisation's console. The migration prints how many and how to attribute
+them:
+
+```sql
+UPDATE console.audit_log SET org = '<your-org>' WHERE org = '';
+```
+
+**Two findings worth recording**, both measured on PostgreSQL 17 rather than
+assumed:
+
+- **A partition inherits none of its parent's row-level security.** Not the
+  switches, not the policies. Reading a child of `console.audit_log` *directly*
+  returned every organisation's rows, bound or unbound, while the parent
+  behaved correctly. Partitions are now created with RLS enabled and forced and
+  no policy of their own, which is deny-all on direct access — nothing reads
+  them directly, so that is the right answer.
+- **Omitting `WITH CHECK` does not open a write hole.** PostgreSQL reuses
+  `USING` as the write check when `WITH CHECK` is absent, and a cross-boundary
+  INSERT is refused either way. A comment in `internal/codegen/sql.go` claimed
+  otherwise and has been corrected; the shape that genuinely leaks is an
+  explicit `WITH CHECK (true)`.
+
+The console refuses to start if any table in its schema is neither policed nor
+on a short list of deliberate exemptions (`sessions`, which is the table the
+session lookup uses to *discover* the organisation; `spent_assertions`, where a
+per-organisation replay check would not be a replay check; and the `orgs`
+registry). A missing boundary is otherwise invisible — sign-in works, pages
+render, and the data is simply everyone's.
+
 #### The console's identity comes from Atlantis Cloud — breaking
 
 The console no longer holds accounts. `console.users` is dropped, along with

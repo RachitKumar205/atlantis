@@ -1,0 +1,159 @@
+package console
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/jackc/pgx/v5"
+)
+
+// rowQuerier is the slice of a pgx pool this check needs. Narrow on purpose:
+// the check is then callable against a pool, a connection or a transaction,
+// which is what lets a test run it under SET LOCAL ROLE.
+type rowQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// unpolicedTables are the console tables that deliberately carry no
+// organisation boundary.
+//
+// Each one is a decision, not an omission, and each is here rather than in a
+// comment so that adding a table without deciding is impossible — see
+// verifyConsolePolicies.
+//
+//   - sessions: the bootstrap table. getSessionInfo is the query that
+//     *discovers* which organisation a request belongs to, so it cannot be
+//     filtered by that organisation. Its bulk operations are scoped through
+//     orgStore instead, which makes writing one without an organisation a
+//     compile error.
+//
+//   - spent_assertions: global by design. A replay check that is per
+//     organisation is not a replay check — the same assertion could be spent
+//     once in each. jti is 128 bits from crypto/rand, so the ids do not
+//     collide across organisations by accident.
+//
+//   - orgs: the registry. A list of organisations that only its own
+//     organisation could read would be useless, and it holds nothing that is
+//     not already in every assertion.
+//
+// Not listed, because it is not in this schema: console_schema_migrations.
+// internal/migrate pins search_path=public for exactly this reason, so
+// golang-migrate's bookkeeping lands in public and the query below never sees
+// it. An entry for it was written and then removed — a dead exemption is worse
+// than none, because it asserts that a table is here when it is not.
+var unpolicedTables = map[string]string{
+	"sessions":         "bootstrap: the session lookup is what discovers the organisation",
+	"spent_assertions": "global by design: a per-organisation replay check is not a replay check",
+	"orgs":             "the registry of organisations",
+}
+
+// verifyConsolePolicies asks the live catalogue whether the organisation
+// boundary is actually in place.
+//
+// # Why this exists at all
+//
+// Binding an organisation succeeds whether or not a policy is there. So does
+// every query afterwards. An operator signing in sees their own data and a
+// working console either way — the only observable signal reports healthy
+// while every organisation reads every other organisation's rows.
+//
+// The server-side equivalent, pg.VerifyPartitionPolicies, was written after a
+// review reproduced exactly that: the differ emitted nothing, the unbound
+// request was correctly refused, and the bound request returned every tenant's
+// rows. Reading the migration files does not help, because the question is what
+// the database ended up with.
+//
+// # Why it checks unknown tables too
+//
+// The dangerous case is not a policy that was removed; it is a table that never
+// had one. A new console table is written, nobody thinks about isolation, and
+// it holds several organisations' rows from its first row onward. Requiring
+// every table to be either policed or named above turns that from an oversight
+// into a boot failure.
+func verifyConsolePolicies(ctx context.Context, q rowQuerier) error {
+	rows, err := q.Query(ctx, `
+		SELECT c.relname,
+		       c.relrowsecurity,
+		       c.relforcerowsecurity,
+		       COALESCE(
+		           (SELECT count(*)
+		              FROM pg_policy p
+		             WHERE p.polrelid = c.oid
+		               AND NOT p.polpermissive
+		               AND pg_get_expr(p.polqual, p.polrelid) LIKE '%current_org%'), 0)
+		  FROM pg_class c
+		  JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = 'console'
+		   AND c.relkind IN ('r', 'p')
+		   AND c.relispartition = false
+		 ORDER BY c.relname`)
+	if err != nil {
+		// A check that could not run is not a check that passed.
+		return fmt.Errorf("could not verify the organisation boundary: %w", err)
+	}
+	defer rows.Close()
+
+	var faults []string
+	seen := 0
+	for rows.Next() {
+		var (
+			name             string
+			rls, forced      bool
+			boundaryPolicies int
+		)
+		if err := rows.Scan(&name, &rls, &forced, &boundaryPolicies); err != nil {
+			return fmt.Errorf("could not verify the organisation boundary: %w", err)
+		}
+		seen++
+
+		if _, exempt := unpolicedTables[name]; exempt {
+			continue
+		}
+		switch {
+		case !rls:
+			faults = append(faults, fmt.Sprintf("console.%s has no row-level security", name))
+		case !forced:
+			// The trap this catches: ENABLE without FORCE leaves the owner
+			// exempt, and the console's role owns these tables. `\d` lists the
+			// policy; it applies to nobody who connects.
+			faults = append(faults, fmt.Sprintf(
+				"console.%s has row-level security enabled but not FORCED, so the owning role reads through it", name))
+		case boundaryPolicies == 0:
+			faults = append(faults, fmt.Sprintf(
+				"console.%s has no RESTRICTIVE policy referencing console.current_org()", name))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("could not verify the organisation boundary: %w", err)
+	}
+	if seen == 0 {
+		return fmt.Errorf("could not verify the organisation boundary: no tables found in schema console")
+	}
+	if len(faults) == 0 {
+		return nil
+	}
+
+	sort.Strings(faults)
+	var b strings.Builder
+	b.WriteString("refusing to start: the organisation boundary is not in place.\n\n")
+	for _, f := range faults {
+		fmt.Fprintf(&b, "  %s\n", f)
+	}
+	b.WriteString("\nThis console serves several organisations from one database, and " +
+		"row-level security is what separates them. Without it every organisation " +
+		"reads every other organisation's rows, and nothing an operator can observe " +
+		"would show it — sign-in works, the pages render, the data is simply " +
+		"everyone's.\n\n")
+	b.WriteString("A table that should not be policed belongs in unpolicedTables " +
+		"(internal/console/policyguard.go) with the reason, so the decision is " +
+		"recorded rather than implied. Currently exempt:\n")
+	exempt := make([]string, 0, len(unpolicedTables))
+	for name, why := range unpolicedTables {
+		exempt = append(exempt, fmt.Sprintf("  console.%s — %s", name, why))
+	}
+	sort.Strings(exempt)
+	b.WriteString(strings.Join(exempt, "\n") + "\n")
+	return fmt.Errorf("%s", b.String())
+}

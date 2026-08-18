@@ -2085,9 +2085,20 @@ func emitPartitionPolicy(b *sqlBuilder, e *dsl.Entity) {
 	// naming this policy, and a cross-tenant UPDATE touched nothing.
 	//
 	// USING gates what a statement may read; WITH CHECK what it may write.
-	// Both are required on the boundary: USING alone lets a caller INSERT a row
-	// attributed to another tenant, which it then cannot see — a write leak
-	// rather than a read leak, and just as much a breach.
+	//
+	// This comment used to say that both were required because "USING alone
+	// lets a caller INSERT a row attributed to another tenant". That is wrong,
+	// and was corrected after measuring it on PostgreSQL 17: when WITH CHECK is
+	// omitted entirely, PostgreSQL reuses USING as the write check, and a
+	// cross-tenant INSERT is refused naming this policy. Omitting it opens
+	// nothing.
+	//
+	// Writing both is still right, for a different and weaker reason: it states
+	// the intent, and it keeps the write half pinned if somebody later gives
+	// the read half a different predicate. The shape that genuinely does leak
+	// is an explicit `WITH CHECK (true)` — which is what a well-meaning "let
+	// writes through" edit produces, and which this line makes it obvious you
+	// are choosing.
 	b.linef("CREATE POLICY %s ON %s AS RESTRICTIVE USING (%s) WITH CHECK (%s);",
 		quoteIdent(partitionPolicyName(e)), table, predicate, predicate)
 

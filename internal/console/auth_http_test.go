@@ -68,8 +68,8 @@ func TestExchangeOpensASession(t *testing.T) {
 	if err := json.Unmarshal(me.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode /api/auth/me: %v", err)
 	}
-	if got.Subject != "usr_rachit@example.com" {
-		t.Errorf("subject = %q", got.Subject)
+	if want := subjectFor(defaultOrg, "rachit@example.com"); got.Subject != want {
+		t.Errorf("subject = %q, want %q", got.Subject, subjectFor(defaultOrg, "rachit@example.com"))
 	}
 	if got.Org != "acme" {
 		t.Errorf("org = %q", got.Org)
@@ -247,8 +247,8 @@ func TestAuditLogNamesAssertionAuthenticatedActors(t *testing.T) {
 			continue
 		}
 		found = true
-		if e.Actor != "usr_auditor@example.com" {
-			t.Errorf("actor = %q, want the Cloud subject", e.Actor)
+		if want := subjectFor(defaultOrg, "auditor@example.com"); e.Actor != want {
+			t.Errorf("actor = %q, want the Cloud subject %q", e.Actor, subjectFor(defaultOrg, "auditor@example.com"))
 		}
 		if e.ActorEmail != "auditor@example.com" {
 			t.Errorf("actor_email = %q", e.ActorEmail)
@@ -275,9 +275,9 @@ func TestAuditListingJoinsNothing(t *testing.T) {
 	f := newConsoleFixture(t)
 	token := f.signIn(t, "reader@example.com", "admin")
 
-	// Written straight through the store: no session, no sign-in, nothing for
-	// a join to find.
-	f.srv.db.logAction(context.Background(),
+	// Written straight through the store, in the same organisation the reader
+	// is in: no session, no sign-in, nothing for a join to find.
+	f.srv.db.forOrg(defaultOrg).logAction(context.Background(),
 		"local:4242", "departed@example.com", "approve_plan", map[string]any{"version": 7})
 
 	w := httptest.NewRecorder()

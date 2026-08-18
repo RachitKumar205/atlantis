@@ -77,7 +77,7 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	db, err := newStore(ctx, cfg.PGURL)
+	db, err := newStore(ctx, cfg.PGURL, log)
 	if err != nil {
 		_ = atl.Close()
 		return nil, fmt.Errorf("open console db: %w", err)
@@ -103,10 +103,22 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 	}
 	// Partitions are per-month and cannot live in a static migration; the
 	// migration creates the partitioned parent, this creates the children.
+	// It also isolates each child, which is not inherited — see the function.
 	if err := db.ensureAuditPartitions(ctx); err != nil {
 		db.close()
 		_ = atl.Close()
 		return nil, fmt.Errorf("console audit partitions: %w", err)
+	}
+	// Then ask the catalogue whether the organisation boundary is really there.
+	//
+	// After the migrations and the partitions, because it checks the state they
+	// produce. Fatal, because a console that cannot separate organisations
+	// looks completely healthy from the outside while serving each of them the
+	// others' data.
+	if err := verifyConsolePolicies(ctx, db.pool); err != nil {
+		db.close()
+		_ = atl.Close()
+		return nil, err
 	}
 
 	// The verifier is built before the server exists, so a console that
@@ -537,6 +549,17 @@ func (s *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Record the organisation before opening the session.
+	//
+	// Not fatal if it fails: the assertion verified, so the sign-in is
+	// legitimate and refusing it over a registry write would take the console
+	// down for a bookkeeping problem. The registry is how step 5 finds an
+	// organisation's endpoint and certificate, not part of this request's
+	// authorisation — the boundary itself is the policy on the data.
+	if err := s.db.rememberOrg(r.Context(), claims.Org); err != nil {
+		s.log.Warn("record organisation", "org", claims.Org, "err", err)
+	}
+
 	token, err := s.db.createSession(r.Context(), claims)
 	if err != nil {
 		s.log.Error("create session", "err", err)
@@ -545,7 +568,7 @@ func (s *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setSessionCookie(w, token, s.cfg.CookieSecure)
-	s.db.logAction(r.Context(), claims.Subject, claims.Email, "signed_in", map[string]any{
+	s.db.forOrg(claims.Org).logAction(r.Context(), claims.Subject, claims.Email, "signed_in", map[string]any{
 		"org": claims.Org,
 	})
 	jsonOK(w, map[string]bool{"ok": true})
@@ -592,7 +615,7 @@ func (s *Server) handleSudo(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	s.db.logAction(r.Context(), u.Subject, u.Email, "sudo_granted", map[string]any{
+	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "sudo_granted", map[string]any{
 		"ttl_seconds": int(sudoTTL.Seconds()),
 	})
 	jsonOK(w, map[string]any{"ok": true, "expires_in_seconds": int(sudoTTL.Seconds())})
@@ -1023,13 +1046,13 @@ func (s *Server) handleSignOutOthers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := r.Context().Value(ctxUser).(*User)
-	count, err := s.db.deleteSessionsForSubjectExcept(r.Context(), u.Subject, cookie.Value)
+	count, err := s.db.forOrg(u.Org).deleteSessionsForSubjectExcept(r.Context(), u.Subject, cookie.Value)
 	if err != nil {
 		s.log.Error("sign out others", "err", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	s.db.logAction(r.Context(), u.Subject, u.Email, "sign_out_others", map[string]any{
+	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "sign_out_others", map[string]any{
 		"sessions_removed": count,
 	})
 	jsonOK(w, map[string]any{"ok": true, "sessions_removed": count})
@@ -1040,13 +1063,13 @@ func (s *Server) handleSignOutOthers(w http.ResponseWriter, r *http.Request) {
 // the SPA enforces explicit consent before this hits.
 func (s *Server) handleSignOutAll(w http.ResponseWriter, r *http.Request) {
 	actor := r.Context().Value(ctxUser).(*User)
-	count, err := s.db.deleteAllSessions(r.Context())
+	count, err := s.db.forOrg(actor.Org).deleteAllSessions(r.Context())
 	if err != nil {
 		s.log.Error("sign out all", "err", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	s.db.logAction(r.Context(), actor.Subject, actor.Email, "sign_out_all", map[string]any{
+	s.db.forOrg(actor.Org).logAction(r.Context(), actor.Subject, actor.Email, "sign_out_all", map[string]any{
 		"sessions_removed": count,
 	})
 	clearSessionCookie(w, s.cfg.CookieSecure)
@@ -1090,7 +1113,7 @@ func (s *Server) handleRevokeAllCallers(w http.ResponseWriter, r *http.Request) 
 		revoked++
 	}
 
-	s.db.logAction(r.Context(), actor.Subject, actor.Email, "revoke_all_callers", map[string]any{
+	s.db.forOrg(actor.Org).logAction(r.Context(), actor.Subject, actor.Email, "revoke_all_callers", map[string]any{
 		"revoked":  revoked,
 		"failures": failures,
 	})
@@ -1134,7 +1157,7 @@ func (s *Server) handleRegisterCaller(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.db.logAction(r.Context(), actor.Subject, actor.Email, "register_caller", map[string]any{
+	s.db.forOrg(actor.Org).logAction(r.Context(), actor.Subject, actor.Email, "register_caller", map[string]any{
 		"caller":     body.Caller,
 		"can_mutate": body.CanMutate,
 	})
@@ -1181,7 +1204,7 @@ func (s *Server) handleSetCallerAliases(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	u := r.Context().Value(ctxUser).(*User)
-	s.db.logAction(r.Context(), u.Subject, u.Email, "set_caller_aliases", map[string]any{
+	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "set_caller_aliases", map[string]any{
 		"caller":  caller,
 		"aliases": body.Aliases,
 	})
@@ -1203,7 +1226,7 @@ func (s *Server) handleRevokeCaller(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u := r.Context().Value(ctxUser).(*User)
-	s.db.logAction(r.Context(), u.Subject, u.Email, "revoke_caller", map[string]any{"caller": caller})
+	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "revoke_caller", map[string]any{"caller": caller})
 
 	s.proxyProto(w, "admin", resp, nil)
 }
@@ -1243,7 +1266,7 @@ func (s *Server) handleRollbackSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.db.logAction(r.Context(), u.Subject, u.Email, "rollback_schema", map[string]any{
+	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "rollback_schema", map[string]any{
 		"to_version": body.ToVersion,
 		"caller":     caller,
 	})
@@ -1312,7 +1335,7 @@ func (s *Server) handleRetryDeadJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u := r.Context().Value(ctxUser).(*User)
-	s.db.logAction(r.Context(), u.Subject, u.Email, "retry_dead_job", map[string]any{"job_id": id})
+	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "retry_dead_job", map[string]any{"job_id": id})
 
 	s.proxyProto(w, "admin", resp, nil)
 }
@@ -1347,7 +1370,7 @@ func (s *Server) handleDrainWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := r.Context().Value(ctxUser).(*User)
-	s.db.logAction(r.Context(), u.Subject, u.Email, "worker_drained", map[string]any{"session_id": id})
+	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "worker_drained", map[string]any{"session_id": id})
 	s.proxyProto(w, "admin", resp, nil)
 }
 
@@ -1364,7 +1387,7 @@ func (s *Server) handleEvictWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := r.Context().Value(ctxUser).(*User)
-	s.db.logAction(r.Context(), u.Subject, u.Email, "worker_evicted", map[string]any{"session_id": id})
+	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "worker_evicted", map[string]any{"session_id": id})
 	s.proxyProto(w, "admin", resp, nil)
 }
 
@@ -1452,7 +1475,7 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
 
 	u := r.Context().Value(ctxUser).(*User)
-	s.db.logAction(r.Context(), u.Subject, u.Email, "issue_cert", map[string]any{
+	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "issue_cert", map[string]any{
 		"caller":     caller,
 		"expires_at": signerRespBody.ExpiresAt,
 	})
@@ -1507,8 +1530,9 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 // ── audit log ─────────────────────────────────────────────────────────────────
 
 func (s *Server) handleGetAuditLog(w http.ResponseWriter, r *http.Request) {
+	u := r.Context().Value(ctxUser).(*User)
 	limit := intQuery(r, "limit", 100)
-	entries, err := s.db.listAuditLog(r.Context(), limit)
+	entries, err := s.db.forOrg(u.Org).listAuditLog(r.Context(), limit)
 	if err != nil {
 		s.log.Error("list audit log", "err", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -1772,7 +1796,7 @@ func (s *Server) handleSetChangePolicy(w http.ResponseWriter, r *http.Request) {
 			"approver_role":    e.GetApproverRole(),
 		})
 	}
-	s.db.logAction(r.Context(), u.Subject, u.Email, "set_change_policy", map[string]any{"entries": changed})
+	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "set_change_policy", map[string]any{"entries": changed})
 	s.proxyProto(w, "SetChangePolicy", resp, nil)
 }
 
@@ -1886,7 +1910,7 @@ func (s *Server) decideSchemaPlan(w http.ResponseWriter, r *http.Request, approv
 	// share one call site costs the type check that keeps a nil-typed response
 	// from reaching the encoder.
 	audit := func(verb string) {
-		s.db.logAction(r.Context(), u.Subject, u.Email, verb, map[string]any{
+		s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, verb, map[string]any{
 			"plan_id": planID,
 			"role":    role,
 			"reason":  body.Reason,
