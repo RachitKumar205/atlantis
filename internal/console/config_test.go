@@ -15,6 +15,34 @@ func setConsoleEnv(t *testing.T) {
 	t.Setenv("ATL_TLS_CERT", "/etc/atlantis/console.crt")
 	t.Setenv("ATL_TLS_KEY", "/etc/atlantis/console.key")
 	t.Setenv("ATL_TLS_CA", "/etc/atlantis/ca.crt")
+	t.Setenv("CLOUD_ISSUER", "https://cloud.atlantis.dev")
+	t.Setenv("CLOUD_AUDIENCE", "https://acme.console.atlantis.dev")
+	t.Setenv("CLOUD_JWKS_URL", "https://cloud.atlantis.dev/.well-known/jwks.json")
+}
+
+// The console will not start without an issuer to trust.
+//
+// This is stricter than it may look, and the strictness is the point. The
+// verifier compares iss and aud for exact equality, and an empty expected
+// value means the check is skipped — so a console missing either one would not
+// refuse to start, it would start and accept assertions from any issuer, for
+// any console. Nothing downstream could notice: every request would carry a
+// valid session, established from a token that verified.
+func TestConfigFromEnvRequiresTheCloudIssuer(t *testing.T) {
+	for _, missing := range []string{"CLOUD_ISSUER", "CLOUD_AUDIENCE", "CLOUD_JWKS_URL"} {
+		t.Run("without "+missing, func(t *testing.T) {
+			setConsoleEnv(t)
+			t.Setenv(missing, "")
+
+			_, err := ConfigFromEnv()
+			if err == nil {
+				t.Fatalf("ConfigFromEnv accepted a console with no %s", missing)
+			}
+			if !strings.Contains(err.Error(), missing) {
+				t.Errorf("the error does not name %s: %v", missing, err)
+			}
+		})
+	}
 }
 
 // The console will not start without its client certificate.

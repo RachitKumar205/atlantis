@@ -2,6 +2,7 @@ package issuer
 
 import (
 	"crypto/ecdsa"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -140,17 +141,85 @@ func TestMintRefusesAnIncompleteGrant(t *testing.T) {
 	}
 }
 
+// TestEveryAssertionGetsADistinctID pins what single-use enforcement rests on.
+// If Mint reused an id, the second sign-in of a session would be refused as a
+// replay of the first — and the failure would look like a broken console
+// rather than like the collision it is.
+func TestEveryAssertionGetsADistinctID(t *testing.T) {
+	iss, err := New("https://cloud.atlantis.dev", mustKey(t))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	seen := make(map[string]bool)
+	for range 50 {
+		tok, err := iss.Mint(validGrant())
+		if err != nil {
+			t.Fatalf("Mint: %v", err)
+		}
+		id := assertionID(t, tok)
+		if id == "" {
+			t.Fatal("minted an assertion with no jti; the console requires one")
+		}
+		if seen[id] {
+			t.Fatalf("assertion id %q was minted twice", id)
+		}
+		seen[id] = true
+	}
+}
+
+// assertionID reads jti out of a token's payload without verifying it. Only
+// safe because the test minted the token itself.
+func assertionID(t *testing.T, token string) string {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("token has %d segments, want 3", len(parts))
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	var claims struct {
+		ID string `json:"jti"`
+	}
+	if err := json.Unmarshal(raw, &claims); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	return claims.ID
+}
+
+// completeClaims is a claim set that passes Validate. Each test below removes
+// or spoils exactly one field, so a rejection can only be caused by that field
+// — otherwise a test asserting "no expiry is refused" passes on a set that is
+// also missing three other things.
+func completeClaims() identity.Claims {
+	return identity.Claims{
+		ID:      "assertion_1",
+		Subject: "usr_1",
+		Org:     "acme",
+		Email:   "rachit@example.com",
+		Role:    identity.RoleAdmin,
+		Expiry:  time.Now().Add(time.Minute),
+	}
+}
+
 func TestMintRequiresRoleThatConsoleUnderstands(t *testing.T) {
 	// identity.Role's whole purpose. Kept separate from the table above
-	// because it is the case where the grant is complete and still wrong.
-	var c identity.Claims
-	if err := (identity.Claims{
-		Subject: "u", Org: "o", Email: "e", Role: identity.Role("viewer "), Expiry: time.Now(),
-	}).Validate(); err == nil {
+	// because it is the case where the claim set is complete and still wrong.
+	if err := completeClaims().Validate(); err != nil {
+		t.Fatalf("the control claim set does not validate, so the cases below prove nothing: %v", err)
+	}
+
+	spoiled := completeClaims()
+	spoiled.Role = identity.Role("viewer ")
+	if err := spoiled.Validate(); err == nil {
 		t.Error("a role with trailing whitespace was accepted")
 	}
-	c = identity.Claims{Subject: "u", Org: "o", Email: "e", Role: identity.RoleViewer, Expiry: time.Now()}
-	if err := c.Validate(); err != nil {
+
+	ok := completeClaims()
+	ok.Role = identity.RoleViewer
+	if err := ok.Validate(); err != nil {
 		t.Errorf("Validate(viewer): %v", err)
 	}
 }
@@ -160,13 +229,34 @@ func TestMintRequiresRoleThatConsoleUnderstands(t *testing.T) {
 // every time check it makes. An assertion that never expires is a permanent
 // credential.
 func TestClaimsValidateRequiresExpiry(t *testing.T) {
-	c := identity.Claims{Subject: "u", Org: "o", Email: "e", Role: identity.RoleAdmin}
+	c := completeClaims()
+	c.Expiry = time.Time{}
+
 	err := c.Validate()
 	if err == nil {
 		t.Fatal("claims with no expiry were accepted")
 	}
 	if !errors.Is(err, identity.ErrMissingClaim) {
 		t.Errorf("err = %v, want ErrMissingClaim", err)
+	}
+	if !strings.Contains(err.Error(), "exp") {
+		t.Errorf("err = %v, want it to name exp — it was refused, but not for the missing expiry", err)
+	}
+}
+
+// TestClaimsValidateRequiresAnAssertionID pins the other half: without jti the
+// console has nothing to record, so refusing a replayed assertion becomes
+// impossible.
+func TestClaimsValidateRequiresAnAssertionID(t *testing.T) {
+	c := completeClaims()
+	c.ID = ""
+
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("claims with no assertion id were accepted")
+	}
+	if !strings.Contains(err.Error(), "jti") {
+		t.Errorf("err = %v, want it to name jti", err)
 	}
 }
 

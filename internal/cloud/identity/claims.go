@@ -54,6 +54,16 @@ type Private struct {
 //
 // It is what the console turns into a session.
 type Claims struct {
+	// ID is the assertion's unique identifier, the `jti` claim.
+	//
+	// It exists so an assertion can be spent exactly once. The token travels
+	// through a browser, which means it can be captured by anything that can
+	// read the page — and a replayable one would let a captured assertion be
+	// exchanged for a second session, or be re-posted to /api/auth/sudo to
+	// obtain step-up without the round trip to Cloud that step-up is entirely
+	// about. Authorization codes are single-use for the same reason.
+	ID string
+
 	// Subject is Cloud's immutable identifier for the user. It becomes the
 	// audit actor, so it must not be an email: an email can be reassigned to
 	// a different person, which would retroactively change who an audit row
@@ -96,6 +106,11 @@ var ErrMissingClaim = errors.New("assertion is missing a required claim")
 // non-zero Expiry here is what closes that.
 func (c Claims) Validate() error {
 	switch {
+	case c.ID == "":
+		// Without jti the console cannot tell a fresh assertion from one it
+		// has already accepted, so single-use enforcement would silently
+		// degrade into no enforcement at all.
+		return fmt.Errorf("%w: jti", ErrMissingClaim)
 	case c.Subject == "":
 		return fmt.Errorf("%w: sub", ErrMissingClaim)
 	case c.Org == "":

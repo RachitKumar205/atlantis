@@ -39,6 +39,31 @@ make dev-console-role
 
 The target creates `atlantis_console` as `NOSUPERUSER NOBYPASSRLS` and hands it ownership of the `console` schema, which is what `FORCE ROW LEVEL SECURITY` binds against. It is idempotent, and `make dev-console` runs it for you.
 
+## 0c. Run the identity service
+
+```bash
+make dev-auth
+```
+
+**The console has no local accounts and no development bypass.** It verifies
+every sign-in against a JWKS URL in every environment, so running it locally
+means running the issuer locally — and that issuer is `cmd/cloud`, the same code
+Atlantis Cloud runs, not a test double.
+
+`make dev-auth` creates a signing key in `./certs` on first run and serves the
+key set on `:9500`. Leave it running.
+
+To sign in:
+
+```bash
+make dev-token EMAIL=you@example.com ROLE=admin
+```
+
+It prints a URL with the assertion in the fragment. Open it. The assertion is
+**single use** — a second attempt with the same one is refused as a replay, so
+run the target again for each sign-in, and again when the console asks you to
+confirm a destructive action.
+
 ## 1. Write `atlantis.dev.yaml`
 
 In the atlantis repo root:
@@ -111,6 +136,9 @@ The two manifests can coexist in the same atlantis deployment repo. Commit `atla
 - `caller api: path is not allowed for source: git` — you set both `path:` and `repo:`/`ref:` on one caller. Pick one mode per row.
 - `mTLS is required: TLS_CERT_FILE, ... not set` — run `make dev-certs` and pass the three paths. There is no way to start without them.
 - `refusing to start: ... the connecting role bypasses row-level security` from the console — run `make dev-console-role` and point `CONSOLE_PG_URL` at `atlantis_console`.
+- `CLOUD_ISSUER is required` from the console — it has no local accounts, so it needs an issuer to trust. `make dev-console` passes the right values; `make dev-auth` runs the issuer they point at.
+- `invalid assertion` on sign-in — most often a reused link. Assertions are single use; run `make dev-token` again. Otherwise `make dev-auth` is signing with a different key than the one it publishes: delete `./certs/cloud-signing-key.pem` and restart both.
+- `cannot reach the identity provider` — `make dev-auth` is not running. The console answers 503 rather than 401 here, because nothing is known to be wrong with the credential.
 - `no client certificate configured` from `tide` or `tidectl` — run `make dev-caller-cert CALLER=<name>` and export what it prints.
 - `pg pool init: ...` from the server — `PG_URL` is wrong or Postgres isn't reachable.
 - `memcached: ...` from the server — `MEMCACHED_ADDR` is wrong, or memcached isn't running.

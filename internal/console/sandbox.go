@@ -66,7 +66,7 @@ const maxSnapshotBytes = 256 << 20 // 256 MiB
 type sandboxMeta struct {
 	pubID         string
 	internalID    string
-	ownerID       int64
+	ownerSubject  string
 	createdAt     time.Time
 	lastActive    time.Time
 	schemaVersion string
@@ -104,14 +104,14 @@ func newSandboxLayer(perUser int, ttl time.Duration) *sandboxLayer {
 // lookup returns meta + ownership-check result. Called from the proxy
 // path; if ok=false the caller returns 404 (we don't distinguish
 // "not yours" from "doesn't exist" to avoid pubID enumeration leaks).
-func (l *sandboxLayer) lookup(pubID string, ownerID int64) (*sandboxMeta, bool) {
+func (l *sandboxLayer) lookup(pubID string, ownerSubject string) (*sandboxMeta, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	m, ok := l.byPub[pubID]
 	if !ok {
 		return nil, false
 	}
-	if m.ownerID != ownerID {
+	if m.ownerSubject != ownerSubject {
 		return nil, false
 	}
 	return m, true
@@ -130,12 +130,12 @@ func (l *sandboxLayer) touchActivity(pubID string) {
 
 // listForUser returns the user's active sandboxes, ordered by createdAt
 // descending (most recent first). RLock-only; cheap.
-func (l *sandboxLayer) listForUser(ownerID int64) []*sandboxMeta {
+func (l *sandboxLayer) listForUser(ownerSubject string) []*sandboxMeta {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	var out []*sandboxMeta
 	for _, m := range l.byPub {
-		if m.ownerID == ownerID {
+		if m.ownerSubject == ownerSubject {
 			out = append(out, m)
 		}
 	}
@@ -149,12 +149,12 @@ func (l *sandboxLayer) listForUser(ownerID int64) []*sandboxMeta {
 }
 
 // countForUser is the per-user-limit check helper.
-func (l *sandboxLayer) countForUser(ownerID int64) int {
+func (l *sandboxLayer) countForUser(ownerSubject string) int {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	n := 0
 	for _, m := range l.byPub {
-		if m.ownerID == ownerID {
+		if m.ownerSubject == ownerSubject {
 			n++
 		}
 	}
@@ -298,7 +298,7 @@ type sandboxBootResponse struct {
 // into the meta map. Per-user limit applies; embedded is opt-in.
 func (s *Server) handleSandboxBoot(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(ctxUser).(*User)
-	if s.sandboxes.countForUser(user.ID) >= s.sandboxes.perUser {
+	if s.sandboxes.countForUser(user.Subject) >= s.sandboxes.perUser {
 		jsonError(w, fmt.Sprintf("max %d active sandboxes — destroy one first", s.sandboxes.perUser), http.StatusTooManyRequests)
 		return
 	}
@@ -358,7 +358,7 @@ func (s *Server) handleSandboxBoot(w http.ResponseWriter, r *http.Request) {
 	meta := &sandboxMeta{
 		pubID:         pubID,
 		internalID:    internalID,
-		ownerID:       user.ID,
+		ownerSubject:  user.Subject,
 		createdAt:     now,
 		lastActive:    now,
 		schemaVersion: hash,
@@ -418,7 +418,7 @@ type sandboxListResponse struct {
 // else.
 func (s *Server) handleSandboxList(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(ctxUser).(*User)
-	metas := s.sandboxes.listForUser(user.ID)
+	metas := s.sandboxes.listForUser(user.Subject)
 	out := sandboxListResponse{Sandboxes: make([]sandboxListEntry, 0, len(metas))}
 	for _, m := range metas {
 		out.Sandboxes = append(out.Sandboxes, sandboxListEntry{
@@ -439,7 +439,7 @@ func (s *Server) handleSandboxList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSandboxDestroy(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(ctxUser).(*User)
 	pubID := r.PathValue("pubID")
-	if _, ok := s.sandboxes.lookup(pubID, user.ID); !ok {
+	if _, ok := s.sandboxes.lookup(pubID, user.Subject); !ok {
 		jsonError(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -461,7 +461,7 @@ func (s *Server) handleSandboxDestroy(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSandboxProxy(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(ctxUser).(*User)
 	pubID := r.PathValue("pubID")
-	meta, ok := s.sandboxes.lookup(pubID, user.ID)
+	meta, ok := s.sandboxes.lookup(pubID, user.Subject)
 	if !ok {
 		jsonError(w, "not found", http.StatusNotFound)
 		return
@@ -509,7 +509,7 @@ func (s *Server) handleSandboxFork(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	user := r.Context().Value(ctxUser).(*User)
 	pubID := r.PathValue("pubID")
-	parent, ok := s.sandboxes.lookup(pubID, user.ID)
+	parent, ok := s.sandboxes.lookup(pubID, user.Subject)
 	if !ok {
 		jsonError(w, "not found", http.StatusNotFound)
 		return
@@ -526,10 +526,10 @@ func (s *Server) handleSandboxFork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Per-user budget: existing count + N must stay within the limit.
-	if s.sandboxes.countForUser(user.ID)+req.N > s.sandboxes.perUser {
+	if s.sandboxes.countForUser(user.Subject)+req.N > s.sandboxes.perUser {
 		jsonError(w,
 			fmt.Sprintf("fork would exceed per-user limit (have %d, want %d more, cap %d)",
-				s.sandboxes.countForUser(user.ID), req.N, s.sandboxes.perUser),
+				s.sandboxes.countForUser(user.Subject), req.N, s.sandboxes.perUser),
 			http.StatusTooManyRequests)
 		return
 	}
@@ -584,7 +584,7 @@ func (s *Server) handleSandboxFork(w http.ResponseWriter, r *http.Request) {
 		s.sandboxes.register(&sandboxMeta{
 			pubID:         newPub,
 			internalID:    internalID,
-			ownerID:       user.ID,
+			ownerSubject:  user.Subject,
 			createdAt:     now,
 			lastActive:    now,
 			schemaVersion: parent.schemaVersion,

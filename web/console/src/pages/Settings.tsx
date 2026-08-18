@@ -8,16 +8,13 @@ import {
   Fingerprint,
   Lock,
   LogOut,
-  Mail,
   Monitor,
-  Plus,
   ShieldCheck,
   Server,
   Shield,
-  Trash2,
   Users,
 } from 'lucide-react'
-import { api, queries, type ChangePolicyEntry, type OperatorUser, type UserRole } from '@/api/client'
+import { api, queries, type ChangePolicyEntry, type MeResult } from '@/api/client'
 import { useMe } from '@/hooks/useAuth'
 import { PageShell } from '@/components/PageShell'
 
@@ -48,45 +45,12 @@ const SECTIONS: Section[] = [
 ]
 
 export function Settings() {
-  const qc = useQueryClient()
   const navigate = useNavigate()
   const { data: me } = useMe()
-  const { data: ops, isLoading: oLoading } = useQuery(queries.operators())
 
   const [active, setActive] = useState<SectionId>('general')
   const [toast, setToast] = useState<string | null>(null)
   const fire = (msg: string) => { setToast(msg); setTimeout(() => setToast(null), 2200) }
-
-  const setRole = useMutation({
-    mutationFn: ({ id, role }: { id: number; role: UserRole }) => api.users.setRole(id, role),
-    onSuccess: (_, vars) => {
-      qc.invalidateQueries({ queryKey: ['users', 'operators'] })
-      fire(`Role updated → ${vars.role}`)
-    },
-    onError: (err: Error) => fire(err.message),
-  })
-  const createUser = useMutation({
-    mutationFn: ({ firstName, lastName, email, password, role }: {
-      firstName: string
-      lastName: string
-      email: string
-      password: string
-      role: UserRole
-    }) => api.users.create(firstName, lastName, email, password, role),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['users', 'operators'] })
-      fire('Invite sent')
-    },
-    onError: (err: Error) => fire(err.message),
-  })
-  const deleteUser = useMutation({
-    mutationFn: (id: number) => api.users.delete(id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['users', 'operators'] })
-      fire('Operator removed')
-    },
-    onError: (err: Error) => fire(err.message),
-  })
 
   return (
     <PageShell title="Settings" sub="general · members · security · change policy">
@@ -111,23 +75,10 @@ export function Settings() {
               <GeneralPanel onToast={fire} />
             </div>
             <div className={`set-panel ${active === 'members' ? 'is-active' : ''}`}>
-              <MembersPanel
-                users={ops?.users ?? []}
-                loading={oLoading}
-                currentUserId={me?.id ?? ''}
-                onRoleChange={(id, role) => setRole.mutate({ id, role })}
-                onInvite={(firstName, lastName, email, password, role) =>
-                  createUser.mutate({ firstName, lastName, email, password, role })
-                }
-                onDelete={(id) => deleteUser.mutate(id)}
-                saving={setRole.isPending || createUser.isPending || deleteUser.isPending}
-              />
+              <MembersPanel me={me} />
             </div>
             <div className={`set-panel ${active === 'security' ? 'is-active' : ''}`}>
-              <SecurityPanel
-                onToast={fire}
-                onAfterPasswordChange={() => navigate({ to: '/login' })}
-              />
+              <SecurityPanel onToast={fire} />
             </div>
             <div className={`set-panel ${active === 'policy' ? 'is-active' : ''}`}>
               <ChangePolicyPanel onToast={fire} isAdmin={me?.role === 'admin'} />
@@ -233,145 +184,62 @@ function GeneralPanel({ onToast }: { onToast: (msg: string) => void }) {
 }
 
 // ── Members ──────────────────────────────────────────────────────────────
-// avatarFor derives initials from the user record. Prefers real name
-// when present; falls back to email parsing for legacy users created
-// before the name fields were added.
-function avatarFor(u: OperatorUser, i: number): { initials: string; tone: string } {
-  const f = (u.first_name ?? '').trim()
-  const l = (u.last_name ?? '').trim()
-  let initials: string
-  if (f && l) {
-    initials = (f.charAt(0) + l.charAt(0)).toUpperCase()
-  } else if (f) {
-    initials = f.slice(0, 2).toUpperCase()
-  } else {
-    initials = u.email.split('@')[0].slice(0, 2).toUpperCase()
-  }
-  const tones = ['', 'av-slate', 'av-sage', 'av-coral']
-  return { initials, tone: tones[i % tones.length] }
-}
 
-// nameFor returns the user's full name when set; falls back to a
-// readable derivation of the email local part otherwise.
-function nameFor(u: OperatorUser): string {
-  const f = (u.first_name ?? '').trim()
-  const l = (u.last_name ?? '').trim()
-  if (f && l) return `${f} ${l}`
-  if (f) return f
-  const local = u.email.split('@')[0].replace(/[._-]/g, ' ')
-  return local.charAt(0).toUpperCase() + local.slice(1)
-}
-
-function MembersPanel({
-  users, loading, currentUserId, onRoleChange, onInvite, onDelete, saving,
-}: {
-  users: OperatorUser[]
-  loading: boolean
-  currentUserId: string
-  onRoleChange: (id: number, role: UserRole) => void
-  onInvite: (firstName: string, lastName: string, email: string, password: string, role: UserRole) => void
-  onDelete: (id: number) => void
-  saving: boolean
-}) {
-  const [inviting, setInviting] = useState(false)
-  const [confirmRemove, setConfirmRemove] = useState<OperatorUser | null>(null)
-
+// Read-only, and that is the design rather than a gap.
+//
+// This console used to invite operators, set their roles and delete them. It
+// cannot any more, because it holds no accounts: membership and roles belong
+// to the organisation at Atlantis Cloud, and arrive here inside each
+// assertion. Keeping an editable copy would mean two systems disagreeing about
+// who may do what, with the console's copy winning by virtue of being the one
+// enforcing it.
+function MembersPanel({ me }: { me?: MeResult }) {
   return (
     <>
       <div className="set-head">
         <h2>Members</h2>
-        <p>People with console access. Roles control who can apply schema changes, issue caller certificates, and manage operators.</p>
+        <p>Who can reach this console is decided by your organisation at Atlantis Cloud. This page shows what your current session was granted.</p>
       </div>
+
       <section className="card">
         <div className="card__head">
           <Users size={14} />
-          <span className="card__title">Operators</span>
-          <span className="chip" style={{ marginLeft: 10 }}>{users.length}</span>
-          <button
-            className="btn btn--sm"
-            style={{ marginLeft: 'auto' }}
-            onClick={() => setInviting(true)}
-          >
-            <Plus size={12} />
-            <span>Invite operator</span>
-          </button>
+          <span className="card__title">This session</span>
         </div>
         <div className="card__body" style={{ padding: 0 }}>
-          {loading ? (
-            <div style={{ padding: 18 }}>
-              {[0, 1].map(i => (
-                <div key={i} className="sk" style={{ height: 40, marginBottom: 8 }} />
-              ))}
+          <div className="setrow">
+            <div className="setrow__main">
+              <div className="setrow__label">Signed in as</div>
+              <div className="setrow__help">{me?.email ?? '—'}</div>
             </div>
-          ) : (
-            <div className="memberlist">
-              {users.map((u, i) => {
-                const isSelf = String(u.id) === currentUserId
-                const { initials, tone } = avatarFor(u, i)
-                return (
-                  <div key={u.id} className="member">
-                    <span className={`avatar ${tone}`}>{initials}</span>
-                    <div className="member__id">
-                      <div className="member__name">
-                        {nameFor(u)}
-                        {isSelf && <span className="badge badge--plain">you</span>}
-                      </div>
-                      <div className="member__email">{u.email}</div>
-                    </div>
-                    <div className="member__control">
-                      <select
-                        className="input--boxed"
-                        value={u.role}
-                        disabled={isSelf || saving}
-                        title={isSelf ? 'You cannot change your own role' : undefined}
-                        onChange={e => onRoleChange(u.id, e.target.value as UserRole)}
-                      >
-                        <option value="admin">admin</option>
-                        <option value="viewer">viewer</option>
-                      </select>
-                      <button
-                        className="iconbtn"
-                        title="Remove"
-                        disabled={isSelf}
-                        onClick={() => setConfirmRemove(u)}
-                      >
-                        <Trash2 />
-                      </button>
-                    </div>
-                  </div>
-                )
-              })}
+            <div className="setrow__control">
+              <span className="set-readout">{me?.name || '—'}</span>
             </div>
-          )}
+          </div>
+
+          <div className="setrow">
+            <div className="setrow__main">
+              <div className="setrow__label">Organisation</div>
+              <div className="setrow__help">This console serves one organisation. Every request is scoped to it.</div>
+            </div>
+            <div className="setrow__control">
+              <span className="set-readout">{me?.org ?? '—'}</span>
+            </div>
+          </div>
+
+          <div className="setrow">
+            <div className="setrow__main">
+              <div className="setrow__label">Role</div>
+              <div className="setrow__help">
+                Granted by Atlantis Cloud and fixed for this session. A change there takes effect the next time you sign in.
+              </div>
+            </div>
+            <div className="setrow__control">
+              <span className={`badge ${me?.role === 'admin' ? 'badge--add' : ''}`}>{me?.role ?? '—'}</span>
+            </div>
+          </div>
         </div>
       </section>
-
-      {inviting && (
-        <InviteDialog
-          onCancel={() => setInviting(false)}
-          onInvite={(f, l, e, p, r) => { onInvite(f, l, e, p, r); setInviting(false) }}
-          saving={saving}
-        />
-      )}
-
-      {confirmRemove && (
-        <ConfirmDialog
-          title="Remove operator"
-          icon={<Trash2 />}
-          body={
-            <>
-              Revoke console access for <b>{confirmRemove.email}</b>? Their active sessions end immediately.
-            </>
-          }
-          confirmLabel="Remove"
-          danger
-          onCancel={() => setConfirmRemove(null)}
-          onConfirm={() => {
-            onDelete(confirmRemove.id)
-            setConfirmRemove(null)
-          }}
-        />
-      )}
     </>
   )
 }
@@ -379,10 +247,8 @@ function MembersPanel({
 // ── Security ─────────────────────────────────────────────────────────────
 function SecurityPanel({
   onToast,
-  onAfterPasswordChange,
 }: {
   onToast: (msg: string) => void
-  onAfterPasswordChange: () => void
 }) {
   // mTLS toggle is dormant — mTLS is always required at the gRPC layer
   // today, so a UI toggle would either be a no-op or introduce a real
@@ -390,22 +256,6 @@ function SecurityPanel({
   // (commented) so we can re-enable cleanly once a permissive mode is
   // implemented end-to-end.
   // const [mtlsRequired, setMtlsRequired] = useState(true)
-  const [pwOpen, setPwOpen] = useState(false)
-  const [pwError, setPwError] = useState<string | null>(null)
-
-  const changePw = useMutation({
-    mutationFn: ({ current, next }: { current: string; next: string }) =>
-      api.auth.changePassword(current, next),
-    onSuccess: () => {
-      setPwOpen(false)
-      setPwError(null)
-      onToast('Password updated — sign in again')
-      // The BFF invalidates every session for this user on success;
-      // bounce to /login so the next request doesn't 401 mid-render.
-      onAfterPasswordChange()
-    },
-    onError: (err: Error) => setPwError(err.message),
-  })
 
   const signOutOthers = useMutation({
     mutationFn: () => api.auth.signOutOthers(),
@@ -422,7 +272,7 @@ function SecurityPanel({
     <>
       <div className="set-head">
         <h2>Security</h2>
-        <p>Console credentials and the transport policy callers must satisfy. mTLS settings here apply to every registered caller.</p>
+        <p>Sessions on this console, and the transport policy callers must satisfy. mTLS settings here apply to every registered caller.</p>
       </div>
 
       <section className="card">
@@ -434,10 +284,12 @@ function SecurityPanel({
           <div className="setrow">
             <div className="setrow__main">
               <div className="setrow__label">Password</div>
-              <div className="setrow__help">Operator credentials, rotated independently of mTLS certificates.</div>
+              <div className="setrow__help">
+                Held by Atlantis Cloud, not by this console. Change it where you sign in.
+              </div>
             </div>
             <div className="setrow__control">
-              <button className="btn btn--sm" onClick={() => setPwOpen(true)}>Change password</button>
+              <span className="set-readout">Managed by Atlantis Cloud</span>
             </div>
           </div>
 
@@ -522,14 +374,6 @@ function SecurityPanel({
         </div>
       </section>
 
-      {pwOpen && (
-        <PasswordDialog
-          error={pwError}
-          pending={changePw.isPending}
-          onCancel={() => { setPwOpen(false); setPwError(null) }}
-          onSubmit={(current, next) => changePw.mutate({ current, next })}
-        />
-      )}
     </>
   )
 }
@@ -584,8 +428,8 @@ function ChangePolicyPanel({ onToast, isAdmin }: { onToast: (msg: string) => voi
   // is the control that decides whether production DDL runs without a human,
   // so a stolen session cookie alone must not be enough to relax it.
   const save = useMutation({
-    mutationFn: async ({ entry, password }: { entry: ChangePolicyEntry; password: string }) => {
-      await api.auth.sudo(password)
+    mutationFn: async ({ entry, assertion }: { entry: ChangePolicyEntry; assertion: string }) => {
+      await api.auth.sudo(assertion)
       return api.policy.set([entry])
     },
     onSuccess: (_res, { entry }) => {
@@ -671,7 +515,7 @@ function ChangePolicyPanel({ onToast, isAdmin }: { onToast: (msg: string) => voi
           pending={save.isPending}
           error={save.error ? (save.error as Error).message : null}
           onCancel={() => { save.reset(); setPending(null) }}
-          onConfirm={(password) => save.mutate({ entry: pending, password })}
+          onConfirm={(assertion) => save.mutate({ entry: pending, assertion })}
         />
       )}
     </>
@@ -691,10 +535,10 @@ function DangerPanel({
   // Danger-zone mutations call /api/auth/sudo first to elevate the
   // session, then the actual action. The two-step is so a stolen
   // session cookie alone isn't enough — the operator must produce
-  // their password too, within sudoTTL of the action.
+  // a fresh sign-in code from Cloud too, within sudoTTL of the action.
   const signOutAll = useMutation({
-    mutationFn: async (password: string) => {
-      await api.auth.sudo(password)
+    mutationFn: async (assertion: string) => {
+      await api.auth.sudo(assertion)
       return api.auth.signOutAll()
     },
     onSuccess: (res) => {
@@ -703,12 +547,12 @@ function DangerPanel({
       onAfterSignOutAll()
     },
     // Don't auto-dismiss on error — the dialog surfaces the message
-    // inline so the user can correct (wrong password, rate-limited, etc).
+    // inline so the user can correct (expired code, rate-limited, etc).
   })
 
   const revokeAll = useMutation({
-    mutationFn: async ({ password }: { password: string }) => {
-      await api.auth.sudo(password)
+    mutationFn: async ({ assertion }: { assertion: string }) => {
+      await api.auth.sudo(assertion)
       return api.callers.revokeAll()
     },
     onSuccess: (res) => {
@@ -777,7 +621,7 @@ function DangerPanel({
           pending={signOutAll.isPending}
           error={signOutAll.error ? (signOutAll.error as Error).message : null}
           onCancel={() => { setConfirm(null); signOutAll.reset() }}
-          onConfirm={(password) => signOutAll.mutate(password)}
+          onConfirm={(assertion) => signOutAll.mutate(assertion)}
         />
       )}
 
@@ -796,7 +640,7 @@ function DangerPanel({
           pending={revokeAll.isPending}
           error={revokeAll.error ? (revokeAll.error as Error).message : null}
           onCancel={() => { setConfirm(null); revokeAll.reset() }}
-          onConfirm={(password) => revokeAll.mutate({ password })}
+          onConfirm={(assertion) => revokeAll.mutate({ assertion })}
         />
       )}
     </>
@@ -804,47 +648,8 @@ function DangerPanel({
 }
 
 // ── Dialogs ──────────────────────────────────────────────────────────────
-function ConfirmDialog({
-  title, icon, body, confirmLabel, danger, pending, onCancel, onConfirm,
-}: {
-  title: string
-  icon: React.ReactNode
-  body: React.ReactNode
-  confirmLabel: string
-  danger?: boolean
-  pending?: boolean
-  onCancel: () => void
-  onConfirm: () => void
-}) {
-  return (
-    <div className="overlay is-open" onMouseDown={e => { if (e.target === e.currentTarget) onCancel() }}>
-      <div className="modal" style={{ width: 420 }} role="dialog" aria-modal>
-        <div className="modal__head">
-          <div className="row" style={{ gap: 10, alignItems: 'center' }}>
-            {icon}
-            <span className="modal__title">{title}</span>
-          </div>
-        </div>
-        <div className="modal__body">
-          <div style={{ fontSize: 13, color: 'var(--ink-1)', lineHeight: 1.55 }}>{body}</div>
-        </div>
-        <div className="modal__foot">
-          <button className="btn btn--ghost" onClick={onCancel} disabled={pending}>Cancel</button>
-          <button
-            className={`btn ${danger ? 'btn--danger' : 'btn--brass'}`}
-            onClick={onConfirm}
-            disabled={pending}
-          >
-            {confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 // SudoConfirmDialog — destructive-action gate that combines the
-// optional typed-phrase challenge with a required password re-auth.
+// optional typed-phrase challenge with a required re-authentication at Cloud.
 // The submit calls /api/auth/sudo first (via the mutation wired up
 // in DangerPanel) so a stolen session cookie alone isn't enough to
 // trigger sign-out-all or revoke-all.
@@ -862,13 +667,13 @@ export function SudoConfirmDialog({
   pending?: boolean
   error: string | null
   onCancel: () => void
-  onConfirm: (password: string) => void
+  onConfirm: (assertion: string) => void
 }) {
   const [typed, setTyped] = useState('')
-  const [password, setPassword] = useState('')
+  const [assertion, setAssertion] = useState('')
 
   const phraseOK = !requiredText || typed.trim().toLowerCase() === requiredText.toLowerCase()
-  const canSubmit = phraseOK && password.length > 0 && !pending
+  const canSubmit = phraseOK && assertion.length > 0 && !pending
 
   return (
     <div className="overlay is-open" onMouseDown={e => { if (e.target === e.currentTarget) onCancel() }}>
@@ -899,17 +704,34 @@ export function SudoConfirmDialog({
             </div>
           )}
 
+          {/*
+            Step-up takes a fresh sign-in code from Atlantis Cloud, not a
+            password — this console holds no credential to re-check. The code
+            is single-use at the server, so the one already spent signing in
+            will not work here: proving yourself again is the entire point of
+            the gate.
+
+            Pasted rather than fetched. A browser round trip to Cloud and back
+            would discard this dialog, and with it the action the user is
+            partway through confirming. Once Cloud has a sign-in flow, that
+            handoff replaces the paste — the credential and the checks behind
+            it do not change, only where the user gets it.
+          */}
           <div className="field">
-            <label className="field__label">Confirm with your password</label>
+            <label className="field__label" htmlFor="sudo-assertion">
+              Confirm with a sign-in code from Atlantis Cloud
+            </label>
             <input
-              className="input"
-              type="password"
+              id="sudo-assertion"
+              className="input mono"
+              type="text"
               autoFocus={!requiredText}
-              autoComplete="current-password"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              placeholder="••••••••"
-              onKeyDown={e => { if (e.key === 'Enter' && canSubmit) onConfirm(password) }}
+              autoComplete="off"
+              spellCheck={false}
+              value={assertion}
+              onChange={e => setAssertion(e.target.value.trim())}
+              placeholder="eyJhbGciOi…"
+              onKeyDown={e => { if (e.key === 'Enter' && canSubmit) onConfirm(assertion) }}
             />
           </div>
 
@@ -921,7 +743,7 @@ export function SudoConfirmDialog({
           <button className="btn btn--ghost" onClick={onCancel} disabled={pending}>Cancel</button>
           <button
             className="btn btn--danger"
-            onClick={() => onConfirm(password)}
+            onClick={() => onConfirm(assertion)}
             disabled={!canSubmit}
           >
             {pending ? 'Working…' : confirmLabel}
@@ -936,7 +758,7 @@ export function SudoConfirmDialog({
 // gate for the most destructive actions. The confirm button stays
 // disabled until the user types the required phrase verbatim. Kept for
 // non-sudo-required typed gates; the danger-zone uses SudoConfirmDialog
-// above which composes typed-phrase + password re-auth.
+// above which composes typed-phrase + re-authentication.
 // Exported so it is not an unused local: the component is deliberately
 // dormant, not dead, and the typecheck gate has to be able to run.
 export function TypedConfirmDialog({
@@ -988,179 +810,6 @@ export function TypedConfirmDialog({
             disabled={!matches || pending}
           >
             {confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function InviteDialog({
-  onCancel, onInvite, saving,
-}: {
-  onCancel: () => void
-  onInvite: (firstName: string, lastName: string, email: string, password: string, role: UserRole) => void
-  saving: boolean
-}) {
-  const [firstName, setFirstName] = useState('')
-  const [lastName, setLastName] = useState('')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [role, setRole] = useState<UserRole>('viewer')
-
-  return (
-    <div className="overlay is-open" onMouseDown={e => { if (e.target === e.currentTarget) onCancel() }}>
-      <div className="modal" role="dialog" aria-modal>
-        <div className="modal__head">
-          <div className="modal__title">Invite operator</div>
-          <div className="modal__sub">They receive an email to set credentials and enroll an mTLS certificate.</div>
-        </div>
-        <div className="modal__body">
-          <div className="row" style={{ gap: 12 }}>
-            <div className="field" style={{ flex: 1 }}>
-              <label className="field__label">First name <span style={{ color: 'var(--ink-3)', fontWeight: 400 }}>(optional)</span></label>
-              <input
-                className="input"
-                type="text"
-                placeholder="Ada"
-                value={firstName}
-                onChange={e => setFirstName(e.target.value)}
-              />
-            </div>
-            <div className="field" style={{ flex: 1 }}>
-              <label className="field__label">Last name <span style={{ color: 'var(--ink-3)', fontWeight: 400 }}>(optional)</span></label>
-              <input
-                className="input"
-                type="text"
-                placeholder="Lovelace"
-                value={lastName}
-                onChange={e => setLastName(e.target.value)}
-              />
-            </div>
-          </div>
-          <div className="field">
-            <label className="field__label">Email address</label>
-            <input
-              className="input"
-              type="email"
-              placeholder="name@your.org"
-              autoFocus
-              value={email}
-              onChange={e => setEmail(e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label className="field__label">Initial password</label>
-            <input
-              className="input"
-              type="password"
-              placeholder="min 8 characters"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label className="field__label">Role</label>
-            <select
-              className="input--boxed"
-              value={role}
-              onChange={e => setRole(e.target.value as UserRole)}
-            >
-              <option value="viewer">viewer</option>
-              <option value="admin">admin</option>
-            </select>
-          </div>
-        </div>
-        <div className="modal__foot">
-          <button className="btn btn--ghost" onClick={onCancel}>Cancel</button>
-          <button
-            className="btn btn--brass"
-            disabled={!email || password.length < 8 || saving}
-            onClick={() => onInvite(firstName.trim(), lastName.trim(), email, password, role)}
-          >
-            <Mail size={13} />
-            <span>{saving ? 'Inviting…' : 'Send invite'}</span>
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function PasswordDialog({
-  onCancel, onSubmit, error, pending,
-}: {
-  onCancel: () => void
-  onSubmit: (current: string, next: string) => void
-  error: string | null
-  pending: boolean
-}) {
-  const [current, setCurrent] = useState('')
-  const [next, setNext] = useState('')
-  const [confirm, setConfirm] = useState('')
-  const [localError, setLocalError] = useState<string | null>(null)
-
-  const handle = () => {
-    setLocalError(null)
-    if (next !== confirm) { setLocalError('New password and confirmation do not match'); return }
-    if (next.length < 8)  { setLocalError('New password must be at least 8 characters'); return }
-    onSubmit(current, next)
-  }
-
-  const errMsg = localError ?? error
-
-  return (
-    <div className="overlay is-open" onMouseDown={e => { if (e.target === e.currentTarget) onCancel() }}>
-      <div className="modal" role="dialog" aria-modal>
-        <div className="modal__head">
-          <div className="modal__title">Change password</div>
-          <div className="modal__sub">Re-enter your current password to set a new one. You'll be signed out everywhere.</div>
-        </div>
-        <div className="modal__body">
-          <div className="field">
-            <label className="field__label">Current password</label>
-            <input
-              className="input"
-              type="password"
-              placeholder="••••••••"
-              autoFocus
-              value={current}
-              onChange={e => setCurrent(e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label className="field__label">New password</label>
-            <input
-              className="input"
-              type="password"
-              placeholder="min 8 characters"
-              value={next}
-              onChange={e => setNext(e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label className="field__label">Confirm new password</label>
-            <input
-              className="input"
-              type="password"
-              placeholder="••••••••"
-              value={confirm}
-              onChange={e => setConfirm(e.target.value)}
-            />
-          </div>
-          {errMsg && (
-            <div className="banner banner--error" style={{ marginTop: 4 }}>{errMsg}</div>
-          )}
-        </div>
-        <div className="modal__foot">
-          <button className="btn btn--ghost" onClick={onCancel} disabled={pending}>Cancel</button>
-          <button
-            className="btn btn--brass"
-            onClick={handle}
-            disabled={pending || !current || !next || !confirm}
-          >
-            <Lock size={13} />
-            <span>{pending ? 'Updating…' : 'Update password'}</span>
           </button>
         </div>
       </div>

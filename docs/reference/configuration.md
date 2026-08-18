@@ -231,6 +231,9 @@ Read by `cmd/console`, not the Atlantis server.
 | `CONSOLE_LISTEN` | `:3000` | Bind address for the BFF + SPA. |
 | `CONSOLE_PG_URL` | (unset; required) | Connection string for the BFF's audit / session tables — the same Postgres instance as the server, separate schema. **The role must be `NOSUPERUSER` and `NOBYPASSRLS`; the console refuses to start otherwise.** |
 | `CONSOLE_SESSION_SECRET` | (unset; required, ≥32 chars) | HMAC key for session cookies. Console refuses to start below 32 chars, so `changeme` placeholders trip a fatal startup error — set this before first boot. |
+| `CLOUD_ISSUER` | (unset; **required**) | The `iss` value the console will accept, matched exactly. |
+| `CLOUD_AUDIENCE` | (unset; **required**) | The `aud` value the console requires, naming this console. It is what stops an assertion minted for one organisation's console being replayed against another's. |
+| `CLOUD_JWKS_URL` | (unset; **required**) | Where the issuer publishes its public keys. Fetched on demand, refreshed every 5 minutes, and refetched whenever an assertion names a key the console does not hold — which is how a key rotation takes effect promptly. |
 | `CONSOLE_COOKIE_SECURE` | `false` | Sets the `Secure` flag on session cookies. Default false so `http://localhost` works for first boot; flip to `true` once a TLS terminator (reverse proxy, LB) sits in front. |
 | `CONSOLE_AUDIT_RETENTION_DAYS` | `365` | Audit-row retention. Covers the typical SOC 2 audit window and PCI DSS §10.5.1's 12-month online minimum. HIPAA = 2190 (6 years); SOX = 2555 (7 years). `0` keeps every partition forever. |
 | `ATL_ENDPOINT` | `localhost:9090` | atlantis-server endpoint the BFF dials over mTLS. |
@@ -241,6 +244,49 @@ Read by `cmd/console`, not the Atlantis server.
 | `SANDBOX_TTL` | `30m` | Idle window after which the BFF's janitor evicts a sandbox. Go duration syntax. Set lower (`10s`) for CI; higher (`2h`) for long agent loops. |
 
 The 256 MiB cap on `PUT /api/sandbox/{id}/snapshot` is a compile-time constant, not configurable. See [Sandbox HTTP API](sandbox-api.md#limits).
+
+### Identity comes from Atlantis Cloud
+
+The console holds no accounts. There are no passwords, no user table, and no
+first-run wizard: a user signs in at Atlantis Cloud, arrives carrying a signed
+assertion, and the console exchanges it for a session cookie.
+
+All three `CLOUD_*` variables are required and none has a default. That is
+stricter than it may look, and deliberately so — the issuer and audience are
+compared for exact equality, and an empty expected value means the check is
+skipped. A console missing either would not refuse to start; it would start and
+accept assertions from any issuer, for any console, with every request
+afterwards carrying a valid session. There is no later point at which that
+could be noticed, so it is refused at startup.
+
+Assertions are single use. Each carries a `jti`, and the console records spent
+ones, so a captured assertion is worth nothing once the legitimate request has
+landed. The same check backs step-up: `POST /api/auth/sudo` takes a *fresh*
+assertion, which sends the user back to Cloud, so holding a session cookie is
+not enough to run a destructive action.
+
+A Cloud outage does not sign anyone out. Cached keys keep verifying while the
+JWKS endpoint is unreachable, because the assertion is not the durable
+credential — it lives for minutes and is spent immediately on a session.
+Revoking access means revoking the session, which is a row the console owns and
+can delete without reaching Cloud at all.
+
+## Cloud identity service
+
+Read by `cmd/cloud`, which publishes the keys consoles verify against.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `CLOUD_LISTEN` | `:9500` | Bind address for the JWKS document, served at `/.well-known/jwks.json`. |
+| `CLOUD_ISSUER` | (unset; **required**) | Becomes the `iss` claim. Must match each console's `CLOUD_ISSUER` exactly. |
+| `CLOUD_SIGNING_KEY` | `./certs/cloud-signing-key.pem` | ECDSA P-256 signing key, created on first use with mode `0600`. Persisting it matters: a key regenerated per restart changes the published key set, so every assertion issued beforehand stops verifying. |
+
+Minting is a command (`cloud mint`) rather than an HTTP route, and that is a
+constraint rather than an unfinished feature. A route that mints on request is a
+complete authentication bypass until something in front of it establishes who is
+asking, and Cloud does not yet hold user records. `cloud mint` needs read access
+to the signing key, so it is available to whoever operates Cloud and nobody
+else.
 
 ## Observability
 

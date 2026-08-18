@@ -38,7 +38,7 @@ class RootErrorBoundary extends Component<{ children: ReactNode }, { error: Erro
 }
 
 // Routes that bypass auth guard and shell chrome
-const PUBLIC_PATHS = ['/login', '/setup']
+const PUBLIC_PATHS = ['/login']
 
 interface RouterContext {
   queryClient: QueryClient
@@ -46,60 +46,37 @@ interface RouterContext {
 
 export const Route = createRootRouteWithContext<RouterContext>()({
   // beforeLoad runs on every route transition (including initial mount).
-  // The full gate logic enumerates the state machine: (setup configured?
-  // × authenticated? × path requested) → allow or redirect. Anything not
-  // matching an "allow" branch redirects.
+  //
+  // The gate is now one question — is this session authenticated? There used
+  // to be a prior one, "has an operator been created yet", which drove a
+  // first-run wizard. A console has no accounts to create: Cloud provisions
+  // the stack and decides who may reach it, so nothing distinguishes this
+  // console's first request from its ten-thousandth.
   beforeLoad: async ({ location, context }) => {
     const { queryClient } = context
     const path = location.pathname
 
-    // 1. Setup status drives every decision — fetch first.
-    let configured: boolean
-    try {
-      const setup = await queryClient.fetchQuery(queries.setupStatus())
-      configured = setup.configured
-    } catch {
-      // Couldn't reach the BFF. Safest behaviour: keep the user on a
-      // public surface rather than let a half-loaded console render.
-      // /login is the universal fallback because its error surface is
-      // simpler than the wizard's.
-      if (path === '/login') return
-      throw redirect({ to: '/login' })
-    }
-
-    // 2. Not configured → the wizard is the only legal destination.
-    if (!configured) {
-      if (path.startsWith('/setup')) return
-      throw redirect({ to: '/setup' })
-    }
-
-    // 3. Configured → check whether this caller is authenticated.
     let authed = false
     try {
       await queryClient.fetchQuery(queries.me())
       authed = true
     } catch (err) {
-      // 401 is the expected unauthenticated case; treat any other
-      // error (network, 5xx, malformed) as unauthenticated too — the
-      // login page is the only surface we trust to show errors safely.
+      // 401 is the expected unauthenticated case; treat any other error
+      // (network, 5xx, malformed) as unauthenticated too — the login page is
+      // the only surface we trust to show errors safely.
       if (!(err instanceof ApiError) || err.status !== 401) {
         // No-op — drop into the unauthenticated branch below.
       }
       authed = false
     }
 
-    // 4. Setup is done; the wizard no longer applies. Bounce off it.
-    if (path.startsWith('/setup')) {
-      throw redirect({ to: authed ? '/' : '/login' })
-    }
-
-    // 5. Authed users hitting /login → send home.
+    // /login is reachable unauthenticated, and is where an assertion from
+    // Cloud lands. An authenticated user has no business there.
     if (path.startsWith('/login')) {
       if (authed) throw redirect({ to: '/' })
       return
     }
 
-    // 6. Any other path requires auth.
     if (!authed) {
       throw redirect({ to: '/login' })
     }

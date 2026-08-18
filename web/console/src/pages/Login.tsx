@@ -1,33 +1,64 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { ArrowRight } from 'lucide-react'
 import { api } from '@/api/client'
 
 // Centered authcard: concentric-ring logo above lowercase "atlantis"
-// wordmark, "Sign in" title, two inputs, full-width brass submit.
-// Multiple bolder redesigns (porthole + serif wordmark + depth ruler,
-// instrument-plate labels) were tried and reverted — keep this baseline
-// unless the whole auth surface is being rethought.
+// wordmark. Multiple bolder redesigns (porthole + serif wordmark + depth
+// ruler, instrument-plate labels) were tried and reverted — keep this
+// baseline unless the whole auth surface is being rethought.
+//
+// There is no form any more. The console holds no credentials: a user signs
+// in at Atlantis Cloud and arrives here carrying a signed assertion, which
+// this page spends for a session cookie.
+//
+// The assertion travels in the URL *fragment*, not the query string. A
+// fragment is never sent to the server, so it stays out of access logs, out
+// of the Referer header on the next navigation, and out of anything sitting
+// between the browser and here. It is also erased from the address bar below
+// before the exchange resolves, so it does not survive into history or a
+// bookmark.
+const ASSERTION_PARAM = 'assertion'
+
+function takeAssertionFromURL(): string | null {
+  const raw = window.location.hash.replace(/^#/, '')
+  if (!raw) return null
+
+  const params = new URLSearchParams(raw)
+  const assertion = params.get(ASSERTION_PARAM)
+  if (!assertion) return null
+
+  // Remove it before anything else runs. replaceState rather than assigning
+  // location.hash, which would push a history entry that still contains it.
+  params.delete(ASSERTION_PARAM)
+  const rest = params.toString()
+  window.history.replaceState(null, '', window.location.pathname + (rest ? `#${rest}` : ''))
+
+  return assertion
+}
+
 export function Login() {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const [assertion] = useState(takeAssertionFromURL)
 
-  const loginMutation = useMutation({
-    mutationFn: () => api.auth.login(email, password),
+  const exchange = useMutation({
+    mutationFn: (token: string) => api.auth.exchange(token),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['auth', 'me'] })
       navigate({ to: '/schema', search: { namespace: undefined, entity: undefined } })
     },
   })
 
-  const submit = (e: FormEvent) => {
-    e.preventDefault()
-    if (!email || !password) return
-    loginMutation.mutate()
-  }
+  // Exchange once. React runs effects twice in StrictMode, and the assertion
+  // is single-use at the server — a second POST would be refused as a replay
+  // and the user would be shown a failure for a sign-in that worked.
+  const started = useRef(false)
+  useEffect(() => {
+    if (!assertion || started.current) return
+    started.current = true
+    exchange.mutate(assertion)
+  }, [assertion, exchange])
 
   return (
     <div className="auth">
@@ -53,52 +84,29 @@ export function Login() {
 
         <div className="auth__title">Sign in</div>
 
-        <form className="auth__fields" onSubmit={submit} noValidate>
-          <div className="field">
-            <label className="field__label" htmlFor="auth-email">Email</label>
-            <input
-              id="auth-email"
-              className="input"
-              type="email"
-              placeholder="you@example.com"
-              value={email}
-              onChange={e => setEmail(e.target.value)}
-              autoComplete="email"
-              autoFocus
-              disabled={loginMutation.isPending}
-            />
-          </div>
-          <div className="field">
-            <label className="field__label" htmlFor="auth-password">Password</label>
-            <input
-              id="auth-password"
-              className="input"
-              type="password"
-              placeholder="••••••••••"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              autoComplete="current-password"
-              disabled={loginMutation.isPending}
-            />
-          </div>
+        <div className="auth__fields">
+          {assertion && exchange.isPending && (
+            <p className="auth__note" aria-live="polite">Signing you in…</p>
+          )}
 
-          {loginMutation.isError && (
+          {exchange.isError && (
             <div className="banner banner--error" role="alert" aria-live="assertive">
               <span className="banner__icon" />
-              <span>{loginMutation.error?.message ?? 'Invalid credentials'}</span>
+              <span>
+                {exchange.error?.message ?? 'That sign-in link could not be used.'}
+                {' '}Start again from Atlantis Cloud.
+              </span>
             </div>
           )}
 
-          <button
-            type="submit"
-            className="btn btn--brass"
-            style={{ width: '100%', justifyContent: 'center', height: 38, marginTop: 4 }}
-            disabled={loginMutation.isPending || !email || !password}
-          >
-            <span>{loginMutation.isPending ? 'Signing in…' : 'Sign in'}</span>
-            <ArrowRight size={14} />
-          </button>
-        </form>
+          {!assertion && !exchange.isPending && (
+            <p className="auth__note">
+              Sign in from Atlantis Cloud, then choose this console. Opening this
+              page directly cannot sign you in — the console keeps no accounts of
+              its own.
+            </p>
+          )}
+        </div>
       </div>
     </div>
   )

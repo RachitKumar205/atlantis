@@ -6,7 +6,6 @@
 
 import { Route as RootRoute } from './routes/__root'
 import { Route as IndexRoute } from './routes/index'
-import { Route as SetupRoute } from './routes/setup'
 import { Route as LoginRoute } from './routes/login'
 import { Route as SchemaRoute } from './routes/schema'
 import { Route as HistoryRoute } from './routes/history'
@@ -22,7 +21,6 @@ import { Route as WorkerSessionRoute } from './routes/workers.$id'
 
 export const routeTree = RootRoute.addChildren([
   IndexRoute,
-  SetupRoute,
   LoginRoute,
   SchemaRoute,
   HistoryRoute,
@@ -45,13 +43,6 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRoute
-      parentRoute: typeof RootRoute
-    }
-    '/setup': {
-      id: '/setup'
-      path: '/setup'
-      fullPath: '/setup'
-      preLoaderRoute: typeof SetupRoute
       parentRoute: typeof RootRoute
     }
     '/login': {

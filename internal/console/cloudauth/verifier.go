@@ -216,6 +216,7 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*identity.Claims, 
 	}
 
 	claims := identity.Claims{
+		ID:      registered.ID,
 		Subject: registered.Subject,
 		Org:     private.Org,
 		Role:    private.Role,

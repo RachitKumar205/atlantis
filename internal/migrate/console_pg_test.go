@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -93,14 +94,10 @@ func TestAnExistingConsoleDatabaseConverges(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 
-	// Build it the way the console used to, and put a row in each table so the
-	// migration has something to destroy if it is wrong.
+	// Build it the way the console used to, and seed the rows the migrations
+	// have to make a decision about.
 	if _, err := pool.Exec(ctx, theOldWay); err != nil {
 		t.Fatalf("build the old schema: %v", err)
-	}
-	if _, err := pool.Exec(ctx, `
-INSERT INTO console.users (email, password_hash) VALUES ('op@example.com', 'x')`); err != nil {
-		t.Fatalf("seed user: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
 CREATE TABLE IF NOT EXISTS console.audit_log_p209901
@@ -109,71 +106,143 @@ CREATE TABLE IF NOT EXISTS console.audit_log_p209901
 		t.Fatalf("seed partition: %v", err)
 	}
 
+	var userID int64
+	if err := pool.QueryRow(ctx, `
+INSERT INTO console.users (email, password_hash) VALUES ('op@example.com', 'x')
+RETURNING id`).Scan(&userID); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	// Two audit rows: one by a user who still exists, one by a user who was
+	// already deleted. 0003 handles them by different branches, and the second
+	// is the one where there is nothing left to copy an email from.
+	if _, err := pool.Exec(ctx, `
+INSERT INTO console.audit_log (user_id, action, created_at)
+VALUES ($1, 'approve_plan', '2099-01-15 12:00:00+00'),
+       (999999, 'sign_out_all', '2099-01-16 12:00:00+00')`, userID); err != nil {
+		t.Fatalf("seed audit rows: %v", err)
+	}
+
 	if err := migrate.RunFS(dsn, migrations.Console, "console",
 		migrate.ConsoleHistoryTable, quiet()); err != nil {
 		t.Fatalf("migrate an existing console database: %v", err)
 	}
 
-	var users int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM console.users`).Scan(&users); err != nil {
-		t.Fatalf("count users: %v", err)
+	// The audit trail survives the identity swap.
+	//
+	// This is the property migration 0003 is most able to break quietly.
+	// console.users is dropped, and every historical row referenced it by id —
+	// so unless the email is copied across first, the log keeps every row and
+	// can no longer say who any of them was.
+	var actor, actorEmail string
+	if err := pool.QueryRow(ctx, `
+SELECT actor, actor_email FROM console.audit_log WHERE action = 'approve_plan'`).
+		Scan(&actor, &actorEmail); err != nil {
+		t.Fatalf("read the migrated audit row: %v", err)
 	}
-	if users != 1 {
-		t.Errorf("%d operator rows after migrating, want 1. The baseline "+
-			"recreated a table that already had data in it", users)
+	if want := "local:" + strconv.FormatInt(userID, 10); actor != want {
+		t.Errorf("actor = %q, want %q — a pre-migration row must stay "+
+			"attributable, and visibly not a Cloud subject", actor, want)
+	}
+	if actorEmail != "op@example.com" {
+		t.Errorf("actor_email = %q, want it copied from console.users before "+
+			"that table was dropped", actorEmail)
 	}
 
-	// And the version is recorded, which is the half that makes the NEXT
-	// migration possible. A no-op that leaves the history empty is the failure
-	// mode this test exists to catch: everything looks fine until migration 2.
+	// The row whose user was already gone keeps what there was of it.
+	var orphanActor, orphanEmail string
+	if err := pool.QueryRow(ctx, `
+SELECT actor, actor_email FROM console.audit_log WHERE action = 'sign_out_all'`).
+		Scan(&orphanActor, &orphanEmail); err != nil {
+		t.Fatalf("read the orphaned audit row: %v", err)
+	}
+	if orphanActor != "local:999999" {
+		t.Errorf("orphaned actor = %q, want local:999999", orphanActor)
+	}
+	if orphanEmail != "" {
+		t.Errorf("orphaned actor_email = %q, want empty — there was no user to "+
+			"read one from, and inventing one would be worse than leaving it blank", orphanEmail)
+	}
+
+	// And console.users is gone, rather than left behind holding password
+	// hashes nothing reads.
+	var usersExists bool
+	if err := pool.QueryRow(ctx, `
+SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'console' AND tablename = 'users')`).
+		Scan(&usersExists); err != nil {
+		t.Fatalf("look for console.users: %v", err)
+	}
+	if usersExists {
+		t.Error("console.users survived the migration, still holding password hashes")
+	}
+
+	// The version is recorded, which is the half that makes the NEXT migration
+	// possible. A no-op that leaves the history empty is the failure mode this
+	// test exists to catch: everything looks fine until the migration after it.
 	var version int
 	if err := pool.QueryRow(ctx,
 		`SELECT version FROM public.`+migrate.ConsoleHistoryTable).Scan(&version); err != nil {
 		t.Fatalf("read migration version: %v", err)
 	}
-	if version < 2 {
-		t.Errorf("history records version %d, want at least 2 — an existing "+
+	if version < 3 {
+		t.Errorf("history records version %d, want at least 3 — an existing "+
 			"database converged but did not record how far it got", version)
 	}
 }
 
-// A fresh database gets the same schema the old code would have built.
+// An upgraded database and a fresh one end up with the same schema.
 //
-// Compared through the catalogue rather than by reading the SQL: the question
-// is what Postgres ended up with, and a migration that produces a subtly
-// different column order or a missing index passes any review of the file.
-func TestTheBaselineMatchesWhatTheOldCodeBuilt(t *testing.T) {
+// This used to compare a freshly-migrated database against theOldWay verbatim,
+// which held only while the baseline was the whole history. It stopped being
+// true at migration 0003 — correctly, since that migration exists to change the
+// shape.
+//
+// The durable property is the one below: whatever the migrations do, a console
+// that has been running since before they existed must end up indistinguishable
+// from one installed today. Otherwise the next migration works on one and fails
+// on the other, and which one you have depends on when you started.
+//
+// Compared through the catalogue rather than by reading the SQL, because the
+// question is what Postgres ended up with — a migration that produces a subtly
+// different default or a missing index passes any review of the file.
+func TestAnUpgradedDatabaseMatchesAFreshOne(t *testing.T) {
 	admin := adminDSN(t)
 
-	oldDSN := pgcatalog.PrivateDatabase(t, admin, "atlantis_console_oldway")
-	newDSN := pgcatalog.PrivateDatabase(t, admin, "atlantis_console_newway")
+	upgradedDSN := pgcatalog.PrivateDatabase(t, admin, "atlantis_console_oldway")
+	freshDSN := pgcatalog.PrivateDatabase(t, admin, "atlantis_console_newway")
 	ctx := context.Background()
 
-	oldPool, err := pgxpool.New(ctx, oldDSN)
+	upgradedPool, err := pgxpool.New(ctx, upgradedDSN)
 	if err != nil {
-		t.Fatalf("connect old: %v", err)
+		t.Fatalf("connect upgraded: %v", err)
 	}
-	t.Cleanup(oldPool.Close)
-	if _, err := oldPool.Exec(ctx, theOldWay); err != nil {
+	t.Cleanup(upgradedPool.Close)
+
+	// The old schema, then every migration on top of it.
+	if _, err := upgradedPool.Exec(ctx, theOldWay); err != nil {
 		t.Fatalf("build the old schema: %v", err)
 	}
+	if err := migrate.RunFS(upgradedDSN, migrations.Console, "console",
+		migrate.ConsoleHistoryTable, quiet()); err != nil {
+		t.Fatalf("migrate the upgraded database: %v", err)
+	}
 
-	if err := migrate.RunFS(newDSN, migrations.Console, "console",
+	// The same migrations against an empty database.
+	if err := migrate.RunFS(freshDSN, migrations.Console, "console",
 		migrate.ConsoleHistoryTable, quiet()); err != nil {
 		t.Fatalf("migrate a fresh database: %v", err)
 	}
-	newPool, err := pgxpool.New(ctx, newDSN)
+	freshPool, err := pgxpool.New(ctx, freshDSN)
 	if err != nil {
-		t.Fatalf("connect new: %v", err)
+		t.Fatalf("connect fresh: %v", err)
 	}
-	t.Cleanup(newPool.Close)
+	t.Cleanup(freshPool.Close)
 
-	oldShape := consoleShape(t, oldPool)
-	newShape := consoleShape(t, newPool)
-	if oldShape != newShape {
-		t.Errorf("the migrated schema differs from what store.migrate built.\n"+
-			"A fresh install and an upgraded one would not match.\n\n"+
-			"old:\n%s\n\nnew:\n%s", oldShape, newShape)
+	upgraded := consoleShape(t, upgradedPool)
+	fresh := consoleShape(t, freshPool)
+	if upgraded != fresh {
+		t.Errorf("an upgraded console and a fresh one have different schemas.\n"+
+			"The next migration would work on one and fail on the other.\n\n"+
+			"upgraded:\n%s\n\nfresh:\n%s", upgraded, fresh)
 	}
 }
 

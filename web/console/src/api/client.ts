@@ -23,53 +23,20 @@ export class ApiError extends Error {
 // Wire types
 // ---------------------------------------------------------------------------
 
-export interface SetupStatus {
-  configured: boolean
-}
-
-export interface SetupResult {
-  ok: boolean
-}
-
-export type ConnectivityProbeStatus = 'ok' | 'err' | 'wait'
-
-export interface ConnectivityProbe {
-  label: string
-  status: ConnectivityProbeStatus
-  meta?: string
-}
-
-export interface ConnectivityResponse {
-  endpoint: string
-  overall: ConnectivityProbeStatus
-  probes: ConnectivityProbe[]
-}
-
-export interface LoginResult {
-  ok: boolean
-}
-
 export type UserRole = 'admin' | 'viewer'
 
+// Who is signed in, as asserted by Atlantis Cloud and copied onto the session.
+//
+// There is no local account behind this. `subject` is Cloud's identifier and
+// is what audit rows record; `org` is the organisation the session is acting
+// in. Both are fixed for the life of the session — a change at Cloud takes
+// effect at the next sign-in.
 export interface MeResult {
-  id: string
+  subject: string
+  org: string
   email: string
   role: UserRole
-  first_name: string
-  last_name: string
-}
-
-export interface OperatorUser {
-  id: number
-  email: string
-  role: UserRole
-  first_name: string
-  last_name: string
-  created_at: string
-}
-
-export interface OperatorsResponse {
-  users: OperatorUser[]
+  name: string
 }
 
 export interface SubmittedFile {
@@ -645,35 +612,16 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 // ---------------------------------------------------------------------------
 
 export const api = {
-  setup: {
-    status: (): Promise<SetupStatus> =>
-      apiFetch<SetupStatus>('/api/setup/status'),
-
-    connectivity: (): Promise<ConnectivityResponse> =>
-      apiFetch<ConnectivityResponse>('/api/setup/connectivity'),
-
-    configure: (
-      firstName: string,
-      lastName: string,
-      email: string,
-      password: string,
-    ): Promise<SetupResult> =>
-      apiFetch<SetupResult>('/api/setup', {
-        method: 'POST',
-        body: JSON.stringify({
-          first_name: firstName,
-          last_name: lastName,
-          email,
-          password,
-        }),
-      }),
-  },
-
   auth: {
-    login: (email: string, password: string): Promise<LoginResult> =>
-      apiFetch<LoginResult>('/api/auth/login', {
+    // Trade an assertion issued by Atlantis Cloud for a session cookie.
+    //
+    // The assertion is spent here and never kept. It is single-use at the
+    // server, so holding on to one buys nothing, and a token left in memory is
+    // readable by anything else running on the page.
+    exchange: (assertion: string): Promise<{ ok: boolean }> =>
+      apiFetch('/api/auth/exchange', {
         method: 'POST',
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ assertion }),
       }),
 
     logout: (): Promise<void> =>
@@ -682,16 +630,13 @@ export const api = {
     me: (): Promise<MeResult> =>
       apiFetch<MeResult>('/api/auth/me'),
 
-    changePassword: (currentPassword: string, newPassword: string): Promise<{ ok: boolean }> =>
-      apiFetch('/api/auth/password', {
-        method: 'POST',
-        body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
-      }),
-
-    sudo: (password: string): Promise<{ ok: boolean; expires_in_seconds: number }> =>
+    // Step-up for destructive actions. Takes a *fresh* assertion, which means
+    // returning to Cloud — proving yourself again is the whole point, and the
+    // one already spent on sign-in is refused.
+    sudo: (assertion: string): Promise<{ ok: boolean; expires_in_seconds: number }> =>
       apiFetch('/api/auth/sudo', {
         method: 'POST',
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ assertion }),
       }),
 
     signOutOthers: (): Promise<{ ok: boolean; sessions_removed: number }> =>
@@ -863,37 +808,8 @@ export const api = {
       }),
   },
 
-  users: {
-    list: (): Promise<OperatorsResponse> =>
-      apiFetch<OperatorsResponse>('/api/users'),
-
-    create: (
-      firstName: string,
-      lastName: string,
-      email: string,
-      password: string,
-      role: UserRole,
-    ): Promise<{ id: number; email: string; role: UserRole; first_name: string; last_name: string }> =>
-      apiFetch('/api/users', {
-        method: 'POST',
-        body: JSON.stringify({
-          first_name: firstName,
-          last_name: lastName,
-          email,
-          password,
-          role,
-        }),
-      }),
-
-    setRole: (id: number, role: UserRole): Promise<{ ok: boolean }> =>
-      apiFetch(`/api/users/${id}/role`, {
-        method: 'PUT',
-        body: JSON.stringify({ role }),
-      }),
-
-    delete: (id: number): Promise<{ ok: boolean }> =>
-      apiFetch(`/api/users/${id}`, { method: 'DELETE' }),
-  },
+  // No users API. Membership and roles belong to the organisation, which lives
+  // at Cloud; this console reads what an assertion tells it.
 
   jobs: {
     get: (id: string): Promise<GetJobStatusResponse> =>
@@ -1125,11 +1041,6 @@ export interface SandboxDiffResponse {
 // ---------------------------------------------------------------------------
 
 export const queries = {
-  setupStatus: () => ({
-    queryKey: ['setup', 'status'] as const,
-    queryFn: () => api.setup.status(),
-  }),
-
   me: () => ({
     queryKey: ['auth', 'me'] as const,
     queryFn: () => api.auth.me(),
@@ -1194,12 +1105,6 @@ export const queries = {
   callers: () => ({
     queryKey: ['callers'] as const,
     queryFn: () => api.callers.list(),
-    staleTime: 30_000,
-  }),
-
-  operators: () => ({
-    queryKey: ['users', 'operators'] as const,
-    queryFn: () => api.users.list(),
     staleTime: 30_000,
   }),
 

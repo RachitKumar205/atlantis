@@ -73,13 +73,27 @@ func GenerateKey() (*Key, error) {
 		return nil, fmt.Errorf("generate signing key: %w", err)
 	}
 	k := &Key{priv: priv}
+	id, err := thumbprintOf(k)
+	if err != nil {
+		return nil, err
+	}
+	k.ID = id
+	return k, nil
+}
+
+// thumbprintOf computes a key's RFC 7638 thumbprint, which becomes its kid.
+//
+// Shared with the key-file loader so a key reloaded from disk gets the same
+// kid it had when generated. If the two disagreed, a restart would silently
+// republish the same key under a new name and every assertion still in flight
+// would name a kid the key set no longer lists.
+func thumbprintOf(k *Key) (string, error) {
 	pub := k.PublicJWK()
 	tp, err := pub.Thumbprint(crypto.SHA256)
 	if err != nil {
-		return nil, fmt.Errorf("thumbprint signing key: %w", err)
+		return "", fmt.Errorf("thumbprint signing key: %w", err)
 	}
-	k.ID = base64.RawURLEncoding.EncodeToString(tp)
-	return k, nil
+	return base64.RawURLEncoding.EncodeToString(tp), nil
 }
 
 // PublicJWK returns the public half of the key, in the form it is published.
@@ -185,7 +199,13 @@ func (i *Issuer) Mint(g Grant) (string, error) {
 	now := time.Now().UTC()
 	expiry := now.Add(DefaultTTL)
 
+	jti, err := newTokenID()
+	if err != nil {
+		return "", err
+	}
+
 	claims := identity.Claims{
+		ID:      jti,
 		Subject: g.Subject,
 		Org:     g.Org,
 		Role:    g.Role,
@@ -209,6 +229,7 @@ func (i *Issuer) Mint(g Grant) (string, error) {
 	}
 
 	registered := jwt.Claims{
+		ID:        jti,
 		Issuer:    i.name,
 		Subject:   g.Subject,
 		Audience:  jwt.Audience{g.Audience},
@@ -228,6 +249,20 @@ func (i *Issuer) Mint(g Grant) (string, error) {
 		return "", fmt.Errorf("sign assertion: %w", err)
 	}
 	return tok, nil
+}
+
+// newTokenID returns the `jti` for one assertion: 128 bits from crypto/rand.
+//
+// It must be unpredictable, not merely unique. A console records spent
+// assertion ids to refuse replay, so a guessable jti would let someone pre-emptively
+// burn an id that a legitimate assertion is about to carry, turning a
+// sign-in into a failure the user cannot explain or retry past.
+func newTokenID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate assertion id: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // Handler serves the public key set at JWKSPath.

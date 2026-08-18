@@ -15,6 +15,15 @@ CONSOLE_PG_ROLE     ?= atlantis_console
 CONSOLE_PG_PASSWORD ?= console
 CONSOLE_PG_URL      ?= postgres://$(CONSOLE_PG_ROLE):$(CONSOLE_PG_PASSWORD)@localhost:5432/atlantis?sslmode=disable
 
+# Identity. The console verifies every sign-in against Atlantis Cloud, with no
+# local accounts and no development bypass, so these are required to start it —
+# `make dev-auth` runs the issuer these values point at.
+CLOUD_LISTEN       ?= :9500
+CLOUD_ISSUER       ?= http://localhost:9500
+CLOUD_AUDIENCE     ?= http://localhost:3000
+CLOUD_JWKS_URL     ?= $(CLOUD_ISSUER)/.well-known/jwks.json
+CLOUD_SIGNING_KEY  ?= $(DEV_CERT_DIR)/cloud-signing-key.pem
+
 # Two migration histories: infra (hand-written) and tidectl (codegen).
 MIGRATIONS_INFRA_DIR := ./migrations/infra
 MIGRATIONS_TIDECTL_DIR := ./.dev/migrations/tidectl
@@ -290,7 +299,48 @@ dev-console: dev-certs dev-console-role build-console ## Run the management cons
 		ATL_TLS_CERT="$(DEV_CERT_DIR)/console.crt" \
 		ATL_TLS_KEY="$(DEV_CERT_DIR)/console.key" \
 		ATL_TLS_CA="$(DEV_CERT_DIR)/ca.crt" \
+		CLOUD_ISSUER="$(CLOUD_ISSUER)" \
+		CLOUD_AUDIENCE="$(CLOUD_AUDIENCE)" \
+		CLOUD_JWKS_URL="$(CLOUD_JWKS_URL)" \
 		$(BIN_DIR)/atlantis-console
+
+# ── Atlantis Cloud (identity) ──────────────────────────────────────────────
+#
+# The console has no local accounts and no development bypass: it verifies
+# every sign-in against a JWKS URL in every environment. So running it locally
+# means running the issuer locally, which is the same code Cloud runs.
+
+.PHONY: dev-auth
+dev-auth: build-cloud ## Serve Cloud's key set on :9500 so the console can verify sign-ins
+	CLOUD_ISSUER="$(CLOUD_ISSUER)" \
+		$(BIN_DIR)/atlantis-cloud serve \
+			-key "$(CLOUD_SIGNING_KEY)" \
+			-listen "$(CLOUD_LISTEN)"
+
+.PHONY: dev-token
+dev-token: build-cloud ## Mint a sign-in assertion. EMAIL=you@example.com ROLE=admin ORG=acme
+	@# Prints the URL to open, because the console reads the assertion from the
+	@# URL fragment — a fragment is never sent to a server, so it stays out of
+	@# access logs and out of the Referer header.
+	@#
+	@# Same key as `dev-auth`, or the assertion would be signed by a key the
+	@# console's key set does not list.
+	@token=$$(CLOUD_ISSUER="$(CLOUD_ISSUER)" $(BIN_DIR)/atlantis-cloud mint \
+		-key "$(CLOUD_SIGNING_KEY)" \
+		-audience "$(CLOUD_AUDIENCE)" \
+		-subject "usr_$${EMAIL:-dev@example.com}" \
+		-org "$${ORG:-acme}" \
+		-role "$${ROLE:-admin}" \
+		-email "$${EMAIL:-dev@example.com}" \
+		-name "$${NAME:-Local Developer}") && \
+	echo "" && \
+	echo "Open this to sign in (the assertion is single-use):" && \
+	echo "  http://localhost:3000/login#assertion=$$token" && \
+	echo ""
+
+.PHONY: build-cloud
+build-cloud: ## Build the Cloud identity service
+	$(GO) build $(GOFLAGS) -o $(BIN_DIR)/atlantis-cloud ./cmd/cloud
 
 .PHONY: dev-console-role
 dev-console-role: ## Create the local console database role (NOSUPERUSER NOBYPASSRLS)

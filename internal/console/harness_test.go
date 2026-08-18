@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
@@ -19,6 +20,8 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
+	"github.com/rachitkumar205/atlantis/internal/cloud/issuer"
 	"github.com/rachitkumar205/atlantis/internal/migrate"
 	"github.com/rachitkumar205/atlantis/internal/server/admin"
 	"github.com/rachitkumar205/atlantis/internal/testsupport/pgcatalog"
@@ -30,7 +33,8 @@ import (
 //
 // # Why this exists, and why it is this shape
 //
-// Until now internal/console had one test, of a bcrypt hash. Every route was
+// Until this existed, internal/console had one test, of a bcrypt hash (since
+// deleted along with local passwords). Every route was
 // covered by nothing — including the approve route, which is the control that
 // lets production DDL run, and which is wrapped in four middlewares whose
 // order matters.
@@ -63,6 +67,12 @@ type consoleFixture struct {
 	adminSv *admin.Service
 	pool    *pgxpool.Pool
 	dsn     string
+
+	// A real Cloud issuer, on a real JWKS endpoint. Not a stub: the console
+	// has no development bypass for identity, so a fixture that faked one
+	// would be exercising a path production never takes.
+	iss      *issuer.Issuer
+	audience string
 }
 
 func newConsoleFixture(t *testing.T) *consoleFixture {
@@ -137,6 +147,21 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 	go func() { _ = grpcSrv.Serve(lis) }()
 	t.Cleanup(grpcSrv.Stop)
 
+	// Cloud, as far as this console is concerned: a signing key, a JWKS
+	// endpoint, and an issuer name the console is configured to trust.
+	signingKey, err := issuer.GenerateKey()
+	if err != nil {
+		t.Fatalf("generate cloud signing key: %v", err)
+	}
+	iss, err := issuer.New("https://cloud.test", signingKey)
+	if err != nil {
+		t.Fatalf("issuer.New: %v", err)
+	}
+	jwks := httptest.NewServer(iss.Handler())
+	t.Cleanup(jwks.Close)
+
+	const audience = "https://console.test"
+
 	srv, err := New(Config{
 		PGURL:               consoleDSN,
 		ATLEndpoint:         lis.Addr().String(),
@@ -146,32 +171,67 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 		ATLTLSCert:          consoleCert,
 		ATLTLSKey:           consoleKey,
 		ATLTLSCA:            pki.CAFile,
+		CloudIssuer:         iss.Name(),
+		CloudAudience:       audience,
+		CloudJWKSURL:        jwks.URL + issuer.JWKSPath,
 	}, nil, quiet)
 	if err != nil {
 		t.Fatalf("console New: %v", err)
 	}
 	t.Cleanup(srv.Close)
 
-	return &consoleFixture{srv: srv, adminSv: adminSv, pool: pool, dsn: dsn}
+	return &consoleFixture{
+		srv: srv, adminSv: adminSv, pool: pool, dsn: dsn,
+		iss: iss, audience: audience,
+	}
 }
 
-// signIn creates a user with the given role and returns a session token.
-func (f *consoleFixture) signIn(t *testing.T, email, role string) string {
+// assertion mints a signed assertion for a user, as Cloud would.
+func (f *consoleFixture) assertion(t *testing.T, email, role string) string {
 	t.Helper()
-	ctx := context.Background()
-	u, err := f.srv.db.createUser(ctx, email, "correct-horse-battery-staple", role, "Test", "User")
+	tok, err := f.iss.Mint(issuer.Grant{
+		// One subject per email keeps distinct test users distinct without
+		// the fixture having to hand out ids.
+		Subject:  "usr_" + email,
+		Org:      "acme",
+		Role:     identity.Role(role),
+		Email:    email,
+		Name:     "Test User",
+		Audience: f.audience,
+	})
 	if err != nil {
-		t.Fatalf("create %s: %v", email, err)
-	}
-	tok, err := f.srv.db.createSession(ctx, u.ID)
-	if err != nil {
-		t.Fatalf("create session for %s: %v", email, err)
+		t.Fatalf("mint assertion for %s: %v", email, err)
 	}
 	return tok
 }
 
+// signIn returns a session token for a user with the given role.
+//
+// It goes through the real exchange endpoint rather than writing a session
+// row. Every test that calls this then depends on the actual sign-in path, so
+// a change that breaks it cannot pass by leaving a shortcut intact.
+func (f *consoleFixture) signIn(t *testing.T, email, role string) string {
+	t.Helper()
+
+	body := fmt.Sprintf(`{"assertion":%q}`, f.assertion(t, email, role))
+	req := f.request(t, http.MethodPost, "/api/auth/exchange", body, "")
+	rec := httptest.NewRecorder()
+	f.srv.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("exchange for %s: status %d, body %s", email, rec.Code, rec.Body.String())
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			return c.Value
+		}
+	}
+	t.Fatalf("exchange for %s set no session cookie", email)
+	return ""
+}
+
 // elevate puts a session into sudo mode, as /api/auth/sudo does after the
-// operator re-types their password.
+// operator presents a fresh assertion.
 func (f *consoleFixture) elevate(t *testing.T, token string) {
 	t.Helper()
 	if err := f.srv.db.grantSudo(context.Background(), token); err != nil {

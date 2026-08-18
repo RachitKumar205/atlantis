@@ -168,6 +168,7 @@ func (c *testCloud) fetchCount() int {
 func validClaims() map[string]any {
 	return map[string]any{
 		"iss":   testIssuerName,
+		"jti":   "assertion_01HQ",
 		"sub":   "usr_01HQ",
 		"aud":   []string{testAudience},
 		"iat":   testNow.Unix(),
@@ -226,6 +227,9 @@ func TestVerifyAcceptsAValidAssertion(t *testing.T) {
 		t.Fatalf("Verify: %v", err)
 	}
 
+	if claims.ID != "assertion_01HQ" {
+		t.Errorf("ID = %q; the console spends this to refuse a replay", claims.ID)
+	}
 	if claims.Subject != "usr_01HQ" {
 		t.Errorf("Subject = %q", claims.Subject)
 	}
@@ -337,6 +341,11 @@ func TestVerifyRejects(t *testing.T) {
 
 		{name: "no subject", token: func(t *testing.T) string {
 			return key.sign(t, key.kid, without("sub"))
+		}},
+		// Without jti the console cannot refuse a replayed assertion, so
+		// single-use enforcement would degrade into none at all.
+		{name: "no assertion id", token: func(t *testing.T) string {
+			return key.sign(t, key.kid, without("jti"))
 		}},
 		{name: "no org", token: func(t *testing.T) string {
 			return key.sign(t, key.kid, without("org"))

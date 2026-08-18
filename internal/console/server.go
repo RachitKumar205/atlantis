@@ -29,6 +29,8 @@ import (
 
 	"github.com/rachitkumar205/atlantis/clients/go/adminjson"
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
+	"github.com/rachitkumar205/atlantis/internal/console/cloudauth"
 	"github.com/rachitkumar205/atlantis/internal/migrate"
 	"github.com/rachitkumar205/atlantis/internal/storage/pg"
 	"github.com/rachitkumar205/atlantis/migrations"
@@ -48,6 +50,10 @@ type Server struct {
 	log      *slog.Logger
 	spaFS    fs.FS
 	loginLim *loginLimiter
+
+	// cloud verifies the assertions this console accepts as identity. It is
+	// the console's only source of one — there are no local accounts.
+	cloud *cloudauth.Verifier
 
 	// sandboxes owns the in-process sandbox runtime + per-user meta.
 	// See internal/console/sandbox.go for the layer's design.
@@ -103,10 +109,25 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 		return nil, fmt.Errorf("console audit partitions: %w", err)
 	}
 
+	// The verifier is built before the server exists, so a console that
+	// cannot tell who is signing in never starts. There is no other source of
+	// identity to fall back to.
+	cloud, err := cloudauth.New(cloudauth.Config{
+		Issuer:   cfg.CloudIssuer,
+		Audience: cfg.CloudAudience,
+		JWKSURL:  cfg.CloudJWKSURL,
+	})
+	if err != nil {
+		db.close()
+		_ = atl.Close()
+		return nil, err
+	}
+
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	s := &Server{
 		cfg: cfg, atl: atl, db: db, log: log, spaFS: spaFS,
 		loginLim:  newLoginLimiter(),
+		cloud:     cloud,
 		sandboxes: newSandboxLayer(cfg.SandboxPerUserLimit, cfg.SandboxTTL),
 		bgCtx:     bgCtx, bgCancel: bgCancel,
 	}
@@ -197,6 +218,16 @@ func (s *Server) runAuditRetention() {
 	} else if n > 0 {
 		s.log.Info("session gc: pruned expired", "count", n)
 	}
+
+	// Likewise the record of spent assertions. Once an assertion is past its
+	// own expiry it is refused on that ground before the replay check is
+	// reached, so the row has stopped carrying information — but one is
+	// written per sign-in, so without this the table only grows.
+	if n, err := s.db.deleteSpentAssertions(ctx); err != nil {
+		s.log.Warn("spent assertion gc", "err", err)
+	} else if n > 0 {
+		s.log.Info("spent assertion gc: pruned expired", "count", n)
+	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -206,11 +237,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) buildMux() {
 	mux := http.NewServeMux()
 
-	// Setup + auth (no session required).
-	mux.HandleFunc("GET /api/setup/status", s.handleSetupStatus)
-	mux.HandleFunc("GET /api/setup/connectivity", s.handleSetupConnectivity)
-	mux.HandleFunc("POST /api/setup", s.handleSetup)
-	mux.HandleFunc("POST /api/auth/login", s.handleLogin)
+	// Sign-in (no session required). One route: trade an assertion issued by
+	// Cloud for a session cookie.
+	//
+	// There is no first-run setup any more. A console has no accounts to
+	// create, so nothing distinguishes its first request from its
+	// ten-thousandth — Cloud provisions the stack and decides who may reach
+	// it.
+	mux.HandleFunc("POST /api/auth/exchange", s.handleExchange)
 
 	// Auth-required endpoints.
 	mux.HandleFunc("POST /api/auth/logout", s.auth(s.handleLogout))
@@ -319,15 +353,14 @@ func (s *Server) buildMux() {
 	// note taught every reader to distrust real operational data.
 	mux.HandleFunc("GET /api/logs", s.auth(s.handleGetLogs))
 
-	// User management — admin-only.
-	mux.HandleFunc("GET /api/users", s.auth(s.requireRole("admin", s.handleListUsers)))
-	mux.HandleFunc("POST /api/users", s.auth(s.requireRole("admin", s.csrf(s.handleCreateUser))))
-	mux.HandleFunc("PUT /api/users/{id}/role", s.auth(s.requireRole("admin", s.csrf(s.handleSetUserRole))))
-	mux.HandleFunc("DELETE /api/users/{id}", s.auth(s.requireRole("admin", s.csrf(s.handleDeleteUser))))
+	// No user-management routes. Membership and roles belong to the
+	// organisation, which lives at Cloud; this console reads what an
+	// assertion tells it. Managing operators here would mean two places
+	// disagreeing about who may do what, with the console's copy winning by
+	// virtue of being the one enforcing it.
 
 	// Settings-page operations.
 	mux.HandleFunc("GET /api/instance", s.auth(s.handleInstance))
-	mux.HandleFunc("POST /api/auth/password", s.auth(s.csrf(s.handleChangePassword)))
 	mux.HandleFunc("POST /api/auth/sudo", s.auth(s.csrf(s.handleSudo)))
 	mux.HandleFunc("POST /api/auth/sign-out-others", s.auth(s.csrf(s.handleSignOutOthers)))
 	// Danger-zone — admin + CSRF + sudo (re-auth within sudoTTL).
@@ -421,104 +454,90 @@ func (s *Server) requireSudo(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// ── setup + auth handlers ──────────────────────────────────────────────────
+// ── auth handlers ──────────────────────────────────────────────────────────
 
-func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
-	has, err := s.db.hasAnyUser(r.Context())
-	if err != nil {
-		s.log.Error("setup status", "err", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	jsonOK(w, map[string]bool{"configured": has})
-}
-
-func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
-	// Guard against re-initialisation after the first operator is created.
-	has, err := s.db.hasAnyUser(r.Context())
-	if err != nil {
-		s.log.Error("setup check", "err", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	if has {
-		jsonError(w, "already configured", http.StatusConflict)
-		return
-	}
-
-	var body struct {
-		Email     string `json:"email"`
-		Password  string `json:"password"`
-		FirstName string `json:"first_name"`
-		LastName  string `json:"last_name"`
-	}
-	if err := readJSON(r, &body); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-	body.FirstName = strings.TrimSpace(body.FirstName)
-	body.LastName = strings.TrimSpace(body.LastName)
-	if body.Email == "" || body.Password == "" {
-		jsonError(w, "email and password are required", http.StatusBadRequest)
-		return
-	}
-	if len(body.Password) < 8 {
-		jsonError(w, "password must be at least 8 characters", http.StatusBadRequest)
-		return
-	}
-
-	user, err := s.db.createUser(r.Context(), body.Email, body.Password, "admin", body.FirstName, body.LastName)
-	if err != nil {
-		s.log.Error("create user", "err", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	token, err := s.db.createSession(r.Context(), user.ID)
-	if err != nil {
-		s.log.Error("create session", "err", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	setSessionCookie(w, token, s.cfg.CookieSecure)
-	jsonOK(w, map[string]bool{"ok": true})
-}
-
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	// Per-IP rate limit. bcrypt's ~250ms is the primary throttle on
-	// credential-spraying; this is the secondary one that bounds the
-	// rate of attempts a single host can stack up. Failed AND successful
-	// attempts both count — we don't want an attacker who already has a
-	// valid password to also have unbounded login bandwidth.
+// acceptAssertion reads an assertion out of the request, verifies it against
+// Cloud, and spends it so it cannot be presented twice.
+//
+// Both entry points below go through here, and both need every step: the
+// exchange that opens a session, and the step-up that grants sudo. Writing it
+// once means the two cannot drift into applying different checks to the same
+// credential — which is the shape the bug would take, since the weaker of the
+// two would still work perfectly for everyone using it legitimately.
+//
+// Returns the verified claims, or writes the response and returns nil.
+func (s *Server) acceptAssertion(w http.ResponseWriter, r *http.Request) *identity.Claims {
+	// Per-IP limit. Verification is a signature check rather than a bcrypt
+	// round, so it is cheap enough to attempt at volume; the limit bounds how
+	// fast one host can push candidate assertions at this console.
 	if ok, retry := s.loginLim.allow(clientIP(r)); !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(retry))
-		s.log.Warn("login rate-limited", "ip", clientIP(r))
-		jsonError(w, "too many login attempts; try again shortly", http.StatusTooManyRequests)
-		return
+		s.log.Warn("assertion exchange rate-limited", "ip", clientIP(r))
+		jsonError(w, "too many attempts; try again shortly", http.StatusTooManyRequests)
+		return nil
 	}
 
 	var body struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Assertion string `json:"assertion"`
 	}
 	if err := readJSON(r, &body); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
+		return nil
+	}
+	if body.Assertion == "" {
+		jsonError(w, "assertion is required", http.StatusBadRequest)
+		return nil
 	}
 
-	user, err := s.db.authenticateUser(r.Context(), body.Email, body.Password)
-	if errors.Is(err, ErrNotFound) {
-		jsonError(w, "invalid credentials", http.StatusUnauthorized)
-		return
+	claims, err := s.cloud.Verify(r.Context(), body.Assertion)
+	if errors.Is(err, cloudauth.ErrKeysUnavailable) {
+		// Not the caller's fault, and not a credential problem: this console
+		// cannot reach Cloud's keys, so it cannot judge the assertion either
+		// way. Answering 401 would tell the user to try different
+		// credentials, which cannot help.
+		s.log.Error("cloud signing keys unavailable", "err", err)
+		jsonError(w, "cannot reach the identity provider; try again shortly", http.StatusServiceUnavailable)
+		return nil
 	}
 	if err != nil {
-		s.log.Error("authenticate user", "err", err)
+		// One message for every rejection. Distinguishing "expired" from
+		// "wrong audience" from "bad signature" tells whoever is holding a
+		// token which part to work on next.
+		s.log.Warn("assertion rejected", "ip", clientIP(r), "err", err)
+		jsonError(w, "invalid assertion", http.StatusUnauthorized)
+		return nil
+	}
+
+	// Spend it. An assertion travels through a browser and is therefore
+	// exposed to anything else running on the page; single use means a copy
+	// captured in flight is worth nothing once the legitimate request lands.
+	if err := s.db.spendAssertion(r.Context(), claims.ID, claims.Expiry); errors.Is(err, ErrAssertionSpent) {
+		s.log.Warn("assertion replayed", "ip", clientIP(r), "subject", claims.Subject)
+		jsonError(w, "invalid assertion", http.StatusUnauthorized)
+		return nil
+	} else if err != nil {
+		s.log.Error("record spent assertion", "err", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
+		return nil
+	}
+
+	return claims
+}
+
+// handleExchange trades a Cloud assertion for a session cookie.
+//
+// The console is a browser application, so the assertion is spent immediately
+// and everything afterwards rides on the existing session cookie. Keeping the
+// token in JavaScript to send as a bearer header would put a live credential
+// somewhere every script on the page can read it, and would give up the
+// SameSite and HttpOnly properties the cookie already has.
+func (s *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
+	claims := s.acceptAssertion(w, r)
+	if claims == nil {
 		return
 	}
 
-	token, err := s.db.createSession(r.Context(), user.ID)
+	token, err := s.db.createSession(r.Context(), claims)
 	if err != nil {
 		s.log.Error("create session", "err", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
@@ -526,40 +545,40 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setSessionCookie(w, token, s.cfg.CookieSecure)
+	s.db.logAction(r.Context(), claims.Subject, claims.Email, "signed_in", map[string]any{
+		"org": claims.Org,
+	})
 	jsonOK(w, map[string]bool{"ok": true})
 }
 
-// handleSudo grants the current session a short window of elevated
-// permission (sudoTTL ~ 5 minutes) on successful re-authentication with
-// the user's password. Required by destructive endpoints — sign-out-all,
+// handleSudo grants the current session a short window of elevated permission
+// (sudoTTL ~ 5 minutes). Required by destructive endpoints — sign-out-all,
 // revoke-all — so a stolen session cookie alone cannot trigger them.
 //
-// Rate-limited the same way login is to prevent spraying a session
-// cookie at this endpoint to escalate.
+// Step-up used to mean re-typing a password. With no local credentials it
+// means presenting a *fresh* assertion, which sends the user back to Cloud to
+// prove themselves there. That preserves the property the control exists for:
+// holding the cookie is not enough.
+//
+// The freshness is what single-use buys. Were assertions replayable, the SPA
+// could keep the one it signed in with and post it here, and sudo would
+// degrade into a button that always succeeds — while looking, from every
+// screen and every audit row, exactly like a working step-up.
 func (s *Server) handleSudo(w http.ResponseWriter, r *http.Request) {
-	if ok, retry := s.loginLim.allow(clientIP(r)); !ok {
-		w.Header().Set("Retry-After", strconv.Itoa(retry))
-		jsonError(w, "too many attempts; try again shortly", http.StatusTooManyRequests)
-		return
-	}
-
-	var body struct {
-		Password string `json:"password"`
-	}
-	if err := readJSON(r, &body); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-	if body.Password == "" {
-		jsonError(w, "password is required", http.StatusBadRequest)
+	claims := s.acceptAssertion(w, r)
+	if claims == nil {
 		return
 	}
 
 	u := r.Context().Value(ctxUser).(*User)
-	if _, err := s.db.authenticateUser(r.Context(), u.Email, body.Password); err != nil {
-		// Generic message — don't leak whether the password was wrong vs
-		// some other internal error.
-		jsonError(w, "invalid password", http.StatusUnauthorized)
+
+	// The assertion must be for the user already holding this session.
+	// Without this, anyone with a valid assertion of their own could elevate
+	// somebody else's session by posting it against their cookie.
+	if claims.Subject != u.Subject {
+		s.log.Warn("sudo assertion is for a different subject",
+			"session", u.Subject, "assertion", claims.Subject)
+		jsonError(w, "assertion does not match this session", http.StatusForbidden)
 		return
 	}
 
@@ -573,7 +592,7 @@ func (s *Server) handleSudo(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	s.db.logAction(r.Context(), u.ID, "sudo_granted", map[string]any{
+	s.db.logAction(r.Context(), u.Subject, u.Email, "sudo_granted", map[string]any{
 		"ttl_seconds": int(sudoTTL.Seconds()),
 	})
 	jsonOK(w, map[string]any{"ok": true, "expires_in_seconds": int(sudoTTL.Seconds())})
@@ -591,12 +610,11 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	u := r.Context().Value(ctxUser).(*User)
 	jsonOK(w, map[string]any{
-		"id":         u.ID,
-		"email":      u.Email,
-		"role":       u.Role,
-		"first_name": u.FirstName,
-		"last_name":  u.LastName,
-		"created_at": u.CreatedAt,
+		"subject": u.Subject,
+		"org":     u.Org,
+		"email":   u.Email,
+		"role":    u.Role,
+		"name":    u.Name,
 	})
 }
 
@@ -837,9 +855,14 @@ func (s *Server) csrf(next http.HandlerFunc) http.HandlerFunc {
 // ── Login rate limiter ────────────────────────────────────────────────────────
 
 // loginLimiter is a per-IP sliding-window leaky bucket sized for a
-// human-paced login UX. bcrypt's intrinsic ~250ms cost is the primary
-// throttle on credential-spraying; this is the secondary one that
-// keeps a single host from issuing thousands of attempts per minute.
+// human-paced sign-in.
+//
+// It used to be the secondary throttle, behind bcrypt's intrinsic ~250ms cost
+// per attempt. There is no bcrypt any more — the console holds no passwords,
+// and verifying an assertion is a signature check measured in microseconds. So
+// this is now the ONLY thing bounding how fast one host can push candidate
+// assertions at this console, and it should be tightened rather than relaxed
+// if it is revisited.
 //
 // Memory bound: at most loginLimiterMaxIPs entries, each holding up to
 // loginLimiterMax timestamps. ~10KB ceiling under sustained attack.
@@ -975,157 +998,6 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// ── User management ──────────────────────────────────────────────────
-
-func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
-	users, err := s.db.listUsers(r.Context())
-	if err != nil {
-		s.log.Error("list users", "err", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	type wire struct {
-		ID        int64  `json:"id"`
-		Email     string `json:"email"`
-		Role      string `json:"role"`
-		CreatedAt string `json:"created_at"`
-	}
-	out := make([]wire, 0, len(users))
-	for _, u := range users {
-		out = append(out, wire{
-			ID:        u.ID,
-			Email:     u.Email,
-			Role:      u.Role,
-			CreatedAt: u.CreatedAt.UTC().Format(time.RFC3339),
-		})
-	}
-	jsonOK(w, map[string]any{"users": out})
-}
-
-func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Email     string `json:"email"`
-		Password  string `json:"password"`
-		Role      string `json:"role"`
-		FirstName string `json:"first_name"`
-		LastName  string `json:"last_name"`
-	}
-	if err := readJSON(r, &body); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-	body.FirstName = strings.TrimSpace(body.FirstName)
-	body.LastName = strings.TrimSpace(body.LastName)
-	if body.Email == "" || body.Password == "" {
-		jsonError(w, "email and password are required", http.StatusBadRequest)
-		return
-	}
-	if len(body.Password) < 8 {
-		jsonError(w, "password must be at least 8 characters", http.StatusBadRequest)
-		return
-	}
-	if body.Role != "admin" && body.Role != "viewer" {
-		body.Role = "viewer"
-	}
-
-	user, err := s.db.createUser(r.Context(), body.Email, body.Password, body.Role, body.FirstName, body.LastName)
-	if err != nil {
-		s.log.Error("create user", "err", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	actor := r.Context().Value(ctxUser).(*User)
-	s.db.logAction(r.Context(), actor.ID, "create_user", map[string]any{
-		"email":      user.Email,
-		"role":       user.Role,
-		"first_name": user.FirstName,
-		"last_name":  user.LastName,
-	})
-	jsonOK(w, map[string]any{
-		"id":         user.ID,
-		"email":      user.Email,
-		"role":       user.Role,
-		"first_name": user.FirstName,
-		"last_name":  user.LastName,
-	})
-}
-
-func (s *Server) handleSetUserRole(w http.ResponseWriter, r *http.Request) {
-	idStr := r.PathValue("id")
-	var id int64
-	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil || id <= 0 {
-		jsonError(w, "invalid user id", http.StatusBadRequest)
-		return
-	}
-
-	var body struct {
-		Role string `json:"role"`
-	}
-	if err := readJSON(r, &body); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-	if body.Role != "admin" && body.Role != "viewer" {
-		jsonError(w, `role must be "admin" or "viewer"`, http.StatusBadRequest)
-		return
-	}
-
-	// Prevent self-demotion so there's always at least one admin.
-	actor := r.Context().Value(ctxUser).(*User)
-	if actor.ID == id && body.Role != "admin" {
-		jsonError(w, "cannot change your own role", http.StatusConflict)
-		return
-	}
-
-	if err := s.db.setUserRole(r.Context(), id, body.Role); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			jsonError(w, "user not found", http.StatusNotFound)
-			return
-		}
-		s.log.Error("set user role", "err", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-
-	s.db.logAction(r.Context(), actor.ID, "set_user_role", map[string]any{
-		"target_user_id": id,
-		"role":           body.Role,
-	})
-	jsonOK(w, map[string]bool{"ok": true})
-}
-
-// handleDeleteUser removes an operator. ON DELETE CASCADE on
-// console.sessions handles their active sessions in the same statement
-// — they're signed out immediately. Self-deletion is refused so the
-// last admin can never accidentally lock themselves out.
-func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
-	idStr := r.PathValue("id")
-	var id int64
-	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil || id <= 0 {
-		jsonError(w, "invalid user id", http.StatusBadRequest)
-		return
-	}
-	actor := r.Context().Value(ctxUser).(*User)
-	if actor.ID == id {
-		jsonError(w, "cannot delete your own account", http.StatusConflict)
-		return
-	}
-	if err := s.db.deleteUser(r.Context(), id); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			jsonError(w, "user not found", http.StatusNotFound)
-			return
-		}
-		s.log.Error("delete user", "err", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	s.db.logAction(r.Context(), actor.ID, "delete_user", map[string]any{
-		"target_user_id": id,
-	})
-	jsonOK(w, map[string]bool{"ok": true})
-}
-
 // ── Settings-page operations ─────────────────────────────────────────────────
 
 // handleInstance returns small, non-secret runtime facts the Settings
@@ -1137,42 +1009,9 @@ func (s *Server) handleInstance(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// handleChangePassword verifies the caller's current password before
-// rotating it. On success every session for the user is invalidated
-// (including the calling one) so the user is forced to sign in again
-// with the new password — defensive against the new credential being
-// reused via a stolen cookie before they noticed.
-func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Current string `json:"current_password"`
-		New     string `json:"new_password"`
-	}
-	if err := readJSON(r, &body); err != nil {
-		jsonError(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-	if body.Current == "" || body.New == "" {
-		jsonError(w, "current_password and new_password are required", http.StatusBadRequest)
-		return
-	}
-	if len(body.New) < 8 {
-		jsonError(w, "new password must be at least 8 characters", http.StatusBadRequest)
-		return
-	}
-	u := r.Context().Value(ctxUser).(*User)
-	if err := s.db.changePassword(r.Context(), u.ID, body.Current, body.New); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			jsonError(w, "current password is incorrect", http.StatusUnauthorized)
-			return
-		}
-		s.log.Error("change password", "err", err)
-		jsonError(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	s.db.logAction(r.Context(), u.ID, "change_password", nil)
-	clearSessionCookie(w, s.cfg.CookieSecure)
-	jsonOK(w, map[string]bool{"ok": true})
-}
+// Passwords are Cloud's business. There is no local credential to rotate, so
+// the console offers no way to change one — a user changes their password
+// where their account lives.
 
 // handleSignOutOthers terminates every session for the calling user
 // except the one whose token is on the current request. The user stays
@@ -1184,13 +1023,13 @@ func (s *Server) handleSignOutOthers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := r.Context().Value(ctxUser).(*User)
-	count, err := s.db.deleteSessionsForUserExcept(r.Context(), u.ID, cookie.Value)
+	count, err := s.db.deleteSessionsForSubjectExcept(r.Context(), u.Subject, cookie.Value)
 	if err != nil {
 		s.log.Error("sign out others", "err", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	s.db.logAction(r.Context(), u.ID, "sign_out_others", map[string]any{
+	s.db.logAction(r.Context(), u.Subject, u.Email, "sign_out_others", map[string]any{
 		"sessions_removed": count,
 	})
 	jsonOK(w, map[string]any{"ok": true, "sessions_removed": count})
@@ -1207,7 +1046,7 @@ func (s *Server) handleSignOutAll(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	s.db.logAction(r.Context(), actor.ID, "sign_out_all", map[string]any{
+	s.db.logAction(r.Context(), actor.Subject, actor.Email, "sign_out_all", map[string]any{
 		"sessions_removed": count,
 	})
 	clearSessionCookie(w, s.cfg.CookieSecure)
@@ -1251,7 +1090,7 @@ func (s *Server) handleRevokeAllCallers(w http.ResponseWriter, r *http.Request) 
 		revoked++
 	}
 
-	s.db.logAction(r.Context(), actor.ID, "revoke_all_callers", map[string]any{
+	s.db.logAction(r.Context(), actor.Subject, actor.Email, "revoke_all_callers", map[string]any{
 		"revoked":  revoked,
 		"failures": failures,
 	})
@@ -1295,7 +1134,7 @@ func (s *Server) handleRegisterCaller(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.db.logAction(r.Context(), actor.ID, "register_caller", map[string]any{
+	s.db.logAction(r.Context(), actor.Subject, actor.Email, "register_caller", map[string]any{
 		"caller":     body.Caller,
 		"can_mutate": body.CanMutate,
 	})
@@ -1342,7 +1181,7 @@ func (s *Server) handleSetCallerAliases(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	u := r.Context().Value(ctxUser).(*User)
-	s.db.logAction(r.Context(), u.ID, "set_caller_aliases", map[string]any{
+	s.db.logAction(r.Context(), u.Subject, u.Email, "set_caller_aliases", map[string]any{
 		"caller":  caller,
 		"aliases": body.Aliases,
 	})
@@ -1364,7 +1203,7 @@ func (s *Server) handleRevokeCaller(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u := r.Context().Value(ctxUser).(*User)
-	s.db.logAction(r.Context(), u.ID, "revoke_caller", map[string]any{"caller": caller})
+	s.db.logAction(r.Context(), u.Subject, u.Email, "revoke_caller", map[string]any{"caller": caller})
 
 	s.proxyProto(w, "admin", resp, nil)
 }
@@ -1404,7 +1243,7 @@ func (s *Server) handleRollbackSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.db.logAction(r.Context(), u.ID, "rollback_schema", map[string]any{
+	s.db.logAction(r.Context(), u.Subject, u.Email, "rollback_schema", map[string]any{
 		"to_version": body.ToVersion,
 		"caller":     caller,
 	})
@@ -1473,7 +1312,7 @@ func (s *Server) handleRetryDeadJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u := r.Context().Value(ctxUser).(*User)
-	s.db.logAction(r.Context(), u.ID, "retry_dead_job", map[string]any{"job_id": id})
+	s.db.logAction(r.Context(), u.Subject, u.Email, "retry_dead_job", map[string]any{"job_id": id})
 
 	s.proxyProto(w, "admin", resp, nil)
 }
@@ -1508,7 +1347,7 @@ func (s *Server) handleDrainWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := r.Context().Value(ctxUser).(*User)
-	s.db.logAction(r.Context(), u.ID, "worker_drained", map[string]any{"session_id": id})
+	s.db.logAction(r.Context(), u.Subject, u.Email, "worker_drained", map[string]any{"session_id": id})
 	s.proxyProto(w, "admin", resp, nil)
 }
 
@@ -1525,7 +1364,7 @@ func (s *Server) handleEvictWorker(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u := r.Context().Value(ctxUser).(*User)
-	s.db.logAction(r.Context(), u.ID, "worker_evicted", map[string]any{"session_id": id})
+	s.db.logAction(r.Context(), u.Subject, u.Email, "worker_evicted", map[string]any{"session_id": id})
 	s.proxyProto(w, "admin", resp, nil)
 }
 
@@ -1613,7 +1452,7 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
 
 	u := r.Context().Value(ctxUser).(*User)
-	s.db.logAction(r.Context(), u.ID, "issue_cert", map[string]any{
+	s.db.logAction(r.Context(), u.Subject, u.Email, "issue_cert", map[string]any{
 		"caller":     caller,
 		"expires_at": signerRespBody.ExpiresAt,
 	})
@@ -1677,22 +1516,22 @@ func (s *Server) handleGetAuditLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type wire struct {
-		ID        int64           `json:"id"`
-		UserID    int64           `json:"user_id"`
-		UserEmail string          `json:"user_email"`
-		Action    string          `json:"action"`
-		Detail    json.RawMessage `json:"detail,omitempty"`
-		CreatedAt string          `json:"created_at"`
+		ID         int64           `json:"id"`
+		Actor      string          `json:"actor"`
+		ActorEmail string          `json:"actor_email"`
+		Action     string          `json:"action"`
+		Detail     json.RawMessage `json:"detail,omitempty"`
+		CreatedAt  string          `json:"created_at"`
 	}
 	out := make([]wire, 0, len(entries))
 	for _, e := range entries {
 		out = append(out, wire{
-			ID:        e.ID,
-			UserID:    e.UserID,
-			UserEmail: e.UserEmail,
-			Action:    e.Action,
-			Detail:    json.RawMessage(e.Detail),
-			CreatedAt: e.CreatedAt.UTC().Format(time.RFC3339),
+			ID:         e.ID,
+			Actor:      e.Actor,
+			ActorEmail: e.ActorEmail,
+			Action:     e.Action,
+			Detail:     json.RawMessage(e.Detail),
+			CreatedAt:  e.CreatedAt.UTC().Format(time.RFC3339),
 		})
 	}
 	jsonOK(w, map[string]any{"entries": out})
@@ -1933,7 +1772,7 @@ func (s *Server) handleSetChangePolicy(w http.ResponseWriter, r *http.Request) {
 			"approver_role":    e.GetApproverRole(),
 		})
 	}
-	s.db.logAction(r.Context(), u.ID, "set_change_policy", map[string]any{"entries": changed})
+	s.db.logAction(r.Context(), u.Subject, u.Email, "set_change_policy", map[string]any{"entries": changed})
 	s.proxyProto(w, "SetChangePolicy", resp, nil)
 }
 
@@ -2047,7 +1886,7 @@ func (s *Server) decideSchemaPlan(w http.ResponseWriter, r *http.Request, approv
 	// share one call site costs the type check that keeps a nil-typed response
 	// from reaching the encoder.
 	audit := func(verb string) {
-		s.db.logAction(r.Context(), u.ID, verb, map[string]any{
+		s.db.logAction(r.Context(), u.Subject, u.Email, verb, map[string]any{
 			"plan_id": planID,
 			"role":    role,
 			"reason":  body.Reason,

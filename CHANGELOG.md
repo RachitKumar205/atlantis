@@ -13,6 +13,52 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Changed
 
+#### The console's identity comes from Atlantis Cloud — breaking
+
+The console no longer holds accounts. `console.users` is dropped, along with
+every password hash in it, the sign-in form, the first-run setup wizard, and the
+four `/api/users` routes. A user signs in at Atlantis Cloud and arrives carrying
+a signed assertion, which the console exchanges for the session cookie it
+already used.
+
+**What to do.** Three new settings are required and none has a default —
+`CLOUD_ISSUER`, `CLOUD_AUDIENCE` and `CLOUD_JWKS_URL`. The console will not
+start without all three. See [Configuration](docs/reference/configuration.md#console-bff).
+
+Strictness here is deliberate rather than fussy. The issuer and audience are
+compared for exact equality, and an empty expected value means the check does
+not run — so a console missing either would not fail, it would start and accept
+assertions from any issuer, for any console. Every request afterwards would
+carry a valid session established from a token that verified, and nothing
+downstream could tell the difference. There is no later point at which that is
+detectable, so it is refused at startup.
+
+**Existing installs.** Migration `0003` runs automatically.
+
+- Every session is deleted. A session row meant "this cookie belongs to local
+  user N", and there is no mapping from a local row to a Cloud user — the
+  console never knew one. Everybody signs in again, once.
+- Audit history is kept and stays attributable. Each row's actor becomes
+  `local:<id>`, with the email copied off `console.users` before that table is
+  dropped. The `local:` prefix is there so nobody later mistakes one for an
+  identity Cloud can resolve.
+- `console.users` is dropped. **The password hashes in it are not recoverable**,
+  and the down migration cannot restore them — it restores the table's shape
+  only. Rolling back a console that has been serving traffic means restoring
+  from a backup taken before `0003` ran.
+
+**Step-up changed.** `POST /api/auth/sudo` previously took a password. It now
+takes a *fresh* assertion, which sends the user back to Cloud. Assertions are
+single use, so the one spent signing in will not work — re-proving identity is
+what the control is for, and a replayable credential would have quietly turned
+it into a button that always succeeds.
+
+**Audit rows changed shape** for anything reading `console.audit_log` directly:
+`user_id BIGINT` is replaced by `actor TEXT` and `actor_email TEXT`, and
+`GET /api/audit` renames the corresponding fields. The email is written onto the
+row rather than resolved at read time, so an entry says who acted when it
+happened rather than who holds that identity now.
+
 #### The console refuses a database role that bypasses row-level security — breaking
 
 `CONSOLE_PG_URL` must name a `NOSUPERUSER`, `NOBYPASSRLS` role. The console

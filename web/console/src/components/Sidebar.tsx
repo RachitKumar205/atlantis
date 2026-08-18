@@ -48,7 +48,7 @@ export function Sidebar() {
   })
 
   const isActive = (to: string) => path.startsWith(to)
-  const initials = avatarInitials(me?.first_name, me?.last_name, me?.email)
+  const initials = avatarInitials(me?.name, me?.email)
   const displayName = displayNameFor(me)
 
   return (
@@ -110,28 +110,28 @@ export function Sidebar() {
 }
 
 // displayNameFor renders the user's preferred label in the sidebar.
-// Returns the full name when both first and last are set, the first
-// name alone when that's all there is, and falls back to email so the
-// slot stays informative for users who skipped the name fields.
-function displayNameFor(me?: { first_name?: string; last_name?: string; email?: string }): string {
-  const f = (me?.first_name ?? '').trim()
-  const l = (me?.last_name ?? '').trim()
-  if (f && l) return `${f} ${l}`
-  if (f) return f
+//
+// Cloud asserts one `name`, not a first/last pair, because a great many people
+// do not have a name that splits into two that way. It is optional, so the
+// email is the fallback and the slot stays informative either way.
+function displayNameFor(me?: { name?: string; email?: string }): string {
+  const n = (me?.name ?? '').trim()
+  if (n) return n
   return me?.email ?? ''
 }
 
 // avatarInitials renders the two-letter badge. Priority:
-//   1. First initial + last initial when both names are present.
-//   2. Two letters derived from the email local part (split on common
-//      separators) when names aren't set — covers users created before
-//      the name fields were added.
-//   3. "?" while auth is loading so the badge slot keeps its size.
-function avatarInitials(first?: string, last?: string, email?: string): string {
-  const f = (first ?? '').trim()
-  const l = (last ?? '').trim()
-  if (f && l) return (f.charAt(0) + l.charAt(0)).toUpperCase()
-  if (f) return f.slice(0, 2).toUpperCase()
+//   1. Initials from the asserted name — first and last word when there are
+//      several, otherwise its first two letters.
+//   2. Two letters from the email local part, split on common separators.
+//   3. "?" while auth is loading, so the badge slot keeps its size.
+function avatarInitials(name?: string, email?: string): string {
+  const words = (name ?? '').trim().split(/\s+/).filter(Boolean)
+  if (words.length >= 2) {
+    return (words[0].charAt(0) + words[words.length - 1].charAt(0)).toUpperCase()
+  }
+  if (words.length === 1) return words[0].slice(0, 2).toUpperCase()
+
   if (!email) return '?'
   const local = email.split('@')[0]
   const parts = local.split(/[._-]/).filter(Boolean)

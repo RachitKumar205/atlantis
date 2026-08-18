@@ -22,6 +22,19 @@ type Config struct {
 	HealthListen  string // ATL_HEALTH_LISTEN — atlantis health HTTP addr, default :8081
 	SignerAddr    string // ATL_SIGNER_ADDR — optional; cert issuance requires it
 
+	// Who this console accepts identity from. All three are required and
+	// none has a default.
+	//
+	// A default would be the wrong kind of convenience here. CloudIssuer and
+	// CloudAudience are compared for exact equality, and an empty expected
+	// value means the corresponding check does not run — so a console started
+	// with either one missing would not fail, it would run and accept
+	// assertions from any issuer, for any console. The failure has to happen
+	// at startup because it cannot be noticed afterwards.
+	CloudIssuer   string // CLOUD_ISSUER — the iss value to require
+	CloudAudience string // CLOUD_AUDIENCE — this console's own name, required in aud
+	CloudJWKSURL  string // CLOUD_JWKS_URL — where the issuer publishes its keys
+
 	// AuditRetentionDays controls how long operator-action audit rows
 	// are kept before their monthly partition is DROPped by the
 	// background worker. 0 disables retention entirely (kept forever);
@@ -53,6 +66,10 @@ func ConfigFromEnv() (Config, error) {
 		HealthListen:  envOr("ATL_HEALTH_LISTEN", "localhost:8081"),
 		SignerAddr:    os.Getenv("ATL_SIGNER_ADDR"),
 
+		CloudIssuer:   os.Getenv("CLOUD_ISSUER"),
+		CloudAudience: os.Getenv("CLOUD_AUDIENCE"),
+		CloudJWKSURL:  os.Getenv("CLOUD_JWKS_URL"),
+
 		AuditRetentionDays: envInt("CONSOLE_AUDIT_RETENTION_DAYS", 365),
 
 		SandboxPerUserLimit: envInt("SANDBOX_PER_USER_LIMIT", 100),
@@ -60,6 +77,18 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if c.PGURL == "" {
 		return Config{}, fmt.Errorf("CONSOLE_PG_URL is required")
+	}
+	// See the field comments: an unset issuer or audience does not weaken the
+	// check, it removes it.
+	for _, v := range []struct{ name, val string }{
+		{"CLOUD_ISSUER", c.CloudIssuer},
+		{"CLOUD_AUDIENCE", c.CloudAudience},
+		{"CLOUD_JWKS_URL", c.CloudJWKSURL},
+	} {
+		if v.val == "" {
+			return Config{}, fmt.Errorf("%s is required: the console has no local accounts and "+
+				"verifies every sign-in against Atlantis Cloud", v.name)
+		}
 	}
 	if c.SessionSecret == "" {
 		return Config{}, fmt.Errorf("CONSOLE_SESSION_SECRET is required")

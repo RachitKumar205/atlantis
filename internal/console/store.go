@@ -12,7 +12,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/crypto/bcrypt"
+
+	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 )
 
 func jsonMarshalBytes(v any) ([]byte, error) { return json.Marshal(v) }
@@ -39,18 +40,35 @@ const sessionTouchThreshold = 0.5
 // Short window so a logged-in laptop walked-away-from can't escalate.
 const sudoTTL = 5 * time.Minute
 
-// ErrNotFound is returned when a user or session is not found, or when
-// credentials are invalid. Callers must not distinguish the two cases to
-// avoid user enumeration.
+// ErrNotFound is returned when a session is not found or has expired.
 var ErrNotFound = errors.New("not found")
 
+// ErrAssertionSpent reports an assertion that has already been exchanged.
+//
+// It is deliberately distinct from a verification failure. The assertion is
+// genuine and unexpired; what is wrong is that it is being presented a second
+// time, which is either a replay or a page that submitted twice.
+var ErrAssertionSpent = errors.New("assertion has already been used")
+
+// User is who is making the current request.
+//
+// Every field arrives in a signed assertion from Cloud and is copied onto the
+// session at sign-in. The console stores no user record, so there is nothing
+// here to look up and nothing to keep in step — the values are a snapshot of
+// what Cloud asserted, fixed for the life of the session. A role change at
+// Cloud therefore takes effect at the user's next sign-in.
 type User struct {
-	ID        int64
-	Email     string
-	Role      string // "admin" | "viewer"
-	FirstName string
-	LastName  string
-	CreatedAt time.Time
+	// Subject is Cloud's stable identifier, and the audit actor. Not an
+	// email: an address can be reassigned to a different person, which would
+	// retroactively change who an audit row says acted.
+	Subject string
+
+	// Org is the organisation this session is acting in.
+	Org string
+
+	Role  string // "admin" | "viewer"
+	Email string
+	Name  string
 }
 
 type store struct {
@@ -200,19 +218,32 @@ func (s *store) dropAuditPartitionsOlderThan(ctx context.Context, cutoff time.Ti
 
 // logAction records an operator action in the audit log. Failures are
 // non-fatal — the caller receives a log line but the action still succeeds.
-func (s *store) logAction(ctx context.Context, userID int64, action string, detail map[string]any) {
+// logAction records an operator action.
+//
+// The actor's email is written onto the row rather than resolved when the log
+// is read. An audit entry should say who acted at the time it happened; a
+// lookup would report whoever holds that identity now, which is a different
+// claim and occasionally a false one.
+func (s *store) logAction(ctx context.Context, actor, actorEmail, action string, detail map[string]any) {
 	detailJSON, _ := jsonMarshalBytes(detail)
 	_, _ = s.pool.Exec(ctx, `
-		INSERT INTO console.audit_log (user_id, action, detail) VALUES ($1, $2, $3)
-	`, userID, action, detailJSON)
+		INSERT INTO console.audit_log (actor, actor_email, action, detail) VALUES ($1, $2, $3, $4)
+	`, actor, actorEmail, action, detailJSON)
 }
 
+// listAuditLog reads the most recent entries.
+//
+// It reads what each row carries and joins nothing. The previous version
+// INNER JOINed console.users, which meant an action by anyone without a row
+// there was not merely unattributed — it was absent from the listing
+// entirely. Now that identity comes from Cloud there would have been no such
+// row for anybody, so the log would have been silently empty while continuing
+// to be written.
 func (s *store) listAuditLog(ctx context.Context, limit int) ([]auditEntry, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT al.id, al.user_id, u.email, al.action, al.detail, al.created_at
-		FROM console.audit_log al
-		JOIN console.users u ON u.id = al.user_id
-		ORDER BY al.created_at DESC
+		SELECT id, actor, actor_email, action, detail, created_at
+		FROM console.audit_log
+		ORDER BY created_at DESC
 		LIMIT $1
 	`, limit)
 	if err != nil {
@@ -223,7 +254,7 @@ func (s *store) listAuditLog(ctx context.Context, limit int) ([]auditEntry, erro
 	for rows.Next() {
 		var e auditEntry
 		var detail []byte
-		if err := rows.Scan(&e.ID, &e.UserID, &e.UserEmail, &e.Action, &detail, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.Actor, &e.ActorEmail, &e.Action, &detail, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		e.Detail = detail
@@ -233,126 +264,21 @@ func (s *store) listAuditLog(ctx context.Context, limit int) ([]auditEntry, erro
 }
 
 type auditEntry struct {
-	ID        int64
-	UserID    int64
-	UserEmail string
-	Action    string
-	Detail    []byte
-	CreatedAt time.Time
+	ID         int64
+	Actor      string // Cloud subject, or "local:N" for actions predating migration 0003
+	ActorEmail string
+	Action     string
+	Detail     []byte
+	CreatedAt  time.Time
 }
 
-func (s *store) hasAnyUser(ctx context.Context) (bool, error) {
-	var n int
-	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM console.users LIMIT 1`).Scan(&n)
-	return n > 0, err
-}
-
-func (s *store) createUser(ctx context.Context, email, password, role, firstName, lastName string) (*User, error) {
-	if role == "" {
-		role = "admin"
-	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return nil, err
-	}
-	var u User
-	err = s.pool.QueryRow(ctx, `
-		INSERT INTO console.users (email, password_hash, role, first_name, last_name)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, email, role, first_name, last_name, created_at
-	`, email, string(hash), role, firstName, lastName).Scan(
-		&u.ID, &u.Email, &u.Role, &u.FirstName, &u.LastName, &u.CreatedAt,
-	)
-	return &u, err
-}
-
-func (s *store) listUsers(ctx context.Context) ([]*User, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, email, role, first_name, last_name, created_at
-		FROM console.users ORDER BY created_at ASC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []*User
-	for rows.Next() {
-		u := &User{}
-		if err := rows.Scan(&u.ID, &u.Email, &u.Role, &u.FirstName, &u.LastName, &u.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, u)
-	}
-	return out, rows.Err()
-}
-
-func (s *store) setUserRole(ctx context.Context, userID int64, role string) error {
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE console.users SET role = $1 WHERE id = $2
-	`, role, userID)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// deleteUser removes a user. The session FK is ON DELETE CASCADE so any
-// active session of the deleted user is also gone in the same statement.
-// audit_log has no FK (created_at partitioning), so historic actions stay
-// readable with the original user_id intact.
-func (s *store) deleteUser(ctx context.Context, userID int64) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM console.users WHERE id = $1`, userID)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// changePassword verifies the user's current password then writes a new
-// bcrypt hash. Returns ErrNotFound when the current password doesn't
-// match (same error as authenticateUser to keep the failure shape
-// consistent with login).
-func (s *store) changePassword(ctx context.Context, userID int64, currentPassword, newPassword string) error {
-	var hash string
-	err := s.pool.QueryRow(ctx,
-		`SELECT password_hash FROM console.users WHERE id = $1`, userID).Scan(&hash)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(currentPassword)); err != nil {
-		return ErrNotFound
-	}
-	newHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
-	if err != nil {
-		return err
-	}
-	if _, err := s.pool.Exec(ctx,
-		`UPDATE console.users SET password_hash = $1 WHERE id = $2`,
-		string(newHash), userID); err != nil {
-		return err
-	}
-	// Invalidate every session for this user — the user is told to
-	// sign in again with the new password.
-	_, err = s.pool.Exec(ctx, `DELETE FROM console.sessions WHERE user_id = $1`, userID)
-	return err
-}
-
-// deleteSessionsForUserExcept signs out every session belonging to
-// userID except the one whose token is keepToken. Returns the count of
-// sessions removed.
-func (s *store) deleteSessionsForUserExcept(ctx context.Context, userID int64, keepToken string) (int64, error) {
+// deleteSessionsForSubjectExcept signs out every session belonging to a Cloud
+// subject except the one whose token is keepToken. Returns how many were
+// removed.
+func (s *store) deleteSessionsForSubjectExcept(ctx context.Context, subject, keepToken string) (int64, error) {
 	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM console.sessions WHERE user_id = $1 AND token <> $2`,
-		userID, keepToken)
+		`DELETE FROM console.sessions WHERE subject = $1 AND token <> $2`,
+		subject, keepToken)
 	if err != nil {
 		return 0, err
 	}
@@ -369,55 +295,12 @@ func (s *store) deleteAllSessions(ctx context.Context) (int64, error) {
 	return tag.RowsAffected(), nil
 }
 
-// dummyAuthHash equalises wall-clock time between the wrong-password and
-// no-such-user branches of authenticateUser so timing can't enumerate
-// valid emails. Comparing against an empty-string hash returns
-// ErrHashTooShort instantly and leaks the distinction; comparing against
-// a real bcrypt hash forces the same key-stretching work as the
-// legitimate path.
+// createSession opens a session from a verified assertion.
 //
-// Computed once at process start at the same cost real user hashes use
-// (bcrypt.DefaultCost). The hashed input is a fixed placeholder, not a
-// secret, and the hash output is non-sensitive: bcrypt embeds a random
-// salt so even the dummy hash's bytes differ per process.
-var dummyAuthHash []byte
-
-func init() {
-	h, err := bcrypt.GenerateFromPassword([]byte("invalid-placeholder"), bcrypt.DefaultCost)
-	if err != nil {
-		// bcrypt at default cost with a short fixed input can't fail under
-		// normal conditions; if it does the runtime is broken enough that
-		// failing loud at startup is the right move.
-		panic(fmt.Sprintf("console: precompute dummy bcrypt hash: %v", err))
-	}
-	dummyAuthHash = h
-}
-
-func (s *store) authenticateUser(ctx context.Context, email, password string) (*User, error) {
-	var u User
-	var hash string
-	err := s.pool.QueryRow(ctx, `
-		SELECT id, email, role, password_hash, created_at
-		FROM console.users WHERE email = $1
-	`, email).Scan(&u.ID, &u.Email, &u.Role, &hash, &u.CreatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Burn an actual bcrypt round against a precomputed dummy hash so
-		// the no-user wall-clock matches the wrong-password path. Empty
-		// `hash` returns ErrHashTooShort instantly and leaks "no such
-		// user" via timing.
-		_ = bcrypt.CompareHashAndPassword(dummyAuthHash, []byte(password))
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
-		return nil, ErrNotFound
-	}
-	return &u, nil
-}
-
-func (s *store) createSession(ctx context.Context, userID int64) (string, error) {
+// The claims are copied onto the row. There is no user table to point at, and
+// the session is meant to be a snapshot of what Cloud asserted at sign-in
+// rather than a live view of it.
+func (s *store) createSession(ctx context.Context, c *identity.Claims) (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
@@ -428,10 +311,47 @@ func (s *store) createSession(ctx context.Context, userID int64) (string, error)
 	// string compare; we only emit the new shape going forward.
 	token := base64.RawURLEncoding.EncodeToString(b)
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO console.sessions (token, user_id, expires_at)
-		VALUES ($1, $2, $3)
-	`, token, userID, time.Now().Add(sessionTTL))
+		INSERT INTO console.sessions (token, subject, org, role, email, name, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, token, c.Subject, c.Org, string(c.Role), c.Email, c.Name, time.Now().Add(sessionTTL))
 	return token, err
+}
+
+// spendAssertion records an assertion id, and reports ErrAssertionSpent if it
+// was already there.
+//
+// INSERT ... ON CONFLICT DO NOTHING makes the check and the claim one
+// statement. Reading first and inserting second would leave a window in which
+// two concurrent requests both see the id as unused, which is precisely the
+// race a replay would exploit — and the narrower it gets the harder the
+// resulting bug is to believe.
+func (s *store) spendAssertion(ctx context.Context, jti string, expiresAt time.Time) error {
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO console.spent_assertions (jti, expires_at)
+		VALUES ($1, $2)
+		ON CONFLICT (jti) DO NOTHING
+	`, jti, expiresAt)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrAssertionSpent
+	}
+	return nil
+}
+
+// deleteSpentAssertions drops records of assertions that have since expired.
+//
+// Safe to forget them at that point: an expired assertion is refused on its
+// own exp before the replay check is ever reached, so the row has stopped
+// carrying information. Without this the table grows once per sign-in forever.
+func (s *store) deleteSpentAssertions(ctx context.Context) (int64, error) {
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM console.spent_assertions WHERE expires_at < NOW()`)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 // sessionInfo bundles what middleware needs after a session lookup:
@@ -442,9 +362,8 @@ type sessionInfo struct {
 	SudoUntil *time.Time // nil when not in sudo mode
 }
 
-// getSessionInfo returns the session row + the user. Centralises the
-// JOIN so the auth middleware and the sudo middleware look at the
-// session through one query.
+// getSessionInfo returns the session row, which now carries the identity
+// itself. One query, no join — the row is self-contained.
 func (s *store) getSessionInfo(ctx context.Context, token string) (*sessionInfo, error) {
 	var (
 		u         User
@@ -452,11 +371,10 @@ func (s *store) getSessionInfo(ctx context.Context, token string) (*sessionInfo,
 		sudoUntil *time.Time
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT u.id, u.email, u.role, u.first_name, u.last_name, u.created_at, s.expires_at, s.sudo_until
-		FROM console.sessions s
-		JOIN console.users u ON u.id = s.user_id
-		WHERE s.token = $1 AND s.expires_at > NOW()
-	`, token).Scan(&u.ID, &u.Email, &u.Role, &u.FirstName, &u.LastName, &u.CreatedAt, &expiresAt, &sudoUntil)
+		SELECT subject, org, role, email, name, expires_at, sudo_until
+		FROM console.sessions
+		WHERE token = $1 AND expires_at > NOW()
+	`, token).Scan(&u.Subject, &u.Org, &u.Role, &u.Email, &u.Name, &expiresAt, &sudoUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
