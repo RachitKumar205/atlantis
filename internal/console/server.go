@@ -29,6 +29,8 @@ import (
 
 	"github.com/rachitkumar205/atlantis/clients/go/adminjson"
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/migrate"
+	"github.com/rachitkumar205/atlantis/migrations"
 )
 
 const (
@@ -73,10 +75,22 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 		_ = atl.Close()
 		return nil, fmt.Errorf("open console db: %w", err)
 	}
-	if err := db.migrate(ctx); err != nil {
+	// The console's schema is versioned and travels inside this binary. See
+	// the migrations package for why it is embedded rather than read from a
+	// path, and internal/migrate for the search_path pin that keeps a second
+	// boot from replaying the whole history.
+	if err := migrate.RunFS(cfg.PGURL, migrations.Console, "console",
+		migrate.ConsoleHistoryTable, log); err != nil {
 		db.close()
 		_ = atl.Close()
 		return nil, fmt.Errorf("console db migrate: %w", err)
+	}
+	// Partitions are per-month and cannot live in a static migration; the
+	// migration creates the partitioned parent, this creates the children.
+	if err := db.ensureAuditPartitions(ctx); err != nil {
+		db.close()
+		_ = atl.Close()
+		return nil, fmt.Errorf("console audit partitions: %w", err)
 	}
 
 	bgCtx, bgCancel := context.WithCancel(context.Background())

@@ -1,0 +1,12 @@
+-- Deliberately empty.
+--
+-- The table is gone and so is every feature that read it: the console's PR
+-- flow, its CRUD handlers, and the VCS package behind them were all removed in
+-- #47. Recreating an empty console.caller_repos on `down` would restore a shape
+-- nothing writes and nothing reads — a table that exists only to make a
+-- rollback look symmetrical.
+--
+-- Rolling back past this migration therefore leaves the table absent, which is
+-- the honest result: the data it held was already unrecoverable when the
+-- feature was deleted.
+SELECT 1;

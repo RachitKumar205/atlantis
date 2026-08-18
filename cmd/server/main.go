@@ -43,6 +43,7 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/server/jobsdispatcher"
 	"github.com/rachitkumar205/atlantis/internal/storage/pg"
 	"github.com/rachitkumar205/atlantis/jobs"
+	"github.com/rachitkumar205/atlantis/migrations"
 )
 
 // podID returns the local pod identifier used in the dispatcher's
@@ -102,7 +103,10 @@ func main() {
 // can register cleanup before its Run starts.
 func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing, adminPolicy *authz.Policy) error {
 	if cfg.AutoMigrate {
-		if err := migrate.Run(cfg.PGURL, cfg.MigrationsDir, log); err != nil {
+		// infra travels inside this binary; the tidectl tree is read from
+		// MigrationsDir because the deployment emits it after the build. See
+		// the migrations package for the split.
+		if err := migrate.Run(cfg.PGURL, migrations.Infra, cfg.MigrationsDir, log); err != nil {
 			return err
 		}
 	}

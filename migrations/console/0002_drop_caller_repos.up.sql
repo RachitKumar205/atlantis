@@ -1,0 +1,13 @@
+-- Drops console.caller_repos, which mapped each caller to a GitHub
+-- owner/repo/branch for the console's "Open PR" button. That flow went in #47:
+-- .atl files live in the customer's own git repository and migrations apply
+-- through `tide apply`, so the console has no reason to know a repository
+-- exists.
+--
+-- This statement used to live inside store.migrate, with a comment explaining
+-- that it was there only because the console had no migration framework and a
+-- one-shot statement had nowhere else to go. It now has somewhere else to go.
+--
+-- IF EXISTS because most databases never had the table: it is gone from fresh
+-- installs, and present only where the console ran before #47.
+DROP TABLE IF EXISTS console.caller_repos;

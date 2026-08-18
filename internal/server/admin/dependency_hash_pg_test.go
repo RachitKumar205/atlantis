@@ -13,6 +13,7 @@ import (
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/migrate"
 	"github.com/rachitkumar205/atlantis/internal/testsupport/pgcatalog"
+	"github.com/rachitkumar205/atlantis/migrations"
 )
 
 // The end-to-end half of the per-caller staleness token.
@@ -49,7 +50,8 @@ func depScopeService(t *testing.T) *Service {
 	dsn := pgcatalog.PrivateDatabase(t, adminDSN, dbName)
 
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if err := migrate.Run(dsn, "../../../migrations", quiet); err != nil {
+	if err := migrate.RunFS(dsn, migrations.Infra, "infra",
+		migrate.InfraHistoryTable, quiet); err != nil {
 		t.Fatalf("migrate %s: %v", dbName, err)
 	}
 

@@ -11,6 +11,34 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ## Unreleased
 
+### Changed
+
+#### Migrations travel in the binary
+
+The server's own schema (`migrations/infra`) and the console's
+(`migrations/console`, new) are embedded with `go:embed` and applied from there.
+A binary now carries the schema it was built against.
+
+**`MIGRATIONS_DIR` still exists, and means less than it did.** It names only the
+**tidectl-emitted** tree — the migrations your deployment owns, written by
+`tidectl plan` / `approve` into your own repository after the binary was built,
+which no binary can embed. It no longer points at the server's own schema, so it
+can no longer point a server at a version of that schema its code disagrees
+with. The server image drops its `COPY migrations /app/migrations`.
+
+**The console gains a migration framework.** Its schema was previously built by
+one `CREATE TABLE IF NOT EXISTS` block re-run on every boot, with one-shot
+`DROP` statements appended as features were removed. That has no version, so
+nothing could tell *already applied* from *applied halfway* — survivable while
+every statement was `CREATE TABLE`, and not once one is an `ALTER`.
+
+An existing console database converges on first boot with no operator action:
+migration 1 is the current schema with `IF NOT EXISTS` throughout, so it no-ops
+and records its version. Verified against a database carrying live rows.
+
+The `console.caller_repos` drop from the PR-flow removal is now migration 2,
+where its own comment said it belonged.
+
 ### Removed
 
 #### The self-host bundle — breaking

@@ -63,7 +63,16 @@ type config struct {
 	// production (operators apply migrations explicitly via tidectl /
 	// golang-migrate); compose / make dev-isolated flip this on so first-
 	// day workflows don't need an extra step.
-	AutoMigrate   bool
+	AutoMigrate bool
+
+	// MigrationsDir is where the TIDECTL-emitted tree lives — the migrations
+	// the deployment owns, written by `tidectl plan`/`approve` into its own
+	// repository after this binary was built.
+	//
+	// It no longer names the server's own schema. That tree (migrations/infra)
+	// is embedded in the binary, so there is no path that can point a server at
+	// a different version of the schema its code expects. See the migrations
+	// package.
 	MigrationsDir string
 
 	// Schema-management toggles surfaced to the admin Service.

@@ -82,7 +82,11 @@ Durations use Go syntax (`5m`, `30s`, `1h`, `500ms`).
 | Variable | Default | Notes |
 |---|---|---|
 | `AUTO_MIGRATE` | `false` | Apply pending migrations on boot. |
-| `MIGRATIONS_DIR` | `migrations` | Directory passed to the bundled migrate runner. Resolved relative to the server's working directory. |
+| `MIGRATIONS_DIR` | `migrations` | Where the **tidectl-emitted** tree lives, resolved relative to the server's working directory. A missing or empty `tidectl/` subdirectory is fine — a deployment with no callers has not emitted any yet. |
+
+`MIGRATIONS_DIR` does not name the server's own schema. That tree is embedded in the binary, so a server cannot be pointed at a different version of the schema its code expects. Only the tidectl tree is read from disk, because `tidectl plan` / `approve` writes it into your deployment repository after the binary was built.
+
+The console has its own embedded tree and its own history table (`console_schema_migrations`); it needs no configuration at all.
 
 Set `AUTO_MIGRATE=false` in production. Boot-time migrations race rolling restarts: golang-migrate serializes on a Postgres advisory lock, but a losing replica crash-loops until the leader finishes — visible to your orchestrator as a flapping pod.
 

@@ -54,7 +54,11 @@ RUN adduser -D -u 10001 atlantis && \
 
 WORKDIR /app
 COPY --from=build /out/atlantis /app/atlantis
-COPY migrations /app/migrations
+
+# No `COPY migrations` for the server's own schema: migrations/infra is embedded
+# in the binary, so the image cannot carry a version of it that disagrees with
+# the code. MIGRATIONS_DIR now names only the tidectl-emitted tree, which a
+# deployment mounts because it writes it after this image is built.
 
 # /app/schema is writable so `tide apply` can mirror submitted .atl files when
 # ATL_MIRROR_SCHEMA=true, which is a local-development aid — see the

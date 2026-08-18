@@ -1,13 +1,29 @@
 // Package migrate applies the SQL migration tree to a Postgres database.
 //
-// It lives here rather than in cmd/server because two things need it and only
-// one of them is the server: tests that boot against a private database have to
-// build the schema first, and a test binary cannot call into package main.
+// It lives here rather than in cmd/server because several things need it and
+// only one of them is the server: the console migrates its own schema, and
+// tests that boot against a private database have to build the schema first —
+// and a test binary cannot call into package main.
+//
+// # Where a migration tree comes from
+//
+// Two sources, split by who owns the schema rather than by convenience.
+//
+// A tree the PRODUCT owns is embedded in the binary that needs it
+// ([RunFS]): migrations/infra in atlantis-server, migrations/console in
+// atlantis-console. The binary then carries the schema it was built against,
+// so there is no path to configure and no way to run one version of a binary
+// against another version of its own schema.
+//
+// A tree the DEPLOYMENT owns stays on disk ([RunDir]). tidectl emits those
+// into the deployment's own repository after the binary is built, so no binary
+// can embed them.
 package migrate
 
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,47 +31,90 @@ import (
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/pgx/v5"
+	"github.com/golang-migrate/migrate/v4/source"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 )
 
-// Run applies any pending migrations against the configured
-// Postgres URL when AUTO_MIGRATE is enabled (the default in
-// docker-compose / make dev-isolated; off in production where ops runs
-// migrations explicitly).
+// History table names. Each tree rides its own so they evolve independently,
+// and so a version recorded by one is never mistaken for another's.
+const (
+	InfraHistoryTable   = "atlantis_schema_migrations_infra"
+	TidectlHistoryTable = "atlantis_schema_migrations_tidectl"
+	ConsoleHistoryTable = "console_schema_migrations"
+)
+
+// Run applies the server's pending migrations: the embedded infra tree, then
+// the tidectl tree from disk.
 //
-// The migrations tree is split into infra/ (hand-written) and tidectl/
-// (codegen-emitted); each rides its own _schema_migrations history
-// table so the two evolve independently. We always apply infra first
-// because tidectl-emitted trigger functions reference the
-// cache_invalidations table that infra creates. A no-op
-// (already-current) leg logs at info and continues.
+// infra goes first because tidectl-emitted trigger functions reference the
+// cache_invalidations table infra creates. A no-op (already-current) leg logs
+// at info and continues.
 //
-// Failures here are fatal: starting the server against an out-of-date
-// schema would let RPCs hit columns that don't exist yet. We'd rather
-// crash on boot than serve garbage.
-func Run(pgURL string, migrationsDir string, log *slog.Logger) error {
-	if err := applyDir(pgURL, migrationsDir, "infra", "atlantis_schema_migrations_infra", log); err != nil {
+// Failures here are fatal: starting the server against an out-of-date schema
+// would let RPCs hit columns that don't exist yet. We'd rather crash on boot
+// than serve garbage.
+//
+// infraFS is the embedded tree — see the package doc for why the product's own
+// schema travels in the binary while the deployment's stays on disk.
+// tidectlDir may be missing or empty, which is a legitimate state: a fresh
+// install with no callers has no tidectl migrations yet.
+func Run(pgURL string, infraFS fs.FS, tidectlDir string, log *slog.Logger) error {
+	if err := RunFS(pgURL, infraFS, "infra", InfraHistoryTable, log); err != nil {
 		return err
 	}
-	return applyDir(pgURL, migrationsDir, "tidectl", "atlantis_schema_migrations_tidectl", log)
+	return RunDir(pgURL, tidectlDir, "tidectl", TidectlHistoryTable, log)
 }
 
-// applyDir runs `migrate up` against one subdirectory + its private
-// history table. The version number reported in logs is per-subdir;
-// operators reading the log see two version stamps per boot, one per
-// history.
-func applyDir(pgURL, root, sub, historyTable string, log *slog.Logger) error {
-	// A missing or empty subdir is a legitimate state — a fresh install
-	// with no callers has no tidectl/ migrations yet, and the auto-migrate
-	// shouldn't fail on it. golang-migrate errors out of migrate.New if
-	// the source path doesn't exist, so guard explicitly.
+// RunFS applies an embedded migration tree. sub names the directory inside fsys
+// and is used only for log lines and error messages.
+func RunFS(pgURL string, fsys fs.FS, sub, historyTable string, log *slog.Logger) error {
+	// An embedded tree with no .sql files is a build mistake, not a state:
+	// //go:embed fails at compile time on a missing directory, so reaching here
+	// with nothing in it means the pattern matched a directory that exists and
+	// is empty. Say so rather than logging "skipped" and starting against a
+	// database with no schema.
+	entries, err := fs.ReadDir(fsys, sub)
+	if err != nil {
+		return fmt.Errorf("migrate %s: read embedded tree: %w", sub, err)
+	}
+	if len(entries) == 0 {
+		return fmt.Errorf("migrate %s: the embedded tree is empty, so this "+
+			"binary carries no schema for it", sub)
+	}
+
+	src, err := iofs.New(fsys, sub)
+	if err != nil {
+		return fmt.Errorf("migrate %s: open embedded tree: %w", sub, err)
+	}
+	return apply(pgURL, src, "iofs", sub, historyTable, log)
+}
+
+// RunDir applies a migration tree from the filesystem.
+//
+// A missing or empty directory is a legitimate state here — unlike RunFS,
+// nothing guarantees the deployment has emitted any migrations yet — so it logs
+// and returns nil.
+func RunDir(pgURL, root, sub, historyTable string, log *slog.Logger) error {
 	dir := filepath.Join(root, sub)
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) == 0 {
 		log.Info("auto-migrate skipped (no migrations)", "dir", sub)
 		return nil
 	}
+	src, err := source.Open("file://" + dir)
+	if err != nil {
+		return fmt.Errorf("migrate %s: open %s: %w", sub, dir, err)
+	}
+	return apply(pgURL, src, "file", sub, historyTable, log)
+}
 
-	src := "file://" + dir
+// apply runs `migrate up` from one source against its private history table.
+// The version number reported in logs is per-tree; an operator reading a server
+// boot sees two version stamps, one per history.
+//
+// srcName is the driver name golang-migrate registers the source under —
+// "iofs" or "file". It affects nothing but its own error messages.
+func apply(pgURL string, src source.Driver, srcName, sub, historyTable string, log *slog.Logger) error {
 	sep := "?"
 	if strings.Contains(pgURL, "?") {
 		sep = "&"
@@ -88,7 +147,7 @@ func applyDir(pgURL, root, sub, historyTable string, log *slog.Logger) error {
 	dbURL := "pgx5://" + trimScheme(pgURL) + sep +
 		"search_path=public&x-migrations-table=" + historyTable
 
-	m, err := migrate.New(src, dbURL)
+	m, err := migrate.NewWithSourceInstance(srcName, src, dbURL)
 	if err != nil {
 		return fmt.Errorf("migrate init %s: %w", sub, err)
 	}

@@ -20,6 +20,7 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/server/admin"
 	"github.com/rachitkumar205/atlantis/internal/testsupport/pgcatalog"
 	"github.com/rachitkumar205/atlantis/internal/testsupport/testpki"
+	"github.com/rachitkumar205/atlantis/migrations"
 )
 
 // The console's first HTTP test harness.
@@ -88,7 +89,10 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 	dsn := pgcatalog.PrivateDatabase(t, adminDSN, dbName)
 
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if err := migrate.Run(dsn, "../../migrations", quiet); err != nil {
+	// Infra only. The console's own schema is applied by console.New from the
+	// tree embedded in the binary, which is the path under test.
+	if err := migrate.RunFS(dsn, migrations.Infra, "infra",
+		migrate.InfraHistoryTable, quiet); err != nil {
 		t.Fatalf("migrate %s: %v", dbName, err)
 	}
 

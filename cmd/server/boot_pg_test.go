@@ -20,6 +20,7 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/migrate"
 	"github.com/rachitkumar205/atlantis/internal/server/authz"
 	"github.com/rachitkumar205/atlantis/internal/testsupport/pgcatalog"
+	"github.com/rachitkumar205/atlantis/migrations"
 )
 
 // Boot the real run() and watch what it does about tenant isolation.
@@ -253,7 +254,10 @@ func bootDatabase(t *testing.T, adminDSN, dbName string) string {
 	// the drop inside this helper uses FORCE rather than terminating and hoping.
 	dsn := pgcatalog.PrivateDatabase(t, adminDSN, dbName)
 
-	if err := migrate.Run(dsn, "../../migrations", quietBootLogger()); err != nil {
+	// Infra only, from the embedded tree — no path, so this cannot drift from
+	// the schema the binary under test was built against.
+	if err := migrate.RunFS(dsn, migrations.Infra, "infra",
+		migrate.InfraHistoryTable, quietBootLogger()); err != nil {
 		t.Fatalf("migrate %s: %v", dbName, err)
 	}
 	return dsn

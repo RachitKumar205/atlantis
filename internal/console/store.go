@@ -71,85 +71,24 @@ func newStore(ctx context.Context, pgURL string) (*store, error) {
 
 func (s *store) close() { s.pool.Close() }
 
-// migrate creates the console schema + users and sessions tables. Runs at
-// startup; idempotent via CREATE IF NOT EXISTS.
-func (s *store) migrate(ctx context.Context) error {
-	_, err := s.pool.Exec(ctx, `
-		CREATE SCHEMA IF NOT EXISTS console;
+// The console's schema lives in migrations/console, applied by internal/migrate
+// from the tree embedded in this binary.
+//
+// It used to be built here, by one idempotent CREATE-IF-NOT-EXISTS block re-run
+// on every boot, with one-shot DROP statements appended as features were
+// removed. That has no version, so nothing could distinguish "already applied"
+// from "applied halfway" — survivable while every statement was CREATE TABLE,
+// and not once one of them is an ALTER or a policy.
 
-		CREATE TABLE IF NOT EXISTS console.users (
-			id            BIGSERIAL PRIMARY KEY,
-			email         TEXT        NOT NULL UNIQUE,
-			password_hash TEXT        NOT NULL,
-			role          TEXT        NOT NULL DEFAULT 'admin',
-			first_name    TEXT        NOT NULL DEFAULT '',
-			last_name     TEXT        NOT NULL DEFAULT '',
-			created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		);
-
-		CREATE TABLE IF NOT EXISTS console.sessions (
-			token      TEXT        PRIMARY KEY,
-			user_id    BIGINT      NOT NULL REFERENCES console.users(id) ON DELETE CASCADE,
-			expires_at TIMESTAMPTZ NOT NULL,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			-- sudo_until: NULL outside sudo mode. Set by /api/auth/sudo when
-			-- the user re-authenticates with their password; checked by the
-			-- requireSudo middleware on destructive endpoints. Grants a
-			-- short window of elevated permission like sudo on a shell, so
-			-- a stolen session cookie cannot trigger sign-out-all or
-			-- revoke-all without also producing the password.
-			sudo_until TIMESTAMPTZ
-		);
-		CREATE INDEX IF NOT EXISTS console_sessions_user_id_idx
-			ON console.sessions(user_id);
-		CREATE INDEX IF NOT EXISTS console_sessions_expires_idx
-			ON console.sessions(expires_at);
-
-		-- Added 2026-08-13. Drops console.caller_repos, which mapped each
-		-- caller to a GitHub owner/repo/branch for the console's "Open PR"
-		-- button. That flow is gone: .atl files live in the customer's own git
-		-- repo and migrations apply through tide apply, so the console has no
-		-- reason to know a repository exists.
-		--
-		-- A DROP inside migrate() rather than a numbered migration because this
-		-- package has no migration framework — migrate() is CREATE TABLE IF NOT
-		-- EXISTS re-run on every boot, so a one-shot statement has nowhere else
-		-- to live. IF EXISTS keeps it a no-op from the second boot onward.
-		--
-		-- Safe to delete this statement once every install has booted past this
-		-- version. Leaving it costs one catalogue lookup per boot; deleting it
-		-- early on an install that never upgraded leaves the table orphaned.
-		DROP TABLE IF EXISTS console.caller_repos;
-
-		-- audit_log is range-partitioned on created_at, one partition per
-		-- calendar month, so the retention worker can DROP whole months
-		-- atomically (no DELETE-induced bloat). The PK includes
-		-- created_at because Postgres requires every unique constraint on
-		-- a partitioned table to cover the partition key.
-		--
-		-- A FK from audit_log to console.users isn't permitted on a
-		-- partitioned table that crosses heterogeneous parent rows —
-		-- enforce referential integrity at the application layer instead
-		-- (users.id is BIGSERIAL and never reused, so a stale user_id in
-		-- audit history just shows as user_email='' in the listing).
-		CREATE TABLE IF NOT EXISTS console.audit_log (
-			id         BIGSERIAL,
-			user_id    BIGINT      NOT NULL,
-			action     TEXT        NOT NULL,
-			detail     JSONB,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			PRIMARY KEY (id, created_at)
-		) PARTITION BY RANGE (created_at);
-
-		CREATE INDEX IF NOT EXISTS console_audit_log_user_id_idx
-			ON console.audit_log(user_id);
-		CREATE INDEX IF NOT EXISTS console_audit_log_created_at_idx
-			ON console.audit_log(created_at DESC);
-	`)
-	if err != nil {
-		return err
-	}
-
+// ensureAuditPartitions creates the audit_log partitions the console needs to
+// start: this month's and next month's.
+//
+// Separate from the migration tree on purpose. audit_log is partitioned by
+// month, so its children are a function of the calendar rather than of the
+// schema version — a static migration written today cannot create next March's
+// partition. The migration creates the partitioned parent; this creates the
+// children, and the retention worker keeps the window rolling.
+func (s *store) ensureAuditPartitions(ctx context.Context) error {
 	// Ensure the current and next month's partitions exist so the very
 	// first logAction call after a cold start lands somewhere. The
 	// retention worker keeps this rolling.

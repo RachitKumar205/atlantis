@@ -1,0 +1,12 @@
+-- Drops the console schema in full.
+--
+-- CASCADE because audit_log owns per-month partitions created at runtime by
+-- store.ensureAuditPartition, and sessions carries a foreign key to users.
+-- Enumerating them here would mean listing partitions this file cannot know
+-- the names of.
+--
+-- This destroys every operator account, session and audit row. It is the
+-- reverse of a baseline, so that is what reversing means; it exists so the
+-- migration tree is genuinely reversible and `down` can be tested rather than
+-- assumed.
+DROP SCHEMA IF EXISTS console CASCADE;
