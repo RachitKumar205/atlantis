@@ -350,6 +350,46 @@ Read by `cmd/cloud`, which publishes the keys consoles verify against.
 | `CLOUD_LISTEN` | `:9500` | Bind address for the JWKS document, served at `/.well-known/jwks.json`. |
 | `CLOUD_ISSUER` | (unset; **required**) | Becomes the `iss` claim. Must match each console's `CLOUD_ISSUER` exactly. |
 | `CLOUD_SIGNING_KEY` | `./certs/cloud-signing-key.pem` | ECDSA P-256 signing key, created on first use with mode `0600`. Persisting it matters: a key regenerated per restart changes the published key set, so every assertion issued beforehand stops verifying. |
+| `CLOUD_PG_URL` | (unset; **required**) | Cloud's own database — accounts, organisations, membership. Separate from the console's; locally the same PostgreSQL instance, schema `cloud`. |
+| `CLOUD_PUBLIC_URL` | (unset; **required**) | Base URL every emailed link is built from. See below. |
+| `CLOUD_SMTP_ADDR` | (unset) | `host:port` of a mail server. **Unset means links are written to the log rather than sent.** |
+| `CLOUD_SMTP_FROM` | (unset; required with `CLOUD_SMTP_ADDR`) | Sender address. A message with no sender is refused by every receiver. |
+| `CLOUD_SMTP_USER`, `CLOUD_SMTP_PASSWORD` | (unset) | SMTP credentials. Sent only over an encrypted connection — Go's `PlainAuth` refuses otherwise, which is why STARTTLS is attempted unconditionally. |
+| `CLOUD_HIBP_CHECK` | `true` | Refuse passwords found in a known breach, via Have I Been Pwned's k-anonymity range API. The password never leaves the process; only the first five characters of its SHA-1 are sent. |
+| `CLOUD_TRUST_PROXY` | `false` | Read `X-Forwarded-For` when rate limiting. Leave off unless something you control terminates in front — the header is spoofable, and a limiter keyed on a spoofable value is one an attacker resets per request. |
+
+### Accounts, and what `cloud serve` does not serve
+
+`cloud serve` publishes the key set and four account routes: sign up, verify an
+address, request a password reset, complete one.
+
+**It does not serve sign-in.** Cloud's sign-in is two-legged — a password, then
+a second factor — and the second factor is not built yet. A route that issued a
+session on a password alone is the posture this product refuses, so it lands
+with the factor that gates it. Nothing `cloud serve` exposes today creates a
+session, including completing a password reset: proving control of a mailbox is
+one factor, and a reset that signed you in would make the mailbox sufficient on
+its own.
+
+**`CLOUD_PUBLIC_URL` has no default and is not derived from the request.** It
+becomes a URL in an email asking somebody to prove who they are. A wrong value
+does not fail — it sends every user a working link to the wrong host, which is a
+broken flow if that host is ours and a phishing primitive if it is not. Deriving
+it from the `Host` header would be worse, because that header is
+attacker-controlled.
+
+**With no `CLOUD_SMTP_ADDR`, links go to the log.** Cloud warns at startup and
+again on every message, and both warnings are deliberate: this is the one
+setting whose absence looks exactly like everything working. Accounts are
+created, the response says a message is on its way, and the link sits in a log
+nobody reads.
+
+**Sign-up and reset-request answer identically whether or not the address has an
+account** — same status, same body, and held to the same latency floor. Without
+the floor the bodies are pointless: the registered path writes a row, mints a
+token and sends a message, and the unregistered one does none of it, so the
+clock says what the body will not. An address that already has an account is
+sent a message telling *the owner* that somebody tried to sign up with it.
 
 `cloud org register` also reads `CONSOLE_PG_URL` and `CONSOLE_DATA_KEY`, as
 defaults for its `-db` and `-data-key` flags. The keyset must be the one the

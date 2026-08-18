@@ -13,6 +13,51 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Added
 
+#### Accounts can hold a password and prove control of an address
+
+`cloud serve` grows from publishing a key set into serving four account routes:
+sign up, verify an address, request a password reset, complete one.
+
+- **argon2id**, with its parameters carried in the stored hash. Raising the cost
+  is a constant change plus a rehash on next use, not a migration — an older
+  hash still verifies and reports that it should be rewritten.
+- **Strength by estimate, not by composition rule.** zxcvbn, refusing anything
+  under score 3 or 12 characters, with the user's own email and name fed in as
+  context. A rule demanding one upper, one digit and one symbol accepts
+  `Passw0rd!` and rejects a long passphrase; this does the opposite.
+- **Breached-password checking** against Have I Been Pwned's k-anonymity range
+  API, on by default. Only the first five characters of the password's SHA-1
+  leave the process. If the corpus cannot be reached the password is accepted
+  and a warning is logged: sign-up must not stop working because a third party
+  is down.
+- **Email through a `Mailer` interface**, SMTP today. With none configured,
+  links are written to the log and a warning is emitted at startup and at every
+  send — the absence of a mail server is the one setting that otherwise looks
+  exactly like everything working.
+- **Tokens are stored hashed.** A verification or reset token travels in a URL,
+  so it lands in browser history, in referrers and in logs; the database holds
+  only a SHA-256 of it. Single-use, short-lived, bound to their purpose and to
+  the address they were sent to — so a reset issued to an old address stops
+  working when the address changes.
+
+**Sign-up and reset-request do not reveal who has an account.** Same status,
+same body, and held to the same latency floor, because the registered path
+writes a row, mints a token and sends a message while the unregistered one does
+none of it — a difference of tens of milliseconds that is trivially measurable.
+An address that already has an account gets a message telling *the owner* that
+somebody tried to sign up with it.
+
+**No route here creates a session, including completing a reset.** Signing in
+needs two factors and proving control of a mailbox is one; a reset that signed
+you in would make the mailbox sufficient on its own. Sign-in lands with the
+second factor that gates it.
+
+New configuration: `CLOUD_PG_URL`, `CLOUD_PUBLIC_URL`, `CLOUD_SMTP_*`,
+`CLOUD_HIBP_CHECK`, `CLOUD_TRUST_PROXY`. `CLOUD_PUBLIC_URL` is required and has
+no default — it becomes a link in an email asking somebody to prove who they
+are, and a wrong value does not fail, it sends every user a working link to the
+wrong host.
+
 #### Atlantis Cloud records who people are and which organisations they belong to
 
 The console has been trusting an `org` claim that nothing wrote. `cloud mint`

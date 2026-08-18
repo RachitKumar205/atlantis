@@ -38,10 +38,11 @@ type catalogQuerier interface {
 // tables here that are only ever read for an already-identified user, and this
 // is what stops them landing unpoliced because nobody thought about it.
 var unpolicedTables = map[string]string{
-	"users":       "the sign-in lookup is what discovers who the request is",
-	"identities":  "the OAuth callback lookup is the same, one step along: a policy here makes every sign-in create a duplicate account",
-	"orgs":        "the registry of organisations",
-	"memberships": "read per-user by a member and per-org by an admin; a policy on user_id breaks the second",
+	"users":        "the sign-in lookup is what discovers who the request is",
+	"identities":   "the OAuth callback lookup is the same, one step along: a policy here makes every sign-in create a duplicate account",
+	"orgs":         "the registry of organisations",
+	"memberships":  "read per-user by a member and per-org by an admin; a policy on user_id breaks the second",
+	"email_tokens": "a reset link is spent by token hash with nobody signed in, so a policy keyed to the current user matches nothing and every reset reports an invalid token",
 }
 
 // VerifyPolicies asks the live catalogue whether every table in schema cloud is

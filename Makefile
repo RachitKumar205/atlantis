@@ -37,6 +37,11 @@ CLOUD_SIGNING_KEY  ?= $(DEV_CERT_DIR)/cloud-signing-key.pem
 # table is also the point at which this needs its own NOSUPERUSER role.
 CLOUD_PG_URL       ?= postgres://atlantis:atlantis@localhost:5432/atlantis?sslmode=disable
 
+# The base every emailed link is built from. Required, with no default in the
+# product — a wrong value does not fail, it sends every user a working link to
+# the wrong host. Locally it is wherever `make dev-auth` is listening.
+CLOUD_PUBLIC_URL   ?= http://localhost:9500
+
 # Two migration histories: infra (hand-written) and tidectl (codegen).
 MIGRATIONS_INFRA_DIR := ./migrations/infra
 MIGRATIONS_TIDECTL_DIR := ./.dev/migrations/tidectl
@@ -403,8 +408,14 @@ dev-org-register: dev-certs dev-data-key build-cloud ## Point an org at the loca
 # means running the issuer locally, which is the same code Cloud runs.
 
 .PHONY: dev-auth
-dev-auth: build-cloud ## Serve Cloud's key set on :9500 so the console can verify sign-ins
+dev-auth: build-cloud ## Serve Cloud: the key set the console verifies against, plus the account routes
+	@# No CLOUD_SMTP_ADDR here, so verification and reset links are written to
+	@# this terminal instead of emailed. `cloud serve` warns about it at startup
+	@# and at every send — that is the intended development flow, and the
+	@# warning is what stops it being the accidental production one.
 	CLOUD_ISSUER="$(CLOUD_ISSUER)" \
+		CLOUD_PG_URL="$(CLOUD_PG_URL)" \
+		CLOUD_PUBLIC_URL="$(CLOUD_PUBLIC_URL)" \
 		$(BIN_DIR)/atlantis-cloud serve \
 			-key "$(CLOUD_SIGNING_KEY)" \
 			-listen "$(CLOUD_LISTEN)"

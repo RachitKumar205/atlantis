@@ -7,10 +7,17 @@
 // the other half of the same job: Cloud says who a user is, and Cloud says
 // which atlantis that user's organisation is served by.
 //
-//	cloud serve          publish the key set over HTTP
+//	cloud serve          publish the key set, and serve the account routes
 //	cloud mint           sign one assertion and print it
 //	cloud org register   record an organisation's atlantis and credentials
 //	cloud data-key       print a keyset for a console's CONSOLE_DATA_KEY
+//
+// # What `serve` does not serve
+//
+// Sign-in. Cloud's sign-in is two-legged — a password, then a second factor —
+// and the second factor does not exist yet. A route that issued a session on a
+// password alone would be the posture this product refuses, so it lands with
+// the factor that gates it. Nothing `serve` exposes today creates a session.
 //
 // # Why minting is not a route
 //
@@ -55,6 +62,7 @@ import (
 
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 	"github.com/rachitkumar205/atlantis/internal/cloud/issuer"
+	cloudsrv "github.com/rachitkumar205/atlantis/internal/cloud/server"
 	"github.com/rachitkumar205/atlantis/internal/cloud/store"
 	"github.com/rachitkumar205/atlantis/internal/console"
 	"github.com/rachitkumar205/atlantis/internal/console/secrets"
@@ -128,54 +136,89 @@ func issuerFlag(fs *flag.FlagSet) *string {
 		"issuer name; becomes the iss claim and must match each console's CLOUD_ISSUER")
 }
 
+// serve runs Cloud's HTTP surface: the key set every console verifies against,
+// and the account routes.
+//
+// Configuration comes from the environment rather than flags here, because
+// there is now more of it than a command line wants to carry and because it is
+// the same set a deployment sets once. The flags that remain are the two an
+// operator overrides interactively.
 func serve(args []string, log *slog.Logger) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	keyPath := keyFlag(fs)
 	issuerName := issuerFlag(fs)
-	listen := fs.String("listen", envOr("CLOUD_LISTEN", ":9500"), "address to serve the JWKS document on")
+	listen := fs.String("listen", "", "address to serve on (overrides CLOUD_LISTEN)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *issuerName == "" {
-		return errors.New("-issuer is required (or set CLOUD_ISSUER); it becomes the iss claim " +
-			"and each console compares it for exact equality")
+
+	cfg, err := cloudsrv.ConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	// Flags win where they were given, so `cloud serve -issuer X` still works
+	// the way it did before this grew a config.
+	if *issuerName != "" {
+		cfg.Issuer = *issuerName
+	}
+	if *keyPath != "" {
+		cfg.SigningKey = *keyPath
+	}
+	if *listen != "" {
+		cfg.Listen = *listen
 	}
 
-	key, created, err := issuer.LoadOrCreateKey(*keyPath)
+	key, created, err := issuer.LoadOrCreateKey(cfg.SigningKey)
 	if err != nil {
 		return err
 	}
 	if created {
-		log.Info("generated a signing key", "path", *keyPath, "kid", key.ID)
+		log.Info("generated a signing key", "path", cfg.SigningKey, "kid", key.ID)
 	}
-
-	iss, err := issuer.New(*issuerName, key)
+	iss, err := issuer.New(cfg.Issuer, key)
 	if err != nil {
 		return err
 	}
 
-	srv := &http.Server{
-		Addr:              *listen,
-		Handler:           iss.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	// Graceful shutdown. A console that catches a truncated response while
-	// refreshing its key set keeps its cached keys, so this is not
-	// load-bearing for correctness — but a half-written JWKS is a confusing
-	// thing to find in a log when something else is actually wrong.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	db, err := openCloud(ctx, cfg.PGURL, log)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	api := cloudsrv.New(cfg, db, iss, log)
+	defer api.Close()
+
+	srv := &http.Server{
+		Addr:              cfg.Listen,
+		Handler:           api,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
 	errc := make(chan error, 1)
 	go func() {
-		log.Info("serving key set", "addr", *listen, "issuer", iss.Name(),
-			"path", issuer.JWKSPath, "kid", key.ID)
+		log.Info("serving", "addr", cfg.Listen, "issuer", iss.Name(),
+			"jwks", issuer.JWKSPath, "kid", key.ID, "public_url", cfg.PublicURL)
+		if cfg.SMTPAddr == "" {
+			// Said at startup as well as at every send, because this is the
+			// setting whose absence looks like everything working: accounts are
+			// created, the response says a message is on its way, and the link
+			// is in a log nobody reads.
+			log.Warn("no CLOUD_SMTP_ADDR — verification and reset links will be " +
+				"written to this log instead of emailed")
+		}
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errc <- err
 		}
 	}()
 
+	// Graceful shutdown. A console that catches a truncated response while
+	// refreshing its key set keeps its cached keys, so this is not
+	// load-bearing for correctness — but a half-written JWKS is a confusing
+	// thing to find in a log when something else is actually wrong.
 	select {
 	case err := <-errc:
 		return err
