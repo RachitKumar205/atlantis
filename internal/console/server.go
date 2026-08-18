@@ -31,8 +31,8 @@ import (
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 	"github.com/rachitkumar205/atlantis/internal/console/cloudauth"
-	"github.com/rachitkumar205/atlantis/internal/console/secrets"
 	"github.com/rachitkumar205/atlantis/internal/migrate"
+	"github.com/rachitkumar205/atlantis/internal/secrets"
 	"github.com/rachitkumar205/atlantis/internal/storage/pg"
 	"github.com/rachitkumar205/atlantis/migrations"
 )

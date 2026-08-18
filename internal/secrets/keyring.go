@@ -1,24 +1,32 @@
-// Package secrets encrypts the private key material the console stores for
-// each organisation.
+// Package secrets encrypts secrets that have to be stored reversibly.
+//
+// # Who uses it
+//
+// Two processes, which is why it lives here rather than under either of them:
+//
+//   - The console seals one client private key per organisation in
+//     console.orgs, so that dialling the wrong organisation's atlantis fails at
+//     the TLS handshake rather than returning somebody else's data.
+//   - Cloud seals each account's TOTP secret in cloud.totp_secrets. A second
+//     factor must be recomputable, so unlike the argon2id password hash beside
+//     it, it cannot be hashed.
+//
+// Both are the same shape of problem: a value that cannot be one-way hashed
+// because it has to be used again, living in a database that gets backed up,
+// replicated, and read by anything that can reach it.
 //
 // # What this defends, and what it does not
 //
-// The console holds one client certificate per organisation so that dialling
-// the wrong organisation's atlantis fails at the TLS handshake rather than
-// returning somebody else's data. Those certificates come with private keys,
-// and the keys live in console.orgs, which means they live in a database that
-// gets backed up, replicated, and read by anything that can reach it.
+// **A database dump alone yields nothing.** A leaked backup, a replica, a broad
+// SELECT over either table — none of them produce a usable key or a working
+// second factor, because the key-encrypting key is not in the database.
 //
-// So: **a database dump alone yields nothing.** A leaked backup, a replica, a
-// broad SELECT over console.orgs — none of them produce a usable key, because
-// the key-encrypting key is not in the database.
-//
-// It does **not** defend a compromised console process. The console must be
-// able to decrypt every organisation's key in order to serve any of them, so
-// the key-encrypting key is in memory by necessity. Nothing at this layer
-// changes that, and saying otherwise would be worse than the gap itself — an
-// operator who believes the keys are safe from a compromised process would make
-// different decisions about how that process is run.
+// It does **not** defend a compromised process. Each of them must be able to
+// decrypt in order to serve anybody, so the key-encrypting key is in memory by
+// necessity. Nothing at this layer changes that, and saying otherwise would be
+// worse than the gap itself — an operator who believes the secrets are safe
+// from a compromised process would make different decisions about how that
+// process is run.
 //
 // # Why Tink rather than crypto/cipher
 //

@@ -350,7 +350,9 @@ Read by `cmd/cloud`, which publishes the keys consoles verify against.
 | `CLOUD_LISTEN` | `:9500` | Bind address for the JWKS document, served at `/.well-known/jwks.json`. |
 | `CLOUD_ISSUER` | (unset; **required**) | Becomes the `iss` claim. Must match each console's `CLOUD_ISSUER` exactly. |
 | `CLOUD_SIGNING_KEY` | `./certs/cloud-signing-key.pem` | ECDSA P-256 signing key, created on first use with mode `0600`. Persisting it matters: a key regenerated per restart changes the published key set, so every assertion issued beforehand stops verifying. |
-| `CLOUD_PG_URL` | (unset; **required**) | Cloud's own database — accounts, organisations, membership. Separate from the console's; locally the same PostgreSQL instance, schema `cloud`. |
+| `CLOUD_PG_URL` | (unset; **required**) | Cloud's own database — accounts, organisations, membership, second factors. Separate from the console's; locally the same PostgreSQL instance, schema `cloud`. **The role must be `NOSUPERUSER` / `NOBYPASSRLS` and must own the tables** — see below. |
+| `CLOUD_DATA_KEY` | (unset; **required**) | Base64 Tink keyset sealing each account's TOTP secret. `cloud data-key` prints one. Not recoverable if lost. |
+| `CLOUD_COOKIE_SECURE` | `false` | `Secure` flag on Cloud's session cookie. Flip to `true` once a TLS terminator sits in front. |
 | `CLOUD_PUBLIC_URL` | (unset; **required**) | Base URL every emailed link is built from. See below. |
 | `CLOUD_SMTP_ADDR` | (unset) | `host:port` of a mail server. **Unset means links are written to the log rather than sent.** |
 | `CLOUD_SMTP_FROM` | (unset; required with `CLOUD_SMTP_ADDR`) | Sender address. A message with no sender is refused by every receiver. |
@@ -358,18 +360,53 @@ Read by `cmd/cloud`, which publishes the keys consoles verify against.
 | `CLOUD_HIBP_CHECK` | `true` | Refuse passwords found in a known breach, via Have I Been Pwned's k-anonymity range API. The password never leaves the process; only the first five characters of its SHA-1 are sent. |
 | `CLOUD_TRUST_PROXY` | `false` | Read `X-Forwarded-For` when rate limiting. Leave off unless something you control terminates in front — the header is spoofable, and a limiter keyed on a spoofable value is one an attacker resets per request. |
 
-### Accounts, and what `cloud serve` does not serve
+### Signing in takes two factors, always
 
-`cloud serve` publishes the key set and four account routes: sign up, verify an
-address, request a password reset, complete one.
+`cloud serve` publishes the key set, the account routes (sign up, verify,
+request a reset, complete one) and sign-in.
 
-**It does not serve sign-in.** Cloud's sign-in is two-legged — a password, then
-a second factor — and the second factor is not built yet. A route that issued a
-session on a password alone is the posture this product refuses, so it lands
-with the factor that gates it. Nothing `cloud serve` exposes today creates a
-session, including completing a password reset: proving control of a mailbox is
-one factor, and a reset that signed you in would make the mailbox sufficient on
-its own.
+**Sign-in is two-legged and cannot be shortened.** A password produces a
+*pending login*, not a session; only a second factor turns one into the other.
+That is structural rather than a check: pending logins live in
+`cloud.pending_logins` and sessions in `cloud.sessions`, so a session lookup
+does not find a pending login and there is no flag anybody can forget to test.
+
+**Every account needs a second factor.** An account with none gets a pending
+login that reaches enrolment and nothing else, which is also how accounts
+created before this existed acquire one. Today that factor is TOTP, with ten
+single-use backup codes; **WebAuthn arrives with the Cloud sign-in app**, which
+is what can drive its browser ceremony.
+
+**Completing a password reset does not sign you in.** Proving control of a
+mailbox is one factor, and a reset that produced a session would make the
+mailbox sufficient on its own.
+
+**An unverified address cannot sign in at all**, so there is no
+half-authenticated account anywhere downstream. `POST /api/auth/verify/resend`
+issues another link and answers identically whether or not the address has one.
+
+### Cloud needs its own database role
+
+`CLOUD_PG_URL` must point at a role that is `NOSUPERUSER` and `NOBYPASSRLS`,
+**and that owns the tables in schema `cloud`**.
+
+`cloud.totp_secrets` and `cloud.backup_codes` are protected by row-level
+security. `FORCE ROW LEVEL SECURITY` binds a table's *owner*; it binds a
+superuser to nothing. So a Cloud connected as a superuser — or one holding only
+`SELECT`/`INSERT` on tables somebody else owns — runs with every policy attached
+and inert, `\d` still listing them, every query returning everything.
+
+Cloud refuses to start in that state: the boot check that has been watching
+since the schema was created now enforces, and asks about the role as soon as a
+policed table exists. Locally, `make dev-cloud-role` creates the role and
+transfers ownership of anything an earlier superuser-run Cloud left behind.
+
+**`CLOUD_DATA_KEY` is not recoverable.** A TOTP secret must be recomputed to be
+checked, so unlike the argon2id password hash beside it, it is encrypted rather
+than hashed — sealed with the user id as associated data, so a ciphertext lifted
+onto another account will not open. Lose the keyset and every enrolled factor
+stays intact and permanently unopenable, which presents as every account being
+unable to finish signing in.
 
 **`CLOUD_PUBLIC_URL` has no default and is not derived from the request.** It
 becomes a URL in an email asking somebody to prove who they are. A wrong value

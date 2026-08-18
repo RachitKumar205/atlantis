@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rachitkumar205/atlantis/internal/console/secrets"
+	"github.com/rachitkumar205/atlantis/internal/secrets"
 )
 
 // setConsoleEnv sets the minimum ConfigFromEnv accepts. Tests about one missing

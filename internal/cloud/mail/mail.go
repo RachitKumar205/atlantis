@@ -3,7 +3,7 @@
 //
 // # Why an interface for two messages
 //
-// The same reason internal/console/secrets has one. The implementation is
+// The same reason internal/secrets has one. The implementation is
 // expected to change — SMTP today, very likely a transactional API later — and
 // an interface means that change is a constructor rather than an edit to every
 // call site. Two implementations exist from the start so the interface is

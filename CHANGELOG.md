@@ -13,6 +13,68 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Added
 
+#### People can sign in, with two factors — breaking for local development
+
+Cloud's sign-in is two-legged: a password produces a **pending login**, and only
+a second factor turns that into a session.
+
+That is structural rather than a check anybody performs. Pending logins live in
+`cloud.pending_logins` and sessions in `cloud.sessions`, so a session lookup
+does not find a pending login. The alternative — one table with a `state`
+column — makes every session read responsible for testing that column, and the
+one that forgets authenticates somebody who presented a single factor.
+
+- **Every account needs a second factor.** One with none gets a pending login
+  that reaches enrolment and nothing else, which is how accounts created before
+  this acquire one.
+- **TOTP today; WebAuthn with the Cloud sign-in app.** WebAuthn's ceremony needs
+  browser JavaScript and Cloud has no frontend, so shipping the server half now
+  would be code nothing calls. Stated plainly because it matters: **until that
+  lands the only second factor is phishable**, which is precisely what WebAuthn
+  was chosen over TOTP to fix.
+- **These routes are JSON, and enrolment has no page yet** — for the same
+  reason. Sign-in answers in JSON, so a person in a browser has no way to arrive
+  at an enrolment page, and one written anyway would be reachable by nobody. The
+  page and the QR code arrive with the sign-in app. Email verification and
+  password reset keep their plain HTML pages, because each is the target of a
+  link somebody is sent.
+- **A TOTP code is single-use within its window.** A code is valid for up to
+  ninety seconds once clock skew is allowed, so the step it came from is
+  recorded and a second presentation is refused.
+- **Ten backup codes**, hashed with argon2id rather than SHA-256 — they are
+  short enough to be typed, around fifty bits, which is reachable offline
+  against a fast hash and not against a memory-hard one.
+- **TOTP secrets are encrypted at rest**, sealed with the user id as associated
+  data so a ciphertext cannot be moved between accounts. A second factor has to
+  be recomputed to be checked, so it cannot be hashed the way a password is.
+- **An unverified address cannot sign in.** `POST /api/auth/verify/resend` sends
+  another link and answers identically whether or not the address has an account.
+- A wrong password, an unknown address and an account with no password are
+  refused identically, in the same time — the "no such account" branch verifies
+  against a decoy hash so it costs what a real check costs.
+
+**Breaking for local development.** `CLOUD_PG_URL` must now point at a
+`NOSUPERUSER NOBYPASSRLS` role that **owns** schema `cloud`, and
+`CLOUD_DATA_KEY` is required. `cloud.totp_secrets` and `cloud.backup_codes` are
+the first Cloud tables protected by row-level security, and `FORCE ROW LEVEL
+SECURITY` binds a table's owner while binding a superuser to nothing — so the
+previous dev role would have run with every policy attached and inert. Cloud
+refuses to start that way. Run `make dev-cloud-role`, which creates the role and
+transfers ownership of anything an earlier superuser-run Cloud left behind.
+
+**One bug worth recording, because its shape recurs here.**
+`HasConfirmedFactor` was written against the unpoliced pool with a comment
+arguing that was acceptable since it returns only a boolean. It is not: the
+table is policed, an unbound read matches nothing, and the count was therefore
+always zero. Every sign-in reported "no second factor enrolled" and handed out a
+pending login that could **enrol one**, letting anybody holding just a password
+replace the second factor on an account that already had one. The failure was
+silent in exactly the way migration `0003`'s own notes predicted — reading
+nothing through a policy looks like an empty table rather than a missing bind.
+Caught by a test, fixed by moving the query onto the bound handle, where it
+belonged: the user is already identified by that point, so there was never a
+bootstrap reason to go around the boundary.
+
 #### Accounts can hold a password and prove control of an address
 
 `cloud serve` grows from publishing a key set into serving four account routes:

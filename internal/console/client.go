@@ -35,7 +35,7 @@ type adminClient struct {
 // Credentials come from the organisation's registry row rather than from files
 // on disk, because there is now one set per organisation and they arrive while
 // the process is running. The certificate and CA are PEM text from the row; the
-// private key has just been decrypted by internal/console/secrets and should
+// private key has just been decrypted by internal/secrets and should
 // not outlive this call by any longer than the tls.Certificate it becomes.
 //
 // The CA is the boundary this whole step rests on. Each organisation's atlantis

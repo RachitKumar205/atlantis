@@ -5,11 +5,13 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 	"github.com/rachitkumar205/atlantis/internal/testsupport/pgcatalog"
@@ -22,15 +24,40 @@ import (
 // reason, so the gate is a local-development convenience rather than a way for
 // these to be quietly absent.
 
+// newTestStore opens Cloud's database as the role a deployment runs as.
+//
+// # Why not the administrative role
+//
+// Since migration 0003 there are policed tables, and the connecting role
+// decides whether their policies do anything: FORCE ROW LEVEL SECURITY binds a
+// table's owner, and binds a superuser to nothing at all. A fixture that
+// connected as the test cluster's superuser would run every test with the
+// boundary inert, and every isolation assertion would pass for the wrong
+// reason — which is exactly the failure the boundary exists to prevent.
+//
+// So the fixture creates a NOSUPERUSER NOBYPASSRLS role and migrates as it, so
+// that role also OWNS the tables. Ten other tests in this repository do the
+// same; the grants differ per test, which is why each has its own.
 func newTestStore(t *testing.T) *Store {
+	t.Helper()
+	db, _ := newTestStoreWithDSN(t)
+	return db
+}
+
+func newTestStoreWithDSN(t *testing.T) (*Store, string) {
 	t.Helper()
 	adminDSN := os.Getenv("ATLANTIS_TEST_PG")
 	if adminDSN == "" {
 		t.Skip("set ATLANTIS_TEST_PG to exercise Cloud's database")
 	}
 
-	dsn := pgcatalog.PrivateDatabase(t, adminDSN, "atlantis_cloud_store")
+	const dbName = "atlantis_cloud_store"
+	adminOnDB := pgcatalog.PrivateDatabase(t, adminDSN, dbName)
+	dsn := pgcatalog.IsolatedRoleDSN(t, adminOnDB, dbName, "cloud_probe")
+
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// Migrated as the isolated role, so it owns what it creates — which is what
+	// FORCE ROW LEVEL SECURITY binds against.
 	if err := Migrate(dsn, quiet); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -40,7 +67,7 @@ func newTestStore(t *testing.T) *Store {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(db.Close)
-	return db
+	return db, dsn
 }
 
 // An account round-trips, and the id it gets is not derived from anything about
@@ -445,28 +472,28 @@ func TestPolicyGuardPassesOnAFreshSchema(t *testing.T) {
 
 // A new table with no boundary and no recorded decision fails the boot.
 //
-// This is the whole point of the guard. Every table Cloud has today is exempt,
-// so nothing it currently checks can come out false — what it is for is the
-// next one. The second-factor secrets are the first tables here that are only
-// ever read for an already-identified user, and this is what stops them landing
-// unpoliced because nobody thought about it.
+// This is the whole point of the guard, and it has already done its job once:
+// this test used to create `cloud.totp_secrets` as its hypothetical, and had to
+// be renamed when migration 0003 made that table real and policed. The
+// hypothetical name below is deliberately one nothing will ever add, so the
+// next person to hit this failure is hitting the real thing.
 func TestPolicyGuardRefusesAnUndecidedTable(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
 	if _, err := db.pool.Exec(ctx,
-		`CREATE TABLE cloud.totp_secrets (user_id TEXT PRIMARY KEY, secret TEXT NOT NULL)`); err != nil {
+		`CREATE TABLE cloud.undecided_fixture (user_id TEXT PRIMARY KEY, secret TEXT NOT NULL)`); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
 
 	err := VerifyPolicies(ctx, db.pool)
 	if err == nil {
-		t.Fatal("a table holding every user's second factor was added with no " +
-			"boundary and no decision, and the guard started anyway")
+		t.Fatal("a table holding per-user secrets was added with no boundary " +
+			"and no decision, and the guard started anyway")
 	}
 	// On content: the guard has several ways to fail, and a test satisfied by
 	// any error would pass with the unknown-table branch deleted.
-	if !strings.Contains(err.Error(), "totp_secrets") {
+	if !strings.Contains(err.Error(), "undecided_fixture") {
 		t.Errorf("the error does not name the table: %v", err)
 	}
 	if !strings.Contains(err.Error(), "no row-level security") {
@@ -488,10 +515,10 @@ func TestPolicyGuardRefusesEnabledButNotForced(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
+	// cloud.current_user_id() already exists — migration 0003 created it for
+	// the real policed tables. This adds a table that uses it wrongly.
 	for _, sql := range []string{
 		`CREATE TABLE cloud.notes (user_id TEXT PRIMARY KEY, body TEXT)`,
-		`CREATE FUNCTION cloud.current_user_id() RETURNS text LANGUAGE sql STABLE AS
-		 $$ SELECT nullif(pg_catalog.current_setting('cloud.user', true), '') $$`,
 		`ALTER TABLE cloud.notes ENABLE ROW LEVEL SECURITY`,
 		`CREATE POLICY notes_isolation ON cloud.notes AS RESTRICTIVE
 		 USING (user_id = cloud.current_user_id())`,
@@ -533,50 +560,62 @@ type brokenRow struct{}
 
 func (brokenRow) Scan(...any) error { return errors.New("permission denied for table pg_roles") }
 
-// The role check arms itself when a policed table appears, and not before.
+// The role check has armed, and a superuser now fails where in C1 it passed.
 //
-// This is the half that is easy to get wrong in the safe direction: a guard
-// that never asks about the role passes every test that only creates exempt
-// tables, and then a superuser reads through the first real policy. The two
-// halves are asserted separately here because they fail for different reasons.
-func TestTheRoleCheckArmsWithTheFirstPolicedTable(t *testing.T) {
-	db := newTestStore(t)
+// This test inverted when migration 0003 landed, and the inversion is the
+// point. While every table was exempt the guard deliberately did not ask about
+// the role, because a role that bypasses row-level security bypasses nothing
+// when there is nothing to bypass. cloud.totp_secrets and cloud.backup_codes
+// changed that: a policy now exists, and whether it does anything depends
+// entirely on who is connected.
+//
+// So the assertion is no longer "the check stays quiet" but "the check fires".
+func TestTheRoleCheckHasArmed(t *testing.T) {
+	adminDSN := os.Getenv("ATLANTIS_TEST_PG")
+	if adminDSN == "" {
+		t.Skip("set ATLANTIS_TEST_PG to exercise Cloud's database")
+	}
 	ctx := context.Background()
 
-	// The test role is the administrative one, which is a superuser — so if the
-	// role check ran unconditionally, this would already be failing.
+	// The isolated role passes: it is NOSUPERUSER NOBYPASSRLS and owns the
+	// tables, so the policies apply to it.
+	db, _ := newTestStoreWithDSN(t)
 	if err := VerifyPolicies(ctx, db.pool); err != nil {
-		t.Fatalf("the guard refused a schema where every table is exempt, so it "+
-			"is asking about the role before there is anything to protect: %v", err)
+		t.Fatalf("the guard refuses the role a deployment actually runs as: %v", err)
 	}
 
-	// Now give it something to protect.
-	for _, sql := range []string{
-		`CREATE FUNCTION cloud.current_user_id() RETURNS text LANGUAGE sql STABLE AS
-		 $$ SELECT nullif(pg_catalog.current_setting('cloud.user', true), '') $$`,
-		`CREATE TABLE cloud.totp_secrets (user_id TEXT PRIMARY KEY, secret TEXT NOT NULL)`,
-		`ALTER TABLE cloud.totp_secrets ENABLE ROW LEVEL SECURITY`,
-		`ALTER TABLE cloud.totp_secrets FORCE ROW LEVEL SECURITY`,
-		`CREATE POLICY totp_isolation ON cloud.totp_secrets AS RESTRICTIVE
-		 USING (user_id = cloud.current_user_id())`,
-	} {
-		if _, err := db.pool.Exec(ctx, sql); err != nil {
-			t.Fatalf("setup %q: %v", sql, err)
-		}
+	// The same schema, read by the superuser that created the database, is
+	// refused. Without the role check this would pass while every policy in the
+	// schema was inert — sign-in working, pages rendering, and every account's
+	// second factor readable by any query that forgot a WHERE clause.
+	super, err := pgxpool.New(ctx, currentTestDBAdminDSN(t, adminDSN))
+	if err != nil {
+		t.Fatalf("open as superuser: %v", err)
 	}
+	defer super.Close()
 
-	err := VerifyPolicies(ctx, db.pool)
+	err = VerifyPolicies(ctx, super)
 	if err == nil {
-		t.Fatal("a policed table exists and the connecting role is a superuser, " +
-			"which reads through every policy in the schema — and the guard " +
-			"passed anyway")
+		t.Fatal("a superuser passed the guard on a schema with policed tables, " +
+			"so every policy in it is attached and inert")
 	}
 	if !strings.Contains(err.Error(), "superuser") {
 		t.Errorf("refused, but not because of the role: %v", err)
 	}
-	// Named, because the operator's next question is which table made this
-	// start mattering.
-	if !strings.Contains(err.Error(), "1 table(s)") {
-		t.Errorf("the error does not say how much is at stake: %v", err)
+	// Named, because the operator's next question is how much is at stake.
+	if !strings.Contains(err.Error(), "2 table(s)") {
+		t.Errorf("the error does not say how many tables are affected: %v", err)
 	}
+}
+
+// currentTestDBAdminDSN points the administrative credentials at the private
+// database the fixture just created.
+func currentTestDBAdminDSN(t *testing.T, adminDSN string) string {
+	t.Helper()
+	u, err := url.Parse(adminDSN)
+	if err != nil {
+		t.Fatalf("parse %q: %v", adminDSN, err)
+	}
+	u.Path = "/atlantis_cloud_store"
+	return u.String()
 }

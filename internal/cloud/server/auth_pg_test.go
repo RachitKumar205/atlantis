@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/cloud/authn"
 	"github.com/rachitkumar205/atlantis/internal/cloud/issuer"
 	"github.com/rachitkumar205/atlantis/internal/cloud/store"
+	"github.com/rachitkumar205/atlantis/internal/secrets"
 	"github.com/rachitkumar205/atlantis/internal/testsupport/pgcatalog"
 )
 
@@ -87,6 +89,7 @@ type fixture struct {
 	// slept records what the latency floor asked for instead of spending it.
 	mu    sync.Mutex
 	slept []time.Duration
+	ipSeq int
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -96,8 +99,18 @@ func newFixture(t *testing.T) *fixture {
 		t.Skip("set ATLANTIS_TEST_PG to exercise Cloud's account routes")
 	}
 
-	dsn := pgcatalog.PrivateDatabase(t, adminDSN, "atlantis_cloud_server")
+	// The isolated role, not the administrative one. Migration 0003 policed
+	// cloud.totp_secrets and cloud.backup_codes, and a superuser reads straight
+	// through a policy even with FORCE set — so a fixture on the admin DSN
+	// would run every second-factor test with the boundary inert, and the
+	// isolation assertions would pass for the reason they exist to prevent.
+	const dbName = "atlantis_cloud_server"
+	adminOnDB := pgcatalog.PrivateDatabase(t, adminDSN, dbName)
+	dsn := pgcatalog.IsolatedRoleDSN(t, adminOnDB, dbName, "cloud_srv_probe")
+
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// Migrated as that role, so it owns what it creates — which is what FORCE
+	// ROW LEVEL SECURITY binds against.
 	if err := store.Migrate(dsn, quiet); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -116,11 +129,20 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatalf("issuer: %v", err)
 	}
 
+	keyset, err := secrets.NewKeyset()
+	if err != nil {
+		t.Fatalf("keyset: %v", err)
+	}
+
 	f := &fixture{db: db, mailer: &recordingMailer{}}
-	f.srv = New(Config{
+	f.srv, err = New(Config{
 		PublicURL:     "https://cloud.test",
 		CheckBreaches: false,
+		DataKeyset:    keyset,
 	}, db, iss, quiet)
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
 	t.Cleanup(f.srv.Close)
 
 	f.srv.mailer = f.mailer
@@ -139,9 +161,24 @@ func (f *fixture) sleeps() []time.Duration {
 	return append([]time.Duration(nil), f.slept...)
 }
 
+// post sends from a fresh address each time.
+//
+// Every route here is rate limited per client, and a multi-step flow — sign up,
+// verify, sign in, enrol — is more requests than one client is allowed. Tests
+// that are not about the limiter should not have to think about it, and a test
+// that trips it fails with a 429 that looks nothing like the property it was
+// checking. Tests that ARE about the limiter use postFrom with a fixed address.
 func (f *fixture) post(t *testing.T, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	return f.postFrom(t, "203.0.113.9", path, body)
+	return f.postFrom(t, f.nextIP(), path, body)
+}
+
+// nextIP hands out a distinct source address per request.
+func (f *fixture) nextIP() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ipSeq++
+	return fmt.Sprintf("203.0.113.%d", f.ipSeq%250+1)
 }
 
 // postFrom sends from a chosen address, for tests that make more requests than
@@ -159,7 +196,7 @@ func (f *fixture) postFrom(t *testing.T, ip, path, body string) *httptest.Respon
 func (f *fixture) get(t *testing.T, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodGet, path, nil)
-	r.RemoteAddr = "203.0.113.9:1234"
+	r.RemoteAddr = f.nextIP() + ":1234"
 	rec := httptest.NewRecorder()
 	f.srv.ServeHTTP(rec, r)
 	return rec
@@ -545,9 +582,13 @@ func TestTheResetPageEscapesTheToken(t *testing.T) {
 func TestRequestsAreRateLimited(t *testing.T) {
 	f := newFixture(t)
 
+	// A fixed source address, because this is the one test that is about the
+	// limiter — f.post rotates so that ordinary multi-step flows do not trip it.
+	const from = "198.51.100.200"
+
 	var lastCode int
 	for i := range limiterMax + 2 {
-		rec := f.post(t, "/api/auth/reset/request", `{"email":"rl@example.com"}`)
+		rec := f.postFrom(t, from, "/api/auth/reset/request", `{"email":"rl@example.com"}`)
 		lastCode = rec.Code
 		if i < limiterMax && rec.Code != http.StatusOK {
 			t.Fatalf("request %d was refused with %d before the limit", i, rec.Code)

@@ -13,7 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/rachitkumar205/atlantis/internal/console/secrets"
+	"github.com/rachitkumar205/atlantis/internal/secrets"
 )
 
 // undefinedTable is PostgreSQL's SQLSTATE for a missing relation.

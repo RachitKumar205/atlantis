@@ -24,23 +24,30 @@ CLOUD_AUDIENCE     ?= http://localhost:3000
 CLOUD_JWKS_URL     ?= $(CLOUD_ISSUER)/.well-known/jwks.json
 CLOUD_SIGNING_KEY  ?= $(DEV_CERT_DIR)/cloud-signing-key.pem
 
-# Cloud's own database: accounts, organisations and memberships.
+# Cloud's own database: accounts, organisations, membership and second factors.
 #
 # Its own DSN, and locally its own schema in the same instance the console uses.
 # That is a development convenience rather than a constraint — nothing joins
 # across the two, so separating them later is this line and nothing else.
 #
-# The dev role here is the administrative one, which is a superuser. That is
-# fine while every table in schema cloud is exempt from the user boundary, and
-# stops being fine the moment one is not: store.VerifyPolicies refuses to start
-# on a bypassing role as soon as a policed table exists, so the first policed
-# table is also the point at which this needs its own NOSUPERUSER role.
-CLOUD_PG_URL       ?= postgres://atlantis:atlantis@localhost:5432/atlantis?sslmode=disable
+# Its own ROLE, for the same reason the console has one. Migration 0003 policed
+# cloud.totp_secrets and cloud.backup_codes, and a superuser reads straight
+# through row-level security even with FORCE set — so Cloud now refuses to start
+# on the `atlantis` dev role. `make dev-cloud-role` creates this one.
+CLOUD_PG_ROLE      ?= atlantis_cloud
+CLOUD_PG_PASSWORD  ?= cloud
+CLOUD_PG_URL       ?= postgres://$(CLOUD_PG_ROLE):$(CLOUD_PG_PASSWORD)@localhost:5432/atlantis?sslmode=disable
 
 # The base every emailed link is built from. Required, with no default in the
 # product — a wrong value does not fail, it sends every user a working link to
 # the wrong host. Locally it is wherever `make dev-auth` is listening.
 CLOUD_PUBLIC_URL   ?= http://localhost:9500
+
+# The keyset Cloud seals each account's TOTP secret with. Same shape and same
+# package as the console's CONSOLE_DATA_KEY, and stable for the same reason:
+# regenerate it and every enrolled second factor becomes unopenable, which
+# presents as every account being locked out with the rows intact.
+CLOUD_DATA_KEY_FILE ?= $(DEV_CERT_DIR)/cloud-data-key
 
 # Two migration histories: infra (hand-written) and tidectl (codegen).
 MIGRATIONS_INFRA_DIR := ./migrations/infra
@@ -349,7 +356,7 @@ dev-data-key: ## Create (once) the local keyset that seals organisation credenti
 	@echo "$$(cat $(DEV_DATA_KEY_FILE))"
 
 .PHONY: dev-cloud-seed
-dev-cloud-seed: build-cloud ## Create an account, an org, and a grant: make dev-cloud-seed EMAIL=you@example.com ORG=acme
+dev-cloud-seed: dev-cloud-role build-cloud ## Create an account, an org, and a grant: make dev-cloud-seed EMAIL=you@example.com ORG=acme
 	@test -n "$(EMAIL)" -a -n "$(ORG)" || { \
 	  echo "Usage:   make dev-cloud-seed EMAIL=<address> ORG=<name>"; \
 	  echo "Example: make dev-cloud-seed EMAIL=you@example.com ORG=acme"; \
@@ -372,7 +379,7 @@ dev-cloud-seed: build-cloud ## Create an account, an org, and a grant: make dev-
 		-email "$(EMAIL)" -org "$(ORG)" -role admin
 
 .PHONY: dev-org-register
-dev-org-register: dev-certs dev-data-key build-cloud ## Point an org at the local atlantis: make dev-org-register ORG=<name>
+dev-org-register: dev-certs dev-data-key dev-cloud-role build-cloud ## Point an org at the local atlantis: make dev-org-register ORG=<name>
 	@test -n "$(ORG)" || { \
 	  echo "Usage:   make dev-org-register ORG=<name>"; \
 	  echo "Example: make dev-org-register ORG=acme"; \
@@ -407,8 +414,23 @@ dev-org-register: dev-certs dev-data-key build-cloud ## Point an org at the loca
 # every sign-in against a JWKS URL in every environment. So running it locally
 # means running the issuer locally, which is the same code Cloud runs.
 
+.PHONY: dev-cloud-data-key
+dev-cloud-data-key: ## Create (once) the keyset Cloud seals second-factor secrets with
+	@if [ ! -f "$(CLOUD_DATA_KEY_FILE)" ]; then \
+	  mkdir -p "$$(dirname $(CLOUD_DATA_KEY_FILE))"; \
+	  $(GO) run ./cmd/cloud data-key 2>/dev/null > "$(CLOUD_DATA_KEY_FILE)"; \
+	  chmod 600 "$(CLOUD_DATA_KEY_FILE)"; \
+	  echo "==> wrote a new keyset to $(CLOUD_DATA_KEY_FILE)"; \
+	fi
+	@# A file, not a fresh value per run, for the same reason as the console's.
+	@# Every enrolled TOTP secret is sealed under this; regenerating it leaves
+	@# each one intact and permanently unopenable, which presents as every
+	@# account being unable to complete a sign-in. Deleting it locally means
+	@# everyone re-enrols.
+	@echo "$$(cat $(CLOUD_DATA_KEY_FILE))"
+
 .PHONY: dev-auth
-dev-auth: build-cloud ## Serve Cloud: the key set the console verifies against, plus the account routes
+dev-auth: dev-cloud-role dev-cloud-data-key build-cloud ## Serve Cloud: the key set the console verifies against, plus the account routes
 	@# No CLOUD_SMTP_ADDR here, so verification and reset links are written to
 	@# this terminal instead of emailed. `cloud serve` warns about it at startup
 	@# and at every send — that is the intended development flow, and the
@@ -416,6 +438,7 @@ dev-auth: build-cloud ## Serve Cloud: the key set the console verifies against, 
 	CLOUD_ISSUER="$(CLOUD_ISSUER)" \
 		CLOUD_PG_URL="$(CLOUD_PG_URL)" \
 		CLOUD_PUBLIC_URL="$(CLOUD_PUBLIC_URL)" \
+		CLOUD_DATA_KEY="$$(cat $(CLOUD_DATA_KEY_FILE))" \
 		$(BIN_DIR)/atlantis-cloud serve \
 			-key "$(CLOUD_SIGNING_KEY)" \
 			-listen "$(CLOUD_LISTEN)"
@@ -496,6 +519,76 @@ dev-console-role: ## Create the local console database role (NOSUPERUSER NOBYPAS
 	    END IF; \
 	  END \$$\$$;"
 	@echo "==> role $(CONSOLE_PG_ROLE) ready (NOSUPERUSER NOBYPASSRLS), owns schema console"
+
+.PHONY: dev-cloud-role
+dev-cloud-role: ## Create the local Cloud database role (NOSUPERUSER NOBYPASSRLS)
+	@# Idempotent: creates the role only when absent, and re-grants either way.
+	@#
+	@# Cloud refuses to start on a role that can bypass row-level security, from
+	@# migration 0003 onward — that is the migration that policed
+	@# cloud.totp_secrets and cloud.backup_codes, and a superuser reads straight
+	@# through a policy even with FORCE set. Before 0003 every table in the
+	@# schema was exempt, so the check deliberately stayed quiet and the
+	@# `atlantis` dev role was fine.
+	@#
+	@# CREATE on the database because Cloud runs its own migrations: it creates
+	@# schema cloud and therefore owns it, which is what FORCE ROW LEVEL
+	@# SECURITY binds against.
+	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "\
+	  DO \$$\$$ BEGIN \
+	    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$(CLOUD_PG_ROLE)') THEN \
+	      CREATE ROLE $(CLOUD_PG_ROLE) LOGIN PASSWORD '$(CLOUD_PG_PASSWORD)' \
+	        NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE; \
+	    END IF; \
+	  END \$$\$$;" \
+	  -c "GRANT CONNECT, CREATE ON DATABASE atlantis TO $(CLOUD_PG_ROLE)" \
+	  -c "GRANT USAGE, CREATE ON SCHEMA public TO $(CLOUD_PG_ROLE)"
+	@# Hand over anything a previous superuser-run Cloud created.
+	@#
+	@# Ownership, not grants, and this is the part that is silent when skipped.
+	@# FORCE ROW LEVEL SECURITY binds a table's OWNER. A Cloud that merely had
+	@# SELECT and INSERT on tables owned by somebody else would not be subject to
+	@# its own policies — they would be attached, `\d` would list them, every
+	@# query would return everything, and nothing observable would differ from a
+	@# boundary that works.
+	@#
+	@# Not hypothetical: `cloud org create` and `cloud user create` shipped
+	@# before 0003 and ran as whatever CLOUD_PG_URL pointed at, which was the
+	@# superuser.
+	@#
+	@# Tables only, no sequences: Postgres refuses ALTER SEQUENCE OWNER on a
+	@# sequence owned by a serial column, and does not need it — reowning the
+	@# table carries its dependent sequences along, which cloud.backup_codes
+	@# relies on.
+	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "\
+	  DO \$$\$$ DECLARE r record; BEGIN \
+	    IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'cloud') THEN \
+	      EXECUTE 'ALTER SCHEMA cloud OWNER TO $(CLOUD_PG_ROLE)'; \
+	      FOR r IN SELECT c.relname FROM pg_class c \
+	                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+	                WHERE n.nspname = 'cloud' AND c.relkind IN ('r','p') LOOP \
+	        EXECUTE format('ALTER TABLE cloud.%I OWNER TO $(CLOUD_PG_ROLE)', r.relname); \
+	      END LOOP; \
+	    END IF; \
+	  END \$$\$$;"
+	@# The migration history lives in public and is written by whoever migrates.
+	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "\
+	  DO \$$\$$ BEGIN \
+	    IF to_regclass('public.cloud_schema_migrations') IS NOT NULL THEN \
+	      EXECUTE 'ALTER TABLE public.cloud_schema_migrations OWNER TO $(CLOUD_PG_ROLE)'; \
+	    END IF; \
+	  END \$$\$$;"
+	@# The functions the policies call. Owned by the migrator on a fresh
+	@# install; transferred here for a database that predates 0003.
+	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "\
+	  DO \$$\$$ DECLARE r record; BEGIN \
+	    FOR r IN SELECT p.oid::regprocedure AS sig FROM pg_proc p \
+	               JOIN pg_namespace n ON n.oid = p.pronamespace \
+	              WHERE n.nspname = 'cloud' LOOP \
+	      EXECUTE format('ALTER FUNCTION %s OWNER TO $(CLOUD_PG_ROLE)', r.sig); \
+	    END LOOP; \
+	  END \$$\$$;"
+	@echo "==> role $(CLOUD_PG_ROLE) ready (NOSUPERUSER NOBYPASSRLS), owns schema cloud"
 
 .PHONY: dev-caller-cert
 dev-caller-cert: dev-certs ## Issue a local caller cert signed by the dev CA: make dev-caller-cert CALLER=<name>

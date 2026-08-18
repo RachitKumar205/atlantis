@@ -65,7 +65,7 @@ import (
 	cloudsrv "github.com/rachitkumar205/atlantis/internal/cloud/server"
 	"github.com/rachitkumar205/atlantis/internal/cloud/store"
 	"github.com/rachitkumar205/atlantis/internal/console"
-	"github.com/rachitkumar205/atlantis/internal/console/secrets"
+	"github.com/rachitkumar205/atlantis/internal/secrets"
 )
 
 func main() {
@@ -189,7 +189,10 @@ func serve(args []string, log *slog.Logger) error {
 	}
 	defer db.Close()
 
-	api := cloudsrv.New(cfg, db, iss, log)
+	api, err := cloudsrv.New(cfg, db, iss, log)
+	if err != nil {
+		return err
+	}
 	defer api.Close()
 
 	srv := &http.Server{

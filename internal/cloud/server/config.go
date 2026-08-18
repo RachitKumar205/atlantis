@@ -72,6 +72,22 @@ type Config struct {
 	// Turn it on only when something you control terminates in front.
 	TrustProxy bool // CLOUD_TRUST_PROXY
 
+	// DataKeyset seals each account's TOTP secret in cloud.totp_secrets.
+	//
+	// Base64 Tink keyset, required, no default — the same value shape and the
+	// same package the console uses for organisation private keys. A second
+	// factor has to be recomputed to be checked, so unlike the argon2id
+	// password hash beside it, it cannot be hashed and must be encrypted.
+	//
+	// Generating one per boot would encrypt every enrolled factor under a key
+	// that dies with the process, which presents as every account being locked
+	// out after a restart with the rows intact and unopenable.
+	DataKeyset string // CLOUD_DATA_KEY
+
+	// CookieSecure sets the Secure flag on the session cookie. Default false so
+	// http://localhost works; true once a TLS terminator sits in front.
+	CookieSecure bool // CLOUD_COOKIE_SECURE
+
 	// SendTimeout bounds a single mail send.
 	SendTimeout time.Duration
 }
@@ -89,6 +105,8 @@ func ConfigFromEnv() (Config, error) {
 		SMTPPassword:  os.Getenv("CLOUD_SMTP_PASSWORD"),
 		CheckBreaches: os.Getenv("CLOUD_HIBP_CHECK") != "false",
 		TrustProxy:    os.Getenv("CLOUD_TRUST_PROXY") == "true",
+		DataKeyset:    os.Getenv("CLOUD_DATA_KEY"),
+		CookieSecure:  os.Getenv("CLOUD_COOKIE_SECURE") == "true",
 		SendTimeout:   10 * time.Second,
 	}
 
@@ -100,6 +118,16 @@ func ConfigFromEnv() (Config, error) {
 		if v.val == "" {
 			return Config{}, fmt.Errorf("%s is required", v.name)
 		}
+	}
+
+	if c.DataKeyset == "" {
+		return Config{}, fmt.Errorf(
+			"CLOUD_DATA_KEY is required.\n\n" +
+				"Each account's second-factor secret is encrypted with it. A second " +
+				"factor has to be recomputed to be checked, so it cannot be hashed the " +
+				"way a password is — without this keyset Cloud can neither enrol a " +
+				"factor nor verify one.\n\n" +
+				"For local development: `make dev-cloud-data-key` prints one to export.")
 	}
 
 	// Parsed rather than trusted. A PublicURL that is not an absolute URL

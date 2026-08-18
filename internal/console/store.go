@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
-	"github.com/rachitkumar205/atlantis/internal/console/secrets"
+	"github.com/rachitkumar205/atlantis/internal/secrets"
 )
 
 func jsonMarshalBytes(v any) ([]byte, error) { return json.Marshal(v) }
@@ -77,7 +77,7 @@ type store struct {
 	pool *pgxpool.Pool
 
 	// keys seals the per-organisation private keys in console.orgs. See
-	// internal/console/secrets for what that does and does not defend.
+	// internal/secrets for what that does and does not defend.
 	keys secrets.Keyring
 
 	// log exists because audit writes are best-effort and their errors used to
@@ -486,7 +486,7 @@ func (s *store) orgCredentials(ctx context.Context, org string) (*orgCredentials
 
 	// The organisation name is the associated data the key was sealed with, so
 	// a key copied from another row will not open here. See
-	// internal/console/secrets.
+	// internal/secrets.
 	keyPEM, err := s.keys.Decrypt(keyCT, []byte(org))
 	if err != nil {
 		return nil, fmt.Errorf("decrypt credentials for %s "+

@@ -14,17 +14,23 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/cloud/issuer"
 	cloudmail "github.com/rachitkumar205/atlantis/internal/cloud/mail"
 	"github.com/rachitkumar205/atlantis/internal/cloud/store"
+	"github.com/rachitkumar205/atlantis/internal/secrets"
 )
 
 // Server is Cloud's HTTP surface.
 type Server struct {
-	cfg     Config
-	db      *store.Store
-	mailer  cloudmail.Mailer
-	breach  authn.BreachChecker
-	iss     *issuer.Issuer
-	log     *slog.Logger
-	lim     *limiter
+	cfg    Config
+	db     *store.Store
+	mailer cloudmail.Mailer
+	breach authn.BreachChecker
+	iss    *issuer.Issuer
+	log    *slog.Logger
+	lim    *limiter
+
+	// keys seals each account's TOTP secret. See internal/secrets for what that
+	// does and does not defend.
+	keys secrets.Keyring
+
 	mux     *http.ServeMux
 	handler http.Handler
 
@@ -36,9 +42,20 @@ type Server struct {
 }
 
 // New wires the server. The store is owned by the caller and not closed here.
-func New(cfg Config, db *store.Store, iss *issuer.Issuer, log *slog.Logger) *Server {
+//
+// Returns an error only for a keyset it cannot read: without one Cloud can
+// neither enrol a second factor nor check one, so every sign-in would fail at
+// the last step with a message about ciphertext rather than about
+// configuration.
+func New(cfg Config, db *store.Store, iss *issuer.Issuer, log *slog.Logger) (*Server, error) {
+	keys, err := secrets.FromEnvKeyset(cfg.DataKeyset)
+	if err != nil {
+		return nil, fmt.Errorf("CLOUD_DATA_KEY: %w", err)
+	}
+
 	s := &Server{
 		cfg: cfg, db: db, iss: iss, log: log,
+		keys:  keys,
 		lim:   newLimiter(),
 		mux:   http.NewServeMux(),
 		sleep: realSleep,
@@ -67,9 +84,9 @@ func New(cfg Config, db *store.Store, iss *issuer.Issuer, log *slog.Logger) *Ser
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.bgCancel = cancel
-	go s.sweepExpiredTokens(ctx)
+	go s.sweepExpired(ctx)
 
-	return s
+	return s, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.handler.ServeHTTP(w, r) }
@@ -90,6 +107,23 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/auth/signup", s.handleSignup)
 	s.mux.HandleFunc("POST /api/auth/reset/request", s.handleResetRequest)
 	s.mux.HandleFunc("POST /api/auth/reset/complete", s.handleResetComplete)
+	s.mux.HandleFunc("POST /api/auth/verify/resend", s.handleResendVerification)
+
+	// Sign-in, in two legs. Nothing here issues a session except
+	// handleVerifySecondFactor and the enrolment that completes a sign-in.
+	//
+	// JSON only. There was a script-free HTML enrolment page beside these, and
+	// it went for the same reason WebAuthn is not here yet: nothing could reach
+	// it. Sign-in returns JSON, so a person in a browser never arrives at the
+	// page, and it confirmed a factor without completing the sign-in the way
+	// these routes do. The verification and reset pages below are different —
+	// each is the target of a link in an email somebody receives. Enrolment
+	// gets its page from the Cloud sign-in app, along with the QR code.
+	s.mux.HandleFunc("POST /api/auth/login", s.handleLogin)
+	s.mux.HandleFunc("POST /api/auth/2fa/verify", s.handleVerifySecondFactor)
+	s.mux.HandleFunc("POST /api/auth/2fa/enrol/begin", s.handleEnrolBegin)
+	s.mux.HandleFunc("POST /api/auth/2fa/enrol/finish", s.handleEnrolFinish)
+	s.mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
 
 	// Reached from an email, by a person, in a browser. Plain pages rather than
 	// JSON for that reason. They are deliberately unstyled and framework-free:
@@ -122,13 +156,14 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// sweepExpiredTokens removes tokens that can no longer be spent.
+// sweepExpired removes tokens, sessions and half-finished logins that can no
+// longer be used.
 //
 // Logs what it deleted including zero, because a sweep that silently deletes
 // nothing forever is a shape this repository has shipped before — see the TTL
 // sweeper in the CHANGELOG. A count in the log is the difference between
 // "nothing to do" and "this has not worked for months".
-func (s *Server) sweepExpiredTokens(ctx context.Context) {
+func (s *Server) sweepExpired(ctx context.Context) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {
@@ -136,12 +171,18 @@ func (s *Server) sweepExpiredTokens(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			n, err := s.db.DeleteExpiredEmailTokens(ctx)
+			tokens, err := s.db.DeleteExpiredEmailTokens(ctx)
 			if err != nil {
 				s.log.Error("sweep expired email tokens", "err", err)
 				continue
 			}
-			s.log.Info("swept expired email tokens", "deleted", n)
+			sessions, pending, err := s.db.DeleteExpiredSessions(ctx)
+			if err != nil {
+				s.log.Error("sweep expired sessions", "err", err)
+				continue
+			}
+			s.log.Info("swept expired rows",
+				"email_tokens", tokens, "sessions", sessions, "pending_logins", pending)
 		}
 	}
 }

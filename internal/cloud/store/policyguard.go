@@ -28,21 +28,26 @@ type catalogQuerier interface {
 // below are argued in full in migrations/cloud/0001; the one-liners are
 // reminders, not the reasoning.
 //
-// # Why this list is currently everything
+// # What is exempt, and what is not
 //
-// Because none of Cloud's first four tables can carry the boundary. Two of them
-// are the queries that *discover* who a request is, so they cannot be filtered
-// by who the request is; one is a registry; one is read from both directions.
-// That makes this guard, today, a tripwire rather than an enforcement — and the
-// tripwire is the point. The second-factor secrets arriving next are the first
-// tables here that are only ever read for an already-identified user, and this
-// is what stops them landing unpoliced because nobody thought about it.
+// Every entry below is a lookup that *discovers* who a request is, or a
+// registry, or a table read from both directions. None of them can be filtered
+// by the current user, because there is no current user until they have
+// answered.
+//
+// cloud.totp_secrets and cloud.backup_codes are deliberately absent: they are
+// only ever read for a user who has already been identified, so they carry the
+// boundary and this guard now enforces rather than merely watching. Their
+// arrival is also what arms the role check below — a policy binds the table's
+// owner under FORCE, but not a superuser.
 var unpolicedTables = map[string]string{
-	"users":        "the sign-in lookup is what discovers who the request is",
-	"identities":   "the OAuth callback lookup is the same, one step along: a policy here makes every sign-in create a duplicate account",
-	"orgs":         "the registry of organisations",
-	"memberships":  "read per-user by a member and per-org by an admin; a policy on user_id breaks the second",
-	"email_tokens": "a reset link is spent by token hash with nobody signed in, so a policy keyed to the current user matches nothing and every reset reports an invalid token",
+	"users":          "the sign-in lookup is what discovers who the request is",
+	"identities":     "the OAuth callback lookup is the same, one step along: a policy here makes every sign-in create a duplicate account",
+	"orgs":           "the registry of organisations",
+	"memberships":    "read per-user by a member and per-org by an admin; a policy on user_id breaks the second",
+	"email_tokens":   "a reset link is spent by token hash with nobody signed in, so a policy keyed to the current user matches nothing and every reset reports an invalid token",
+	"sessions":       "the bootstrap table: the session lookup is what discovers which user a request is",
+	"pending_logins": "the same, one step earlier — a half-finished login is resolved by token before anybody is identified",
 }
 
 // VerifyPolicies asks the live catalogue whether every table in schema cloud is

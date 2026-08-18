@@ -142,14 +142,34 @@ func parse(encoded string) (params, []byte, []byte, error) {
 	return p, salt, want, nil
 }
 
-// A decoy hash for the "no such account" branch of sign-in belongs here, and is
-// deliberately absent until sign-in exists.
+// dummyHash is verified against when no account matches, so that the work a
+// sign-in attempt does not reveal whether an address is registered.
 //
-// Skipping the hash for an unknown address is a real enumeration oracle —
-// argon2id at these parameters takes tens of milliseconds, which is trivially
-// measurable from outside — so the defence is to verify against a hash nobody
-// knows and always fail. It lands with the sign-in route that calls it.
+// Computed once at package load with the current parameters. Skipping the hash
+// for an unknown address is a real enumeration oracle: argon2id at these
+// settings takes tens of milliseconds, which is trivially measurable from
+// outside, and the response body says nothing.
 //
-// Written down rather than built ahead of its call site: a decoy nothing calls
-// passes any test asserting it is a well-formed hash, while defending nothing,
-// and reads in review as though the branch is covered.
+// This was deliberately absent through C2, when nothing signed in and so
+// nothing called it. It arrives with the route that uses it.
+var dummyHash = mustHash("atlantis: no account matches, and this exists so " +
+	"that fact costs the same as one that does")
+
+func mustHash(s string) string {
+	h, err := Hash(s)
+	if err != nil {
+		// Only reachable if crypto/rand fails, which is not a condition this
+		// process can continue through.
+		panic("authn: cannot hash at startup: " + err.Error())
+	}
+	return h
+}
+
+// VerifyDecoy does the work of a password check against a hash nobody knows,
+// and always reports failure.
+//
+// Called on the "no such account" branch of sign-in. The point is the time it
+// takes, not the answer.
+func VerifyDecoy(password string) {
+	_, _, _ = Verify(password, dummyHash)
+}
