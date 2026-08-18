@@ -31,6 +31,7 @@ import (
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 	"github.com/rachitkumar205/atlantis/internal/console/cloudauth"
+	"github.com/rachitkumar205/atlantis/internal/console/secrets"
 	"github.com/rachitkumar205/atlantis/internal/migrate"
 	"github.com/rachitkumar205/atlantis/internal/storage/pg"
 	"github.com/rachitkumar205/atlantis/migrations"
@@ -42,8 +43,17 @@ const (
 
 // Server is the atlantis console BFF.
 type Server struct {
-	cfg      Config
-	atl      *adminClient
+	cfg Config
+
+	// orgs holds one admin channel per organisation, each dialled with that
+	// organisation's own certificate against its own CA.
+	//
+	// This replaced a single `atl *adminClient`. One shared channel could only
+	// ever reach one organisation's atlantis, and pointing it at the wrong one
+	// returned the wrong organisation's schema, plans and jobs with no error
+	// anywhere — the connection was healthy, it was simply the wrong stack.
+	orgs *orgClients
+
 	db       *store
 	mux      *http.ServeMux
 	handler  http.Handler // mux wrapped with security headers
@@ -69,17 +79,23 @@ type Server struct {
 // (the built dist/ directory from web/console). If nil, the SPA fallback
 // returns 404 — useful during development when the SPA runs separately.
 func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
-	atl, err := dialAdmin(cfg)
+	// The keyring first: without it the console can neither read nor write an
+	// organisation's credentials, so every page would fail at the first
+	// request. Better to refuse to start.
+	keys, err := secrets.FromEnvKeyset(cfg.DataKeyset)
 	if err != nil {
-		return nil, fmt.Errorf("dial atlantis: %w", err)
+		return nil, fmt.Errorf("CONSOLE_DATA_KEY: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	db, err := newStore(ctx, cfg.PGURL, log)
+	// No dial here any more. Channels are per organisation and built on first
+	// use from a registry row, so there is nothing to connect to at boot — and
+	// nothing to unwind on the failure paths below, which used to repeat
+	// `_ = atl.Close()` six times.
+	db, err := newStore(ctx, cfg.PGURL, log, keys)
 	if err != nil {
-		_ = atl.Close()
 		return nil, fmt.Errorf("open console db: %w", err)
 	}
 	// Before anything touches the schema: refuse a role that reads through
@@ -88,7 +104,6 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 	privs, derr := pg.DetectRolePrivileges(ctx, pg.PgxRoleQuerier{Q: db.pool})
 	if err := consoleRoleError(privs, derr); err != nil {
 		db.close()
-		_ = atl.Close()
 		return nil, err
 	}
 	// The console's schema is versioned and travels inside this binary. See
@@ -98,7 +113,6 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 	if err := migrate.RunFS(cfg.PGURL, migrations.Console, "console",
 		migrate.ConsoleHistoryTable, log); err != nil {
 		db.close()
-		_ = atl.Close()
 		return nil, fmt.Errorf("console db migrate: %w", err)
 	}
 	// Partitions are per-month and cannot live in a static migration; the
@@ -106,7 +120,6 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 	// It also isolates each child, which is not inherited — see the function.
 	if err := db.ensureAuditPartitions(ctx); err != nil {
 		db.close()
-		_ = atl.Close()
 		return nil, fmt.Errorf("console audit partitions: %w", err)
 	}
 	// Then ask the catalogue whether the organisation boundary is really there.
@@ -117,7 +130,6 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 	// others' data.
 	if err := verifyConsolePolicies(ctx, db.pool); err != nil {
 		db.close()
-		_ = atl.Close()
 		return nil, err
 	}
 
@@ -131,14 +143,14 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 	})
 	if err != nil {
 		db.close()
-		_ = atl.Close()
 		return nil, err
 	}
 
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	s := &Server{
-		cfg: cfg, atl: atl, db: db, log: log, spaFS: spaFS,
+		cfg: cfg, db: db, log: log, spaFS: spaFS,
 		loginLim:  newLoginLimiter(),
+		orgs:      newOrgClients(db),
 		cloud:     cloud,
 		sandboxes: newSandboxLayer(cfg.SandboxPerUserLimit, cfg.SandboxTTL),
 		bgCtx:     bgCtx, bgCancel: bgCancel,
@@ -161,7 +173,7 @@ func (s *Server) Close() {
 		s.bgCancel()
 	}
 	s.db.close()
-	_ = s.atl.Close()
+	s.orgs.close()
 }
 
 // auditRetentionLoop runs daily: creates next month's audit partition
@@ -648,12 +660,20 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 // admin service returns.
 
 func (s *Server) handleGetMergedSchema(w http.ResponseWriter, r *http.Request) {
-	resp, err := s.atl.GetMergedSchema(r.Context(), &adminpb.GetMergedSchemaRequest{})
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.GetMergedSchema(r.Context(), &adminpb.GetMergedSchemaRequest{})
 	s.proxyProto(w, "GetMergedSchema", resp, err)
 }
 
 func (s *Server) handleGetCanonicalIR(w http.ResponseWriter, r *http.Request) {
-	resp, err := s.atl.GetCanonicalIR(r.Context(), &adminpb.GetCanonicalIRRequest{})
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.GetCanonicalIR(r.Context(), &adminpb.GetCanonicalIRRequest{})
 	s.proxyProto(w, "GetCanonicalIR", resp, err, "ir")
 }
 
@@ -666,7 +686,11 @@ func (s *Server) handleGetSchemaHistory(w http.ResponseWriter, r *http.Request) 
 	if caller := r.URL.Query().Get("caller"); caller != "" {
 		req.Caller = caller
 	}
-	resp, err := s.atl.GetSchemaHistory(r.Context(), req)
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.GetSchemaHistory(r.Context(), req)
 	s.proxyProto(w, "GetSchemaHistory", resp, err)
 }
 
@@ -676,7 +700,11 @@ func (s *Server) handleGetSchemaVersion(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "version must be a positive integer", http.StatusBadRequest)
 		return
 	}
-	resp, err := s.atl.GetSchemaVersion(r.Context(), &adminpb.GetSchemaVersionRequest{Version: version})
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.GetSchemaVersion(r.Context(), &adminpb.GetSchemaVersionRequest{Version: version})
 	s.proxyProto(w, "GetSchemaVersion", resp, err, "diff", "ir_snapshot")
 }
 
@@ -687,7 +715,11 @@ func (s *Server) handleDiffSchemaVersions(w http.ResponseWriter, r *http.Request
 		jsonError(w, "from and to are required positive integers", http.StatusBadRequest)
 		return
 	}
-	resp, err := s.atl.DiffSchemaVersions(r.Context(), &adminpb.DiffSchemaVersionsRequest{
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.DiffSchemaVersions(r.Context(), &adminpb.DiffSchemaVersionsRequest{
 		FromVersion: from,
 		ToVersion:   to,
 	})
@@ -697,14 +729,22 @@ func (s *Server) handleDiffSchemaVersions(w http.ResponseWriter, r *http.Request
 func (s *Server) handleGetEntityLineage(w http.ResponseWriter, r *http.Request) {
 	// Admin RPC expects {"entity_id": "..."}.
 	entity := r.PathValue("entity")
-	resp, err := s.atl.GetEntityLineage(r.Context(), &adminpb.GetEntityLineageRequest{EntityId: entity})
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.GetEntityLineage(r.Context(), &adminpb.GetEntityLineageRequest{EntityId: entity})
 	s.proxyProto(w, "GetEntityLineage", resp, err)
 }
 
 // handleGetEntityOwners returns all entity→caller ownership.
 // GetEntityOwners takes no arguments — it always returns the full set.
 func (s *Server) handleGetEntityOwners(w http.ResponseWriter, r *http.Request) {
-	resp, err := s.atl.GetEntityOwners(r.Context(), &adminpb.GetEntityOwnersRequest{})
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.GetEntityOwners(r.Context(), &adminpb.GetEntityOwnersRequest{})
 	s.proxyProto(w, "GetEntityOwners", resp, err)
 }
 
@@ -719,7 +759,11 @@ func (s *Server) handleListParkedObjects(w http.ResponseWriter, r *http.Request)
 	// Accepts "1" or "true": a query param that silently means false for one
 	// of the two obvious spellings is a bug waiting to be filed.
 	all := r.URL.Query().Get("all")
-	resp, err := s.atl.ListParkedObjects(r.Context(), &adminpb.ListParkedObjectsRequest{
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.ListParkedObjects(r.Context(), &adminpb.ListParkedObjectsRequest{
 		IncludeReaped: all == "1" || all == "true",
 		Limit:         200,
 	})
@@ -747,14 +791,19 @@ func (s *Server) handleListParkedObjects(w http.ResponseWriter, r *http.Request)
 // All atlantis HTTP calls share a tight ProbeTimeout so a wedged
 // upstream can't stall the SPA's 1Hz health poll.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	e := s.orgAddrs(w, r)
+	if e == nil {
+		return
+	}
 	type checkItem struct {
 		Name    string `json:"name"`
 		Status  string `json:"status"`
 		Message string `json:"message,omitempty"`
 	}
 
+	healthAddr := e.health
 	probe := func(path string) (int, string) {
-		resp, err := http.Get("http://" + s.cfg.HealthListen + path) //nolint:noctx
+		resp, err := http.Get("http://" + healthAddr + path) //nolint:noctx
 		if err != nil {
 			return 0, err.Error()
 		}
@@ -792,7 +841,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// the SPA renders an em-dash.
 	var startedAt, serverVer string
 	var schemaVer int64
-	if resp, err := http.Get("http://" + s.cfg.HealthListen + "/status"); err == nil { //nolint:noctx
+	if resp, err := http.Get("http://" + healthAddr + "/status"); err == nil { //nolint:noctx
 		var body struct {
 			StartedAt     string `json:"started_at"`
 			Version       string `json:"version"`
@@ -810,7 +859,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// the Prometheus text format is one series. We don't need an exact
 	// count, just a stable "N series" surface that moves with reality.
 	metricsSeries := 0
-	if resp, err := http.Get("http://" + s.cfg.HealthListen + "/metrics"); err == nil { //nolint:noctx
+	if resp, err := http.Get("http://" + healthAddr + "/metrics"); err == nil { //nolint:noctx
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
 		for _, line := range strings.Split(string(body), "\n") {
 			line = strings.TrimSpace(line)
@@ -1026,9 +1075,13 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 // handleInstance returns small, non-secret runtime facts the Settings
 // page renders: the gRPC endpoint callers connect to. Auth-required so
 // it's not exposed publicly.
-func (s *Server) handleInstance(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
+	e := s.orgAddrs(w, r)
+	if e == nil {
+		return
+	}
 	jsonOK(w, map[string]any{
-		"endpoint": s.cfg.ATLEndpoint,
+		"endpoint": e.endpoint,
 	})
 }
 
@@ -1091,7 +1144,11 @@ func (s *Server) handleRevokeAllCallers(w http.ResponseWriter, r *http.Request) 
 	actor := r.Context().Value(ctxUser).(*User)
 
 	// List all known callers via the existing admin RPC; iterate revokes.
-	list, err := s.atl.GetCallers(r.Context(), &adminpb.GetCallersRequest{})
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	list, err := atl.GetCallers(r.Context(), &adminpb.GetCallersRequest{})
 	if err != nil {
 		s.log.Error("RevokeAll: GetCallers", "err", err)
 		jsonError(w, "GetCallers: "+err.Error(), http.StatusBadGateway)
@@ -1104,7 +1161,11 @@ func (s *Server) handleRevokeAllCallers(w http.ResponseWriter, r *http.Request) 
 		if c.GetCaller() == "" {
 			continue
 		}
-		if _, err := s.atl.RevokeCaller(r.Context(),
+		atl := s.orgATL(w, r)
+		if atl == nil {
+			return
+		}
+		if _, err := atl.RevokeCaller(r.Context(),
 			&adminpb.RevokeCallerRequest{Caller: c.GetCaller()}); err != nil {
 			s.log.Warn("RevokeAll: revoke caller", "caller", c.GetCaller(), "err", err)
 			failures = append(failures, c.GetCaller())
@@ -1127,7 +1188,11 @@ func (s *Server) handleRevokeAllCallers(w http.ResponseWriter, r *http.Request) 
 // ── Caller management ─────────────────────────────────────────────────
 
 func (s *Server) handleGetCallers(w http.ResponseWriter, r *http.Request) {
-	resp, err := s.atl.GetCallers(r.Context(), &adminpb.GetCallersRequest{})
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.GetCallers(r.Context(), &adminpb.GetCallersRequest{})
 	s.proxyProto(w, "GetCallers", resp, err)
 }
 
@@ -1146,7 +1211,11 @@ func (s *Server) handleRegisterCaller(w http.ResponseWriter, r *http.Request) {
 	}
 
 	actor := r.Context().Value(ctxUser).(*User)
-	resp, err := s.atl.RegisterCaller(r.Context(), &adminpb.RegisterCallerRequest{
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.RegisterCaller(r.Context(), &adminpb.RegisterCallerRequest{
 		Caller:    body.Caller,
 		CanMutate: body.CanMutate,
 		CreatedBy: actor.Email,
@@ -1173,7 +1242,11 @@ func (s *Server) handleGetCallerAliases(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "caller is required", http.StatusBadRequest)
 		return
 	}
-	resp, err := s.atl.GetCallerAliases(r.Context(), &adminpb.GetCallerAliasesRequest{Caller: caller})
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.GetCallerAliases(r.Context(), &adminpb.GetCallerAliasesRequest{Caller: caller})
 	s.proxyProto(w, "GetCallerAliases", resp, err)
 }
 
@@ -1194,7 +1267,11 @@ func (s *Server) handleSetCallerAliases(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	resp, err := s.atl.SetCallerAliases(r.Context(), &adminpb.SetCallerAliasesRequest{
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.SetCallerAliases(r.Context(), &adminpb.SetCallerAliasesRequest{
 		Caller:  caller,
 		Aliases: body.Aliases,
 	})
@@ -1218,7 +1295,11 @@ func (s *Server) handleRevokeCaller(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := s.atl.RevokeCaller(r.Context(), &adminpb.RevokeCallerRequest{Caller: caller})
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.RevokeCaller(r.Context(), &adminpb.RevokeCallerRequest{Caller: caller})
 	if err != nil {
 		s.log.Error("RevokeCaller", "caller", caller, "err", err)
 		jsonError(w, err.Error(), http.StatusBadGateway)
@@ -1256,7 +1337,11 @@ func (s *Server) handleRollbackSchema(w http.ResponseWriter, r *http.Request) {
 	u := r.Context().Value(ctxUser).(*User)
 	caller := "console:" + u.Email
 
-	resp, err := s.atl.RollbackSchema(r.Context(), &adminpb.RollbackSchemaRequest{
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.RollbackSchema(r.Context(), &adminpb.RollbackSchemaRequest{
 		ToVersion: body.ToVersion,
 		Caller:    caller,
 	})
@@ -1291,7 +1376,11 @@ func (s *Server) handlePreviewRollback(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "to_version is required", http.StatusBadRequest)
 		return
 	}
-	resp, err := s.atl.PreviewRollback(r.Context(), &adminpb.PreviewRollbackRequest{
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.PreviewRollback(r.Context(), &adminpb.PreviewRollbackRequest{
 		ToVersion: body.ToVersion,
 	})
 	if err != nil {
@@ -1307,7 +1396,11 @@ func (s *Server) handlePreviewRollback(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListDeadJobs(w http.ResponseWriter, r *http.Request) {
 	limit := intQuery(r, "limit", 50)
 	jobName := r.URL.Query().Get("job_name")
-	resp, err := s.atl.ListDeadJobs(r.Context(), &adminpb.ListDeadJobsRequest{
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.ListDeadJobs(r.Context(), &adminpb.ListDeadJobsRequest{
 		Limit:   int32(limit),
 		JobName: jobName,
 	})
@@ -1316,7 +1409,11 @@ func (s *Server) handleListDeadJobs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetJobStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	resp, err := s.atl.GetJobStatus(r.Context(), &adminpb.GetJobStatusRequest{JobId: id})
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.GetJobStatus(r.Context(), &adminpb.GetJobStatusRequest{JobId: id})
 	s.proxyProto(w, "GetJobStatus", resp, err, "args")
 }
 
@@ -1327,7 +1424,11 @@ func (s *Server) handleRetryDeadJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := s.atl.RetryDeadJob(r.Context(), &adminpb.RetryDeadJobRequest{JobId: id})
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.RetryDeadJob(r.Context(), &adminpb.RetryDeadJobRequest{JobId: id})
 	if err != nil {
 		s.log.Error("RetryDeadJob", "job_id", id, "err", err)
 		jsonError(w, err.Error(), http.StatusBadGateway)
@@ -1343,7 +1444,11 @@ func (s *Server) handleRetryDeadJob(w http.ResponseWriter, r *http.Request) {
 // ── Worker dispatcher ────────────────────────────────────────────────
 
 func (s *Server) handleListConnectedWorkers(w http.ResponseWriter, r *http.Request) {
-	resp, err := s.atl.ListConnectedWorkers(r.Context(), &adminpb.ListConnectedWorkersRequest{})
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.ListConnectedWorkers(r.Context(), &adminpb.ListConnectedWorkersRequest{})
 	s.proxyProto(w, "ListConnectedWorkers", resp, err)
 }
 
@@ -1353,7 +1458,11 @@ func (s *Server) handleGetWorkerSession(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, "id is required", http.StatusBadRequest)
 		return
 	}
-	resp, err := s.atl.GetWorkerSession(r.Context(), &adminpb.GetWorkerSessionRequest{SessionId: id})
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.GetWorkerSession(r.Context(), &adminpb.GetWorkerSessionRequest{SessionId: id})
 	s.proxyProto(w, "GetWorkerSession", resp, err)
 }
 
@@ -1363,7 +1472,11 @@ func (s *Server) handleDrainWorker(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "id is required", http.StatusBadRequest)
 		return
 	}
-	resp, err := s.atl.DrainWorker(r.Context(), &adminpb.DrainWorkerRequest{SessionId: id})
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.DrainWorker(r.Context(), &adminpb.DrainWorkerRequest{SessionId: id})
 	if err != nil {
 		s.log.Error("DrainWorker", "session_id", id, "err", err)
 		jsonError(w, err.Error(), http.StatusBadGateway)
@@ -1380,7 +1493,11 @@ func (s *Server) handleEvictWorker(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "id is required", http.StatusBadRequest)
 		return
 	}
-	resp, err := s.atl.EvictWorker(r.Context(), &adminpb.EvictWorkerRequest{SessionId: id})
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.EvictWorker(r.Context(), &adminpb.EvictWorkerRequest{SessionId: id})
 	if err != nil {
 		s.log.Error("EvictWorker", "session_id", id, "err", err)
 		jsonError(w, err.Error(), http.StatusBadGateway)
@@ -1503,7 +1620,11 @@ func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
 	// load-bearing — if it fails, the old cert keeps authenticating
 	// until natural expiry, so surface the error to the operator rather
 	// than swallowing it like the pre-binding implementation did.
-	if _, err := s.atl.RecordCallerCertExpiry(r.Context(), &adminpb.RecordCallerCertExpiryRequest{
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	if _, err := atl.RecordCallerCertExpiry(r.Context(), &adminpb.RecordCallerCertExpiryRequest{
 		Caller:      caller,
 		ExpiresAt:   signerRespBody.ExpiresAt,
 		Fingerprint: fingerprintHex,
@@ -1571,7 +1692,11 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	since, _ := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64)
 	limit := intQuery(r, "limit", 0)
 
-	resp, err := s.atl.GetLogs(r.Context(), &adminpb.GetLogsRequest{
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.GetLogs(r.Context(), &adminpb.GetLogsRequest{
 		Since: since,
 		Limit: int32(limit),
 	})
@@ -1732,7 +1857,11 @@ func clearSessionCookie(w http.ResponseWriter, secure bool) {
 
 // handleGetChangePolicy proxies the deployment's change policy.
 func (s *Server) handleGetChangePolicy(w http.ResponseWriter, r *http.Request) {
-	resp, err := s.atl.GetChangePolicy(r.Context(), &adminpb.GetChangePolicyRequest{})
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.GetChangePolicy(r.Context(), &adminpb.GetChangePolicyRequest{})
 	s.proxyProto(w, "GetChangePolicy", resp, err)
 }
 
@@ -1779,7 +1908,11 @@ func (s *Server) handleSetChangePolicy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u := r.Context().Value(ctxUser).(*User)
-	resp, err := s.atl.SetChangePolicy(r.Context(), &adminpb.SetChangePolicyRequest{
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.SetChangePolicy(r.Context(), &adminpb.SetChangePolicyRequest{
 		Entries:   entries,
 		UpdatedBy: u.Email,
 	})
@@ -1827,7 +1960,11 @@ func (s *Server) requirePolicyRole(next http.HandlerFunc) http.HandlerFunc {
 			jsonError(w, "plan id is required", http.StatusBadRequest)
 			return
 		}
-		resp, err := s.atl.GetSchemaPlan(r.Context(), &adminpb.GetSchemaPlanRequest{PlanId: planID})
+		atl := s.orgATL(w, r)
+		if atl == nil {
+			return
+		}
+		resp, err := atl.GetSchemaPlan(r.Context(), &adminpb.GetSchemaPlanRequest{PlanId: planID})
 		if err != nil {
 			s.log.Error("GetSchemaPlan", "plan", planID, "err", err)
 			jsonError(w, err.Error(), http.StatusBadGateway)
@@ -1864,7 +2001,11 @@ func (s *Server) requirePolicyRole(next http.HandlerFunc) http.HandlerFunc {
 
 // handleListSchemaPlans proxies the approval queue.
 func (s *Server) handleListSchemaPlans(w http.ResponseWriter, r *http.Request) {
-	resp, err := s.atl.ListSchemaPlans(r.Context(), &adminpb.ListSchemaPlansRequest{
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.ListSchemaPlans(r.Context(), &adminpb.ListSchemaPlansRequest{
 		State:  r.URL.Query().Get("state"),
 		Caller: r.URL.Query().Get("caller"),
 	})
@@ -1873,7 +2014,11 @@ func (s *Server) handleListSchemaPlans(w http.ResponseWriter, r *http.Request) {
 
 // handleGetSchemaPlan proxies one plan, including the proposed .atl source.
 func (s *Server) handleGetSchemaPlan(w http.ResponseWriter, r *http.Request) {
-	resp, err := s.atl.GetSchemaPlan(r.Context(), &adminpb.GetSchemaPlanRequest{
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.GetSchemaPlan(r.Context(), &adminpb.GetSchemaPlanRequest{
 		PlanId: r.PathValue("id"),
 	})
 	s.proxyProto(w, "GetSchemaPlan", resp, err)
@@ -1917,7 +2062,11 @@ func (s *Server) decideSchemaPlan(w http.ResponseWriter, r *http.Request, approv
 		})
 	}
 	if approve {
-		resp, err := s.atl.ApproveSchemaPlan(r.Context(), &adminpb.ApproveSchemaPlanRequest{
+		atl := s.orgATL(w, r)
+		if atl == nil {
+			return
+		}
+		resp, err := atl.ApproveSchemaPlan(r.Context(), &adminpb.ApproveSchemaPlanRequest{
 			PlanId: planID, DecidedBy: u.Email, DecidedByRole: role, Reason: body.Reason,
 		})
 		if err != nil {
@@ -1929,7 +2078,11 @@ func (s *Server) decideSchemaPlan(w http.ResponseWriter, r *http.Request, approv
 		s.proxyProto(w, "ApproveSchemaPlan", resp, nil)
 		return
 	}
-	resp, err := s.atl.RejectSchemaPlan(r.Context(), &adminpb.RejectSchemaPlanRequest{
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.RejectSchemaPlan(r.Context(), &adminpb.RejectSchemaPlanRequest{
 		PlanId: planID, DecidedBy: u.Email, DecidedByRole: role, Reason: body.Reason,
 	})
 	if err != nil {

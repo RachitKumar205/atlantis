@@ -236,9 +236,7 @@ Read by `cmd/console`, not the Atlantis server.
 | `CLOUD_JWKS_URL` | (unset; **required**) | Where the issuer publishes its public keys. Fetched on demand, refreshed every 5 minutes, and refetched whenever an assertion names a key the console does not hold — which is how a key rotation takes effect promptly. |
 | `CONSOLE_COOKIE_SECURE` | `false` | Sets the `Secure` flag on session cookies. Default false so `http://localhost` works for first boot; flip to `true` once a TLS terminator (reverse proxy, LB) sits in front. |
 | `CONSOLE_AUDIT_RETENTION_DAYS` | `365` | Audit-row retention. Covers the typical SOC 2 audit window and PCI DSS §10.5.1's 12-month online minimum. HIPAA = 2190 (6 years); SOX = 2555 (7 years). `0` keeps every partition forever. |
-| `ATL_ENDPOINT` | `localhost:9090` | atlantis-server endpoint the BFF dials over mTLS. |
-| `ATL_TLS_CERT`, `ATL_TLS_KEY`, `ATL_TLS_CA` | (unset; **all three required**) | Client cert / key / CA for the BFF's mTLS connection to atlantis-server. The console is an ordinary caller on that channel and authenticates as `CN=atlantis-console`. It refuses to start without them. `make dev-certs` writes a matching set into `./certs`. |
-| `ATL_HEALTH_LISTEN` | `localhost:8081` | atlantis-server HTTP health endpoint the BFF surfaces on the console's Health page. |
+| `CONSOLE_DATA_KEY` | (unset; **required**) | Base64 Tink keyset. Encrypts the client private key in each organisation's `console.orgs` row. `cloud data-key` prints one; `make dev-data-key` writes one to `./certs` for local use. |
 | `ATL_SIGNER_ADDR` | (unset) | Signer HTTP endpoint for cert issuance from the console's Callers page. |
 | `SANDBOX_PER_USER_LIMIT` | `3` | Maximum concurrent sandboxes per authenticated user. A boot beyond this returns HTTP `429`. The limit also caps fork count — forking N children requires `N + parent` headroom. |
 | `SANDBOX_TTL` | `30m` | Idle window after which the BFF's janitor evicts a sandbox. Go duration syntax. Set lower (`10s`) for CI; higher (`2h`) for long agent loops. |
@@ -294,6 +292,55 @@ once in each.
 Audit rows written before this existed carry `org = ''` and appear in no
 organisation's console. See the CHANGELOG for how to attribute them.
 
+### Each organisation has its own atlantis
+
+The console no longer reads `ATL_ENDPOINT`, `ATL_TLS_CERT`, `ATL_TLS_KEY`,
+`ATL_TLS_CA` or `ATL_HEALTH_LISTEN`. One console serves many organisations, each
+with its own atlantis behind its own certificate authority, so an address and a
+certificate belong to an organisation rather than to the process. They are
+columns in `console.orgs`, written by `cloud org register`.
+
+*(The variable names are still live elsewhere. `tide` and `tidectl` read
+`ATL_ENDPOINT` and the TLS trio for their own connections. Only the console
+stopped.)*
+
+```bash
+cloud org register \
+  -org acme \
+  -endpoint atlantis.acme.internal:9090 \
+  -health   atlantis.acme.internal:8081 \
+  -ca   acme-ca.pem \
+  -cert console-for-acme.crt \
+  -key  console-for-acme.key
+```
+
+Re-running it rotates a certificate in place. A running console notices within
+five minutes and rebuilds the channel, so a rotation needs no restart.
+
+**An organisation nobody registered is refused** — HTTP 503, naming the
+organisation. There is deliberately no default endpoint to fall back to. A
+fallback is exactly the failure this design exists to prevent: one missing row
+would route an unprovisioned organisation into somebody else's atlantis, every
+page would render, and nothing would report an error.
+
+**A separate certificate authority per organisation is what makes a mistake
+loud.** Credentials issued for one organisation do not chain at another's
+server, so a mixed-up pairing is refused inside the TLS handshake, before any
+atlantis code runs. Nothing further along would catch it: both consoles connect
+as `CN=atlantis-console`, that caller is allowlisted in every install, and it
+holds `CAPABILITY_OPERATOR`.
+
+**`CONSOLE_DATA_KEY` is not recoverable.** Every organisation's private key is
+encrypted under it, with the organisation name as associated data — so a key
+lifted onto another organisation's row will not decrypt. Losing the keyset
+leaves those rows intact, complete, and permanently unopenable, which presents
+as every organisation being unreachable with nothing in the schema looking
+wrong. Store it wherever the deployment's other secrets live.
+
+This protects a leaked backup, a replica, or a broad read of `console.orgs`. It
+does not protect a compromised console process, which holds the keyset in memory
+by necessity.
+
 ## Cloud identity service
 
 Read by `cmd/cloud`, which publishes the keys consoles verify against.
@@ -304,12 +351,23 @@ Read by `cmd/cloud`, which publishes the keys consoles verify against.
 | `CLOUD_ISSUER` | (unset; **required**) | Becomes the `iss` claim. Must match each console's `CLOUD_ISSUER` exactly. |
 | `CLOUD_SIGNING_KEY` | `./certs/cloud-signing-key.pem` | ECDSA P-256 signing key, created on first use with mode `0600`. Persisting it matters: a key regenerated per restart changes the published key set, so every assertion issued beforehand stops verifying. |
 
+`cloud org register` also reads `CONSOLE_PG_URL` and `CONSOLE_DATA_KEY`, as
+defaults for its `-db` and `-data-key` flags. The keyset must be the one the
+console serves with: registering under a different key writes a row that looks
+complete and never opens.
+
 Minting is a command (`cloud mint`) rather than an HTTP route, and that is a
 constraint rather than an unfinished feature. A route that mints on request is a
 complete authentication bypass until something in front of it establishes who is
 asking, and Cloud does not yet hold user records. `cloud mint` needs read access
 to the signing key, so it is available to whoever operates Cloud and nobody
 else.
+
+`cloud org register` is the same argument one layer along. Registering an
+organisation decides which atlantis a console hands that organisation's users,
+so an unauthenticated route for it would let anyone who can reach the console
+repoint an organisation at a server they control — and every request afterwards
+would succeed, because the credentials would be genuine.
 
 ## Observability
 

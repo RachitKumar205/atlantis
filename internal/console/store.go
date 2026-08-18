@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
+	"github.com/rachitkumar205/atlantis/internal/console/secrets"
 )
 
 func jsonMarshalBytes(v any) ([]byte, error) { return json.Marshal(v) }
@@ -75,12 +76,16 @@ type User struct {
 type store struct {
 	pool *pgxpool.Pool
 
+	// keys seals the per-organisation private keys in console.orgs. See
+	// internal/console/secrets for what that does and does not defend.
+	keys secrets.Keyring
+
 	// log exists because audit writes are best-effort and their errors used to
 	// be discarded outright. See logAction.
 	log *slog.Logger
 }
 
-func newStore(ctx context.Context, pgURL string, log *slog.Logger) (*store, error) {
+func newStore(ctx context.Context, pgURL string, log *slog.Logger, keys secrets.Keyring) (*store, error) {
 	// Built from a config rather than pgxpool.New so every new connection has
 	// its organisation discriminator cleared. See newPoolConfig for why that
 	// matters and why it is SET rather than RESET.
@@ -96,7 +101,7 @@ func newStore(ctx context.Context, pgURL string, log *slog.Logger) (*store, erro
 		pool.Close()
 		return nil, err
 	}
-	return &store{pool: pool, log: log}, nil
+	return &store{pool: pool, log: log, keys: keys}, nil
 }
 
 func (s *store) close() { s.pool.Close() }
@@ -408,16 +413,124 @@ func (s *store) createSession(ctx context.Context, c *identity.Claims) (string, 
 //
 // console.orgs is a registry, not organisation-scoped data, so it carries no
 // policy — a table listing organisations that only its own organisation could
-// read would be useless. Nothing sensitive is in it: the name is already in
-// every assertion.
+// read would be useless.
 //
 // Written on exchange, where the claims have just been verified, so the only
 // way to enter this table is to have presented an assertion Cloud signed for
-// that organisation. Step 5 hangs per-organisation endpoints and client
-// certificates off these rows.
+// that organisation. It writes the name and nothing else: the address and
+// credentials arrive later, from `cloud org register`, because an organisation
+// is known from its first sign-in and provisioned separately.
 func (s *store) rememberOrg(ctx context.Context, org string) error {
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO console.orgs (org) VALUES ($1) ON CONFLICT (org) DO NOTHING`, org)
+	return err
+}
+
+// ErrOrgNotProvisioned reports an organisation with no atlantis behind it.
+//
+// Distinct from "no such organisation", and both are distinct from a failure to
+// reach the database. The console answers 503 for this rather than 404, because
+// the organisation is real and somebody signed in to it — what is missing is
+// the stack, which is an operator's problem and not the user's mistake.
+var ErrOrgNotProvisioned = errors.New("organisation has no atlantis registered")
+
+// orgCredentials is everything needed to reach one organisation's atlantis.
+//
+// The private key is already decrypted here. It exists in this form only
+// between the store and the client that is about to be built from it, which is
+// as narrow as the window gets while still being able to dial at all.
+type orgCredentials struct {
+	Org        string
+	Endpoint   string
+	HealthAddr string
+	CAPEM      string
+	CertPEM    string
+	KeyPEM     []byte
+
+	// UpdatedAt is what the connection pool compares to decide whether a
+	// cached client is still built from the current row. A rotated certificate
+	// moves it, and the pool rebuilds without a restart.
+	UpdatedAt time.Time
+}
+
+// orgCredentials reads one organisation's address and credentials, decrypting
+// the private key.
+//
+// Returns ErrOrgNotProvisioned when the row exists but has not been registered
+// — the ordinary state between somebody's first sign-in and an operator
+// provisioning their stack — and ErrNotFound when there is no row at all.
+func (s *store) orgCredentials(ctx context.Context, org string) (*orgCredentials, error) {
+	var (
+		c                                    orgCredentials
+		endpoint, healthAddr, caPEM, certPEM *string
+		keyCT                                []byte
+	)
+	err := s.pool.QueryRow(ctx, `
+		SELECT atl_endpoint, atl_health_addr, ca_pem, client_cert_pem, client_key_ct, updated_at
+		FROM console.orgs WHERE org = $1
+	`, org).Scan(&endpoint, &healthAddr, &caPEM, &certPEM, &keyCT, &c.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	// Every column or none. A half-registered row cannot produce a working
+	// connection, and reporting it as provisioned would surface later as a
+	// confusing TLS or dial error rather than as the missing registration it
+	// is.
+	if endpoint == nil || healthAddr == nil || caPEM == nil || certPEM == nil || len(keyCT) == 0 {
+		return nil, fmt.Errorf("%w: %s", ErrOrgNotProvisioned, org)
+	}
+
+	// The organisation name is the associated data the key was sealed with, so
+	// a key copied from another row will not open here. See
+	// internal/console/secrets.
+	keyPEM, err := s.keys.Decrypt(keyCT, []byte(org))
+	if err != nil {
+		return nil, fmt.Errorf("decrypt credentials for %s "+
+			"(wrong CONSOLE_DATA_KEY, or the row was tampered with): %w", org, err)
+	}
+
+	c.Org = org
+	c.Endpoint = *endpoint
+	c.HealthAddr = *healthAddr
+	c.CAPEM = *caPEM
+	c.CertPEM = *certPEM
+	c.KeyPEM = keyPEM
+	return &c, nil
+}
+
+// registerOrg stores an organisation's address and credentials, sealing the
+// private key.
+//
+// Used by `cloud org register`. Upserts, so re-registering rotates a
+// certificate in place — and touches updated_at, which is how a running console
+// notices.
+func (s *store) registerOrg(ctx context.Context, c orgCredentials) error {
+	// Refuse a registration that cannot dial, here rather than in the exported
+	// wrapper, so this is the only door and there is no second one that skips
+	// the check. See validateOrgCredentials for what it does and does not
+	// claim.
+	if err := validateOrgCredentials(c); err != nil {
+		return fmt.Errorf("register %s: %w", c.Org, err)
+	}
+	keyCT, err := s.keys.Encrypt(c.KeyPEM, []byte(c.Org))
+	if err != nil {
+		return fmt.Errorf("seal the private key for %s: %w", c.Org, err)
+	}
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO console.orgs (org, atl_endpoint, atl_health_addr, ca_pem, client_cert_pem, client_key_ct, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+		ON CONFLICT (org) DO UPDATE SET
+			atl_endpoint    = EXCLUDED.atl_endpoint,
+			atl_health_addr = EXCLUDED.atl_health_addr,
+			ca_pem          = EXCLUDED.ca_pem,
+			client_cert_pem = EXCLUDED.client_cert_pem,
+			client_key_ct   = EXCLUDED.client_key_ct,
+			updated_at      = NOW()
+	`, c.Org, c.Endpoint, c.HealthAddr, c.CAPEM, c.CertPEM, keyCT)
 	return err
 }
 

@@ -39,20 +39,26 @@ import (
 // lets production DDL run, and which is wrapped in four middlewares whose
 // order matters.
 //
-// The obstacle is that a *Server holds an *adminClient, a concrete type that
-// opens a gRPC connection. There is no *Server without something answering on
-// the other end. Two ways past that were available:
+// The obstacle is that the console talks to atlantis over a concrete gRPC
+// channel — once a field, now one per organisation from orgClients. Either way
+// there is no working *Server without something answering on the other end.
+// Two ways past that were available:
 //
-//   - Make the field an interface and pass a fake. Rejected: it changes shipped
-//     code to suit a test, and it would test the console against a fake whose
+//   - Make it an interface and pass a fake. Rejected: it changes shipped code
+//     to suit a test, and it would test the console against a fake whose
 //     behaviour somebody has to keep in step with the real server by hand.
-//   - Run the real admin service in-process. Chosen. dialAdmin already falls
-//     back to insecure credentials when no TLS cert is configured, so a plain
-//     listener is enough, and New() is used exactly as production uses it.
+//   - Run the real admin service in-process. Chosen: New() is then used exactly
+//     as production uses it.
 //
 // The second is slower to set up and tests the thing that ships. It also means
 // the assertions below run against real plan rows created by a real apply,
 // rather than fixtures shaped like what the code hopes it will be handed.
+//
+// The listener speaks mTLS, which is not extra rigour for its own sake. The
+// console has no insecure transport at all — dialOrg has no plaintext branch —
+// so a plain listener would be a channel it could not dial. An earlier version
+// of this comment said the opposite, describing a fallback that has since been
+// deleted.
 //
 // # What is deliberately absent
 //
@@ -68,19 +74,31 @@ type consoleFixture struct {
 	pool    *pgxpool.Pool
 	dsn     string
 
+	// consoleDSN is the isolated role the console itself runs as, as opposed
+	// to dsn, which is the administrative one the fixture inspects with. A
+	// test that goes through an exported entry point should use this, so it
+	// exercises the grants a deployment has rather than a superuser's.
+	consoleDSN string
+
+	// keyset is what the console was started with. Registration has to happen
+	// under the same one, or the row is written and never opens.
+	keyset string
+
 	// A real Cloud issuer, on a real JWKS endpoint. Not a stub: the console
 	// has no development bypass for identity, so a fixture that faked one
 	// would be exercising a path production never takes.
 	iss      *issuer.Issuer
 	audience string
+
+	// atl is the default organisation's stack, kept so a test about the
+	// boundary can reach its CA and its certificate — the two halves it needs
+	// to build a deliberately mismatched pair.
+	atl *atlStack
 }
 
 func newConsoleFixture(t *testing.T) *consoleFixture {
 	t.Helper()
-	adminDSN := os.Getenv("ATLANTIS_TEST_PG")
-	if adminDSN == "" {
-		t.Skip("set ATLANTIS_TEST_PG to exercise the console's HTTP routes")
-	}
+	adminDSN := requireTestPG(t)
 
 	// Confine this process's temp directory before New() runs.
 	//
@@ -121,31 +139,9 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 		t.Fatalf("migrate %s: %v", dbName, err)
 	}
 
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	// The real admin service, on a real listener, over real mTLS.
-	//
-	// The listener demands and verifies a client certificate, exactly as
-	// cmd/server's does. That is not extra rigour for its own sake: the console
-	// has no insecure transport any more, so a plaintext test listener would be
-	// a channel the console cannot dial at all.
-	pki := testpki.New(t, t.TempDir())
-	consoleCert, consoleKey := pki.ClientCert(t, "atlantis-console")
-
-	adminSv := admin.New(pool, admin.Config{AllowApplyMutation: true})
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	grpcSrv := grpc.NewServer(grpc.Creds(credentials.NewTLS(pki.ServerTLS(t))))
-	admin.RegisterGenerated(grpcSrv, adminSv)
-	go func() { _ = grpcSrv.Serve(lis) }()
-	t.Cleanup(grpcSrv.Stop)
+	// The default organisation's atlantis, behind its own CA. Tests about the
+	// boundary stand up a second one the same way.
+	stack := newATLStack(t, dsn)
 
 	// Cloud, as far as this console is concerned: a signing key, a JWKS
 	// endpoint, and an issuer name the console is configured to trust.
@@ -162,15 +158,13 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 
 	const audience = "https://console.test"
 
+	keyset := testKeyset(t)
 	srv, err := New(Config{
 		PGURL:               consoleDSN,
-		ATLEndpoint:         lis.Addr().String(),
 		SessionSecret:       strings.Repeat("k", 32),
+		DataKeyset:          keyset,
 		SandboxPerUserLimit: 1,
 		SandboxTTL:          time.Minute,
-		ATLTLSCert:          consoleCert,
-		ATLTLSKey:           consoleKey,
-		ATLTLSCA:            pki.CAFile,
 		CloudIssuer:         iss.Name(),
 		CloudAudience:       audience,
 		CloudJWKSURL:        jwks.URL + issuer.JWKSPath,
@@ -180,9 +174,118 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 	}
 	t.Cleanup(srv.Close)
 
-	return &consoleFixture{
-		srv: srv, adminSv: adminSv, pool: pool, dsn: dsn,
-		iss: iss, audience: audience,
+	f := &consoleFixture{
+		srv: srv, adminSv: stack.svc, pool: stack.pool, dsn: dsn,
+		consoleDSN: consoleDSN, keyset: keyset,
+		iss: iss, audience: audience, atl: stack,
+	}
+
+	// The console has no process-wide endpoint or certificate any more, so an
+	// organisation is unreachable until it is registered. Registering the
+	// default one here keeps every existing test working; tests about the
+	// boundary register a second organisation against a second CA.
+	f.registerOrg(t, defaultOrg, stack)
+	return f
+}
+
+// requireTestPG returns the administrative DSN, or skips.
+//
+// CI asserts that no test in this repo skips for this reason
+// (.github/workflows/ci.yml), so the skip is a local-development convenience
+// rather than a way for these tests to be quietly absent.
+func requireTestPG(t *testing.T) string {
+	t.Helper()
+	dsn := os.Getenv("ATLANTIS_TEST_PG")
+	if dsn == "" {
+		t.Skip("set ATLANTIS_TEST_PG to exercise the console against a real database")
+	}
+	return dsn
+}
+
+// atlStack is one organisation's atlantis: its own database, its own
+// certificate authority, and a listener that demands a certificate from it.
+//
+// One per organisation, and the CA is per stack rather than shared. That is
+// not tidiness — it is the property the per-organisation client pool rests on.
+// With one CA behind two servers, credentials issued for either organisation
+// chain at both, every cross-organisation dial succeeds, and a test asserting
+// "A's client returned A's data" passes for the weaker reason that the pool
+// happened to hand back the right channel. With two, the wrong pairing is
+// refused inside the handshake, which is the claim the design actually makes.
+type atlStack struct {
+	pki      *testpki.PKI
+	certFile string
+	keyFile  string
+	addr     string
+	svc      *admin.Service
+	pool     *pgxpool.Pool
+	dsn      string
+}
+
+// newATLStack runs the real admin service on a real mTLS listener over dsn.
+//
+// The caller creates and migrates the database, because the fixture's first
+// stack shares one with the console's own schema and a second one does not.
+func newATLStack(t *testing.T, dsn string) *atlStack {
+	t.Helper()
+
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	pki := testpki.New(t, t.TempDir())
+	certFile, keyFile := pki.ClientCert(t, "atlantis-console")
+
+	svc := admin.New(pool, admin.Config{AllowApplyMutation: true})
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	grpcSrv := grpc.NewServer(grpc.Creds(credentials.NewTLS(pki.ServerTLS(t))))
+	admin.RegisterGenerated(grpcSrv, svc)
+	go func() { _ = grpcSrv.Serve(lis) }()
+	t.Cleanup(grpcSrv.Stop)
+
+	return &atlStack{
+		pki: pki, certFile: certFile, keyFile: keyFile,
+		addr: lis.Addr().String(), svc: svc, pool: pool, dsn: dsn,
+	}
+}
+
+// credentials is what `cloud org register` would be handed for this stack.
+//
+// Reads the PEM off disk because testpki writes files, while the console keeps
+// the material in its registry row — the console no longer loads certificates
+// from paths at all.
+func (s *atlStack) credentials(t *testing.T, org string) orgCredentials {
+	t.Helper()
+	read := func(path string) string {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		return string(b)
+	}
+	return orgCredentials{
+		Org:      org,
+		Endpoint: s.addr,
+		// Nothing in these tests reads the health endpoint, but a
+		// half-registered row is refused, so it has to be here.
+		HealthAddr: "127.0.0.1:1",
+		CAPEM:      read(s.pki.CAFile),
+		CertPEM:    read(s.certFile),
+		KeyPEM:     []byte(read(s.keyFile)),
+	}
+}
+
+// registerOrg points an organisation at a stack, as `cloud org register` does
+// in a deployment.
+func (f *consoleFixture) registerOrg(t *testing.T, org string, s *atlStack) {
+	t.Helper()
+	if err := f.srv.db.registerOrg(context.Background(), s.credentials(t, org)); err != nil {
+		t.Fatalf("register %s: %v", org, err)
 	}
 }
 

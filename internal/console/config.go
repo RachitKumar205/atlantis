@@ -4,22 +4,40 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 )
 
 // Config holds all console BFF configuration, sourced from environment
 // variables.
 type Config struct {
-	Listen        string // CONSOLE_LISTEN — default :3000
-	PGURL         string // CONSOLE_PG_URL — required
-	ATLEndpoint   string // ATL_ENDPOINT — default localhost:9090
-	ATLTLSCert    string // ATL_TLS_CERT
-	ATLTLSKey     string // ATL_TLS_KEY
-	ATLTLSCA      string // ATL_TLS_CA
+	Listen string // CONSOLE_LISTEN — default :3000
+	PGURL  string // CONSOLE_PG_URL — required
+	// DataKeyset seals the per-organisation private keys in console.orgs.
+	//
+	// Base64-encoded Tink keyset, required, no default. A console that
+	// generated its own on first boot would encrypt every organisation's
+	// credentials under a key that dies with the container — which presents as
+	// every organisation being unreachable after a restart, with the rows
+	// intact and permanently unopenable.
+	DataKeyset string // CONSOLE_DATA_KEY
+
+	// There is deliberately no ATL_ENDPOINT, ATL_TLS_CERT/KEY/CA or
+	// ATL_HEALTH_LISTEN here any more.
+	//
+	// One console serves many organisations, each with its own atlantis behind
+	// its own CA, so an address and a certificate are properties of an
+	// organisation rather than of the process. They live in console.orgs and
+	// are registered by `cloud org register`.
+	//
+	// Removed rather than kept as a fallback, which is the whole point: an
+	// organisation nobody registered is refused. A default endpoint would mean
+	// one missing row silently routes an unprovisioned organisation into
+	// somebody else's atlantis, and every page would render.
+	//
+	// The env var names stay meaningful elsewhere — tide and tidectl still read
+	// ATL_ENDPOINT for their own connections. Only the console stopped.
 	SessionSecret string // CONSOLE_SESSION_SECRET — required, ≥32 chars
 	CookieSecure  bool   // CONSOLE_COOKIE_SECURE — default false
-	HealthListen  string // ATL_HEALTH_LISTEN — atlantis health HTTP addr, default :8081
 	SignerAddr    string // ATL_SIGNER_ADDR — optional; cert issuance requires it
 
 	// Who this console accepts identity from. All three are required and
@@ -57,13 +75,9 @@ func ConfigFromEnv() (Config, error) {
 	c := Config{
 		Listen:        envOr("CONSOLE_LISTEN", ":3000"),
 		PGURL:         os.Getenv("CONSOLE_PG_URL"),
-		ATLEndpoint:   envOr("ATL_ENDPOINT", "localhost:9090"),
-		ATLTLSCert:    os.Getenv("ATL_TLS_CERT"),
-		ATLTLSKey:     os.Getenv("ATL_TLS_KEY"),
-		ATLTLSCA:      os.Getenv("ATL_TLS_CA"),
+		DataKeyset:    os.Getenv("CONSOLE_DATA_KEY"),
 		SessionSecret: os.Getenv("CONSOLE_SESSION_SECRET"),
 		CookieSecure:  os.Getenv("CONSOLE_COOKIE_SECURE") == "true",
-		HealthListen:  envOr("ATL_HEALTH_LISTEN", "localhost:8081"),
 		SignerAddr:    os.Getenv("ATL_SIGNER_ADDR"),
 
 		CloudIssuer:   os.Getenv("CLOUD_ISSUER"),
@@ -96,35 +110,27 @@ func ConfigFromEnv() (Config, error) {
 	if len(c.SessionSecret) < 32 {
 		return Config{}, fmt.Errorf("CONSOLE_SESSION_SECRET must be at least 32 characters")
 	}
-	// mTLS is required, matching the server. The console is an ordinary caller
-	// on that channel — it authenticates by client certificate as CN=
-	// atlantis-console, and its capability grants hang off that identity.
+	// mTLS is still required on every channel to atlantis — what changed is
+	// where the credentials come from.
 	//
-	// This used to be optional, and the fallback reached further than its own
-	// warning suggested: the setup wizard's connectivity step reported
-	// overall="err" for a TLS-less console, and the only button out of the
-	// wizard is disabled on that value. So the insecure mode did not merely
-	// weaken the console — it could not finish first-run setup at all.
-	var missing []string
-	for _, v := range []struct{ name, val string }{
-		{"ATL_TLS_CERT", c.ATLTLSCert},
-		{"ATL_TLS_KEY", c.ATLTLSKey},
-		{"ATL_TLS_CA", c.ATLTLSCA},
-	} {
-		if v.val == "" {
-			missing = append(missing, v.name)
-		}
-	}
-	if len(missing) > 0 {
+	// They used to be three process-wide file paths, which is why this function
+	// used to demand them. One console now serves many organisations, each with
+	// its own atlantis behind its own CA, so a certificate belongs to an
+	// organisation and lives in its console.orgs row. There is no process-wide
+	// certificate left to validate here, and no mode that skips mTLS: dialOrg
+	// has no insecure branch, and an organisation with no credentials is
+	// refused rather than dialled in the clear.
+	//
+	// What this function validates instead is the key those credentials are
+	// sealed with, without which none of them can be read.
+	if c.DataKeyset == "" {
 		return Config{}, fmt.Errorf(
-			"mTLS is required: %s not set.\n\n"+
-				"The console authenticates to atlantis by client certificate. "+
-				"There is no mode that skips it.\n\n"+
-				"For local development run `make dev-certs`, then:\n"+
-				"  ATL_TLS_CERT=./certs/console.crt \\\n"+
-				"  ATL_TLS_KEY=./certs/console.key \\\n"+
-				"  ATL_TLS_CA=./certs/ca.crt",
-			strings.Join(missing, ", "))
+			"CONSOLE_DATA_KEY is required.\n\n" +
+				"Each organisation's atlantis is reached with its own client " +
+				"certificate, and the private keys are encrypted in console.orgs. " +
+				"Without this keyset the console cannot read any of them, so every " +
+				"organisation would be unreachable.\n\n" +
+				"For local development: `make dev-data-key` prints one to export.")
 	}
 	return c, nil
 }

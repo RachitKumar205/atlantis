@@ -326,7 +326,7 @@ func (s *Server) handleSandboxBoot(w http.ResponseWriter, r *http.Request) {
 	// GetCanonicalIR returns { IR: json.RawMessage, ContentHash: string }.
 	var ir dsl.IR
 	var hash string
-	if err := s.bootResolveIR(r.Context(), &ir, &hash); err != nil {
+	if err := s.bootResolveIR(r.Context(), user.Org, &ir, &hash); err != nil {
 		jsonError(w, "resolve current IR: "+err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -380,8 +380,15 @@ func (s *Server) handleSandboxBoot(w http.ResponseWriter, r *http.Request) {
 // reads cleanly. The admin server returns { ir, content_hash } per
 // admin.go; we forward both into sandbox.Options + the meta map's
 // schemaVersion field.
-func (s *Server) bootResolveIR(ctx context.Context, ir *dsl.IR, hash *string) error {
-	resp, err := s.atl.GetCanonicalIR(ctx, &adminpb.GetCanonicalIRRequest{})
+// The organisation is threaded in rather than read from a field: a sandbox is
+// seeded from its own organisation's schema, and there is no longer a single
+// atlantis to ask.
+func (s *Server) bootResolveIR(ctx context.Context, org string, ir *dsl.IR, hash *string) error {
+	atl, err := s.atlFor(ctx, org)
+	if err != nil {
+		return err
+	}
+	resp, err := atl.GetCanonicalIR(ctx, &adminpb.GetCanonicalIRRequest{})
 	if err != nil {
 		return err
 	}

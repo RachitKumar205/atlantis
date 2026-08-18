@@ -64,6 +64,39 @@ It prints a URL with the assertion in the fragment. Open it. The assertion is
 run the target again for each sign-in, and again when the console asks you to
 confirm a destructive action.
 
+## 0d. Register your organisation
+
+```bash
+make dev-org-register ORG=acme
+```
+
+**The console has no default endpoint.** One console serves many organisations,
+each with its own atlantis behind its own certificate authority, so an address
+and a certificate live in `console.orgs` rather than in the environment. Until
+an organisation is registered, every page answers 503 naming it.
+
+That is deliberate. A fallback endpoint would mean one missing row silently
+routes an unprovisioned organisation into somebody else's atlantis, and every
+page would render.
+
+Run this once per organisation you mint tokens for. `ORG` must match the `org`
+you pass to `make dev-token`. Order matters: `console.orgs` is created by the
+console's own migrations, so start `make dev-console` once first.
+
+Two things about the local setup differ from a deployment, and both are worth
+knowing before you read a working `make dev` as proof of anything:
+
+- **One CA, not one per organisation.** There is a single local atlantis, so
+  every organisation registers against the same CA and the same certificate. The
+  handshake-level refusal of a cross-organisation certificate is therefore *not*
+  exercised locally. `internal/console/org_client_pg_test.go` stands up two CAs
+  and two servers to exercise it.
+- **The keyset is a file.** `make dev-data-key` writes one to
+  `./certs/console-data-key` on first use and reuses it thereafter. Deleting it
+  does not break the console — it starts fine — but every organisation
+  registered under the old keyset stops decrypting, so re-run
+  `make dev-org-register`.
+
 ## 1. Write `atlantis.dev.yaml`
 
 In the atlantis repo root:
@@ -139,6 +172,10 @@ The two manifests can coexist in the same atlantis deployment repo. Commit `atla
 - `CLOUD_ISSUER is required` from the console — it has no local accounts, so it needs an issuer to trust. `make dev-console` passes the right values; `make dev-auth` runs the issuer they point at.
 - `invalid assertion` on sign-in — most often a reused link. Assertions are single use; run `make dev-token` again. Otherwise `make dev-auth` is signing with a different key than the one it publishes: delete `./certs/cloud-signing-key.pem` and restart both.
 - `cannot reach the identity provider` — `make dev-auth` is not running. The console answers 503 rather than 401 here, because nothing is known to be wrong with the credential.
+- `CONSOLE_DATA_KEY is required` from the console — run `make dev-data-key`, or use `make dev-console`, which passes it.
+- `no atlantis is registered for "acme"` — run `make dev-org-register ORG=acme`. The name has to match the `ORG` you minted the token with; signing in creates the organisation but does not provision it.
+- `console.orgs does not exist yet` from `cloud org register` — the console creates its own schema at startup. Run `make dev-console` once, then register.
+- `decrypt credentials for acme (wrong CONSOLE_DATA_KEY, or the row was tampered with)` — the row was registered under a different keyset than the console is serving with. Most often `./certs/console-data-key` was deleted and regenerated; re-run `make dev-org-register`.
 - `no client certificate configured` from `tide` or `tidectl` — run `make dev-caller-cert CALLER=<name>` and export what it prints.
 - `pg pool init: ...` from the server — `PG_URL` is wrong or Postgres isn't reachable.
 - `memcached: ...` from the server — `MEMCACHED_ADDR` is wrong, or memcached isn't running.

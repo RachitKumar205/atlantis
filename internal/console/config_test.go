@@ -3,6 +3,8 @@ package console
 import (
 	"strings"
 	"testing"
+
+	"github.com/rachitkumar205/atlantis/internal/console/secrets"
 )
 
 // setConsoleEnv sets the minimum ConfigFromEnv accepts. Tests about one missing
@@ -12,9 +14,7 @@ func setConsoleEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("CONSOLE_PG_URL", "postgres://x")
 	t.Setenv("CONSOLE_SESSION_SECRET", strings.Repeat("k", 32))
-	t.Setenv("ATL_TLS_CERT", "/etc/atlantis/console.crt")
-	t.Setenv("ATL_TLS_KEY", "/etc/atlantis/console.key")
-	t.Setenv("ATL_TLS_CA", "/etc/atlantis/ca.crt")
+	t.Setenv("CONSOLE_DATA_KEY", testKeyset(t))
 	t.Setenv("CLOUD_ISSUER", "https://cloud.atlantis.dev")
 	t.Setenv("CLOUD_AUDIENCE", "https://acme.console.atlantis.dev")
 	t.Setenv("CLOUD_JWKS_URL", "https://cloud.atlantis.dev/.well-known/jwks.json")
@@ -45,34 +45,45 @@ func TestConfigFromEnvRequiresTheCloudIssuer(t *testing.T) {
 	}
 }
 
-// The console will not start without its client certificate.
+// The console will not start without the key its organisations' credentials
+// are sealed with.
 //
-// ConfigFromEnv had no test of any kind, so every requirement it enforces —
-// including the two that predate this one — was resting on nothing. The mTLS
-// requirement in particular is what makes the console an authenticated caller
-// rather than an anonymous one, and the harness in harness_test.go builds a
-// Config literal, so it exercises none of this.
-func TestConfigFromEnvRequiresEveryTLSVariable(t *testing.T) {
-	for _, missing := range []string{"ATL_TLS_CERT", "ATL_TLS_KEY", "ATL_TLS_CA"} {
-		t.Run("without "+missing, func(t *testing.T) {
-			setConsoleEnv(t)
-			t.Setenv(missing, "")
+// This replaced a test of ATL_TLS_CERT/KEY/CA, which no longer exist: a client
+// certificate is now a property of an organisation rather than of the process,
+// so there is no process-wide certificate left to demand. mTLS did not become
+// optional — dialOrg has no insecure branch, and an organisation with no
+// credentials is refused rather than dialled in the clear.
+//
+// What moved is where the failure lands. Without this keyset the console starts
+// and then cannot decrypt a single organisation's certificate, so every page
+// fails at the first request with an error about ciphertext rather than about
+// configuration.
+func TestConfigFromEnvRequiresTheDataKeyset(t *testing.T) {
+	setConsoleEnv(t)
+	t.Setenv("CONSOLE_DATA_KEY", "")
 
-			_, err := ConfigFromEnv()
-			if err == nil {
-				t.Fatalf("ConfigFromEnv accepted a config with no %s. The console "+
-					"would start and then fail at the handshake, in a message "+
-					"about neither certificates nor configuration", missing)
-			}
-			if !strings.Contains(err.Error(), missing) {
-				t.Errorf("the error does not name %s: %v", missing, err)
-			}
-			if !strings.Contains(err.Error(), "make dev-certs") {
-				t.Errorf("the error does not name the command that produces the "+
-					"certificates: %v", err)
-			}
-		})
+	_, err := ConfigFromEnv()
+	if err == nil {
+		t.Fatal("ConfigFromEnv accepted a console with no CONSOLE_DATA_KEY")
 	}
+	if !strings.Contains(err.Error(), "CONSOLE_DATA_KEY") {
+		t.Errorf("the error does not name the variable: %v", err)
+	}
+	if !strings.Contains(err.Error(), "make dev-data-key") {
+		t.Errorf("the error does not name the command that produces one: %v", err)
+	}
+}
+
+// testKeyset mints a real keyset, so the config tests exercise the value the
+// console will actually be given rather than a placeholder that would pass a
+// non-empty check and fail at first use.
+func testKeyset(t *testing.T) string {
+	t.Helper()
+	k, err := secrets.NewKeyset()
+	if err != nil {
+		t.Fatalf("generate test keyset: %v", err)
+	}
+	return k
 }
 
 // The pre-existing requirements, now that something exercises this function.
@@ -109,8 +120,7 @@ func TestConfigFromEnvAcceptsACompleteEnvironment(t *testing.T) {
 	if c.Listen != ":4000" {
 		t.Errorf("Listen: got %q, want :4000", c.Listen)
 	}
-	if c.ATLTLSCert == "" || c.ATLTLSKey == "" || c.ATLTLSCA == "" {
-		t.Errorf("TLS paths did not survive loading: cert=%q key=%q ca=%q",
-			c.ATLTLSCert, c.ATLTLSKey, c.ATLTLSCA)
+	if c.DataKeyset == "" {
+		t.Errorf("CONSOLE_DATA_KEY did not survive loading")
 	}
 }

@@ -13,6 +13,69 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Changed
 
+#### Each organisation has its own atlantis, reached with its own credentials — breaking
+
+The console dialled one `ATL_ENDPOINT` with one client certificate and sent
+every organisation's request down it. That is not a configuration to tighten —
+it is a console that cannot serve two organisations at all, and the failure if
+it tried would be silent: pointed at the wrong stack it returns the wrong
+organisation's schema, plans and jobs, with no error anywhere, because the
+connection is perfectly healthy.
+
+**Nothing further along would have caught it.** Traced through every control on
+the atlantis side, and a cross-organisation console certificate passes all of
+them: both consoles connect as `CN=atlantis-console`, migration `0019` seeds
+that caller with `CAPABILITY_OPERATOR` in every install, and
+`ATL_CERT_BINDING_EXEMPT_CALLERS` names it by default.
+
+So the address and the certificate became columns. `console.orgs` gains
+`atl_endpoint`, `atl_health_addr`, `ca_pem`, `client_cert_pem` and
+`client_key_ct` (migration `0005`), and the console builds one channel per
+organisation from one row — which is what makes a mismatched pair impossible to
+assemble. **Each organisation has its own certificate authority**, so a
+mismatched pair that is assembled some other way is refused inside the TLS
+handshake, before any atlantis code runs.
+
+**Breaking.** The console no longer reads `ATL_ENDPOINT`, `ATL_TLS_CERT`,
+`ATL_TLS_KEY`, `ATL_TLS_CA` or `ATL_HEALTH_LISTEN`. It requires
+`CONSOLE_DATA_KEY`, and refuses to start without it. Register each organisation
+before its users sign in:
+
+```bash
+cloud data-key                      # once, into your secret store
+cloud org register -org acme \
+  -endpoint atlantis.acme.internal:9090 \
+  -health   atlantis.acme.internal:8081 \
+  -ca acme-ca.pem -cert console-for-acme.crt -key console-for-acme.key
+```
+
+There is deliberately **no fallback endpoint**. An unregistered organisation
+gets a 503 naming it. A fallback is the exact failure this change exists to
+prevent — one missing row would route an unprovisioned organisation into
+somebody else's atlantis and every page would render.
+
+*(`ATL_ENDPOINT` and the TLS trio are unchanged for `tide` and `tidectl`. Only
+the console stopped reading them.)*
+
+**`CONSOLE_DATA_KEY` is not recoverable.** Each organisation's private key is
+encrypted under it — Tink AEAD, with the organisation name as associated data,
+so a ciphertext lifted onto another organisation's row will not decrypt. Lose
+the keyset and those rows stay intact, complete, and permanently unopenable,
+which presents as every organisation being unreachable with nothing in the
+schema looking wrong. Rotation is a keyset property rather than a data
+migration: add a key, promote it, and the key id already in each ciphertext
+prefix keeps the old ones readable.
+
+This protects a leaked backup, a replica, or a broad read of `console.orgs`. It
+does **not** protect a compromised console process, which holds the keyset in
+memory by necessity.
+
+One related fix: a cached channel used to outlive *any* failed re-read of its
+row, including a deleted one — so de-provisioning an organisation appeared to do
+nothing until the console restarted. A definitive answer ("no such
+organisation") now evicts and closes the channel; only a failure to reach the
+database keeps it, which is what the five-minute refresh was meant to bound.
+
 #### The organisation is now a database boundary in the console
 
 One console process serves several organisations, and until now nothing

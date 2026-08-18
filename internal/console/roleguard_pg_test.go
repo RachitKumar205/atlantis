@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/rachitkumar205/atlantis/internal/testsupport/pgcatalog"
-	"github.com/rachitkumar205/atlantis/internal/testsupport/testpki"
 )
 
 // The gate is reached, on the real boot path.
@@ -31,20 +30,19 @@ func TestConsoleRefusesToStartOnARoleThatBypassesRLS(t *testing.T) {
 	dsn := pgcatalog.PrivateDatabase(t, adminDSN, "atlantis_console_rolegate")
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	// Real certificates, because New dials atlantis before it opens the store.
-	// With unreadable ones it fails on the cert and never reaches the gate —
-	// which the first version of this test did, and its own content assertion
-	// is what caught it. grpc.NewClient is lazy, so nothing has to be listening.
-	pki := testpki.New(t, t.TempDir())
-	cert, key := pki.ClientCert(t, "atlantis-console")
-
+	// A real keyset, because it is now the first thing New checks.
+	//
+	// This used to be a real certificate, for the same reason: whatever New
+	// validates first is what an incomplete Config fails on, and the test then
+	// never reaches the gate it is about. Certificates left this function when
+	// they became a property of an organisation rather than of the process, and
+	// the keyring took over the position — so the hazard moved rather than
+	// went away. The content assertion below is what catches it either way, and
+	// it is what caught the certificate version.
 	_, err := New(Config{
 		PGURL:         dsn,
-		ATLEndpoint:   "127.0.0.1:1",
+		DataKeyset:    testKeyset(t),
 		SessionSecret: strings.Repeat("k", 32),
-		ATLTLSCert:    cert,
-		ATLTLSKey:     key,
-		ATLTLSCA:      pki.CAFile,
 	}, nil, quiet)
 
 	if err == nil {

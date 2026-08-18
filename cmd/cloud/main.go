@@ -1,14 +1,18 @@
-// Command cloud is Atlantis Cloud's identity service.
+// Command cloud is Atlantis Cloud's control plane.
 //
 // It holds the signing key, publishes the public half as a JWKS document, and
 // mints the assertions consoles exchange for a session. Every console verifies
 // against this issuer and has no other source of identity — there are no local
-// accounts anywhere in the product.
+// accounts anywhere in the product. It also registers organisations, which is
+// the other half of the same job: Cloud says who a user is, and Cloud says
+// which atlantis that user's organisation is served by.
 //
-// # Two modes, and why minting is not a route
+//	cloud serve          publish the key set over HTTP
+//	cloud mint           sign one assertion and print it
+//	cloud org register   record an organisation's atlantis and credentials
+//	cloud data-key       print a keyset for a console's CONSOLE_DATA_KEY
 //
-//	cloud serve   publish the key set over HTTP
-//	cloud mint    sign one assertion and print it
+// # Why minting is not a route
 //
 // Minting is a command rather than an endpoint on the server, and that is a
 // deliberate constraint rather than an unfinished feature. An HTTP route that
@@ -22,6 +26,19 @@
 // `mint` requires read access to the signing key, so it is available to
 // whoever operates Cloud and to nobody else. When Cloud grows a sign-in flow,
 // that flow calls the same issuer package after authenticating the user.
+//
+// # Why registration is not a route either
+//
+// `org register` is the same argument one layer along. Registering an
+// organisation decides which atlantis a console will hand that organisation's
+// users, so an unauthenticated route for it would let anyone who can reach the
+// console repoint an organisation at a server they control — and every request
+// afterwards would succeed, because the credentials would be genuine.
+//
+// It is here rather than in the console because Cloud is the thing that
+// provisions organisations, and because this binary already runs where an
+// operator runs it. The cost is that cmd/cloud now opens a database, which is
+// the first time anything in Cloud's neighbourhood does.
 package main
 
 import (
@@ -38,6 +55,8 @@ import (
 
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 	"github.com/rachitkumar205/atlantis/internal/cloud/issuer"
+	"github.com/rachitkumar205/atlantis/internal/console"
+	"github.com/rachitkumar205/atlantis/internal/console/secrets"
 )
 
 func main() {
@@ -54,6 +73,10 @@ func main() {
 		err = serve(os.Args[2:], log)
 	case "mint":
 		err = mint(os.Args[2:])
+	case "org":
+		err = org(os.Args[2:])
+	case "data-key":
+		err = dataKey(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -70,13 +93,15 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `atlantis cloud — the identity service consoles verify against
+	fmt.Fprint(os.Stderr, `atlantis cloud — the control plane consoles verify against
 
 usage:
-  cloud serve [flags]   publish the JWKS document
-  cloud mint  [flags]   sign one assertion and print it
+  cloud serve [flags]          publish the JWKS document
+  cloud mint  [flags]          sign one assertion and print it
+  cloud org register [flags]   point an organisation at its atlantis
+  cloud data-key               print a keyset for a console's CONSOLE_DATA_KEY
 
-run "cloud serve -h" or "cloud mint -h" for flags
+run any command with -h for its flags
 `)
 }
 
@@ -202,6 +227,124 @@ func mint(args []string) error {
 	}
 
 	fmt.Println(token)
+	return nil
+}
+
+// org dispatches the organisation subcommands. Only one so far, and it is
+// spelled `org register` rather than `register` because the next ones —
+// listing, de-provisioning — belong under the same noun.
+func org(args []string) error {
+	if len(args) == 0 {
+		return errors.New(`cloud org: expected a subcommand (register)`)
+	}
+	switch args[0] {
+	case "register":
+		return orgRegister(args[1:])
+	default:
+		return fmt.Errorf("cloud org: unknown subcommand %q", args[0])
+	}
+}
+
+func orgRegister(args []string) error {
+	fs := flag.NewFlagSet("org register", flag.ExitOnError)
+	name := fs.String("org", "", "organisation name; must match the org claim Cloud mints for its users")
+	endpoint := fs.String("endpoint", "", "host:port of this organisation's atlantis admin gRPC service")
+	health := fs.String("health", "", "host:port of the same server's plain-HTTP health endpoint")
+	caPath := fs.String("ca", "", "PEM bundle the console verifies this organisation's atlantis against")
+	certPath := fs.String("cert", "", "PEM client certificate the console presents to it")
+	keyPath := fs.String("key", "", "PEM private key for -cert")
+	dbURL := fs.String("db", os.Getenv("CONSOLE_PG_URL"), "console database URL (or set CONSOLE_PG_URL)")
+	keyset := fs.String("data-key", os.Getenv("CONSOLE_DATA_KEY"),
+		"the console's keyset, base64 (or set CONSOLE_DATA_KEY)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	// Named individually rather than as "missing arguments", because six flags
+	// is enough that "which one" is the actual question.
+	for _, r := range []struct{ flag, val string }{
+		{"-org", *name},
+		{"-endpoint", *endpoint},
+		{"-health", *health},
+		{"-ca", *caPath},
+		{"-cert", *certPath},
+		{"-key", *keyPath},
+	} {
+		if r.val == "" {
+			return fmt.Errorf("%s is required", r.flag)
+		}
+	}
+	if *dbURL == "" {
+		return errors.New("-db is required (or set CONSOLE_PG_URL): this writes to the console's database")
+	}
+	if *keyset == "" {
+		return errors.New("-data-key is required (or set CONSOLE_DATA_KEY): the private key is " +
+			"sealed with it, and it must be the same keyset the console serves with, or the row " +
+			"will be written and never open")
+	}
+
+	ca, err := os.ReadFile(*caPath)
+	if err != nil {
+		return fmt.Errorf("read -ca: %w", err)
+	}
+	cert, err := os.ReadFile(*certPath)
+	if err != nil {
+		return fmt.Errorf("read -cert: %w", err)
+	}
+	key, err := os.ReadFile(*keyPath)
+	if err != nil {
+		return fmt.Errorf("read -key: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// RegisterOrg validates the material before it writes, so a swapped
+	// -cert/-key or an expired leaf is refused here rather than found later as
+	// a 503 by whoever next opens the console.
+	if err := console.RegisterOrg(ctx, *dbURL, *keyset, console.OrgRegistration{
+		Org:        *name,
+		Endpoint:   *endpoint,
+		HealthAddr: *health,
+		CAPEM:      string(ca),
+		CertPEM:    string(cert),
+		KeyPEM:     key,
+	}); err != nil {
+		return err
+	}
+
+	fmt.Printf("registered %s at %s\n", *name, *endpoint)
+	// Said every time, because it is the one thing this command cannot check.
+	// A running console re-reads the row on its own schedule, so an operator
+	// who rotates a certificate and immediately tests it may see the old one
+	// and conclude the registration failed.
+	fmt.Fprintln(os.Stderr, "cloud: a running console picks this up within five minutes")
+	return nil
+}
+
+// dataKey prints a keyset for CONSOLE_DATA_KEY.
+//
+// One command, no flags, and it writes to stdout so it can be captured. There
+// is deliberately no `-write` that puts it in a file: the value belongs in
+// whatever holds the deployment's secrets, and a command that drops key
+// material on disk invites it being left there.
+//
+// Losing this value is not recoverable. Every organisation's private key is
+// sealed under it, so a console started with a different one has rows that are
+// intact, complete, and permanently unopenable — which presents as every
+// organisation being unreachable, with nothing in the schema looking wrong.
+func dataKey(args []string) error {
+	fs := flag.NewFlagSet("data-key", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	k, err := secrets.NewKeyset()
+	if err != nil {
+		return err
+	}
+	fmt.Println(k)
+	fmt.Fprintln(os.Stderr, "cloud: store this where the deployment's other secrets live. "+
+		"Every organisation's private key is sealed under it, and there is no way to recover them without it.")
 	return nil
 }
 

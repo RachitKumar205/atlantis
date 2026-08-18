@@ -130,6 +130,25 @@ func (p *PKI) ClientCert(t *testing.T, cn string) (certFile, keyFile string) {
 	return certFile, keyFile
 }
 
+// ExpiredClientCert mints a client leaf that expired an hour ago.
+//
+// For tests about what happens when a certificate is past its validity, which
+// is otherwise only reachable by waiting. The files are named apart from
+// ClientCert's so both can be minted from one PKI — ClientCert derives its
+// filenames from the CN, so two leaves with one CN would overwrite each other.
+func (p *PKI) ExpiredClientCert(t *testing.T, cn string) (certFile, keyFile string) {
+	t.Helper()
+	der, keyDER := p.issueUntil(t, cn,
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, nil, nil,
+		time.Now().Add(-time.Hour))
+
+	certFile = filepath.Join(p.Dir, cn+".expired.crt")
+	keyFile = filepath.Join(p.Dir, cn+".expired.key")
+	writePEM(t, certFile, "CERTIFICATE", der)
+	writePEM(t, keyFile, "EC PRIVATE KEY", keyDER)
+	return certFile, keyFile
+}
+
 // ServerTLS is a tls.Config for a listener that demands and verifies a client
 // certificate from this CA — the same posture cmd/server's transportCreds
 // builds, so a test server behaves like the real one.
@@ -153,15 +172,32 @@ func (p *PKI) issue(
 	t *testing.T, cn string, eku []x509.ExtKeyUsage, dns []string, ips []net.IP,
 ) (certDER, keyDER []byte) {
 	t.Helper()
+	return p.issueUntil(t, cn, eku, dns, ips, time.Now().Add(24*time.Hour))
+}
+
+// issueUntil is issue with the expiry chosen by the caller, so a test can mint
+// a certificate that is already invalid.
+func (p *PKI) issueUntil(
+	t *testing.T, cn string, eku []x509.ExtKeyUsage, dns []string, ips []net.IP, notAfter time.Time,
+) (certDER, keyDER []byte) {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("testpki: %s key: %v", cn, err)
 	}
+	// NotBefore is pinned behind NotAfter rather than to a fixed hour ago, or
+	// an expired certificate would also be one that is not yet valid — and a
+	// test asserting on "expired" would pass against code that only checks the
+	// other end.
+	notBefore := time.Now().Add(-time.Hour)
+	if !notAfter.After(notBefore) {
+		notBefore = notAfter.Add(-time.Hour)
+	}
 	tmpl := &x509.Certificate{
 		SerialNumber: nextSerial(),
 		Subject:      pkix.Name{CommonName: cn},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  eku,
 		DNSNames:     dns,

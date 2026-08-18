@@ -253,6 +253,12 @@ test-codegen-golden: ## Run codegen golden-file tests
 # reissued when ATLANTIS_DOMAIN stops being covered by it.
 DEV_CERT_DIR ?= ./certs
 
+# The keyset the console seals organisation credentials with, kept beside the
+# certificates because it is the same kind of thing and the directory is
+# already gitignored. See dev-data-key for why it is a file and not minted per
+# run.
+DEV_DATA_KEY_FILE ?= $(DEV_CERT_DIR)/console-data-key
+
 .PHONY: dev-certs
 dev-certs: ## Generate the local CA + server and console certs into ./certs
 	@which openssl >/dev/null 2>&1 || (echo "openssl not found"; exit 1)
@@ -289,20 +295,68 @@ dev: dev-certs ## Start compose Postgres + memcached, then run the server
 		$(GO) run ./cmd/server
 
 .PHONY: dev-console
-dev-console: dev-certs dev-console-role build-console ## Run the management console BFF against the local dev server
+dev-console: dev-certs dev-console-role dev-data-key build-console ## Run the management console BFF against the local dev server
 	CONSOLE_PG_URL="$(CONSOLE_PG_URL)" \
-		ATL_ENDPOINT="localhost:9090" \
 		CONSOLE_SESSION_SECRET="$${CONSOLE_SESSION_SECRET:-dev-secret-change-in-prod-32chars!!}" \
 		CONSOLE_LISTEN=":3000" \
-		ATL_HEALTH_LISTEN="localhost:8081" \
 		CONSOLE_COOKIE_SECURE=false \
-		ATL_TLS_CERT="$(DEV_CERT_DIR)/console.crt" \
-		ATL_TLS_KEY="$(DEV_CERT_DIR)/console.key" \
-		ATL_TLS_CA="$(DEV_CERT_DIR)/ca.crt" \
+		CONSOLE_DATA_KEY="$$(cat $(DEV_DATA_KEY_FILE))" \
 		CLOUD_ISSUER="$(CLOUD_ISSUER)" \
 		CLOUD_AUDIENCE="$(CLOUD_AUDIENCE)" \
 		CLOUD_JWKS_URL="$(CLOUD_JWKS_URL)" \
 		$(BIN_DIR)/atlantis-console
+
+# ── Per-organisation atlantis registration ─────────────────────────────────
+#
+# The console no longer reads ATL_ENDPOINT or a certificate from its
+# environment. One console serves many organisations, each with its own
+# atlantis behind its own CA, so an address and a certificate are columns in
+# console.orgs rather than process configuration. Nothing is reachable until it
+# is registered — deliberately, because a fallback endpoint is exactly the
+# silent cross-organisation read the design exists to prevent.
+
+.PHONY: dev-data-key
+dev-data-key: ## Create (once) the local keyset that seals organisation credentials
+	@if [ ! -f "$(DEV_DATA_KEY_FILE)" ]; then \
+	  mkdir -p "$$(dirname $(DEV_DATA_KEY_FILE))"; \
+	  $(GO) run ./cmd/cloud data-key 2>/dev/null > "$(DEV_DATA_KEY_FILE)"; \
+	  chmod 600 "$(DEV_DATA_KEY_FILE)"; \
+	  echo "==> wrote a new keyset to $(DEV_DATA_KEY_FILE)"; \
+	fi
+	@# Written to a file rather than minted per run, and the difference is not
+	@# cosmetic. Every organisation's private key is sealed under this value, so
+	@# a fresh one each time would leave every previously registered
+	@# organisation unopenable — a row that is complete, valid, and refuses to
+	@# decrypt. Regenerating it locally means re-running dev-org-register.
+	@echo "$$(cat $(DEV_DATA_KEY_FILE))"
+
+dev-org-register: dev-certs dev-data-key build-cloud ## Point an org at the local atlantis: make dev-org-register ORG=<name>
+	@test -n "$(ORG)" || { \
+	  echo "Usage:   make dev-org-register ORG=<name>"; \
+	  echo "Example: make dev-org-register ORG=acme"; \
+	  echo; \
+	  echo "The name must match the org claim you mint tokens with:"; \
+	  echo "  make dev-token ORG=acme"; \
+	  exit 1; \
+	}
+	@# One CA locally, and that is a development compromise worth naming.
+	@#
+	@# In a deployment each organisation's atlantis has its own trust root, so
+	@# credentials issued for one do not chain at another and a mixed-up lookup
+	@# is refused inside the TLS handshake. Locally there is one server, so
+	@# every organisation registers against the same CA and the same console
+	@# certificate — which means the local stack does NOT exercise that
+	@# boundary. The two-CA test does (internal/console/org_client_pg_test.go);
+	@# do not read a working `make dev` as evidence the separation holds.
+	CONSOLE_PG_URL="$(CONSOLE_PG_URL)" \
+		CONSOLE_DATA_KEY="$$(cat $(DEV_DATA_KEY_FILE))" \
+		$(BIN_DIR)/atlantis-cloud org register \
+			-org "$(ORG)" \
+			-endpoint "localhost:9090" \
+			-health "localhost:8081" \
+			-ca "$(DEV_CERT_DIR)/ca.crt" \
+			-cert "$(DEV_CERT_DIR)/console.crt" \
+			-key "$(DEV_CERT_DIR)/console.key"
 
 # ── Atlantis Cloud (identity) ──────────────────────────────────────────────
 #
