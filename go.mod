@@ -13,6 +13,7 @@ require github.com/rachitkumar205/atlantis/clients/go v0.0.0-00010101000000-0000
 
 require (
 	github.com/fergusstrange/embedded-postgres v1.34.0
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/google/uuid v1.6.0
 	github.com/grafana/gomemcache v0.0.0-20251127154401-74f93547077b
