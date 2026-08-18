@@ -313,6 +313,22 @@ func (f *consoleFixture) assertion(t *testing.T, email, role string) string {
 // isolated nothing would have passed the whole suite.
 func (f *consoleFixture) assertionForOrg(t *testing.T, org, email, role string) string {
 	t.Helper()
+	return f.mint(t, org, email, role, false)
+}
+
+// stepUpAssertion mints what Cloud's /authorize?prompt=reauth produces.
+//
+// The difference from an ordinary assertion is one claim, and it is the whole
+// of the step-up gate: an ordinary one says somebody holds a Cloud session,
+// which can be twelve hours old, and this one says somebody presented a second
+// factor. Sudo requires the second.
+func (f *consoleFixture) stepUpAssertion(t *testing.T, email, role string) string {
+	t.Helper()
+	return f.mint(t, defaultOrg, email, role, true)
+}
+
+func (f *consoleFixture) mint(t *testing.T, org, email, role string, stepUp bool) string {
+	t.Helper()
 	tok, err := f.iss.Mint(issuer.Grant{
 		// Subject is scoped by organisation as well as email. Cloud subjects
 		// are globally unique, and two organisations having genuinely
@@ -324,6 +340,7 @@ func (f *consoleFixture) assertionForOrg(t *testing.T, org, email, role string) 
 		Email:    email,
 		Name:     "Test User",
 		Audience: f.audience,
+		StepUp:   stepUp,
 	})
 	if err != nil {
 		t.Fatalf("mint assertion for %s in %s: %v", email, org, err)

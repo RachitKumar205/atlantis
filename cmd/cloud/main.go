@@ -19,20 +19,26 @@
 // password alone would be the posture this product refuses, so it lands with
 // the factor that gates it. Nothing `serve` exposes today creates a session.
 //
-// # Why minting is not a route
+// # Minting is now a route as well, and why `mint` is still here
 //
-// Minting is a command rather than an endpoint on the server, and that is a
-// deliberate constraint rather than an unfinished feature. An HTTP route that
-// mints on request is a complete authentication bypass unless something in
-// front of it establishes who is asking — and Cloud does not yet hold user
-// records, so there is nothing to establish it with. Shipping the route first
-// and the check afterwards would mean a window in which the strongest
-// guarantee in the system is that anyone who can reach a port is an
-// administrator of every organisation.
+// This doc used to argue that minting could not be an endpoint, because "an
+// HTTP route that mints on request is a complete authentication bypass unless
+// something in front of it establishes who is asking — and Cloud does not yet
+// hold user records, so there is nothing to establish it with."
 //
-// `mint` requires read access to the signing key, so it is available to
-// whoever operates Cloud and to nobody else. When Cloud grows a sign-in flow,
-// that flow calls the same issuer package after authenticating the user.
+// That premise expired. Cloud holds accounts, sessions and a second factor, so
+// `GET /authorize` establishes who is asking from a session and reads the role
+// out of cloud.memberships rather than taking it as a parameter. The condition
+// the old comment set was met before the route was built, which is the order it
+// asked for.
+//
+// `mint` stays because a route needs a browser and a session, and two cases
+// have neither: an operator diagnosing a deployment, and the first membership
+// in a new one — the person who has to be let in before anybody can let anybody
+// in. It is no longer an escape hatch around the gate, though. It opens the
+// database, reads the same membership row /authorize reads, and refuses when
+// there is none. There is no `-role` flag: the row decides, so that the command
+// and the route cannot disagree about what somebody is allowed to be.
 //
 // # Why registration is not a route either
 //
@@ -55,8 +61,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -233,22 +241,79 @@ func serve(args []string, log *slog.Logger) error {
 	}
 }
 
+// mint prints an assertion for a member of an organisation.
+//
+// # What changed when /authorize arrived
+//
+// It used to take -subject, -org, -role, -email and -audience and sign them.
+// That was a token saying whatever the operator typed, which was tolerable only
+// because typing it required the signing key.
+//
+// Now it takes an account and an organisation and reads the rest. The role
+// comes from cloud.memberships and the audience from cloud.orgs.console_url —
+// the same two rows /authorize consults — so an assertion from the command line
+// and one from a browser carry the same authority for the same person. A
+// -role flag would be a way for those two to disagree, so there is not one.
+//
+// It refuses when there is no membership. That is the point: the gate is the
+// row, and a command that could skip it would mean the gate is optional.
 func mint(args []string) error {
 	fs := flag.NewFlagSet("mint", flag.ExitOnError)
 	keyPath := keyFlag(fs)
 	issuerName := issuerFlag(fs)
-	audience := fs.String("audience", os.Getenv("CLOUD_AUDIENCE"),
-		"the console this assertion is for; must match its CLOUD_AUDIENCE")
-	subject := fs.String("subject", "", "Cloud user id; becomes the audit actor")
+	dbURL := cloudDBFlag(fs)
+	audience := fs.String("audience", "",
+		"override the console this assertion is for; defaults to the organisation's registered console")
+	email := fs.String("email", "", "the account to mint for")
 	org := fs.String("org", "", "organisation the user is acting in")
-	role := fs.String("role", string(identity.RoleAdmin), `"admin" or "viewer"`)
-	email := fs.String("email", "", "email, shown in the console and on audit rows")
-	name := fs.String("name", "", "display name (optional)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *issuerName == "" {
 		return errors.New("-issuer is required (or set CLOUD_ISSUER)")
+	}
+	if *email == "" || *org == "" {
+		return errors.New("-email and -org are required")
+	}
+
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	ctx := context.Background()
+	db, err := openCloud(ctx, *dbURL, log)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	user, err := db.UserByEmail(ctx, *email)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("no account for %s", *email)
+	}
+	if err != nil {
+		return err
+	}
+
+	// The gate, and the same one /authorize applies.
+	role, err := db.RoleIn(ctx, user.ID, *org)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("%s is not a member of %s: add them with `cloud member add`", *email, *org)
+	}
+	if err != nil {
+		return err
+	}
+
+	// The registered console is both the destination and the audience, so
+	// defaulting from it keeps a hand-minted token verifiable at the same place
+	// a browser would have been sent. -audience stays for the case where an
+	// operator is testing a console that is not the registered one.
+	if *audience == "" {
+		*audience, err = db.ConsoleURL(ctx, *org)
+		if errors.Is(err, store.ErrNoConsole) {
+			return fmt.Errorf("%s has no registered console: "+
+				"run `cloud org register -console-url …`, or pass -audience", *org)
+		}
+		if err != nil {
+			return err
+		}
 	}
 
 	key, created, err := issuer.LoadOrCreateKey(*keyPath)
@@ -271,12 +336,16 @@ func mint(args []string) error {
 
 	// Mint validates the grant and names the field that is missing, so there
 	// is no argument checking to repeat here.
+	//
+	// StepUp is deliberately absent: a command cannot present a second factor,
+	// so a token from here does not claim one was. It signs somebody in; it
+	// does not elevate them.
 	token, err := iss.Mint(issuer.Grant{
-		Subject:  *subject,
+		Subject:  user.ID,
 		Org:      *org,
-		Role:     identity.Role(*role),
-		Email:    *email,
-		Name:     *name,
+		Role:     role,
+		Email:    user.Email,
+		Name:     user.Name,
 		Audience: *audience,
 	})
 	if err != nil {
@@ -503,6 +572,8 @@ func orgCreate(args []string, log *slog.Logger) error {
 func orgRegister(args []string, log *slog.Logger) error {
 	fs := flag.NewFlagSet("org register", flag.ExitOnError)
 	name := fs.String("org", "", "organisation name; must match the org claim Cloud mints for its users")
+	consoleURL := fs.String("console-url", "",
+		"absolute URL of this organisation's console; also the assertion audience")
 	endpoint := fs.String("endpoint", "", "host:port of this organisation's atlantis admin gRPC service")
 	health := fs.String("health", "", "host:port of the same server's plain-HTTP health endpoint")
 	caPath := fs.String("ca", "", "PEM bundle the console verifies this organisation's atlantis against")
@@ -521,6 +592,7 @@ func orgRegister(args []string, log *slog.Logger) error {
 	// is enough that "which one" is the actual question.
 	for _, r := range []struct{ flag, val string }{
 		{"-org", *name},
+		{"-console-url", *consoleURL},
 		{"-endpoint", *endpoint},
 		{"-health", *health},
 		{"-ca", *caPath},
@@ -530,6 +602,17 @@ func orgRegister(args []string, log *slog.Logger) error {
 		if r.val == "" {
 			return fmt.Errorf("%s is required", r.flag)
 		}
+	}
+
+	// Parsed here as well as CHECKed in the database, because the message an
+	// operator can act on is this one. A trailing slash is trimmed so that the
+	// value stored is the one compared against the console's CLOUD_AUDIENCE,
+	// where a stray slash would produce a token every console rejects with no
+	// hint as to why.
+	*consoleURL = strings.TrimRight(*consoleURL, "/")
+	if u, err := url.Parse(*consoleURL); err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("-console-url must be an absolute URL like "+
+			"https://acme.console.example, got %q", *consoleURL)
 	}
 	if *dbURL == "" {
 		return errors.New("-db is required (or set CONSOLE_PG_URL): this writes to the console's database")
@@ -580,6 +663,9 @@ func orgRegister(args []string, log *slog.Logger) error {
 	if err := cloudDB.CreateOrg(ctx, *name, ""); err != nil {
 		return fmt.Errorf("record %s in Cloud: %w", *name, err)
 	}
+	if err := cloudDB.SetConsoleURL(ctx, *name, *consoleURL); err != nil {
+		return fmt.Errorf("record %s's console: %w", *name, err)
+	}
 
 	// RegisterOrg validates the material before it writes, so a swapped
 	// -cert/-key or an expired leaf is refused here rather than found later as
@@ -598,6 +684,13 @@ func orgRegister(args []string, log *slog.Logger) error {
 	}
 
 	fmt.Printf("registered %s at %s\n", *name, *endpoint)
+	// Printed so the value an operator has to put in the console's
+	// CLOUD_AUDIENCE comes from the command that set it, rather than from
+	// somebody retyping it. The two must be identical: the audience Cloud mints
+	// is this string, and a console checks `aud` against its own configured
+	// value, so a difference of one character is every sign-in failing with a
+	// message about the token.
+	fmt.Printf("set CLOUD_AUDIENCE=%s on that console\n", *consoleURL)
 	// Said every time, because it is the one thing this command cannot check.
 	// A running console re-reads the row on its own schedule, so an operator
 	// who rotates a certificate and immediately tests it may see the old one

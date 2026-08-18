@@ -13,6 +13,69 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Added
 
+#### Membership is now the gate — breaking for `cloud mint`
+
+`GET /authorize?org=<name>` takes a signed-in Cloud user to that
+organisation's console. It reads `cloud.memberships`, mints an assertion
+carrying **that row's role**, and redirects with the token in the URL fragment,
+which the console already knows how to spend.
+
+The previous entry said plainly that membership was not enforced and that this
+endpoint was the next piece. It is here, so those rows are a boundary now rather
+than a record.
+
+- **There is no destination parameter.** The console URL comes from
+  `cloud.orgs.console_url`, which `cloud org register -console-url` sets. The
+  obvious design — `?console=<url>` checked against an allowlist — is an open
+  redirect with a guard in front of it, and the guard is a thing that can be
+  written wrongly: a prefix match, a forgotten scheme, an exception for staging.
+  A request that carries no destination needs no such check. A `console=`
+  parameter is ignored, and a test asserts that rather than leaving it to look
+  like a feature nobody has got to yet.
+- **That URL is also the assertion's audience**, so a token cannot be delivered
+  somewhere it would not verify and no operator keeps two values in step.
+  `cloud org register` prints the value to put in the console's
+  `CLOUD_AUDIENCE`.
+- **Not a member and no such organisation answer identically.** Distinguishing
+  them would make this route a way to enumerate every organisation in the
+  product.
+
+**Breaking: `cloud mint` no longer signs what it is handed.** It takes `-email`
+and `-org`, reads the membership row for the role and the registered console for
+the audience, and refuses when there is no membership. `-role` and `-subject`
+are gone — the row decides, so the command and the endpoint cannot disagree
+about what somebody is allowed to be. It still exists for the cases with no
+browser: an operator diagnosing a deployment, and the first membership in a new
+one.
+
+#### Confirming a destructive action sends you back to Cloud
+
+The console's danger-zone dialogs took a **pasted** assertion. They now open
+Cloud in a popup, which asks for a second factor and hands the result back
+through `postMessage`, so the dialog and the half-finished action survive. A
+blocked popup falls back to the paste field, which is why that field stays.
+
+**The part that is a fix, not a feature.** `POST /api/auth/sudo` used to accept
+any assertion that verified and had not been spent. That was strong while the
+only way to get one was an operator with the signing key — and `/authorize` ends
+it, because a live Cloud session mints a fresh assertion on request and lasts
+twelve hours without anybody presenting a factor. Single-use stops an assertion
+being *replayed*; it does nothing about one being *re-minted*.
+
+So assertions gained a `step_up` claim, set on exactly one route —
+`/authorize?prompt=reauth`, and only after the code is checked — and sudo now
+requires it. Without that pairing, shipping `/authorize` alone would have turned
+step-up into a button that always succeeds, which is the degradation the sudo
+handler's own comment had warned about since it was written. The test that
+asserted "a fresh assertion grants sudo" now asserts the opposite, because that
+sentence stopped being true the moment the endpoint existed.
+
+One test was found passing for the wrong reason while this landed:
+`TestSudoRefusesAnAssertionForSomebodyElse` began tripping the new step-up gate
+before it ever reached the subject check it is named for, and both refuse with
+403. It now presents a step-up assertion and asserts on the message, so it
+cannot pass through the wrong branch.
+
 #### Sign in with GitHub or Google
 
 Set `CLOUD_GITHUB_CLIENT_ID` and `CLOUD_GITHUB_CLIENT_SECRET` (or the Google

@@ -37,6 +37,12 @@ export interface MeResult {
   email: string
   role: UserRole
   name: string
+
+  // Where to send the browser to present a second factor before a destructive
+  // action. Built by the server from its own CLOUD_ISSUER and the session's
+  // org, so the page never assembles a URL or decides which organisation it is
+  // asking about.
+  step_up_url: string
 }
 
 export interface SubmittedFile {

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { api, queries, type ChangePolicyEntry, type MeResult } from '@/api/client'
 import { useMe } from '@/hooks/useAuth'
+import { STEP_UP_MESSAGE } from '@/pages/Login'
 import { PageShell } from '@/components/PageShell'
 
 // Sectioned IA: left sub-nav (General / Members / Security / Danger
@@ -671,9 +672,53 @@ export function SudoConfirmDialog({
 }) {
   const [typed, setTyped] = useState('')
   const [assertion, setAssertion] = useState('')
+  const [waiting, setWaiting] = useState(false)
+  const [popupBlocked, setPopupBlocked] = useState(false)
+  const popup = useRef<Window | null>(null)
+  const { data: me } = useMe()
 
   const phraseOK = !requiredText || typed.trim().toLowerCase() === requiredText.toLowerCase()
   const canSubmit = phraseOK && assertion.length > 0 && !pending
+
+  // Listen for the assertion the popup hands back.
+  //
+  // Three checks before believing a message, and each closes a different door:
+  // the origin must be this console (another site can postMessage to us), the
+  // source must be the window we opened (this page may have other children),
+  // and the type must match (extensions and dev tooling post here too).
+  useEffect(() => {
+    function onMessage(e: MessageEvent) {
+      if (e.origin !== window.location.origin) return
+      if (popup.current && e.source !== popup.current) return
+      if (e.data?.type !== STEP_UP_MESSAGE || typeof e.data.assertion !== 'string') return
+
+      setWaiting(false)
+      popup.current = null
+      // Straight through, without waiting for another click. The user has just
+      // confirmed at Cloud and the assertion is good for two minutes; asking
+      // them to press the button again would be a second confirmation of the
+      // thing they came back from confirming.
+      if (phraseOK) onConfirm(e.data.assertion)
+      else setAssertion(e.data.assertion)
+    }
+    window.addEventListener('message', onMessage)
+    return () => window.removeEventListener('message', onMessage)
+  }, [onConfirm, phraseOK])
+
+  function confirmAtCloud() {
+    if (!me?.step_up_url) return
+    setPopupBlocked(false)
+    const w = window.open(me.step_up_url, 'atlantis-step-up', 'width=460,height=560')
+    if (!w) {
+      // Blocked. The paste field below is the way through, and it has to stay
+      // for exactly this — a dialog whose only path is a popup is a dialog a
+      // blocked popup turns into a dead end.
+      setPopupBlocked(true)
+      return
+    }
+    popup.current = w
+    setWaiting(true)
+  }
 
   return (
     <div className="overlay is-open" onMouseDown={e => { if (e.target === e.currentTarget) onCancel() }}>
@@ -705,35 +750,60 @@ export function SudoConfirmDialog({
           )}
 
           {/*
-            Step-up takes a fresh sign-in code from Atlantis Cloud, not a
-            password — this console holds no credential to re-check. The code
-            is single-use at the server, so the one already spent signing in
-            will not work here: proving yourself again is the entire point of
-            the gate.
+            Step-up sends the user back to Atlantis Cloud to present a second
+            factor — this console holds no credential to re-check. What comes
+            back is an assertion saying a factor was presented, which is a
+            stronger statement than "this token is fresh": Cloud will mint a
+            fresh one for anybody holding a twelve-hour session, and only the
+            reauth path sets the claim the server requires here.
 
-            Pasted rather than fetched. A browser round trip to Cloud and back
-            would discard this dialog, and with it the action the user is
-            partway through confirming. Once Cloud has a sign-in flow, that
-            handoff replaces the paste — the credential and the checks behind
-            it do not change, only where the user gets it.
+            A popup rather than a redirect. A full navigation would discard
+            this dialog, and with it the action the user is partway through
+            confirming; the popup returns through postMessage and leaves the
+            page standing.
           */}
           <div className="field">
-            <label className="field__label" htmlFor="sudo-assertion">
-              Confirm with a sign-in code from Atlantis Cloud
-            </label>
-            <input
-              id="sudo-assertion"
-              className="input mono"
-              type="text"
-              autoFocus={!requiredText}
-              autoComplete="off"
-              spellCheck={false}
-              value={assertion}
-              onChange={e => setAssertion(e.target.value.trim())}
-              placeholder="eyJhbGciOi…"
-              onKeyDown={e => { if (e.key === 'Enter' && canSubmit) onConfirm(assertion) }}
-            />
+            <label className="field__label">Confirm with Atlantis Cloud</label>
+            <button
+              className="btn"
+              type="button"
+              onClick={confirmAtCloud}
+              disabled={waiting || pending || !me?.step_up_url}
+            >
+              {waiting ? 'Waiting for Atlantis Cloud…' : 'Confirm with Atlantis Cloud'}
+            </button>
+            {waiting && (
+              <div className="hint" style={{ marginTop: 6 }}>
+                A window opened for you to enter your code. Close it to cancel.
+              </div>
+            )}
           </div>
+
+          {/*
+            The fallback, and it stays. A browser that blocks the popup would
+            otherwise leave this dialog with no way forward at all. Shown only
+            when that happens, so the ordinary path is one button.
+          */}
+          {popupBlocked && (
+            <div className="field">
+              <label className="field__label" htmlFor="sudo-assertion">
+                Your browser blocked the window. Open{' '}
+                <a href={me?.step_up_url} target="_blank" rel="noreferrer">this link</a>{' '}
+                and paste the code it gives you.
+              </label>
+              <input
+                id="sudo-assertion"
+                className="input mono"
+                type="text"
+                autoComplete="off"
+                spellCheck={false}
+                value={assertion}
+                onChange={e => setAssertion(e.target.value.trim())}
+                placeholder="eyJhbGciOi…"
+                onKeyDown={e => { if (e.key === 'Enter' && canSubmit) onConfirm(assertion) }}
+              />
+            </div>
+          )}
 
           {error && (
             <div className="banner banner--error" style={{ marginTop: 4 }}>{error}</div>

@@ -46,6 +46,14 @@ type Private struct {
 	Role  Role   `json:"role"`
 	Email string `json:"email"`
 	Name  string `json:"name,omitempty"`
+
+	// StepUp records that a second factor was presented to obtain this
+	// assertion, rather than a live session being spent for one.
+	//
+	// Omitted when false, so an ordinary sign-in carries no claim at all and a
+	// consumer that has never heard of step-up reads the same token it always
+	// did. What it must never be is *assumed* — see the field in Claims.
+	StepUp bool `json:"step_up,omitempty"`
 }
 
 // Claims is a verified assertion. A value of this type means the signature
@@ -82,6 +90,29 @@ type Claims struct {
 	// mints a session with its own lifetime on the strength of this; it does
 	// not extend the assertion.
 	Expiry time.Time
+
+	// StepUp reports that a second factor was presented to obtain this
+	// assertion.
+	//
+	// # Why single-use is not enough on its own
+	//
+	// The console's step-up gate used to rest on freshness alone: an assertion
+	// is spent once, so the one traded for a session cannot be re-posted to
+	// elevate it, and the only way to get another was an operator running
+	// `cloud mint` with the signing key.
+	//
+	// Cloud's /authorize changed that. A live Cloud session mints a fresh
+	// assertion on request, and a Cloud session lasts twelve hours without
+	// anybody presenting a factor. So "fresh" stopped meaning "somebody just
+	// proved themselves" and started meaning "somebody holds a cookie" —
+	// which is exactly what step-up exists to require more than.
+	//
+	// This claim carries the difference. False on an ordinary sign-in, true
+	// only when /authorize demanded a factor and got one. The console refuses
+	// a step-up without it. Deliberately NOT defaulted, inferred, or filled in
+	// from context anywhere: an assertion that does not say a factor was
+	// presented did not have one presented.
+	StepUp bool
 }
 
 // ErrMissingClaim reports an assertion that verified cryptographically but did

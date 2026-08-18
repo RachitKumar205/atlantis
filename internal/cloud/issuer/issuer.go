@@ -180,7 +180,15 @@ type Grant struct {
 	// Audience names the console this assertion is for, and is the reason an
 	// assertion minted for one organisation's console cannot be replayed
 	// against another's.
+	//
+	// Since C5 this is the organisation's registered console URL, which is also
+	// where the browser is sent — one value, so the token's audience and its
+	// destination cannot disagree.
 	Audience string
+
+	// StepUp says a second factor was presented for this assertion. Set only by
+	// the reauth path; see identity.Claims.StepUp for what rests on it.
+	StepUp bool
 }
 
 // Mint returns a signed assertion for g.
@@ -212,6 +220,7 @@ func (i *Issuer) Mint(g Grant) (string, error) {
 		Email:   g.Email,
 		Name:    g.Name,
 		Expiry:  expiry,
+		StepUp:  g.StepUp,
 	}
 	if err := claims.Validate(); err != nil {
 		return "", fmt.Errorf("refusing to mint an assertion no console would accept: %w", err)
@@ -238,10 +247,11 @@ func (i *Issuer) Mint(g Grant) (string, error) {
 		Expiry:    jwt.NewNumericDate(expiry),
 	}
 	private := identity.Private{
-		Org:   g.Org,
-		Role:  g.Role,
-		Email: g.Email,
-		Name:  g.Name,
+		Org:    g.Org,
+		Role:   g.Role,
+		Email:  g.Email,
+		Name:   g.Name,
+		StepUp: g.StepUp,
 	}
 
 	tok, err := jwt.Signed(signer).Claims(registered).Claims(private).Serialize()

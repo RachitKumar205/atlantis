@@ -222,6 +222,10 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*identity.Claims, 
 		Role:    private.Role,
 		Email:   private.Email,
 		Name:    private.Name,
+		// Carried across, never defaulted. A claim that is absent decodes to
+		// false, which is the safe direction: the step-up gate refuses, and the
+		// user is asked to prove themselves rather than waved through.
+		StepUp: private.StepUp,
 	}
 	if registered.Expiry != nil {
 		claims.Expiry = registered.Expiry.Time()

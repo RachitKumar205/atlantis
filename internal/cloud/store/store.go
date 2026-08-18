@@ -264,6 +264,67 @@ func (s *Store) CreateOrg(ctx context.Context, name, displayName string) error {
 	return err
 }
 
+// ErrNoConsole reports an organisation nobody has told Cloud how to reach.
+//
+// Distinct from ErrNotFound, which says there is no such organisation. This one
+// exists and has members; there is simply nowhere to send them. The two need
+// telling apart because they are different mistakes — a typo in a name, versus
+// a provisioning step nobody ran.
+var ErrNoConsole = errors.New("no console is registered for this organisation")
+
+// SetConsoleURL records where an organisation's console lives.
+//
+// Written by `cloud org register`. Also the audience the assertions for that
+// console are minted with — see migration 0004 for why those are one value.
+//
+// The trailing slash is trimmed HERE rather than at the call site. This value
+// is compared against a console's CLOUD_AUDIENCE for exact equality and is
+// concatenated with a path to build a redirect, so one stray slash is every
+// sign-in for that organisation failing with a message about the token. Doing
+// it in the command that happens to write it today would leave the next writer
+// to remember, and the failure it produces gives no hint what to remember.
+func (s *Store) SetConsoleURL(ctx context.Context, org, consoleURL string) error {
+	consoleURL = strings.TrimRight(strings.TrimSpace(consoleURL), "/")
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE cloud.orgs SET console_url = $2 WHERE name = $1`, org, consoleURL)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%s: %w", org, ErrNotFound)
+	}
+	return nil
+}
+
+// ConsoleURL returns where to send somebody who has been authorized into an
+// organisation.
+//
+// # Why this is the only source of a redirect target
+//
+// /authorize takes no destination from the request. It takes an organisation
+// name, checks membership, and asks this. A URL that arrived in a query
+// parameter would need validating against something, and the something would
+// be this column anyway — so the parameter is skipped and the column consulted
+// directly. There is then no input that could be validated wrongly.
+//
+// Reports ErrNoConsole when the organisation exists but has no console, which
+// is a state `cloud org create` leaves behind and `cloud org register` clears.
+func (s *Store) ConsoleURL(ctx context.Context, org string) (string, error) {
+	var consoleURL string
+	err := s.pool.QueryRow(ctx,
+		`SELECT console_url FROM cloud.orgs WHERE name = $1`, org).Scan(&consoleURL)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("%s: %w", org, ErrNotFound)
+	}
+	if err != nil {
+		return "", err
+	}
+	if consoleURL == "" {
+		return "", fmt.Errorf("%s: %w", org, ErrNoConsole)
+	}
+	return consoleURL, nil
+}
+
 // AddMember grants a user a role in an organisation, replacing any existing
 // grant. The role is validated here as well as by the database, so a caller
 // gets a message about the role rather than a constraint name.

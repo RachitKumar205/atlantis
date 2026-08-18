@@ -366,9 +366,10 @@ dev-cloud-seed: dev-cloud-role build-cloud ## Create an account, an org, and a g
 	@# and an operator will need them separately. This target exists because
 	@# running all three by hand is the common case during development.
 	@#
-	@# Membership is not yet the gate: `make dev-token` mints an assertion for
-	@# whatever ORG it is handed, with no check against these rows. Cloud's
-	@# /authorize is what makes them load-bearing, and it does not exist yet.
+	@# These rows are the gate. Cloud's /authorize reads them before minting,
+	@# and so does `make dev-token` — neither will produce an assertion for a
+	@# pair with no membership row, so this target is a prerequisite for signing
+	@# in rather than a convenience.
 	@# No `-` prefix on any of these. All three are idempotent, so re-running
 	@# this target is not an error — and a `-` would swallow the failures that
 	@# are, which is how a seed that stopped working looks exactly like one that
@@ -402,6 +403,7 @@ dev-org-register: dev-certs dev-data-key dev-cloud-role build-cloud ## Point an 
 		CONSOLE_DATA_KEY="$$(cat $(DEV_DATA_KEY_FILE))" \
 		$(BIN_DIR)/atlantis-cloud org register \
 			-org "$(ORG)" \
+			-console-url "$(CLOUD_AUDIENCE)" \
 			-endpoint "localhost:9090" \
 			-health "localhost:8081" \
 			-ca "$(DEV_CERT_DIR)/ca.crt" \
@@ -451,14 +453,16 @@ dev-token: build-cloud ## Mint a sign-in assertion. EMAIL=you@example.com ROLE=a
 	@#
 	@# Same key as `dev-auth`, or the assertion would be signed by a key the
 	@# console's key set does not list.
-	@token=$$(CLOUD_ISSUER="$(CLOUD_ISSUER)" $(BIN_DIR)/atlantis-cloud mint \
+	@# No -role or -subject any more. `mint` reads cloud.memberships for the
+	@# role and cloud.orgs for the audience, so this fails unless
+	@# `make dev-cloud-seed` and `make dev-org-register` have both run — which
+	@# is the point: the command cannot mint an authority the database has no
+	@# record of.
+	@token=$$(CLOUD_ISSUER="$(CLOUD_ISSUER)" CLOUD_PG_URL="$(CLOUD_PG_URL)" \
+		$(BIN_DIR)/atlantis-cloud mint \
 		-key "$(CLOUD_SIGNING_KEY)" \
-		-audience "$(CLOUD_AUDIENCE)" \
-		-subject "usr_$${EMAIL:-dev@example.com}" \
 		-org "$${ORG:-acme}" \
-		-role "$${ROLE:-admin}" \
-		-email "$${EMAIL:-dev@example.com}" \
-		-name "$${NAME:-Local Developer}") && \
+		-email "$${EMAIL:-dev@example.com}") && \
 	echo "" && \
 	echo "Open this to sign in (the assertion is single-use):" && \
 	echo "  http://localhost:3000/login#assertion=$$token" && \

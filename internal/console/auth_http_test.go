@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
@@ -186,11 +187,55 @@ func TestSudoNeedsAFreshAssertion(t *testing.T) {
 		t.Fatal("the assertion already used to sign in also granted sudo")
 	}
 
-	// A fresh one does.
+	// Nor does an unspent one, which is the half that changed.
+	//
+	// This used to be the passing case: any fresh assertion elevated, because
+	// the only way to obtain one was an operator with the signing key. Cloud's
+	// /authorize ends that — a live Cloud session mints a fresh assertion on
+	// request, and that session can be twelve hours old with no second factor
+	// anywhere near it. Accepting this would be a step-up that any signed-in
+	// browser could clear by itself.
 	fresh := f.post(t, "/api/auth/sudo", exchangeBody(f.assertion(t, "sudo@example.com", "admin")), token)
-	if fresh.Code != http.StatusOK {
-		t.Fatalf("a fresh assertion did not grant sudo: status %d, body %s",
-			fresh.Code, fresh.Body.String())
+	if fresh.Code == http.StatusOK {
+		t.Fatal("an assertion minted from a session, with no second factor behind it, " +
+			"granted sudo — step-up is now a button that always succeeds")
+	}
+
+	// What does elevate is one that says a factor was presented.
+	stepUp := f.post(t, "/api/auth/sudo",
+		exchangeBody(f.stepUpAssertion(t, "sudo@example.com", "admin")), token)
+	if stepUp.Code != http.StatusOK {
+		t.Fatalf("a step-up assertion did not grant sudo: status %d, body %s",
+			stepUp.Code, stepUp.Body.String())
+	}
+}
+
+// A step-up assertion is still single-use.
+//
+// The new claim is an addition to the old guard, not a replacement for it. Were
+// it a replacement, one trip through the reauth popup would yield a token good
+// for every destructive action afterwards.
+func TestAStepUpAssertionIsStillSingleUse(t *testing.T) {
+	f := newConsoleFixture(t)
+
+	signIn := f.assertion(t, "once@example.com", "admin")
+	ex := f.post(t, "/api/auth/exchange", exchangeBody(signIn), "")
+	if ex.Code != http.StatusOK {
+		t.Fatalf("exchange: status %d, body %s", ex.Code, ex.Body.String())
+	}
+	var token string
+	for _, c := range ex.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			token = c.Value
+		}
+	}
+
+	elevate := f.stepUpAssertion(t, "once@example.com", "admin")
+	if first := f.post(t, "/api/auth/sudo", exchangeBody(elevate), token); first.Code != http.StatusOK {
+		t.Fatalf("first step-up: status %d, body %s", first.Code, first.Body.String())
+	}
+	if second := f.post(t, "/api/auth/sudo", exchangeBody(elevate), token); second.Code == http.StatusOK {
+		t.Fatal("the same step-up assertion elevated twice")
 	}
 }
 
@@ -201,7 +246,12 @@ func TestSudoRefusesAnAssertionForSomebodyElse(t *testing.T) {
 	f := newConsoleFixture(t)
 
 	token := f.signIn(t, "owner@example.com", "admin")
-	other := f.assertion(t, "someone-else@example.com", "admin")
+
+	// A step-up assertion, so this reaches the subject check rather than
+	// stopping at the step-up gate. Both refuse with 403, so an ordinary
+	// assertion here would let the test pass while proving nothing about whose
+	// session may be elevated — which it did, briefly, when the gate landed.
+	other := f.stepUpAssertion(t, "someone-else@example.com", "admin")
 
 	w := f.post(t, "/api/auth/sudo", exchangeBody(other), token)
 	if w.Code == http.StatusOK {
@@ -209,6 +259,10 @@ func TestSudoRefusesAnAssertionForSomebodyElse(t *testing.T) {
 	}
 	if w.Code != http.StatusForbidden {
 		t.Errorf("status = %d, want 403", w.Code)
+	}
+	// The body names which check refused, so the two cannot be confused.
+	if !strings.Contains(w.Body.String(), "does not match this session") {
+		t.Errorf("refused for the wrong reason: %s", w.Body.String())
 	}
 }
 

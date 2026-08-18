@@ -232,7 +232,7 @@ Read by `cmd/console`, not the Atlantis server.
 | `CONSOLE_PG_URL` | (unset; required) | Connection string for the BFF's audit / session tables — the same Postgres instance as the server, separate schema. **The role must be `NOSUPERUSER` and `NOBYPASSRLS`; the console refuses to start otherwise.** |
 | `CONSOLE_SESSION_SECRET` | (unset; required, ≥32 chars) | HMAC key for session cookies. Console refuses to start below 32 chars, so `changeme` placeholders trip a fatal startup error — set this before first boot. |
 | `CLOUD_ISSUER` | (unset; **required**) | The `iss` value the console will accept, matched exactly. |
-| `CLOUD_AUDIENCE` | (unset; **required**) | The `aud` value the console requires, naming this console. It is what stops an assertion minted for one organisation's console being replayed against another's. |
+| `CLOUD_AUDIENCE` | (unset; **required**) | The `aud` value the console requires, naming this console. It is what stops an assertion minted for one organisation's console being replayed against another's. **Set it to exactly this console's URL as registered with `cloud org register -console-url`** — Cloud mints with that value and redirects to it, so the two must be the same string. |
 | `CLOUD_JWKS_URL` | (unset; **required**) | Where the issuer publishes its public keys. Fetched on demand, refreshed every 5 minutes, and refetched whenever an assertion names a key the console does not hold — which is how a key rotation takes effect promptly. |
 | `CONSOLE_COOKIE_SECURE` | `false` | Sets the `Secure` flag on session cookies. Default false so `http://localhost` works for first boot; flip to `true` once a TLS terminator (reverse proxy, LB) sits in front. |
 | `CONSOLE_AUDIT_RETENTION_DAYS` | `365` | Audit-row retention. Covers the typical SOC 2 audit window and PCI DSS §10.5.1's 12-month online minimum. HIPAA = 2190 (6 years); SOX = 2555 (7 years). `0` keeps every partition forever. |
@@ -422,6 +422,51 @@ except when it is the only thing that can reach the account — an account with 
 password and one connection has no recovery path, because resetting a password
 requires having one. Connections remain listed and removable after a provider's
 credentials are taken out of the environment.
+
+### Getting into an organisation's console
+
+`GET /authorize?org=<name>` is how a signed-in Cloud user reaches a console. It
+checks `cloud.memberships`, mints an assertion carrying **that row's role**, and
+redirects to the organisation's registered console with the token in the URL
+fragment. The console spends it once for a session.
+
+**There is no destination parameter.** The URL comes from
+`cloud.orgs.console_url`, set by `cloud org register -console-url`. A request
+cannot name where it wants to be sent, so there is no open redirect to guard
+against — and a `console=` parameter, if anybody adds one to a link, is ignored.
+
+**That URL is also the assertion's audience.** Set the console's
+`CLOUD_AUDIENCE` to exactly the same value; `cloud org register` prints it for
+that reason. A difference of one character is every sign-in failing with a
+message about the token rather than about the mismatch.
+
+**An organisation with no registered console cannot be signed in to**, and says
+so. That is the ordinary state between `cloud org create` and provisioning.
+
+`cloud mint` still exists for the cases with no browser — an operator
+diagnosing a deployment, and the first membership in a new one. It now reads
+the same membership row and refuses without one, and it has no `-role` flag:
+the row decides, so the command and the endpoint cannot disagree.
+
+### Confirming a destructive action
+
+The console's danger-zone actions need step-up, and step-up means presenting a
+second factor at Cloud — the console holds no credential of its own to re-check.
+
+`GET /authorize?org=<name>&prompt=reauth` asks for a code even when the session
+is live, and only then mints an assertion carrying a `step_up` claim. The
+console's `POST /api/auth/sudo` requires that claim.
+
+**Why the claim rather than freshness.** Sudo used to accept any unspent
+assertion, which was strong while the only way to get one was an operator with
+the signing key. `/authorize` changed that: a Cloud session mints a fresh
+assertion on request and lasts twelve hours without a factor being presented.
+Single-use stops an assertion being replayed; it does nothing about one being
+re-minted. The claim is what says a factor was actually presented.
+
+The console opens that URL in a popup and takes the result through
+`postMessage`, so the dialog and the action behind it survive. If the browser
+blocks the popup, the dialog falls back to pasting the token by hand.
 
 ### Cloud needs its own database role
 

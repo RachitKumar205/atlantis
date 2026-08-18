@@ -152,6 +152,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/account/identities", s.handleListIdentities)
 	s.mux.HandleFunc("POST /api/account/identities/{provider}/unlink", s.handleUnlinkIdentity)
 
+	// Handing a signed-in user to an organisation's console.
+	//
+	// Reached by a browser rather than a script — from a link, or from the
+	// popup the console opens for step-up — so these answer with pages and
+	// redirects, not JSON.
+	s.mux.HandleFunc("GET /authorize", s.handleAuthorize)
+	s.mux.HandleFunc("POST /authorize/reauth", s.handleReauth)
+
 	// Reached from an email, by a person, in a browser. Plain pages rather than
 	// JSON for that reason. They are deliberately unstyled and framework-free:
 	// the Cloud sign-in app replaces them, and a link in an email that already

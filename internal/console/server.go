@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -591,17 +592,34 @@ func (s *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 // revoke-all — so a stolen session cookie alone cannot trigger them.
 //
 // Step-up used to mean re-typing a password. With no local credentials it
-// means presenting a *fresh* assertion, which sends the user back to Cloud to
-// prove themselves there. That preserves the property the control exists for:
-// holding the cookie is not enough.
+// means presenting an assertion that says a second factor was just presented,
+// which sends the user back to Cloud to prove themselves there. That preserves
+// the property the control exists for: holding the cookie is not enough.
 //
-// The freshness is what single-use buys. Were assertions replayable, the SPA
-// could keep the one it signed in with and post it here, and sudo would
-// degrade into a button that always succeeds — while looking, from every
-// screen and every audit row, exactly like a working step-up.
+// # Why single-use stopped being sufficient
+//
+// This used to accept any unspent assertion, and that was strong while the only
+// way to get one was an operator running `cloud mint` with the signing key.
+// Cloud's /authorize changed the economics: a live Cloud session mints a fresh
+// assertion on request, and that session lasts twelve hours without anybody
+// touching a second factor. Single-use stops an assertion being *replayed*; it
+// does nothing about one being *re-minted*.
+//
+// So the check moved from "is this fresh" to "does this say a factor was
+// presented". Cloud sets that claim on exactly one route — /authorize with
+// prompt=reauth — and only after checking the code. Without this line the claim
+// is decoration and sudo is a button that always succeeds, which is the
+// degradation the previous version of this comment warned about and which
+// looks, from every screen and every audit row, exactly like a working gate.
 func (s *Server) handleSudo(w http.ResponseWriter, r *http.Request) {
 	claims := s.acceptAssertion(w, r)
 	if claims == nil {
+		return
+	}
+
+	if !claims.StepUp {
+		s.log.Warn("sudo assertion did not come from a step-up", "subject", claims.Subject)
+		jsonError(w, "confirm with Atlantis Cloud to continue", http.StatusForbidden)
 		return
 	}
 
@@ -650,6 +668,17 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		"email":   u.Email,
 		"role":    u.Role,
 		"name":    u.Name,
+
+		// Where the browser goes to prove a second factor before a destructive
+		// action. Built here rather than in the SPA for two reasons: the org
+		// comes from the session rather than from anything the page holds, and
+		// the console's own configuration is where Cloud's address lives.
+		//
+		// CLOUD_ISSUER is Cloud's base URL — issuer.New documents the `iss`
+		// value as the issuer's https URL, and the console already requires it
+		// to match exactly, so there is no second value that could drift.
+		"step_up_url": s.cfg.CloudIssuer + "/authorize?org=" +
+			url.QueryEscape(u.Org) + "&prompt=reauth",
 	})
 }
 
