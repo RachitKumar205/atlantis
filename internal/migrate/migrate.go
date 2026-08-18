@@ -42,6 +42,7 @@ const (
 	InfraHistoryTable   = "atlantis_schema_migrations_infra"
 	TidectlHistoryTable = "atlantis_schema_migrations_tidectl"
 	ConsoleHistoryTable = "console_schema_migrations"
+	CloudHistoryTable   = "cloud_schema_migrations"
 )
 
 // Run applies the server's pending migrations: the embedded infra tree, then

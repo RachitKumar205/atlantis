@@ -11,6 +11,54 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ## Unreleased
 
+### Added
+
+#### Atlantis Cloud records who people are and which organisations they belong to
+
+The console has been trusting an `org` claim that nothing wrote. `cloud mint`
+would sign an assertion for any organisation string it was handed, with any
+role, because Cloud held no user records and no membership — so "identity comes
+from Cloud" was true about the *signature* and about nothing else.
+
+Cloud now has its own schema (`CLOUD_PG_URL`, migration tree `cloud`, its own
+history table) holding `cloud.users`, `cloud.orgs`, `cloud.memberships` and
+`cloud.identities`. Operator commands to populate it:
+
+```bash
+cloud user create -email you@example.com
+cloud org create  -org acme
+cloud member add  -email you@example.com -org acme -role admin
+```
+
+`cloud org register` now writes both databases — Cloud's organisation row and
+the console's registry row. Neither write is atomic with the other and they are
+in different databases, so both are upserts and a partial run is fixed by
+running it again. Cloud's row goes first deliberately: if the second write
+fails, the result is an organisation with no atlantis yet, which is the ordinary
+state between creating one and provisioning it.
+
+**Membership is not yet enforced.** `cloud mint` still signs whatever it is
+handed; the `/authorize` endpoint that checks `cloud.memberships` before minting
+is the next piece. Until then these rows are a record rather than a gate, and
+this entry says so rather than implying otherwise.
+
+Two notes on the schema, both of which are decisions rather than oversights:
+
+- **`password_hash` is nullable.** An account created by signing in with an
+  OAuth provider has no password and may never gain one. What it may not do is
+  skip the second factor.
+- **No table here carries a per-user row-level boundary**, and the reason is
+  structural. `cloud.users` and `cloud.identities` are the queries that
+  *discover* who a request is, so they cannot be filtered by who the request is
+  — a policy on `identities` would make the OAuth callback match nothing and
+  create a duplicate account on every sign-in. `orgs` is a registry, and
+  `memberships` is read per-user by a member and per-org by an admin. What ships
+  instead is a boot check that refuses to start if a table appears in the schema
+  that is neither policed nor a recorded exemption, so the second-factor secrets
+  arriving next cannot land unpoliced by accident. It also checks the connecting
+  role, but only once a policed table exists — a role that bypasses row-level
+  security bypasses nothing while every table is exempt.
+
 ### Changed
 
 #### Each organisation has its own atlantis, reached with its own credentials — breaking

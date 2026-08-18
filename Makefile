@@ -24,6 +24,19 @@ CLOUD_AUDIENCE     ?= http://localhost:3000
 CLOUD_JWKS_URL     ?= $(CLOUD_ISSUER)/.well-known/jwks.json
 CLOUD_SIGNING_KEY  ?= $(DEV_CERT_DIR)/cloud-signing-key.pem
 
+# Cloud's own database: accounts, organisations and memberships.
+#
+# Its own DSN, and locally its own schema in the same instance the console uses.
+# That is a development convenience rather than a constraint — nothing joins
+# across the two, so separating them later is this line and nothing else.
+#
+# The dev role here is the administrative one, which is a superuser. That is
+# fine while every table in schema cloud is exempt from the user boundary, and
+# stops being fine the moment one is not: store.VerifyPolicies refuses to start
+# on a bypassing role as soon as a policed table exists, so the first policed
+# table is also the point at which this needs its own NOSUPERUSER role.
+CLOUD_PG_URL       ?= postgres://atlantis:atlantis@localhost:5432/atlantis?sslmode=disable
+
 # Two migration histories: infra (hand-written) and tidectl (codegen).
 MIGRATIONS_INFRA_DIR := ./migrations/infra
 MIGRATIONS_TIDECTL_DIR := ./.dev/migrations/tidectl
@@ -330,6 +343,30 @@ dev-data-key: ## Create (once) the local keyset that seals organisation credenti
 	@# decrypt. Regenerating it locally means re-running dev-org-register.
 	@echo "$$(cat $(DEV_DATA_KEY_FILE))"
 
+.PHONY: dev-cloud-seed
+dev-cloud-seed: build-cloud ## Create an account, an org, and a grant: make dev-cloud-seed EMAIL=you@example.com ORG=acme
+	@test -n "$(EMAIL)" -a -n "$(ORG)" || { \
+	  echo "Usage:   make dev-cloud-seed EMAIL=<address> ORG=<name>"; \
+	  echo "Example: make dev-cloud-seed EMAIL=you@example.com ORG=acme"; \
+	  exit 1; \
+	}
+	@# Three commands rather than one, because they are three different things
+	@# and an operator will need them separately. This target exists because
+	@# running all three by hand is the common case during development.
+	@#
+	@# Membership is not yet the gate: `make dev-token` mints an assertion for
+	@# whatever ORG it is handed, with no check against these rows. Cloud's
+	@# /authorize is what makes them load-bearing, and it does not exist yet.
+	@# No `-` prefix on any of these. All three are idempotent, so re-running
+	@# this target is not an error — and a `-` would swallow the failures that
+	@# are, which is how a seed that stopped working looks exactly like one that
+	@# worked.
+	CLOUD_PG_URL="$(CLOUD_PG_URL)" $(BIN_DIR)/atlantis-cloud org create -org "$(ORG)"
+	CLOUD_PG_URL="$(CLOUD_PG_URL)" $(BIN_DIR)/atlantis-cloud user create -email "$(EMAIL)"
+	CLOUD_PG_URL="$(CLOUD_PG_URL)" $(BIN_DIR)/atlantis-cloud member add \
+		-email "$(EMAIL)" -org "$(ORG)" -role admin
+
+.PHONY: dev-org-register
 dev-org-register: dev-certs dev-data-key build-cloud ## Point an org at the local atlantis: make dev-org-register ORG=<name>
 	@test -n "$(ORG)" || { \
 	  echo "Usage:   make dev-org-register ORG=<name>"; \
@@ -349,6 +386,7 @@ dev-org-register: dev-certs dev-data-key build-cloud ## Point an org at the loca
 	@# boundary. The two-CA test does (internal/console/org_client_pg_test.go);
 	@# do not read a working `make dev` as evidence the separation holds.
 	CONSOLE_PG_URL="$(CONSOLE_PG_URL)" \
+		CLOUD_PG_URL="$(CLOUD_PG_URL)" \
 		CONSOLE_DATA_KEY="$$(cat $(DEV_DATA_KEY_FILE))" \
 		$(BIN_DIR)/atlantis-cloud org register \
 			-org "$(ORG)" \

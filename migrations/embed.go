@@ -39,3 +39,17 @@ var Infra embed.FS
 //
 //go:embed console/*.sql
 var Console embed.FS
+
+// Cloud is the control plane's schema: users, organisations, memberships, and
+// the credentials people sign in with.
+//
+// A third tree for the same reason there is a second one — cmd/cloud is
+// deployed, upgraded and rolled back on its own schedule, and it is the only
+// thing that writes these tables. It also reaches its own database
+// (CLOUD_PG_URL), which during development is the same PostgreSQL instance the
+// console uses and need not stay that way: nothing here joins across the
+// boundary, so separating them later is a connection string rather than a
+// migration.
+//
+//go:embed cloud/*.sql
+var Cloud embed.FS

@@ -55,6 +55,7 @@ import (
 
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 	"github.com/rachitkumar205/atlantis/internal/cloud/issuer"
+	"github.com/rachitkumar205/atlantis/internal/cloud/store"
 	"github.com/rachitkumar205/atlantis/internal/console"
 	"github.com/rachitkumar205/atlantis/internal/console/secrets"
 )
@@ -74,7 +75,11 @@ func main() {
 	case "mint":
 		err = mint(os.Args[2:])
 	case "org":
-		err = org(os.Args[2:])
+		err = org(os.Args[2:], log)
+	case "user":
+		err = user(os.Args[2:], log)
+	case "member":
+		err = member(os.Args[2:], log)
 	case "data-key":
 		err = dataKey(os.Args[2:])
 	case "-h", "--help", "help":
@@ -98,6 +103,12 @@ func usage() {
 usage:
   cloud serve [flags]          publish the JWKS document
   cloud mint  [flags]          sign one assertion and print it
+
+  cloud user create [flags]    create an account
+  cloud org create [flags]     record that an organisation exists
+  cloud member add [flags]     grant an account a role in an organisation
+  cloud member remove [flags]  revoke it
+
   cloud org register [flags]   point an organisation at its atlantis
   cloud data-key               print a keyset for a console's CONSOLE_DATA_KEY
 
@@ -230,22 +241,220 @@ func mint(args []string) error {
 	return nil
 }
 
-// org dispatches the organisation subcommands. Only one so far, and it is
-// spelled `org register` rather than `register` because the next ones —
-// listing, de-provisioning — belong under the same noun.
-func org(args []string) error {
+// ── Cloud's own database ────────────────────────────────────────────────────
+
+// openCloud connects to Cloud's database, applying any pending migrations
+// first.
+//
+// Migrating on connect rather than in a separate command: Cloud owns this
+// schema outright, it is the only writer, and a binary that is newer than its
+// database is the state every one of these commands would otherwise fail in
+// with a message about a missing column. The console does the same at startup.
+func openCloud(ctx context.Context, dbURL string, log *slog.Logger) (*store.Store, error) {
+	if dbURL == "" {
+		return nil, errors.New("-db is required (or set CLOUD_PG_URL): this reads and writes Cloud's own database")
+	}
+	if err := store.Migrate(dbURL, log); err != nil {
+		return nil, fmt.Errorf("migrate cloud schema: %w", err)
+	}
+	db, err := store.New(ctx, dbURL, log)
+	if err != nil {
+		return nil, fmt.Errorf("open cloud db: %w", err)
+	}
+	// Before anything writes: refuse a schema where a table carries per-user
+	// rows with no boundary and no recorded decision. See store.VerifyPolicies.
+	if err := store.VerifyPolicies(ctx, db.Pool()); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func cloudDBFlag(fs *flag.FlagSet) *string {
+	return fs.String("db", os.Getenv("CLOUD_PG_URL"), "Cloud's database URL (or set CLOUD_PG_URL)")
+}
+
+// ── Accounts ────────────────────────────────────────────────────────────────
+
+func user(args []string, log *slog.Logger) error {
 	if len(args) == 0 {
-		return errors.New(`cloud org: expected a subcommand (register)`)
+		return errors.New(`cloud user: expected a subcommand (create)`)
 	}
 	switch args[0] {
+	case "create":
+		return userCreate(args[1:], log)
+	default:
+		return fmt.Errorf("cloud user: unknown subcommand %q", args[0])
+	}
+}
+
+func userCreate(args []string, log *slog.Logger) error {
+	fs := flag.NewFlagSet("user create", flag.ExitOnError)
+	email := fs.String("email", "", "email address; folded to lowercase and unique")
+	name := fs.String("name", "", "display name (optional)")
+	dbURL := cloudDBFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *email == "" {
+		return errors.New("-email is required")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	db, err := openCloud(ctx, *dbURL, log)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	u, err := db.CreateUser(ctx, *email, *name, nil)
+	if errors.Is(err, store.ErrAlreadyExists) {
+		// Reported and successful, so re-running a seeding script is not an
+		// error — matching `org create`, which upserts for the same reason. The
+		// alternative a script reaches for is swallowing every failure from
+		// this command, which also swallows the ones that matter.
+		existing, lookupErr := db.UserByEmail(ctx, *email)
+		if lookupErr != nil {
+			return err
+		}
+		fmt.Println(existing.ID)
+		fmt.Fprintf(os.Stderr, "cloud: %s already exists, unchanged\n", existing.Email)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(u.ID)
+	// Said plainly rather than left to be discovered: this account exists and
+	// cannot sign in. An operator who creates one and then cannot get in should
+	// find out here, not at a sign-in page that refuses without saying why.
+	fmt.Fprintf(os.Stderr, "cloud: created %s with no credential — it cannot sign in "+
+		"until a password is set or an account is linked\n", u.Email)
+	return nil
+}
+
+// ── Membership ──────────────────────────────────────────────────────────────
+
+func member(args []string, log *slog.Logger) error {
+	if len(args) == 0 {
+		return errors.New(`cloud member: expected a subcommand (add, remove)`)
+	}
+	switch args[0] {
+	case "add":
+		return memberChange(args[1:], true, log)
+	case "remove":
+		return memberChange(args[1:], false, log)
+	default:
+		return fmt.Errorf("cloud member: unknown subcommand %q", args[0])
+	}
+}
+
+func memberChange(args []string, add bool, log *slog.Logger) error {
+	verb := "remove"
+	if add {
+		verb = "add"
+	}
+	fs := flag.NewFlagSet("member "+verb, flag.ExitOnError)
+	email := fs.String("email", "", "the account's email address")
+	orgName := fs.String("org", "", "organisation")
+	role := fs.String("role", string(identity.RoleAdmin), `"admin" or "viewer"`)
+	dbURL := cloudDBFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *email == "" || *orgName == "" {
+		return errors.New("-email and -org are both required")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	db, err := openCloud(ctx, *dbURL, log)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	u, err := db.UserByEmail(ctx, *email)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("no account for %s — create it with `cloud user create`", *email)
+	}
+	if err != nil {
+		return err
+	}
+
+	if !add {
+		if err := db.RemoveMember(ctx, u.ID, *orgName); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("%s is not a member of %s", *email, *orgName)
+			}
+			return err
+		}
+		fmt.Printf("removed %s from %s\n", *email, *orgName)
+		return nil
+	}
+
+	if err := db.AddMember(ctx, u.ID, *orgName, identity.Role(*role)); err != nil {
+		return err
+	}
+	fmt.Printf("%s is %s of %s\n", *email, *role, *orgName)
+	return nil
+}
+
+// org dispatches the organisation subcommands.
+//
+// Spelled `org create` / `org register` rather than flat verbs because the two
+// are genuinely different things and conflating them caused confusion once
+// already: `create` records that an organisation exists and who may act in it;
+// `register` says which atlantis serves it. An organisation can exist for a
+// while before it is provisioned.
+func org(args []string, log *slog.Logger) error {
+	if len(args) == 0 {
+		return errors.New(`cloud org: expected a subcommand (create, register)`)
+	}
+	switch args[0] {
+	case "create":
+		return orgCreate(args[1:], log)
 	case "register":
-		return orgRegister(args[1:])
+		return orgRegister(args[1:], log)
 	default:
 		return fmt.Errorf("cloud org: unknown subcommand %q", args[0])
 	}
 }
 
-func orgRegister(args []string) error {
+func orgCreate(args []string, log *slog.Logger) error {
+	fs := flag.NewFlagSet("org create", flag.ExitOnError)
+	name := fs.String("org", "", "organisation name: lowercase, alphanumeric and hyphens, max 63")
+	display := fs.String("display-name", "", "human-readable name (optional)")
+	dbURL := cloudDBFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *name == "" {
+		return errors.New("-org is required")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	db, err := openCloud(ctx, *dbURL, log)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	if err := db.CreateOrg(ctx, *name, *display); err != nil {
+		return err
+	}
+	fmt.Printf("organisation %s exists\n", *name)
+	fmt.Fprintln(os.Stderr, "cloud: it has no atlantis yet — `cloud org register` points it at one")
+	return nil
+}
+
+func orgRegister(args []string, log *slog.Logger) error {
 	fs := flag.NewFlagSet("org register", flag.ExitOnError)
 	name := fs.String("org", "", "organisation name; must match the org claim Cloud mints for its users")
 	endpoint := fs.String("endpoint", "", "host:port of this organisation's atlantis admin gRPC service")
@@ -254,6 +463,8 @@ func orgRegister(args []string) error {
 	certPath := fs.String("cert", "", "PEM client certificate the console presents to it")
 	keyPath := fs.String("key", "", "PEM private key for -cert")
 	dbURL := fs.String("db", os.Getenv("CONSOLE_PG_URL"), "console database URL (or set CONSOLE_PG_URL)")
+	cloudDBURL := fs.String("cloud-db", os.Getenv("CLOUD_PG_URL"),
+		"Cloud's database URL (or set CLOUD_PG_URL)")
 	keyset := fs.String("data-key", os.Getenv("CONSOLE_DATA_KEY"),
 		"the console's keyset, base64 (or set CONSOLE_DATA_KEY)")
 	if err := fs.Parse(args); err != nil {
@@ -299,6 +510,31 @@ func orgRegister(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// Two databases, and the order is deliberate.
+	//
+	// Cloud's row first, because it is the cheap one to repeat and the one an
+	// operator can inspect. If the console write then fails, the organisation
+	// exists in Cloud with nobody able to reach an atlantis for it — which is
+	// the *ordinary* state between `org create` and provisioning, so it is a
+	// state the product already handles and a message already exists for.
+	//
+	// The other order produces a state nothing handles: a console that can dial
+	// an organisation Cloud has never heard of, so no assertion naming it will
+	// ever be minted and the row is unreachable and invisible.
+	//
+	// Neither write is atomic with the other and they are in different
+	// databases, so nothing here can make them so. Both are upserts, so the fix
+	// for a partial run is to run it again.
+	cloudDB, err := openCloud(ctx, *cloudDBURL, log)
+	if err != nil {
+		return err
+	}
+	defer cloudDB.Close()
+
+	if err := cloudDB.CreateOrg(ctx, *name, ""); err != nil {
+		return fmt.Errorf("record %s in Cloud: %w", *name, err)
+	}
+
 	// RegisterOrg validates the material before it writes, so a swapped
 	// -cert/-key or an expired leaf is refused here rather than found later as
 	// a 503 by whoever next opens the console.
@@ -310,7 +546,9 @@ func orgRegister(args []string) error {
 		CertPEM:    string(cert),
 		KeyPEM:     key,
 	}); err != nil {
-		return err
+		return fmt.Errorf("%w\n\n%s exists in Cloud but has no atlantis registered. "+
+			"Both writes are upserts — re-run this command once the problem above "+
+			"is fixed", err, *name)
 	}
 
 	fmt.Printf("registered %s at %s\n", *name, *endpoint)
