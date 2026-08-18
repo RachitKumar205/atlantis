@@ -229,7 +229,7 @@ Read by `cmd/console`, not the Atlantis server.
 | Variable | Default | Notes |
 |---|---|---|
 | `CONSOLE_LISTEN` | `:3000` | Bind address for the BFF + SPA. |
-| `CONSOLE_PG_URL` | (unset; required) | Connection string for the BFF's audit / session tables. The bundle points this at the same Postgres instance, separate schema. |
+| `CONSOLE_PG_URL` | (unset; required) | Connection string for the BFF's audit / session tables — the same Postgres instance as the server, separate schema. **The role must be `NOSUPERUSER` and `NOBYPASSRLS`; the console refuses to start otherwise.** |
 | `CONSOLE_SESSION_SECRET` | (unset; required, ≥32 chars) | HMAC key for session cookies. Console refuses to start below 32 chars, so `changeme` placeholders trip a fatal startup error — set this before first boot. |
 | `CONSOLE_COOKIE_SECURE` | `false` | Sets the `Secure` flag on session cookies. Default false so `http://localhost` works for first boot; flip to `true` once a TLS terminator (reverse proxy, LB) sits in front. |
 | `CONSOLE_AUDIT_RETENTION_DAYS` | `365` | Audit-row retention. Covers the typical SOC 2 audit window and PCI DSS §10.5.1's 12-month online minimum. HIPAA = 2190 (6 years); SOX = 2555 (7 years). `0` keeps every partition forever. |

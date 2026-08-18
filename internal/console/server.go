@@ -30,6 +30,7 @@ import (
 	"github.com/rachitkumar205/atlantis/clients/go/adminjson"
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/migrate"
+	"github.com/rachitkumar205/atlantis/internal/storage/pg"
 	"github.com/rachitkumar205/atlantis/migrations"
 )
 
@@ -74,6 +75,15 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		_ = atl.Close()
 		return nil, fmt.Errorf("open console db: %w", err)
+	}
+	// Before anything touches the schema: refuse a role that reads through
+	// row-level security. See consoleRoleError for why this is fatal and why
+	// the decision lives in its own function.
+	privs, derr := pg.DetectRolePrivileges(ctx, pg.PgxRoleQuerier{Q: db.pool})
+	if err := consoleRoleError(privs, derr); err != nil {
+		db.close()
+		_ = atl.Close()
+		return nil, err
 	}
 	// The console's schema is versioned and travels inside this binary. See
 	// the migrations package for why it is embedded rather than read from a

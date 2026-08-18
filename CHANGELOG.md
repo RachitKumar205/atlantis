@@ -13,6 +13,31 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Changed
 
+#### The console refuses a database role that bypasses row-level security — breaking
+
+`CONSOLE_PG_URL` must name a `NOSUPERUSER`, `NOBYPASSRLS` role. The console
+checks at startup and exits otherwise.
+
+The console's tables are about to carry per-organisation data separated by a
+RESTRICTIVE row-level-security policy. A policy is only a boundary for a role
+the database applies it to: a superuser, or any role holding `BYPASSRLS`, reads
+straight through it. The policy is still attached, `\d` still lists it, and
+every query returns every organisation's rows.
+
+This is the same failure `pg.RequireIsolatedRole` refuses for the server,
+reached by a different door — `CONSOLE_PG_URL` is a separate setting, so a
+deployment can get the server's role right and the console's wrong while every
+check reports healthy.
+
+Unlike the server's equivalent there is no opt-out flag. A guard that has to be
+switched on is a guard that depends on someone remembering, and the moment it
+matters is the moment forgetting produces a cross-organisation read.
+
+**Locally:** `make dev-console-role` creates the role and hands it ownership of
+the `console` schema — ownership rather than grants, because
+`FORCE ROW LEVEL SECURITY` binds a table's owner. It is idempotent, safe on a
+database that already has console data, and `make dev-console` runs it for you.
+
 #### Migrations travel in the binary
 
 The server's own schema (`migrations/infra`) and the console's

@@ -2,15 +2,18 @@ package console
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -88,6 +91,18 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 	const dbName = "atlantis_console_http"
 	dsn := pgcatalog.PrivateDatabase(t, adminDSN, dbName)
 
+	// The console refuses to start on a role that reads through row-level
+	// security (see consoleRoleError), and the test database's default role is
+	// a superuser. So the harness connects as a role the policies will actually
+	// apply to — which is also the posture a deployment runs in, making this
+	// harness a closer model of production than it was.
+	//
+	// CREATE on the database because console.New runs its own migrations, which
+	// create the console schema and everything in it. The role therefore OWNS
+	// what it creates, which is what FORCE ROW LEVEL SECURITY binds against
+	// once step 3 adds the policies.
+	consoleDSN := isolatedRoleDSN(t, adminDSN, dsn, dbName, "console_probe")
+
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	// Infra only. The console's own schema is applied by console.New from the
 	// tree embedded in the binary, which is the path under test.
@@ -123,7 +138,7 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 	t.Cleanup(grpcSrv.Stop)
 
 	srv, err := New(Config{
-		PGURL:               dsn,
+		PGURL:               consoleDSN,
 		ATLEndpoint:         lis.Addr().String(),
 		SessionSecret:       strings.Repeat("k", 32),
 		SandboxPerUserLimit: 1,
@@ -229,4 +244,58 @@ func (f *consoleFixture) auditCount(t *testing.T, action string) int {
 		t.Fatalf("count audit rows: %v", err)
 	}
 	return n
+}
+
+// isolatedRoleDSN creates a role the console can legitimately run as, and
+// returns a DSN for it against the same database.
+//
+// NOSUPERUSER NOBYPASSRLS is the whole point: the console refuses to start on
+// anything else, because a role that reads through row-level security makes the
+// organisation boundary inert. Ten other tests in this repo create a role this
+// way for the same reason; the grants differ per test, which is why each does
+// its own rather than sharing one helper.
+//
+// CREATE on the database because console.New runs its own migrations. The role
+// creates the console schema and therefore owns it, which is the state FORCE
+// ROW LEVEL SECURITY needs to bind against.
+func isolatedRoleDSN(t *testing.T, adminDSN, dbDSN, dbName, role string) string {
+	t.Helper()
+
+	const password = "probe"
+	pgcatalog.Do(t, dbDSN, func(conn *pgx.Conn) error {
+		ctx := context.Background()
+		// Dropped first: a previous run in the same cluster may have left it,
+		// and CREATE ROLE is not idempotent.
+		_, _ = conn.Exec(ctx, `DROP OWNED BY `+pgx.Identifier{role}.Sanitize())
+		_, _ = conn.Exec(ctx, `DROP ROLE IF EXISTS `+pgx.Identifier{role}.Sanitize())
+		for _, sql := range []string{
+			fmt.Sprintf(`CREATE ROLE %s LOGIN PASSWORD '%s' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`,
+				pgx.Identifier{role}.Sanitize(), password),
+			fmt.Sprintf(`GRANT CREATE, CONNECT ON DATABASE %s TO %s`,
+				pgx.Identifier{dbName}.Sanitize(), pgx.Identifier{role}.Sanitize()),
+			// The infra tree is already applied by the admin role above, and the
+			// console reads atlantis.* through the admin gRPC service rather
+			// than directly — but the migration runner's history table lives in
+			// public, so it needs to write there.
+			fmt.Sprintf(`GRANT USAGE, CREATE ON SCHEMA public TO %s`,
+				pgx.Identifier{role}.Sanitize()),
+		} {
+			if _, err := conn.Exec(ctx, sql); err != nil {
+				return fmt.Errorf("%s: %w", sql, err)
+			}
+		}
+		return nil
+	})
+	t.Cleanup(func() {
+		pgcatalog.Exec(t, dbDSN,
+			`DROP OWNED BY `+pgx.Identifier{role}.Sanitize(),
+			`DROP ROLE IF EXISTS `+pgx.Identifier{role}.Sanitize())
+	})
+
+	u, err := url.Parse(dbDSN)
+	if err != nil {
+		t.Fatalf("parse %q: %v", dbDSN, err)
+	}
+	u.User = url.UserPassword(role, password)
+	return u.String()
 }

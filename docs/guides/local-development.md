@@ -29,6 +29,16 @@ make dev-caller-cert CALLER=backend
 
 It prints the three `TIDE_TLS_*` values to export.
 
+## 0b. Create the console's database role
+
+```bash
+make dev-console-role
+```
+
+**The console refuses to start on a role that can bypass row-level security**, and the `atlantis` dev role is a superuser. Its per-organisation boundary is an RLS policy, and a superuser reads straight through one — the policy is still attached, `\d` still lists it, and every query returns every organisation's rows.
+
+The target creates `atlantis_console` as `NOSUPERUSER NOBYPASSRLS` and hands it ownership of the `console` schema, which is what `FORCE ROW LEVEL SECURITY` binds against. It is idempotent, and `make dev-console` runs it for you.
+
 ## 1. Write `atlantis.dev.yaml`
 
 In the atlantis repo root:
@@ -100,6 +110,7 @@ The two manifests can coexist in the same atlantis deployment repo. Commit `atla
 - `caller api: local path ../api: stat ...: no such file or directory` — the path in the manifest doesn't exist on disk. Check the relative path resolves against the manifest's directory, not your shell's cwd.
 - `caller api: path is not allowed for source: git` — you set both `path:` and `repo:`/`ref:` on one caller. Pick one mode per row.
 - `mTLS is required: TLS_CERT_FILE, ... not set` — run `make dev-certs` and pass the three paths. There is no way to start without them.
+- `refusing to start: ... the connecting role bypasses row-level security` from the console — run `make dev-console-role` and point `CONSOLE_PG_URL` at `atlantis_console`.
 - `no client certificate configured` from `tide` or `tidectl` — run `make dev-caller-cert CALLER=<name>` and export what it prints.
 - `pg pool init: ...` from the server — `PG_URL` is wrong or Postgres isn't reachable.
 - `memcached: ...` from the server — `MEMCACHED_ADDR` is wrong, or memcached isn't running.

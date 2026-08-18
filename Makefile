@@ -8,6 +8,13 @@ export
 
 PG_URL ?= postgres://atlantis:atlantis@localhost:5432/atlantis?sslmode=disable
 
+# The console connects as its own role, because it refuses to start on one that
+# reads through row-level security — which the `atlantis` dev role does, being a
+# superuser. `make dev-console-role` creates it.
+CONSOLE_PG_ROLE     ?= atlantis_console
+CONSOLE_PG_PASSWORD ?= console
+CONSOLE_PG_URL      ?= postgres://$(CONSOLE_PG_ROLE):$(CONSOLE_PG_PASSWORD)@localhost:5432/atlantis?sslmode=disable
+
 # Two migration histories: infra (hand-written) and tidectl (codegen).
 MIGRATIONS_INFRA_DIR := ./migrations/infra
 MIGRATIONS_TIDECTL_DIR := ./.dev/migrations/tidectl
@@ -273,8 +280,8 @@ dev: dev-certs ## Start compose Postgres + memcached, then run the server
 		$(GO) run ./cmd/server
 
 .PHONY: dev-console
-dev-console: dev-certs build-console ## Run the management console BFF against the local dev server
-	CONSOLE_PG_URL="$(PG_URL)" \
+dev-console: dev-certs dev-console-role build-console ## Run the management console BFF against the local dev server
+	CONSOLE_PG_URL="$(CONSOLE_PG_URL)" \
 		ATL_ENDPOINT="localhost:9090" \
 		CONSOLE_SESSION_SECRET="$${CONSOLE_SESSION_SECRET:-dev-secret-change-in-prod-32chars!!}" \
 		CONSOLE_LISTEN=":3000" \
@@ -284,6 +291,58 @@ dev-console: dev-certs build-console ## Run the management console BFF against t
 		ATL_TLS_KEY="$(DEV_CERT_DIR)/console.key" \
 		ATL_TLS_CA="$(DEV_CERT_DIR)/ca.crt" \
 		$(BIN_DIR)/atlantis-console
+
+.PHONY: dev-console-role
+dev-console-role: ## Create the local console database role (NOSUPERUSER NOBYPASSRLS)
+	@# Idempotent: creates the role only when absent, and re-grants either way.
+	@#
+	@# The console refuses to start on a role that can bypass row-level
+	@# security, because its per-organisation boundary is an RLS policy and a
+	@# superuser reads straight through one. The dev `atlantis` role is a
+	@# superuser, so the console needs its own.
+	@#
+	@# CREATE on the database because the console runs its own migrations: it
+	@# creates the console schema and therefore owns it, which is what FORCE ROW
+	@# LEVEL SECURITY binds against.
+	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "\
+	  DO \$$\$$ BEGIN \
+	    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$(CONSOLE_PG_ROLE)') THEN \
+	      CREATE ROLE $(CONSOLE_PG_ROLE) LOGIN PASSWORD '$(CONSOLE_PG_PASSWORD)' \
+	        NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE; \
+	    END IF; \
+	  END \$$\$$;" \
+	  -c "GRANT CONNECT, CREATE ON DATABASE atlantis TO $(CONSOLE_PG_ROLE)" \
+	  -c "GRANT USAGE, CREATE ON SCHEMA public TO $(CONSOLE_PG_ROLE)"
+	@# Hand over anything a previous superuser-run console created.
+	@#
+	@# Ownership, not just grants: FORCE ROW LEVEL SECURITY binds the table's
+	@# OWNER, so a console that merely has INSERT/SELECT on tables owned by
+	@# someone else would still not be subject to its own policies once step 3
+	@# adds them. On a fresh database this loop finds nothing — the console
+	@# creates and therefore owns everything itself.
+	@#
+	@# Tables only, no sequences: Postgres refuses ALTER SEQUENCE OWNER on a
+	@# sequence owned by a serial column, and does not need it — reowning the
+	@# table carries its dependent sequences along.
+	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "\
+	  DO \$$\$$ DECLARE r record; BEGIN \
+	    IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'console') THEN \
+	      EXECUTE 'ALTER SCHEMA console OWNER TO $(CONSOLE_PG_ROLE)'; \
+	      FOR r IN SELECT c.relname FROM pg_class c \
+	                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+	                WHERE n.nspname = 'console' AND c.relkind IN ('r','p') LOOP \
+	        EXECUTE format('ALTER TABLE console.%I OWNER TO $(CONSOLE_PG_ROLE)', r.relname); \
+	      END LOOP; \
+	    END IF; \
+	  END \$$\$$;"
+	@# The migration history lives in public and is written by whoever migrates.
+	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "\
+	  DO \$$\$$ BEGIN \
+	    IF to_regclass('public.console_schema_migrations') IS NOT NULL THEN \
+	      EXECUTE 'ALTER TABLE public.console_schema_migrations OWNER TO $(CONSOLE_PG_ROLE)'; \
+	    END IF; \
+	  END \$$\$$;"
+	@echo "==> role $(CONSOLE_PG_ROLE) ready (NOSUPERUSER NOBYPASSRLS), owns schema console"
 
 .PHONY: dev-caller-cert
 dev-caller-cert: dev-certs ## Issue a local caller cert signed by the dev CA: make dev-caller-cert CALLER=<name>
