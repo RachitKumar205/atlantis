@@ -13,6 +13,7 @@ import (
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/server/authz"
+	"github.com/rachitkumar205/atlantis/internal/server/interceptors"
 )
 
 // ---------------------------------------------------------------------------
@@ -244,29 +245,41 @@ ON CONFLICT DO NOTHING`,
 }
 
 // LookupCallerCertBinding returns the cert-binding state for a caller:
-// exists reports whether a caller_identities row is present, and
-// fingerprint is the 32-byte SHA-256 of its currently-active cert (nil
-// when the row exists but no cert has been recorded yet — the
-// back-compat case for callers minted before the binding column).
+// which certificate authenticates as it, and which one it replaced.
+//
+// The previous fingerprint and its deadline exist so a renewal whose
+// response is lost does not lock the machine out — see migration 0031.
+// They are returned rather than filtered here so the decision lives in
+// one place, the interceptor, alongside the comparison it is part of.
 //
 // This is the hot path for the cert-binding interceptor; callers
 // should layer a TTL cache on top to avoid one DB read per RPC under
-// burst. A nil pool returns (false, nil, nil) so tests that don't
-// stand up Postgres can exercise the "no binding configured"
-// branch.
-func (s *Service) LookupCallerCertBinding(ctx context.Context, caller string) (exists bool, fingerprint []byte, err error) {
+// burst. A nil pool returns an empty binding so tests that don't stand
+// up Postgres can exercise the "no binding configured" branch.
+func (s *Service) LookupCallerCertBinding(ctx context.Context, caller string) (interceptors.CertBinding, error) {
 	if s.pool == nil {
-		return false, nil, nil
+		return interceptors.CertBinding{}, nil
 	}
-	err = s.pool.QueryRow(ctx, `
-SELECT cert_fingerprint FROM atlantis.caller_identities WHERE caller = $1`, caller).Scan(&fingerprint)
+	var (
+		fingerprint []byte
+		prev        []byte
+		prevUntil   *time.Time
+	)
+	err := s.pool.QueryRow(ctx, `
+SELECT cert_fingerprint, prev_cert_fingerprint, prev_valid_until
+  FROM atlantis.caller_identities WHERE caller = $1`, caller).
+		Scan(&fingerprint, &prev, &prevUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil, nil
+		return interceptors.CertBinding{}, nil
 	}
 	if err != nil {
-		return false, nil, fmt.Errorf("lookup caller_identities.cert_fingerprint: %w", err)
+		return interceptors.CertBinding{}, fmt.Errorf("lookup caller_identities.cert_fingerprint: %w", err)
 	}
-	return true, fingerprint, nil
+	b := interceptors.CertBinding{Exists: true, Fingerprint: fingerprint, Previous: prev}
+	if prevUntil != nil {
+		b.PreviousUntil = *prevUntil
+	}
+	return b, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -333,14 +346,50 @@ func (s *Service) RecordCallerCertExpiry(ctx context.Context, req *adminpb.Recor
 		}
 	}
 
-	// One UPDATE so expiry + fingerprint flip atomically. If fp is nil
+	// One UPDATE so every column flips atomically. If fp is nil
 	// (back-compat caller), COALESCE preserves whatever's already there
 	// — we never *unset* a fingerprint from this path.
+	//
+	// ── The shift into the previous slot ────────────────────────────────
+	//
+	// When a new fingerprint replaces a different existing one, the one being
+	// replaced moves to prev_cert_fingerprint with a deadline. That is what
+	// stops a renewal from locking a machine out: the certificate it is still
+	// holding keeps authenticating until the deadline, which is long enough to
+	// retry a lost response and short enough to bound the exposure.
+	//
+	// Three conditions on the shift, each of them load-bearing:
+	//
+	//   fp IS NOT NULL      — a call that records only an expiry changes
+	//                         nothing about which certificate is current, so
+	//                         there is nothing to supersede.
+	//   old IS NOT NULL     — the first enrolment for a caller replaces
+	//                         nothing. Shifting NULL in would violate the
+	//                         both-or-neither CHECK.
+	//   old IS DISTINCT FROM new — re-recording the SAME certificate is not a
+	//                         renewal. Without this, a retry would push the
+	//                         current certificate into the previous slot and
+	//                         leave both pointing at it, which reads as an
+	//                         overlap that is not happening.
 	tag, err := s.pool.Exec(ctx, `
 UPDATE atlantis.caller_identities
    SET cert_expires_at  = $2,
+       prev_cert_fingerprint = CASE
+           WHEN $3::bytea IS NOT NULL
+            AND cert_fingerprint IS NOT NULL
+            AND cert_fingerprint IS DISTINCT FROM $3::bytea
+           THEN cert_fingerprint
+           ELSE prev_cert_fingerprint
+       END,
+       prev_valid_until = CASE
+           WHEN $3::bytea IS NOT NULL
+            AND cert_fingerprint IS NOT NULL
+            AND cert_fingerprint IS DISTINCT FROM $3::bytea
+           THEN now() + $4::interval
+           ELSE prev_valid_until
+       END,
        cert_fingerprint = COALESCE($3, cert_fingerprint)
- WHERE caller = $1`, req.GetCaller(), exp.UTC(), fp)
+ WHERE caller = $1`, req.GetCaller(), exp.UTC(), fp, interceptors.RenewalOverlap.String())
 	if err != nil {
 		return nil, fmt.Errorf("update caller cert: %w", err)
 	}

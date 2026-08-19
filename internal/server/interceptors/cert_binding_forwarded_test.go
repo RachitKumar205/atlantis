@@ -20,8 +20,8 @@ func TestCertBinding_ForwardedCertIsTheFingerprintSource(t *testing.T) {
 		chk := NewCertBindingChecker(CertBindingConfig{
 			Enforce:           true,
 			CallerFromContext: callerFn,
-			Lookup: func(context.Context, string) (bool, []byte, error) {
-				return true, fp[:], nil
+			Lookup: func(context.Context, string) (CertBinding, error) {
+				return CertBinding{Exists: true, Fingerprint: fp[:]}, nil
 			},
 		})
 		ctx := WithForwardedCert(context.Background(), der)
@@ -35,8 +35,8 @@ func TestCertBinding_ForwardedCertIsTheFingerprintSource(t *testing.T) {
 		chk := NewCertBindingChecker(CertBindingConfig{
 			Enforce:           true,
 			CallerFromContext: callerFn,
-			Lookup: func(context.Context, string) (bool, []byte, error) {
-				return true, other[:], nil
+			Lookup: func(context.Context, string) (CertBinding, error) {
+				return CertBinding{Exists: true, Fingerprint: other[:]}, nil
 			},
 		})
 		ctx := WithForwardedCert(context.Background(), der)

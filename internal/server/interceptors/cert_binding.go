@@ -15,17 +15,56 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// CertBindingLookup returns the binding state for a caller. exists
-// reports whether a caller_identities row is present; fingerprint is
-// the 32-byte SHA-256 of the row's currently-active cert (nil when
-// the row exists but no cert has been recorded yet — the back-compat
-// branch for callers minted before binding existed).
+// RenewalOverlap is how long a superseded certificate keeps working after the
+// one replacing it is recorded.
+//
+// It lives here because two packages have to agree on it and neither may import
+// the other: internal/server/admin sets prev_valid_until from it when it records
+// a renewal, and internal/console decides from it whether a machine presenting a
+// superseded certificate may renew again. If those two drifted apart, the gap
+// would be a window in which a machine can authenticate but cannot renew — a
+// lockout that appears only for certificates in exactly that band.
+//
+// Sized against what it is for: a machine that has just been handed a
+// certificate and needs to store it. That takes milliseconds, and the failures
+// worth surviving — a lost response, a crash before the file lands, a retry
+// through a queue — resolve in minutes. Twenty-four hours is generous by orders
+// of magnitude, deliberately: too short locks a caller out with no self-service
+// recovery, and too long leaves a stolen certificate alive one extra day inside
+// a 90-day life it already had.
+const RenewalOverlap = 24 * time.Hour
+
+// CertBinding is what a caller's row says about which certificates
+// authenticate as it.
+type CertBinding struct {
+	// Exists reports whether a caller_identities row is present.
+	Exists bool
+
+	// Fingerprint is the 32-byte SHA-256 of the currently-active cert, or
+	// nil when the row exists and no cert has been recorded — the
+	// back-compat branch for callers minted before binding existed.
+	Fingerprint []byte
+
+	// Previous is the certificate this one replaced, and PreviousUntil is
+	// when it stops being accepted. Both set or neither; a database CHECK
+	// says so (migration 0031).
+	//
+	// The window exists because a renewal's response can be lost after the
+	// new fingerprint is written — a timeout, a 502, a crash before the file
+	// reaches disk. Without it the machine holds a superseded certificate and
+	// needs a valid one to renew, which is a lockout only an operator can
+	// undo, on a path `tide login` walks unattended across a fleet.
+	Previous      []byte
+	PreviousUntil time.Time
+}
+
+// CertBindingLookup returns the binding state for a caller.
 //
 // Returning a non-nil error fails open in the same way the lookup
 // would if the row truly didn't exist — the interceptor logs the
 // error and treats it as "unknown caller." Lookups MUST NOT block
 // indefinitely; the caller is on the request hot path.
-type CertBindingLookup func(ctx context.Context, caller string) (exists bool, fingerprint []byte, err error)
+type CertBindingLookup func(ctx context.Context, caller string) (CertBinding, error)
 
 // CertBindingConfig parameterises the cert-binding interceptor.
 type CertBindingConfig struct {
@@ -168,35 +207,57 @@ func buildCertBindingCheck(cfg CertBindingConfig) func(ctx context.Context, full
 		}
 		presented := sha256.Sum256(peerCert.Raw)
 
-		exists, stored, err := cache.lookup(ctx, caller, cfg.Lookup)
+		b, err := cache.lookup(ctx, caller, cfg.Lookup)
 		if err != nil {
 			log.Error("cert binding: lookup", "caller", caller, "method", fullMethod, "err", err)
 			return status.Error(codes.Unauthenticated, "caller binding unavailable")
 		}
-		if !exists {
+		if !b.Exists {
 			// Caller has no row — either never registered, or revoked.
 			// Either way it can't authenticate. Distinguishing the two
 			// would leak existence; one error code covers both.
 			log.Info("cert binding: unknown caller", "caller", caller, "method", fullMethod)
 			return status.Errorf(codes.Unauthenticated, "caller %q is not registered", caller)
 		}
-		if stored == nil {
+		if b.Fingerprint == nil {
 			// Bootstrap window: row exists but no fingerprint recorded
-			// yet (operator registered the caller, hasn't issued a cert
-			// through the console). Accept any CA-signed cert until
-			// the first console issuance binds the fingerprint.
+			// yet (operator registered the caller, hasn't enrolled a
+			// machine through the console). Accept any CA-signed cert
+			// until the first enrolment binds the fingerprint.
 			return nil
 		}
 		// subtle.ConstantTimeCompare so a timing oracle can't probe
 		// fingerprint bytes one column at a time.
-		if subtle.ConstantTimeCompare(stored, presented[:]) != 1 {
-			log.Info("cert binding: fingerprint mismatch (cert superseded)",
+		if subtle.ConstantTimeCompare(b.Fingerprint, presented[:]) == 1 {
+			return nil
+		}
+
+		// The certificate the current one replaced, inside its overlap window.
+		//
+		// A renewal writes the new fingerprint before the machine can possibly
+		// have stored the certificate, so between those two moments the machine
+		// is still presenting the old one. Refusing it there is a lockout: it
+		// needs a valid certificate to renew and no longer has one.
+		//
+		// Bounded by PreviousUntil rather than by "has the new one been used
+		// yet", because observing first use means writing from this function —
+		// the hottest read path in the product, behind a cache that would let
+		// the write fire repeatedly before its effect was visible.
+		if b.Previous != nil && time.Now().Before(b.PreviousUntil) &&
+			subtle.ConstantTimeCompare(b.Previous, presented[:]) == 1 {
+			log.Info("cert binding: accepted the superseded certificate inside its renewal window",
 				"caller", caller,
 				"method", fullMethod,
+				"window_ends", b.PreviousUntil.UTC().Format(time.RFC3339),
 			)
-			return status.Errorf(codes.Unauthenticated, "cert superseded for caller %q", caller)
+			return nil
 		}
-		return nil
+
+		log.Info("cert binding: fingerprint mismatch (cert superseded)",
+			"caller", caller,
+			"method", fullMethod,
+		)
+		return status.Errorf(codes.Unauthenticated, "cert superseded for caller %q", caller)
 	}
 }
 
@@ -267,28 +328,27 @@ type bindingCache struct {
 }
 
 type bindingEntry struct {
-	exists      bool
-	fingerprint []byte
-	expires     time.Time
+	binding CertBinding
+	expires time.Time
 }
 
-func (c *bindingCache) lookup(ctx context.Context, caller string, fn CertBindingLookup) (bool, []byte, error) {
+func (c *bindingCache) lookup(ctx context.Context, caller string, fn CertBindingLookup) (CertBinding, error) {
 	now := time.Now()
 	c.mu.RLock()
 	e, ok := c.m[caller]
 	c.mu.RUnlock()
 	if ok && now.Before(e.expires) {
-		return e.exists, e.fingerprint, nil
+		return e.binding, nil
 	}
-	exists, fp, err := fn(ctx, caller)
+	b, err := fn(ctx, caller)
 	if err != nil {
-		return false, nil, err
+		return CertBinding{}, err
 	}
 	c.mu.Lock()
 	if c.m == nil {
 		c.m = make(map[string]bindingEntry)
 	}
-	c.m[caller] = bindingEntry{exists: exists, fingerprint: fp, expires: now.Add(c.ttl)}
+	c.m[caller] = bindingEntry{binding: b, expires: now.Add(c.ttl)}
 	c.mu.Unlock()
-	return exists, fp, nil
+	return b, nil
 }

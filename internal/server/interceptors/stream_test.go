@@ -114,7 +114,11 @@ func peerCtx(parent context.Context, rawCertBytes []byte) context.Context {
 type cbLookupResult struct {
 	exists      bool
 	fingerprint []byte
-	err         error
+	// previous and previousUntil are the renewal overlap: the certificate this
+	// one replaced, and when it stops being accepted.
+	previous      []byte
+	previousUntil time.Time
+	err           error
 }
 
 type recordingLookup struct {
@@ -122,13 +126,18 @@ type recordingLookup struct {
 	calls   atomic.Int64
 }
 
-func (r *recordingLookup) lookup(_ context.Context, caller string) (bool, []byte, error) {
+func (r *recordingLookup) lookup(_ context.Context, caller string) (CertBinding, error) {
 	r.calls.Add(1)
 	got, ok := r.results[caller]
 	if !ok {
-		return false, nil, nil
+		return CertBinding{}, nil
 	}
-	return got.exists, got.fingerprint, got.err
+	return CertBinding{
+		Exists:        got.exists,
+		Fingerprint:   got.fingerprint,
+		Previous:      got.previous,
+		PreviousUntil: got.previousUntil,
+	}, got.err
 }
 
 func runCertBindingUnary(t *testing.T, c *CertBindingChecker, ctx context.Context, method string) error {
@@ -458,5 +467,112 @@ func TestAuth_StreamMatchesUnary(t *testing.T) {
 				t.Errorf("stream code = %v, want %v", status.Code(streamErr), tc.wantCode)
 			}
 		})
+	}
+}
+
+// ── The renewal overlap ─────────────────────────────────────────────────────
+//
+// A renewal records the new fingerprint before the machine can possibly have
+// stored the certificate, so between those two moments the machine is still
+// presenting the old one. Refusing it there is a lockout: renewing needs a
+// valid certificate and it no longer has one.
+//
+// Each of these kills a different way of getting the window wrong — accepting
+// nothing, accepting forever, or accepting the wrong certificate.
+
+func TestCertBinding_SupersededCertPassesInsideItsWindow(t *testing.T) {
+	oldCert := []byte("the-certificate-the-machine-still-holds")
+	newCert := []byte("the-replacement-it-has-not-stored-yet")
+	oldFP := sha256.Sum256(oldCert)
+	newFP := sha256.Sum256(newCert)
+
+	rl := &recordingLookup{results: map[string]cbLookupResult{
+		"alice": {
+			exists:        true,
+			fingerprint:   newFP[:],
+			previous:      oldFP[:],
+			previousUntil: time.Now().Add(time.Hour),
+		},
+	}}
+	c := NewCertBindingChecker(CertBindingConfig{
+		Enforce: true, Lookup: rl.lookup, CallerFromContext: callerFrom,
+	})
+
+	if err := runCertBindingStream(t, c, peerCtx(callCtx("alice"), oldCert), "/x.Y/Z"); err != nil {
+		t.Errorf("the superseded certificate was refused inside its window: %v", err)
+	}
+	// And the replacement works, which is the whole point of having recorded it.
+	if err := runCertBindingStream(t, c, peerCtx(callCtx("alice"), newCert), "/x.Y/Z"); err != nil {
+		t.Errorf("the current certificate was refused: %v", err)
+	}
+}
+
+func TestCertBinding_SupersededCertIsRefusedOnceTheWindowPasses(t *testing.T) {
+	oldCert := []byte("the-certificate-the-machine-still-holds")
+	newCert := []byte("the-replacement")
+	oldFP := sha256.Sum256(oldCert)
+	newFP := sha256.Sum256(newCert)
+
+	rl := &recordingLookup{results: map[string]cbLookupResult{
+		"alice": {
+			exists:      true,
+			fingerprint: newFP[:],
+			previous:    oldFP[:],
+			// Already over. Without this assertion the window would be an
+			// accept-forever second slot, which is not a renewal overlap — it is
+			// a caller with two permanent identities.
+			previousUntil: time.Now().Add(-time.Minute),
+		},
+	}}
+	c := NewCertBindingChecker(CertBindingConfig{
+		Enforce: true, Lookup: rl.lookup, CallerFromContext: callerFrom,
+	})
+
+	err := runCertBindingStream(t, c, peerCtx(callCtx("alice"), oldCert), "/x.Y/Z")
+	if status.Code(err) != codes.Unauthenticated {
+		t.Errorf("an expired overlap still accepted the old certificate: %v err=%v",
+			status.Code(err), err)
+	}
+}
+
+func TestCertBinding_TheWindowAcceptsOnlyTheCertificateItNames(t *testing.T) {
+	newCert := []byte("the-replacement")
+	oldFP := sha256.Sum256([]byte("the-one-it-replaced"))
+	newFP := sha256.Sum256(newCert)
+
+	rl := &recordingLookup{results: map[string]cbLookupResult{
+		"alice": {
+			exists:        true,
+			fingerprint:   newFP[:],
+			previous:      oldFP[:],
+			previousUntil: time.Now().Add(time.Hour),
+		},
+	}}
+	c := NewCertBindingChecker(CertBindingConfig{
+		Enforce: true, Lookup: rl.lookup, CallerFromContext: callerFrom,
+	})
+
+	// A third certificate, matching neither slot. An open window must not become
+	// an open door.
+	err := runCertBindingStream(t, c, peerCtx(callCtx("alice"), []byte("somebody-else's-cert")), "/x.Y/Z")
+	if status.Code(err) != codes.Unauthenticated {
+		t.Errorf("an unrelated certificate passed during a renewal window: %v err=%v",
+			status.Code(err), err)
+	}
+}
+
+func TestCertBinding_NoWindowMeansTheOldBehaviour(t *testing.T) {
+	newCert := []byte("current")
+	newFP := sha256.Sum256(newCert)
+	rl := &recordingLookup{results: map[string]cbLookupResult{
+		"alice": {exists: true, fingerprint: newFP[:]}, // no previous
+	}}
+	c := NewCertBindingChecker(CertBindingConfig{
+		Enforce: true, Lookup: rl.lookup, CallerFromContext: callerFrom,
+	})
+
+	err := runCertBindingStream(t, c, peerCtx(callCtx("alice"), []byte("anything-else")), "/x.Y/Z")
+	if status.Code(err) != codes.Unauthenticated {
+		t.Errorf("a caller with no overlap accepted a second certificate: %v", err)
 	}
 }
