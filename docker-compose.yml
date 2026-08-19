@@ -22,7 +22,13 @@ services:
     # uses continuous aggregates or compression, it works locally, and it is
     # found at launch. The server reports timescaledb.license at startup, and
     # ATL_REQUIRE_APACHE_TIMESCALE=true makes a Community build refuse to boot.
-    image: timescale/timescaledb-ha:pg16-oss
+    #
+    # The major version tracks CI (.github/workflows/ci.yml), not the latest
+    # release. Developing on one major and testing on another is how a
+    # version-dependent behaviour — a plan node, a lock wait, a catalogue
+    # column — is found by CI rather than by the person who wrote it. This was
+    # pg16 while CI ran pg17, which is exactly that gap.
+    image: timescale/timescaledb-ha:pg17-oss
     environment:
       POSTGRES_USER: atlantis
       POSTGRES_PASSWORD: atlantis
@@ -31,6 +37,11 @@ services:
       - "5432:5432"
     volumes:
       - atl-pg:/home/postgres/pgdata/data
+      # Extensions, once, when the data directory is created. Read the file for
+      # why atlantis cannot install `vector` for itself: its pool registers the
+      # pgvector types in AfterConnect, so it cannot open a connection to the
+      # database it would run CREATE EXTENSION on.
+      - ./deploy/pg-init.sql:/docker-entrypoint-initdb.d/00-extensions.sql:ro
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "atlantis"]
       interval: 5s

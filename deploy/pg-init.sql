@@ -1,0 +1,34 @@
+-- Extensions the local development database needs before atlantis can connect.
+--
+-- Mounted by docker-compose.yml into the postgres service's
+-- /docker-entrypoint-initdb.d, so it runs once, when the data directory is
+-- first created. A container started against an existing volume never runs it
+-- again, which is correct: CREATE EXTENSION IF NOT EXISTS is idempotent and
+-- there is nothing to redo.
+--
+-- ── Why this exists when atlantis enables extensions itself ──────────────────
+--
+-- It mostly does. internal/server/admin/extensions.go walks the new IR at apply
+-- time, cross-references pg_available_extensions, and runs
+-- CREATE EXTENSION IF NOT EXISTS for whatever the schema needs — citext for a
+-- citext column, timescaledb for a hypertable, vector for vector(N). Those two
+-- lines are here for parity with internal/testsupport/pgcatalog, which installs
+-- the same three into every test database, and so a `tide plan` reports "ok"
+-- rather than "will be auto-enabled" on a database an operator just made.
+--
+-- `vector` is the one that has to be here.
+--
+-- internal/storage/pg/pool.go registers the pgvector types in AfterConnect, on
+-- every connection, and returns an error when it cannot. An AfterConnect error
+-- aborts the connection, so a pool cannot open at all against a database with
+-- no vector extension — which is well before any apply, and therefore before
+-- the auto-enable path above can run. The failure is
+-- `register pgvector: vector type not found`, and pgcatalog carries the same
+-- note because it was found there first.
+--
+-- So the auto-enable path cannot bootstrap the extension it needs to connect,
+-- and something outside atlantis has to put it there once per database. In a
+-- deployment that is the operator; here it is this file.
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS citext;
+CREATE EXTENSION IF NOT EXISTS timescaledb;
