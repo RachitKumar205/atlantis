@@ -448,11 +448,41 @@ export interface RevokeCallerResponse {
   files_removed: number
 }
 
-export interface IssueCertResponse {
-  cert_pem: string
-  key_pem: string
-  ca_pem: string
+/** A single-use enrolment token, to be carried to the machine that will hold
+ * the certificate.
+ *
+ * There is no key here, and no certificate. The console used to generate the
+ * private key, hand it to this page, and offer it for download — so it crossed
+ * the network, sat in this tab's memory and landed in a Downloads folder, for
+ * no reason: the signer has only ever wanted a CSR. The machine generates its
+ * own key now and this token is the only thing that travels.
+ */
+export interface EnrollTokenResponse {
+  token: string
+  caller: string
+  org: string
   expires_at: string
+}
+
+/** What this console has enrolled, per caller.
+ *
+ * The console's own record, not atlantis's. atlantis binds a caller to one
+ * certificate by fingerprint and does not publish that fingerprint, so an
+ * absent entry means "this console did not enrol it" and never "this caller has
+ * no certificate".
+ */
+export interface CallerCertInfo {
+  caller: string
+  fingerprint: string
+  issued_at: string
+  expires_at: string
+}
+
+export interface CallerCertsResponse {
+  certs: CallerCertInfo[]
+  /** False when no signer is configured, which is when the enrol button should
+   * say so rather than fail on being pressed. */
+  enrolment_enabled: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -812,10 +842,15 @@ export const api = {
         method: 'DELETE',
       }),
 
-    issueCert: (caller: string): Promise<IssueCertResponse> =>
-      apiFetch<IssueCertResponse>(`/api/callers/${encodeURIComponent(caller)}/cert/issue`, {
+    /** Mint a single-use enrolment token. Admin, and sudo — this produces a
+     * credential that becomes a caller's identity. */
+    enroll: (caller: string): Promise<EnrollTokenResponse> =>
+      apiFetch<EnrollTokenResponse>(`/api/callers/${encodeURIComponent(caller)}/enroll`, {
         method: 'POST',
       }),
+
+    certs: (): Promise<CallerCertsResponse> =>
+      apiFetch<CallerCertsResponse>('/api/callers/certs'),
 
     revokeAll: (): Promise<{ ok: boolean; revoked: number; failures: string[] }> =>
       apiFetch('/api/callers/revoke-all', { method: 'POST' }),
@@ -1127,6 +1162,12 @@ export const queries = {
   callers: () => ({
     queryKey: ['callers'] as const,
     queryFn: () => api.callers.list(),
+    staleTime: 30_000,
+  }),
+
+  callerCerts: () => ({
+    queryKey: ['caller-certs'] as const,
+    queryFn: () => api.callers.certs(),
     staleTime: 30_000,
   }),
 

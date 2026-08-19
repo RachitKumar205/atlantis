@@ -1,17 +1,8 @@
 package console
 
 import (
-	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -69,6 +60,17 @@ type Server struct {
 	// sandboxes owns the in-process sandbox runtime + per-user meta.
 	// See internal/console/sandbox.go for the layer's design.
 	sandboxes *sandboxLayer
+
+	// signer is the console's mTLS client to the certificate signer, or nil
+	// when enrolment is not configured.
+	//
+	// Built once at New() so a bad certificate pair is a startup failure rather
+	// than something the first person to enrol a machine discovers.
+	signer *http.Client
+
+	// enrollSrv is the second listener, or nil. It carries the enrolment
+	// routes and nothing else — see enroll.go for why it cannot share the mux.
+	enrollSrv *http.Server
 
 	// Cancelled by Close() to stop background workers (audit retention,
 	// sandbox TTL janitor).
@@ -156,6 +158,25 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 		sandboxes: newSandboxLayer(cfg.SandboxPerUserLimit, cfg.SandboxTTL),
 		bgCtx:     bgCtx, bgCancel: bgCancel,
 	}
+	// The signer client, and the listener that will use it.
+	//
+	// Both at startup, both fatal. Config.validateEnrollment has already
+	// refused a half-configured console, so reaching here with a broken
+	// certificate path means a file that is missing or unreadable — which is
+	// exactly the failure that must not wait until somebody needs a certificate.
+	if cfg.EnrollmentEnabled() {
+		signer, serr := newSignerClient(cfg)
+		if serr != nil {
+			db.close()
+			return nil, serr
+		}
+		s.signer = signer
+		if serr := s.buildEnrollListener(); serr != nil {
+			db.close()
+			return nil, serr
+		}
+	}
+
 	// Clean up embedded-pg tempdirs left over from a prior crashed
 	// process before any new sandboxes are booted; idempotent and
 	// best-effort.
@@ -248,6 +269,18 @@ func (s *Server) runAuditRetention() {
 	// own expiry it is refused on that ground before the replay check is
 	// reached, so the row has stopped carrying information — but one is
 	// written per sign-in, so without this the table only grows.
+	// And unredeemed enrolment tokens, on the same terms.
+	//
+	// Housekeeping only. An expired token stops working because the statement
+	// that spends it says so — this sweep is not what refuses it, and reading
+	// this as the enforcement is how a fifteen-minute token ends up redeemable
+	// for a day. See spendEnrollToken.
+	if n, err := s.db.deleteExpiredEnrollTokens(ctx); err != nil {
+		s.log.Warn("enrolment token gc", "err", err)
+	} else if n > 0 {
+		s.log.Info("enrolment token gc: pruned expired", "count", n)
+	}
+
 	if n, err := s.db.deleteSpentAssertions(ctx); err != nil {
 		s.log.Warn("spent assertion gc", "err", err)
 	} else if n > 0 {
@@ -304,7 +337,22 @@ func (s *Server) buildMux() {
 	mux.HandleFunc("GET /api/callers", s.auth(s.handleGetCallers))
 	mux.HandleFunc("POST /api/callers", s.auth(s.requireRole("admin", s.csrf(s.handleRegisterCaller))))
 	mux.HandleFunc("DELETE /api/callers/{caller}", s.auth(s.requireRole("admin", s.csrf(s.handleRevokeCaller))))
-	mux.HandleFunc("POST /api/callers/{caller}/cert/issue", s.auth(s.requireRole("admin", s.csrf(s.handleIssueCert))))
+	// Enrolment replaces cert issuance.
+	//
+	// POST /api/callers/{caller}/cert/issue used to generate a private key here
+	// and return it for download. This mints a single-use token instead; the
+	// machine that will hold the key generates it and sends only a CSR. See
+	// enroll.go.
+	//
+	// Sudo as well as admin, which the issuance route did not require. It
+	// produces a credential that becomes a caller's identity — the same class
+	// as setting the change policy or revoking every caller.
+	mux.HandleFunc("POST /api/callers/{caller}/enroll",
+		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleMintEnrollToken)))))
+	// Readable by any signed-in user, like the change policy: knowing which
+	// callers have been enrolled is how somebody works out why a deploy is
+	// failing, and hiding it from non-admins makes that an escalation.
+	mux.HandleFunc("GET /api/callers/certs", s.auth(s.handleGetCallerCerts))
 	// Caller aliases. Mounted under /api/admin/callers/... originally to avoid
 	// a ServeMux ambiguity with PUT /api/callers/repos/{caller} — both would
 	// have matched /api/callers/repos/aliases, which Go 1.22+ refuses to
@@ -1583,146 +1631,6 @@ func (s *Server) handleEvictWorker(w http.ResponseWriter, r *http.Request) {
 	u := r.Context().Value(ctxUser).(*User)
 	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "worker_evicted", map[string]any{"session_id": id})
 	s.proxyProto(w, "admin", resp, nil)
-}
-
-// ── Cert issuance ────────────────────────────────────────────────────
-
-// handleIssueCert generates a fresh ECDSA keypair + CSR on the server side,
-// posts the CSR to the signer service, and returns the full cert bundle
-// (cert_pem, key_pem, ca_pem, expires_at) to the operator for download.
-// The CA private key never touches the console.
-func (s *Server) handleIssueCert(w http.ResponseWriter, r *http.Request) {
-	caller := r.PathValue("caller")
-	if caller == "" {
-		jsonError(w, "caller is required", http.StatusBadRequest)
-		return
-	}
-	if s.cfg.SignerAddr == "" {
-		jsonError(w, "cert signer not configured: set ATL_SIGNER_ADDR in environment", http.StatusServiceUnavailable)
-		return
-	}
-
-	// Generate a fresh P-256 key. The private key never leaves the console
-	// BFF — it is generated here, used to create the CSR, then returned to
-	// the operator browser for download alongside the signed cert.
-	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		s.log.Error("generate key", "caller", caller, "err", err)
-		jsonError(w, "key generation failed", http.StatusInternalServerError)
-		return
-	}
-
-	csrTemplate := &x509.CertificateRequest{
-		Subject: pkix.Name{CommonName: caller},
-	}
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTemplate, privKey)
-	if err != nil {
-		s.log.Error("create CSR", "caller", caller, "err", err)
-		jsonError(w, "CSR creation failed", http.StatusInternalServerError)
-		return
-	}
-	csrPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}))
-
-	// POST to signer.
-	type signerReq struct {
-		Caller string `json:"caller"`
-		CSRPEM string `json:"csr_pem"`
-	}
-	type signerResp struct {
-		CertPEM   string `json:"cert_pem"`
-		CAPEM     string `json:"ca_pem"`
-		ExpiresAt string `json:"expires_at"`
-		Error     string `json:"error"`
-	}
-
-	body, _ := json.Marshal(signerReq{Caller: caller, CSRPEM: csrPEM})
-	resp, err := http.Post(s.cfg.SignerAddr+"/issue", "application/json", bytes.NewReader(body)) //nolint:noctx
-	if err != nil {
-		s.log.Error("call signer", "caller", caller, "err", err)
-		jsonError(w, "signer unreachable: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	var signerRespBody signerResp
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&signerRespBody); err != nil {
-		s.log.Error("decode signer response", "caller", caller, "err", err)
-		jsonError(w, "invalid signer response", http.StatusBadGateway)
-		return
-	}
-	if resp.StatusCode != http.StatusOK {
-		msg := signerRespBody.Error
-		if msg == "" {
-			msg = fmt.Sprintf("signer returned %d", resp.StatusCode)
-		}
-		jsonError(w, msg, http.StatusBadGateway)
-		return
-	}
-
-	// Encode the private key as PKCS8 PEM for the download bundle.
-	keyDER, err := x509.MarshalECPrivateKey(privKey)
-	if err != nil {
-		s.log.Error("marshal key", "caller", caller, "err", err)
-		jsonError(w, "key encoding failed", http.StatusInternalServerError)
-		return
-	}
-	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
-
-	u := r.Context().Value(ctxUser).(*User)
-	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "issue_cert", map[string]any{
-		"caller":     caller,
-		"expires_at": signerRespBody.ExpiresAt,
-	})
-
-	// Compute the leaf's SHA-256 fingerprint. The server's cert-binding
-	// interceptor reads this column on every authenticated RPC and
-	// rejects any peer cert whose hash doesn't match — so persisting the
-	// new fingerprint atomically supersedes the previous cert at the
-	// auth layer (rotation/revoke without a CRL).
-	//
-	// PEM decode is parser-strict — anything but a CERTIFICATE block is
-	// rejected so a malformed signer response can't land a bogus
-	// fingerprint that locks the caller out.
-	var fingerprintHex string
-	if block, _ := pem.Decode([]byte(signerRespBody.CertPEM)); block != nil && block.Type == "CERTIFICATE" {
-		sum := sha256.Sum256(block.Bytes)
-		fingerprintHex = hex.EncodeToString(sum[:])
-	} else {
-		s.log.Error("decode signed cert for fingerprint", "caller", caller)
-		jsonError(w, "signer returned malformed cert", http.StatusBadGateway)
-		return
-	}
-
-	// Persist NotAfter + fingerprint. The fingerprint write is
-	// load-bearing — if it fails, the old cert keeps authenticating
-	// until natural expiry, so surface the error to the operator rather
-	// than swallowing it like the pre-binding implementation did.
-	atl := s.orgATL(w, r)
-	if atl == nil {
-		return
-	}
-	if _, err := atl.RecordCallerCertExpiry(r.Context(), &adminpb.RecordCallerCertExpiryRequest{
-		Caller:      caller,
-		ExpiresAt:   signerRespBody.ExpiresAt,
-		Fingerprint: fingerprintHex,
-	}); err != nil {
-		s.log.Error("RecordCallerCertExpiry", "caller", caller, "err", err)
-		jsonError(w, "cert minted but binding write failed; the previous cert still authenticates — retry to rotate", http.StatusBadGateway)
-		return
-	}
-
-	s.log.Info("cert issued",
-		"caller", caller,
-		"operator", u.Email,
-		"expires_at", signerRespBody.ExpiresAt,
-	)
-
-	jsonOK(w, map[string]any{
-		"cert_pem":   signerRespBody.CertPEM,
-		"key_pem":    keyPEM,
-		"ca_pem":     signerRespBody.CAPEM,
-		"expires_at": signerRespBody.ExpiresAt,
-	})
 }
 
 // ── audit log ─────────────────────────────────────────────────────────────────

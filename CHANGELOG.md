@@ -13,6 +13,73 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Added
 
+#### A machine keeps its own private key
+
+The console no longer generates caller private keys. `POST /api/callers/{caller}/cert/issue`
+is gone; in its place an admin mints a **single-use enrolment token**, and the
+machine that will hold the certificate generates its own key and sends only a
+certificate signing request.
+
+The key used to be created inside the console, sent over the network, held in a
+browser tab and downloaded to a laptop. It never needed to be: the signer has
+only ever accepted a CSR, and the console was already building one. The keypair
+was simply born in the wrong process.
+
+- **`console.enroll_tokens`** (migration `console/0007`) is keyed by the
+  token's SHA-256, not the token. A row holding it verbatim is a bearer
+  credential at rest — a backup or a `pg_dump` would hand over every unredeemed
+  enrolment.
+- **Unused, unexpired and in the right organisation are all predicates on the
+  one statement that spends the row.** Expiry is not enforced by the sweeper:
+  housekeeping on a daily tick would leave an hour-old fifteen-minute token
+  perfectly redeemable, and nothing about that is visible.
+- **The redemption route names its organisation and the row-level-security
+  policy compares it**, because that route has no session to read one from.
+- **`console.caller_certs`** records what was issued, keyed by the certificate's
+  fingerprint. It is what makes renewal answerable in the next step: a leaf
+  carries a common name and nothing else, and caller names collide across
+  organisations as a matter of course.
+
+**Breaking: the Callers page no longer downloads a certificate bundle.** It
+shows an enrolment command to run on the target machine, and warns —
+unconditionally — that completing an enrolment supersedes the certificate that
+caller is using now.
+
+#### The certificate signer requires a client certificate
+
+`cmd/signer` had no authentication of any kind: plaintext HTTP, gated only by a
+reserved-name denylist and a registration check that was **skipped entirely
+when `PG_URL` was unset**. Anyone who could reach the port could mint a valid
+certificate for any registered caller, which is that caller's whole identity.
+
+It now demands mTLS (`SIGNER_CLIENT_CA`) and an allowlisted common name
+(`SIGNER_ALLOWED_CLIENT_CNS`), and refuses to start without either. `PG_URL` is
+required rather than optional, because a setting that is absent must not be a
+way to turn a check off.
+
+**`SIGNER_CLIENT_CA` must not be the authority the signer issues from.** Every
+caller leaf carries `ExtKeyUsage: ClientAuth`, so a signer trusting its own
+issuing CA would accept every certificate it had ever produced as a credential
+— and one caller could mint another's identity. The allowlist is the second
+answer to the same question, because "a separate authority" is a property of a
+deployment and an allowlist is a property of the code.
+
+`/healthz` moved to its own plaintext port (`SIGNER_HEALTH_LISTEN`, default
+`:7071`). The container's health check holds no certificate.
+
+#### Worth knowing: certificate binding has never been armed
+
+`caller_identities.cert_fingerprint` is what pins a caller to one certificate,
+and the interceptor accepts **any** CA-signed certificate while it is NULL — a
+deliberate bootstrap window. Its only writer was the console's issuance handler,
+which required `ATL_SIGNER_ADDR`, which no deployment has ever set. So the
+window has been open everywhere, for every caller, since it was written.
+
+Enrolment closes it per caller, on first enrolment, and that is a one-way door:
+any other machine holding a certificate for that caller — including one from
+`make dev-caller-cert` — stops authenticating at that moment. The Callers page
+says so before you press the button.
+
 #### Move between the organisations you belong to
 
 A console's sidebar now shows the organisation it is serving, and — for an

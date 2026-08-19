@@ -38,6 +38,20 @@ type rowQuerier interface {
 //     organisation could read would be useless, and it holds nothing that is
 //     not already in every assertion.
 //
+//   - caller_certs: the same bootstrap shape as sessions, one layer out. It maps
+//     a certificate's fingerprint to the organisation and caller it was issued
+//     for, and renewal's whole question is "which organisation is this
+//     certificate from" — asked before anything knows the answer, so it cannot
+//     be filtered by it. The key is a SHA-256 over a certificate nobody else
+//     holds, so a lookup is not a search: you can only find the row for a
+//     certificate you already have. Handlers that LIST these rows scope them by
+//     the session's organisation in Go.
+//
+// console.enroll_tokens is deliberately absent from this list. It is policed,
+// and the policy is load-bearing rather than decorative: the enrolment route has
+// no session, so the request names the organisation, the handler binds that, and
+// the RESTRICTIVE policy is what compares it against the row.
+//
 // Not listed, because it is not in this schema: console_schema_migrations.
 // internal/migrate pins search_path=public for exactly this reason, so
 // golang-migrate's bookkeeping lands in public and the query below never sees
@@ -47,6 +61,7 @@ var unpolicedTables = map[string]string{
 	"sessions":         "bootstrap: the session lookup is what discovers the organisation",
 	"spent_assertions": "global by design: a per-organisation replay check is not a replay check",
 	"orgs":             "the registry of organisations",
+	"caller_certs":     "bootstrap: the fingerprint lookup is what discovers the organisation",
 }
 
 // verifyConsolePolicies asks the live catalogue whether the organisation

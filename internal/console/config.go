@@ -3,7 +3,9 @@ package console
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -38,7 +40,36 @@ type Config struct {
 	// ATL_ENDPOINT for their own connections. Only the console stopped.
 	SessionSecret string // CONSOLE_SESSION_SECRET — required, ≥32 chars
 	CookieSecure  bool   // CONSOLE_COOKIE_SECURE — default false
-	SignerAddr    string // ATL_SIGNER_ADDR — optional; cert issuance requires it
+
+	// ── Enrolment ───────────────────────────────────────────────────────────
+	//
+	// How a machine gets a client certificate. All of it is optional, and it is
+	// all-or-nothing: a console with some of it set refuses to start, because
+	// the half-configured states are the ones that fail late and quietly.
+	// Leaving every field empty turns enrolment off, and the route that mints a
+	// token says so rather than 404ing.
+	//
+	// SignerAddr used to stand alone here as "optional; cert issuance requires
+	// it", and nothing anywhere set it — so the console shipped with an
+	// issuance button that answered 503 in every deployment it ever ran in.
+	SignerAddr string // ATL_SIGNER_ADDR — the signer's https:// base URL
+	// The console's own client credentials to the signer. CN must be in the
+	// signer's SIGNER_ALLOWED_CLIENT_CNS.
+	SignerCert string // ATL_SIGNER_CERT
+	SignerKey  string // ATL_SIGNER_KEY
+	SignerCA   string // ATL_SIGNER_CA — verifies the signer, not the callers
+
+	// The enrolment listener. Separate from Listen, and separate for a reason
+	// that is not tidiness: Listen serves browsers behind a TLS terminator the
+	// console does not control, so it cannot inspect a client certificate.
+	// This one terminates its own TLS and asks for one.
+	//
+	// It carries two routes and never the console's API or SPA. Every machine
+	// that enrols can reach this port.
+	EnrollListen   string // CONSOLE_ENROLL_LISTEN
+	EnrollTLSCert  string // CONSOLE_ENROLL_TLS_CERT
+	EnrollTLSKey   string // CONSOLE_ENROLL_TLS_KEY
+	EnrollClientCA string // CONSOLE_ENROLL_CLIENT_CA — for renewal in K7b
 
 	// Who this console accepts identity from. All three are required and
 	// none has a default.
@@ -79,6 +110,14 @@ func ConfigFromEnv() (Config, error) {
 		SessionSecret: os.Getenv("CONSOLE_SESSION_SECRET"),
 		CookieSecure:  os.Getenv("CONSOLE_COOKIE_SECURE") == "true",
 		SignerAddr:    os.Getenv("ATL_SIGNER_ADDR"),
+		SignerCert:    os.Getenv("ATL_SIGNER_CERT"),
+		SignerKey:     os.Getenv("ATL_SIGNER_KEY"),
+		SignerCA:      os.Getenv("ATL_SIGNER_CA"),
+
+		EnrollListen:   os.Getenv("CONSOLE_ENROLL_LISTEN"),
+		EnrollTLSCert:  os.Getenv("CONSOLE_ENROLL_TLS_CERT"),
+		EnrollTLSKey:   os.Getenv("CONSOLE_ENROLL_TLS_KEY"),
+		EnrollClientCA: os.Getenv("CONSOLE_ENROLL_CLIENT_CA"),
 
 		CloudIssuer:   os.Getenv("CLOUD_ISSUER"),
 		CloudAudience: os.Getenv("CLOUD_AUDIENCE"),
@@ -103,6 +142,9 @@ func ConfigFromEnv() (Config, error) {
 			return Config{}, fmt.Errorf("%s is required: the console has no local accounts and "+
 				"verifies every sign-in against Atlantis Cloud", v.name)
 		}
+	}
+	if err := c.validateEnrollment(); err != nil {
+		return Config{}, err
 	}
 	if c.SessionSecret == "" {
 		return Config{}, fmt.Errorf("CONSOLE_SESSION_SECRET is required")
@@ -172,4 +214,60 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// EnrollmentEnabled reports whether this console can issue caller certificates.
+//
+// All of it or none of it — validateEnrollment refuses the states in between —
+// so one field answers for the whole feature.
+func (c Config) EnrollmentEnabled() bool { return c.SignerAddr != "" }
+
+// validateEnrollment refuses a half-configured enrolment.
+//
+// # Why this is a startup error and not a runtime one
+//
+// The setting this replaces was documented as "optional" and read at request
+// time, so a console with no signer configured looked completely healthy and
+// answered 503 the first time somebody pressed the button — which, in every
+// deployment that ever ran, was the only behaviour it had. An operator cannot
+// tell "we chose not to enable this" from "somebody mistyped a path" at the
+// moment they need a certificate.
+//
+// Partial configuration is worse than either. A signer address with no client
+// certificate produces a handshake failure the signer logs and the console
+// reports as "signer unreachable"; an enrolment listener with no key does not
+// listen at all. Both are silent until used.
+func (c Config) validateEnrollment() error {
+	set := map[string]string{
+		"ATL_SIGNER_ADDR":         c.SignerAddr,
+		"ATL_SIGNER_CERT":         c.SignerCert,
+		"ATL_SIGNER_KEY":          c.SignerKey,
+		"ATL_SIGNER_CA":           c.SignerCA,
+		"CONSOLE_ENROLL_LISTEN":   c.EnrollListen,
+		"CONSOLE_ENROLL_TLS_CERT": c.EnrollTLSCert,
+		"CONSOLE_ENROLL_TLS_KEY":  c.EnrollTLSKey,
+	}
+	var missing []string
+	filled := 0
+	for name, v := range set {
+		if v == "" {
+			missing = append(missing, name)
+			continue
+		}
+		filled++
+	}
+	if filled == 0 || len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	return fmt.Errorf("enrolment is half-configured: %s %s unset. "+
+		"Set all of them to issue caller certificates, or none of them to leave it off",
+		strings.Join(missing, ", "), plural(len(missing), "is", "are"))
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }

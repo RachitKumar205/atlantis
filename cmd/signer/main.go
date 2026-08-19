@@ -7,6 +7,23 @@
 // match the caller name in the request body, and it must not be on the
 // reserved-CN denylist — those names belong to atlantis infrastructure.
 //
+// # Who may ask
+//
+// /issue is mTLS, verified against SIGNER_CLIENT_CA, and the peer's CN must be
+// in SIGNER_ALLOWED_CLIENT_CNS. Both are required; the signer refuses to start
+// without them.
+//
+// SIGNER_CLIENT_CA must NOT be the CA this signer issues from. Every leaf it
+// signs carries ExtKeyUsage: ClientAuth, so a signer trusting its own issuing
+// authority would accept every certificate it has ever produced as a
+// credential — and one caller could then mint another's identity. The
+// allowlist is the second answer to the same question, because "a separate
+// authority" is a property of how somebody deployed this, and an allowlist is
+// a property of the code.
+//
+// /healthz answers on SIGNER_HEALTH_LISTEN in plaintext, because the container
+// health check holds no certificate.
+//
 // # This is platform code living in the product repo
 //
 // It arrived with the self-host bundle, which is gone — the compose file, the
@@ -21,14 +38,17 @@
 // serve. It is kept here until that move so the capability is not lost in the
 // gap — deleting it would leave nothing able to issue a caller a certificate.
 //
-// Nothing in the product dials it today: the console's handleIssueCert reaches
-// it through ATL_SIGNER_ADDR, which no deployment now sets.
+// The console dials it from the enrolment routes, through ATL_SIGNER_ADDR. That
+// setting was documented and set by nothing for the whole time cert issuance
+// was a button in the console that answered 503; `make dev-signer` is what runs
+// this locally.
 package main
 
 import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -72,56 +92,101 @@ var (
 	pgPool *pgxpool.Pool
 )
 
+// allowedClientCNs is who may ask for a certificate.
+//
+// Empty is not "everyone" — the signer refuses to start with it empty. See
+// requireClientAuth for why a valid certificate is not, by itself, an answer to
+// "may this peer mint identities".
+var allowedClientCNs map[string]bool
+
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if err := run(log); err != nil {
+		log.Error("signer refused to start", "err", err)
+		os.Exit(1)
+	}
+}
 
+// run is main with the exits taken out, so a test can boot the signer and read
+// back why it refused.
+//
+// cmd/server was split the same way for the same reason: a startup guard that
+// only ever calls os.Exit can be asserted on by a subprocess test at best, and
+// not at all from inside the package.
+func run(log *slog.Logger) error {
 	caDir := envOr("CA_DIR", "/ca-private")
 	listen := envOr("SIGNER_LISTEN", ":7070")
-	pgURL := os.Getenv("PG_URL")
+	healthListen := envOr("SIGNER_HEALTH_LISTEN", ":7071")
 
 	var err error
 	caCert, caKey, caPEM, err = loadCA(caDir)
 	if err != nil {
-		log.Error("load CA", "err", err)
-		os.Exit(1)
+		return fmt.Errorf("load CA: %w", err)
 	}
 
-	// Optional: connect to atlantis's Postgres so the issuance path can
-	// verify the requested CN is a registered caller. Read-only access
-	// to atlantis.caller_identities is all we need. Failing to connect
-	// is fatal in production posture — without DB the signer would fall
-	// back to denylist-only and an operator could mint arbitrary CNs —
-	// so we exit rather than silently degrade.
-	if pgURL != "" {
-		cfg, perr := pgxpool.ParseConfig(pgURL)
-		if perr != nil {
-			log.Error("parse PG_URL", "err", perr)
-			os.Exit(1)
-		}
-		cfg.MaxConns = 4
-		cfg.MinConns = 1
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		pgPool, perr = pgxpool.NewWithConfig(ctx, cfg)
-		cancel()
-		if perr != nil {
-			log.Error("connect to PG", "err", perr)
-			os.Exit(1)
-		}
-		defer pgPool.Close()
+	clientCAs, err := loadClientCAs(os.Getenv("SIGNER_CLIENT_CA"))
+	if err != nil {
+		return err
 	}
+	allowedClientCNs, err = parseAllowedCNs(os.Getenv("SIGNER_ALLOWED_CLIENT_CNS"))
+	if err != nil {
+		return err
+	}
+
+	// Connect to atlantis's Postgres so issuance is gated on a registered
+	// caller_identities row.
+	//
+	// Required, not optional. It used to be skipped entirely when PG_URL was
+	// unset, and the comment here claimed that was fatal "in production
+	// posture" — which was true only of the case that does not matter. A DSN
+	// that is set and broken exited; a DSN that was absent silently reduced the
+	// signer to a reserved-CN denylist, which is not a check on anything an
+	// operator registered. An unset setting must not be a way to turn a gate
+	// off, the same rule CLOUD_ISSUER is held to in the console.
+	pgURL := os.Getenv("PG_URL")
+	if pgURL == "" {
+		return errors.New("PG_URL is required: without it the signer cannot tell " +
+			"a registered caller from a name somebody chose, and would issue for either")
+	}
+	cfg, err := pgxpool.ParseConfig(pgURL)
+	if err != nil {
+		return fmt.Errorf("parse PG_URL: %w", err)
+	}
+	cfg.MaxConns = 4
+	cfg.MinConns = 1
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	pgPool, err = pgxpool.NewWithConfig(ctx, cfg)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("connect to PG: %w", err)
+	}
+	defer pgPool.Close()
 
 	log.Info("atlantis-signer ready",
 		"ca_cn", caCert.Subject.CommonName,
 		"ca_expires", caCert.NotAfter.Format(time.RFC3339),
 		"listen", listen,
-		"identity_check", pgPool != nil,
+		"health_listen", healthListen,
+		"allowed_client_cns", len(allowedClientCNs),
 	)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /issue", func(w http.ResponseWriter, r *http.Request) {
+		if !requireClientAuth(w, r, log) {
+			return
+		}
 		handleIssue(w, r, log)
 	})
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+
+	// Health answers on its own plaintext port.
+	//
+	// Not fastidiousness: the container's HEALTHCHECK is a plain `wget http://`
+	// (Dockerfile.signer) and it holds no client certificate — the image mounts
+	// the CA directory and nothing else. Putting TLS on the one port the signer
+	// used to have would leave the container permanently unhealthy, and
+	// anything waiting on `condition: service_healthy` would never start.
+	healthMux := http.NewServeMux()
+	healthMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
@@ -132,6 +197,16 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
+		TLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			ClientAuth: tls.RequireAndVerifyClientCert,
+			ClientCAs:  clientCAs,
+		},
+	}
+	healthSrv := &http.Server{
+		Addr:              healthListen,
+		Handler:           healthMux,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	// Graceful shutdown on SIGTERM / SIGINT.
@@ -139,15 +214,104 @@ func main() {
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
 		<-ch
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
+		sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scancel()
+		_ = srv.Shutdown(sctx)
+		_ = healthSrv.Shutdown(sctx)
 	}()
 
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-		log.Error("signer exited", "err", err)
-		os.Exit(1)
+	go func() {
+		if herr := healthSrv.ListenAndServe(); !errors.Is(herr, http.ErrServerClosed) {
+			log.Error("health listener exited", "err", herr)
+		}
+	}()
+
+	// The certificate and key are the signer's own server identity, separate
+	// from the CA it issues from.
+	certFile := os.Getenv("SIGNER_TLS_CERT")
+	keyFile := os.Getenv("SIGNER_TLS_KEY")
+	if certFile == "" || keyFile == "" {
+		return errors.New("SIGNER_TLS_CERT and SIGNER_TLS_KEY are required: " +
+			"the signer holds a CA private key and does not serve plaintext")
 	}
+	if err := srv.ListenAndServeTLS(certFile, keyFile); !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("signer exited: %w", err)
+	}
+	return nil
+}
+
+// loadClientCAs reads the pool of authorities whose certificates may CALL the
+// signer.
+//
+// # This must not be the CA the signer issues from
+//
+// signCSR stamps every caller leaf with ExtKeyUsage: ClientAuth off the issuing
+// CA. Trust that same CA here and every certificate the signer has ever issued
+// becomes a valid credential to the signer — so caller `backend` dials in with
+// its own legitimate certificate, asks for `payments`, and gets it, because
+// `payments` is a registered caller and the CSR's CN matches the name in the
+// body. It then authenticates as `payments`, because cert binding admits any
+// CA-signed certificate for a caller whose fingerprint has never been recorded.
+//
+// A separate authority is the answer, and the CN allowlist below is the second
+// answer, because "separate" is a deployment property and allowlists are not.
+func loadClientCAs(path string) (*x509.CertPool, error) {
+	if path == "" {
+		return nil, errors.New("SIGNER_CLIENT_CA is required: it names who may ask " +
+			"for a certificate, and must not be the CA the signer issues from")
+	}
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read SIGNER_CLIENT_CA %s: %w", path, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("SIGNER_CLIENT_CA %s contains no certificate", path)
+	}
+	return pool, nil
+}
+
+// parseAllowedCNs reads the comma-separated allowlist.
+//
+// Refuses empty rather than defaulting to a name, so a deployment that means
+// `atlantis-console` has to say so. A default here would be a value nobody
+// chose, protecting the most sensitive endpoint in the product.
+func parseAllowedCNs(raw string) (map[string]bool, error) {
+	out := map[string]bool{}
+	for _, cn := range strings.Split(raw, ",") {
+		if cn = strings.TrimSpace(cn); cn != "" {
+			out[cn] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil, errors.New("SIGNER_ALLOWED_CLIENT_CNS is required and must name " +
+			"at least one common name (normally atlantis-console)")
+	}
+	return out, nil
+}
+
+// requireClientAuth checks the peer is allowed to ask, having already proved it
+// is who it says.
+//
+// The handshake proves the certificate chains to SIGNER_CLIENT_CA. It does not
+// say the holder should be minting identities — that is what this adds, and it
+// is why the allowlist exists alongside a separate authority rather than
+// instead of one.
+func requireClientAuth(w http.ResponseWriter, r *http.Request, log *slog.Logger) bool {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		// Unreachable while ClientAuth is RequireAndVerifyClientCert, and
+		// checked anyway: the day somebody relaxes that to debug something, this
+		// is what stops the relaxation from being silent.
+		jsonError(w, "client certificate required", http.StatusUnauthorized)
+		return false
+	}
+	cn := r.TLS.PeerCertificates[0].Subject.CommonName
+	if !allowedClientCNs[cn] {
+		log.Warn("signer refused a peer", "cn", cn, "remote", r.RemoteAddr)
+		jsonError(w, "this client may not request certificates", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 func handleIssue(w http.ResponseWriter, r *http.Request, log *slog.Logger) {
@@ -174,28 +338,27 @@ func handleIssue(w http.ResponseWriter, r *http.Request, log *slog.Logger) {
 		return
 	}
 
-	// Defense-in-depth registration check. The console BFF also verifies
-	// the caller is registered before reaching us, but a compromised BFF
-	// shouldn't be able to mint arbitrary CNs. When pgPool is nil (dev
-	// bundle without PG_URL) we skip this layer and rely on the BFF check
-	// and the reserved-CN denylist alone — operators should set PG_URL in
-	// prod.
-	if pgPool != nil {
-		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-		defer cancel()
-		var registered bool
-		err := pgPool.QueryRow(ctx,
-			`SELECT EXISTS (SELECT 1 FROM atlantis.caller_identities WHERE caller = $1)`,
-			caller).Scan(&registered)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			log.Error("identity lookup", "caller", caller, "err", err)
-			jsonError(w, "identity lookup failed", http.StatusInternalServerError)
-			return
-		}
-		if !registered {
-			jsonError(w, fmt.Sprintf("caller %q is not registered — operator must Add Caller in the console first", caller), http.StatusForbidden)
-			return
-		}
+	// Defence in depth. The console verifies the caller is registered before
+	// reaching us, and this is the layer that holds if the console is the thing
+	// that is wrong.
+	//
+	// No longer conditional: run() refuses to start without PG_URL, so pgPool is
+	// never nil here. It used to be skipped when the DSN was absent, which meant
+	// the deployment with the least configuration had the fewest checks.
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	var registered bool
+	err := pgPool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM atlantis.caller_identities WHERE caller = $1)`,
+		caller).Scan(&registered)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		log.Error("identity lookup", "caller", caller, "err", err)
+		jsonError(w, "identity lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if !registered {
+		jsonError(w, fmt.Sprintf("caller %q is not registered — an operator must add it in the console first", caller), http.StatusForbidden)
+		return
 	}
 
 	csr, err := parseCSR(req.CSRPEM)

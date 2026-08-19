@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Check, Copy, Download, Key, Link2, Plus, Trash2, X } from 'lucide-react'
-import { api, ApiError, queries, type CallerInfo, type IssueCertResponse } from '@/api/client'
+import { Check, Copy, Key, Link2, Plus, Trash2, X } from 'lucide-react'
+import { api, ApiError, queries, type CallerInfo, type EnrollTokenResponse } from '@/api/client'
 import { useIsAdmin } from '@/hooks/useAuth'
 import { PageShell } from '@/components/PageShell'
 import { HoverInfo } from '@/components/HoverInfo'
@@ -36,8 +36,9 @@ export function Callers() {
   const { data: instance } = useQuery(queries.instance())
   const [addOpen, setAddOpen] = useState(false)
   const [revoking, setRevoking] = useState<string | null>(null)
-  const [certBundle, setCertBundle] = useState<{ name: string; bundle: IssueCertResponse } | null>(null)
-  const [issuingCaller, setIssuingCaller] = useState<string | null>(null)
+  const [enrolment, setEnrolment] = useState<EnrollTokenResponse | null>(null)
+  const [enrollingCaller, setEnrollingCaller] = useState<string | null>(null)
+  const { data: certs } = useQuery(queries.callerCerts())
   const [aliasEditing, setAliasEditing] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
 
@@ -55,13 +56,16 @@ export function Callers() {
     setTimeout(() => setToast(null), 2400)
   }
 
-  const issueM = useMutation({
-    mutationFn: (name: string) => api.callers.issueCert(name),
-    onSuccess: (bundle, name) => {
-      setIssuingCaller(null)
-      setCertBundle({ name, bundle })
+  const enrolM = useMutation({
+    mutationFn: (name: string) => api.callers.enroll(name),
+    onSuccess: (tok) => {
+      setEnrollingCaller(null)
+      setEnrolment(tok)
     },
-    onError: () => setIssuingCaller(null),
+    onError: (err) => {
+      setEnrollingCaller(null)
+      showToast(err instanceof Error ? err.message : 'Could not mint an enrolment token')
+    },
   })
 
   const revokeM = useMutation({
@@ -125,8 +129,10 @@ export function Callers() {
                   key={c.caller}
                   caller={c}
                   canAdmin={isAdmin}
-                  onIssue={() => { setIssuingCaller(c.caller); issueM.mutate(c.caller) }}
-                  isIssuing={issuingCaller === c.caller}
+                  onEnrol={() => { setEnrollingCaller(c.caller); enrolM.mutate(c.caller) }}
+                  isEnrolling={enrollingCaller === c.caller}
+                  enrolmentEnabled={certs?.enrolment_enabled ?? false}
+                  enrolledAt={certs?.certs.find(x => x.caller === c.caller)?.issued_at}
                   onRevoke={() => setRevoking(c.caller)}
                   onManageAliases={() => setAliasEditing(c.caller)}
                 />
@@ -153,12 +159,11 @@ export function Callers() {
         />
       )}
 
-      {certBundle && (
-        <CertDialog
-          name={certBundle.name}
-          bundle={certBundle.bundle}
+      {enrolment && (
+        <EnrolDialog
+          token={enrolment}
           endpoint={instance?.endpoint}
-          onClose={() => setCertBundle(null)}
+          onClose={() => { setEnrolment(null); qc.invalidateQueries({ queryKey: ['caller-certs'] }) }}
           showToast={showToast}
         />
       )}
@@ -189,15 +194,22 @@ export function Callers() {
 function CallerCard({
   caller,
   canAdmin,
-  onIssue,
-  isIssuing,
+  onEnrol,
+  isEnrolling,
+  enrolmentEnabled,
+  enrolledAt,
   onRevoke,
   onManageAliases,
 }: {
   caller: CallerInfo
   canAdmin: boolean
-  onIssue: () => void
-  isIssuing: boolean
+  onEnrol: () => void
+  isEnrolling: boolean
+  enrolmentEnabled: boolean
+  /** When this console last enrolled this caller, if it ever did. Absent is the
+   * normal case: enrolment is new, and the issuance path it replaces answered
+   * 503 in every deployment it ever ran in. */
+  enrolledAt?: string
   onRevoke: () => void
   onManageAliases: () => void
 }) {
@@ -256,19 +268,30 @@ function CallerCard({
               side="bottom"
               inline
               content={
-                <>
-                  <p>Mint a fresh client cert and private key. The bundle downloads once.</p>
-                  <p className="hi-foot">Supersedes the previous cert — atlantis stops authenticating it.</p>
-                </>
+                enrolmentEnabled ? (
+                  <>
+                    <p>Mint a single-use enrolment token. The machine generates its own key and sends only a certificate request — no private key leaves it.</p>
+                    <p className="hi-foot">
+                      {enrolledAt
+                        ? `Last enrolled ${enrolledAt.slice(0, 10)}. Enrolling again supersedes that certificate — atlantis stops authenticating it.`
+                        : 'Enrolling supersedes whatever certificate this caller is using now — atlantis stops authenticating it.'}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p>Certificate enrolment is not configured on this console.</p>
+                    <p className="hi-foot">An operator sets a signer address and the enrolment listener.</p>
+                  </>
+                )
               }
             >
               <button
                 className="btn btn--sm btn--ghost btn--icon"
-                onClick={onIssue}
-                disabled={isIssuing}
-                aria-label="Re-issue cert"
+                onClick={onEnrol}
+                disabled={isEnrolling || !enrolmentEnabled}
+                aria-label="Enrol a machine"
               >
-                {isIssuing ? <span className="spin" /> : <Key size={13} />}
+                {isEnrolling ? <span className="spin" /> : <Key size={13} />}
               </button>
             </HoverInfo>
             <HoverInfo
@@ -440,96 +463,81 @@ function RevokeDialog({
   )
 }
 
-// ── Cert download modal (design's certDialog) ─────────────────────────────
-function CertDialog({
-  name,
-  bundle,
+// ── Enrolment dialog ────────────────────────────────────────────────────
+//
+// What this shows is a token and a command. What it does NOT show — and what
+// the dialog it replaces did show — is a private key.
+//
+// That dialog offered three downloads: certificate, key, CA bundle. The key had
+// been generated inside the console, sent across the network, and held in this
+// tab's memory until somebody clicked. It never needed to be here: the signer
+// has only ever accepted a certificate request, so the keypair can be born on
+// the machine that will use it and stay there.
+function EnrolDialog({
+  token,
   endpoint,
   onClose,
   showToast,
 }: {
-  name: string
-  bundle: IssueCertResponse
+  token: EnrollTokenResponse
   endpoint?: string
   onClose: () => void
   showToast: (msg: string) => void
 }) {
-  const dl = (ext: string, body: string, desc: string) => {
-    const blob = new Blob([body], { type: 'application/x-pem-file' })
-    const a = document.createElement('a')
-    a.href = URL.createObjectURL(blob)
-    a.download = `${name}.${ext}`
-    a.click()
-    URL.revokeObjectURL(a.href)
-    showToast(`Downloaded ${name}.${ext}`)
-    void desc
-  }
+  const exp = new Date(token.expires_at)
+  const expStr = isNaN(exp.getTime())
+    ? token.expires_at
+    : exp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
-  const yaml = `caller: ${name}
-endpoint: ${endpoint || '<ATL_ENDPOINT>'}
-tls:
-  cert: ./${name}.crt
-  key:  ./${name}.key
-  ca:   ./ca.crt`
-
-  // expires_at comes from the signer; surface the real date rather than a
-  // hardcoded TTL — the leaf lifetime is set in cmd/signer/main.go (currently
-  // 90d) and may shift over time. The private key only exists in this tab's
-  // memory until close; re-issuing rotates the cert and invalidates the prior
-  // one on the next dial.
-  const exp = new Date(bundle.expires_at)
-  const expStr = isNaN(exp.getTime()) ? bundle.expires_at : exp.toISOString().slice(0, 10)
+  const cmd = `tide login \\
+  --org ${token.org} \\
+  --caller ${token.caller} \\
+  --token ${token.token}`
 
   return (
     <div className="overlay is-open" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
-      <div className="modal" role="dialog" aria-modal style={{ width: 520 }}>
+      <div className="modal" role="dialog" aria-modal style={{ width: 560 }}>
         <div className="modal__head">
-          <div className="modal__title">Certificate issued — {name}</div>
+          <div className="modal__title">Enrol a machine — {token.caller}</div>
           <div className="modal__sub">
-            Expires {expStr}. Download the three files and store them in your secret
-            manager — re-issuing rotates the cert and invalidates this one.
+            Run this on the machine that will hold the certificate. It generates its own
+            key, which never leaves it. The token works once and expires at {expStr}.
           </div>
         </div>
         <div className="modal__body">
-          <div className="probe-test">
-            <div className="probe-test__row" style={{ cursor: 'pointer' }} onClick={() => dl('crt', bundle.cert_pem, 'client certificate')}>
-              <span className="probe-test__icon brass"><Download size={14} /></span>
-              <span className="probe-test__label">{name}.crt</span>
-              <span className="faint" style={{ fontSize: 11.5, marginLeft: 8 }}>client certificate</span>
-              <span className="probe-test__status muted">download</span>
-            </div>
-            <div className="probe-test__row" style={{ cursor: 'pointer' }} onClick={() => dl('key', bundle.key_pem, 'private key')}>
-              <span className="probe-test__icon brass"><Download size={14} /></span>
-              <span className="probe-test__label">{name}.key</span>
-              <span className="faint" style={{ fontSize: 11.5, marginLeft: 8 }}>private key</span>
-              <span className="probe-test__status muted">download</span>
-            </div>
-            <div className="probe-test__row" style={{ cursor: 'pointer' }} onClick={() => dl('ca.crt', bundle.ca_pem, 'CA bundle')}>
-              <span className="probe-test__icon brass"><Download size={14} /></span>
-              <span className="probe-test__label">{name}.ca.crt</span>
-              <span className="faint" style={{ fontSize: 11.5, marginLeft: 8 }}>CA bundle</span>
-              <span className="probe-test__status muted">download</span>
-            </div>
+          {/* Unconditional, and it has to be. Enrolling supersedes whatever
+              certificate this caller is using — and the console cannot see
+              atlantis's fingerprint, so it cannot know whether there is one to
+              supersede. Saying "this may replace something" only when we happen
+              to know would be silent in exactly the case that hurts. */}
+          <div className="banner banner--warn" style={{ marginBottom: 14 }}>
+            Completing this enrolment replaces the certificate <span className="mono">{token.caller}</span> is
+            using now. atlantis stops authenticating the old one as soon as the new one is recorded — any
+            machine still holding it starts failing.
           </div>
 
-          <div>
-            <div className="section-label" style={{ marginBottom: 8 }}>tide.yaml</div>
-            <pre style={{
-              margin: 0, padding: '13px 15px', background: 'var(--canvas-0)',
-              border: '1px solid var(--line-soft)', borderRadius: 'var(--radius)',
-              fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--ink-1)', lineHeight: 1.7,
-              position: 'relative',
-            }}>
-              {yaml}
-              <button
-                className="btn btn--sm btn--ghost btn--icon"
-                style={{ position: 'absolute', top: 9, right: 9 }}
-                onClick={() => { navigator.clipboard.writeText(yaml); showToast('Copied tide.yaml') }}
-              >
-                <Copy size={13} />
-              </button>
-            </pre>
-          </div>
+          <div className="section-label" style={{ marginBottom: 8 }}>On the target machine</div>
+          <pre style={{
+            margin: 0, padding: '13px 15px', background: 'var(--canvas-0)',
+            border: '1px solid var(--line-soft)', borderRadius: 'var(--radius)',
+            fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--ink-1)', lineHeight: 1.7,
+            position: 'relative', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+          }}>
+            {cmd}
+            <button
+              className="btn btn--sm btn--ghost btn--icon"
+              style={{ position: 'absolute', top: 9, right: 9 }}
+              onClick={() => { navigator.clipboard.writeText(cmd); showToast('Copied the enrolment command') }}
+              aria-label="Copy the enrolment command"
+            >
+              <Copy size={13} />
+            </button>
+          </pre>
+
+          <p className="faint" style={{ fontSize: 12, marginTop: 12, lineHeight: 1.6 }}>
+            The token is shown once and is not recoverable — the console stores only its hash.
+            {endpoint && <> This organisation's atlantis is <span className="mono">{endpoint}</span>.</>}
+          </p>
         </div>
         <div className="modal__foot">
           <button className="btn btn--brass" onClick={onClose}>Done</button>

@@ -237,7 +237,12 @@ Read by `cmd/console`, not the Atlantis server.
 | `CONSOLE_COOKIE_SECURE` | `false` | Sets the `Secure` flag on session cookies. Default false so `http://localhost` works for first boot; flip to `true` once a TLS terminator (reverse proxy, LB) sits in front. |
 | `CONSOLE_AUDIT_RETENTION_DAYS` | `365` | Audit-row retention. Covers the typical SOC 2 audit window and PCI DSS §10.5.1's 12-month online minimum. HIPAA = 2190 (6 years); SOX = 2555 (7 years). `0` keeps every partition forever. |
 | `CONSOLE_DATA_KEY` | (unset; **required**) | Base64 Tink keyset. Encrypts the client private key in each organisation's `console.orgs` row. `cloud data-key` prints one; `make dev-data-key` writes one to `./certs` for local use. |
-| `ATL_SIGNER_ADDR` | (unset) | Signer HTTP endpoint for cert issuance from the console's Callers page. |
+| `ATL_SIGNER_ADDR` | (unset) | The certificate signer's `https://` base URL. Setting it turns on enrolment — see below, and set the rest of the group with it. |
+| `ATL_SIGNER_CERT` / `ATL_SIGNER_KEY` | (unset) | The console's own client certificate to the signer. Its common name must be in the signer's `SIGNER_ALLOWED_CLIENT_CNS`. |
+| `ATL_SIGNER_CA` | (unset) | Verifies the signer's server certificate. Not the authority any caller is issued from. |
+| `CONSOLE_ENROLL_LISTEN` | (unset) | Address for the enrolment listener, e.g. `:3443`. Carries two routes and never the console API or SPA. |
+| `CONSOLE_ENROLL_TLS_CERT` / `_KEY` | (unset) | That listener's own server certificate. It terminates its own TLS, unlike `CONSOLE_LISTEN`. |
+| `CONSOLE_ENROLL_CLIENT_CA` | (unset) | Verifies a machine renewing with its current certificate. Not yet required — renewal is the next step. |
 | `SANDBOX_PER_USER_LIMIT` | `3` | Maximum concurrent sandboxes per authenticated user. A boot beyond this returns HTTP `429`. The limit also caps fork count — forking N children requires `N + parent` headroom. |
 | `SANDBOX_TTL` | `30m` | Idle window after which the BFF's janitor evicts a sandbox. Go duration syntax. Set lower (`10s`) for CI; higher (`2h`) for long agent loops. |
 
@@ -471,6 +476,54 @@ organisations.** That is the cost of a switcher that can offer an organisation
 living on another deployment, and it is accepted deliberately.
 
 With one organisation the sidebar shows a label and no control.
+
+### Giving a machine a certificate
+
+An admin mints a single-use enrolment token from the Callers page. The machine
+that will hold the certificate generates its own key, builds a certificate
+signing request, and presents the token and the CSR to the enrolment listener.
+**No private key crosses the wire in either direction.**
+
+The console previously generated the key itself and offered it for download.
+That path required `ATL_SIGNER_ADDR`, which no deployment set, so it answered
+503 everywhere it ran.
+
+**Enrolment is all-or-nothing.** A console with some of the group set refuses to
+start and names what is missing. A console with none of it set runs normally
+with enrolment off, and the mint route says so rather than answering 404.
+
+**The token is single-use and short-lived.** Unused, unexpired and belonging to
+the right organisation are all conditions on the one statement that spends it,
+so an expired token stops working immediately rather than when housekeeping next
+runs. The console stores only its SHA-256; it cannot be read back.
+
+**Enrolling supersedes.** atlantis binds a caller to one certificate, so
+completing an enrolment stops the previous one authenticating — for every
+machine still using it. The console warns before you start, and cannot tell you
+whether there is a previous one: it does not see atlantis's fingerprint, only
+its own record of what it has enrolled.
+
+#### The signer
+
+| Variable | Default | Description |
+|---|---|---|
+| `SIGNER_LISTEN` | `:7070` | mTLS, carries `POST /issue`. |
+| `SIGNER_HEALTH_LISTEN` | `:7071` | Plaintext, carries `GET /healthz` only. Separate because the container health check holds no certificate. |
+| `SIGNER_TLS_CERT` / `_KEY` | (unset; **required**) | The signer's server identity. |
+| `SIGNER_CLIENT_CA` | (unset; **required**) | Who may ask for a certificate. |
+| `SIGNER_ALLOWED_CLIENT_CNS` | (unset; **required**) | Comma-separated common names, normally `atlantis-console`. |
+| `CA_DIR` | `/ca-private` | The issuing authority. Never leaves the signer. |
+| `PG_URL` | (unset; **required**) | Reads `atlantis.caller_identities` so issuance is gated on a registered caller. |
+
+**`SIGNER_CLIENT_CA` must not be the authority in `CA_DIR`.** Every caller
+certificate the signer issues is marked for client authentication, so a signer
+trusting its own issuing authority would accept every certificate it had ever
+produced as a credential — and one caller could then obtain another's identity.
+The common-name allowlist is a second, independent answer to the same question.
+
+`PG_URL` is required rather than optional. It used to be skipped entirely when
+unset, which meant the deployment with the least configuration had the fewest
+checks.
 
 ### Confirming a destructive action
 

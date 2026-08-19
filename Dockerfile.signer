@@ -22,15 +22,23 @@ USER signer
 
 COPY --from=builder /out/atlantis-signer /usr/local/bin/atlantis-signer
 
-# Container-internal port. A deployment maps this to a loopback-only host port;
-# the CA key is behind it, so it must never be reachable from a public
-# interface.
-EXPOSE 7070
+# Container-internal ports. A deployment maps these to loopback-only host
+# ports; the CA key is behind them, so they must never be reachable from a
+# public interface.
+#
+# 7070 is mTLS and carries /issue. 7071 is plaintext and carries /healthz only.
+# The split exists for the line below: the health check runs inside the
+# container with nothing but the CA directory mounted, so it holds no client
+# certificate and cannot complete a handshake with 7070. Left on one port, the
+# container would be permanently unhealthy and anything waiting on
+# `condition: service_healthy` would never start.
+EXPOSE 7070 7071
 
 ENV CA_DIR=/ca-private \
-    SIGNER_LISTEN=:7070
+    SIGNER_LISTEN=:7070 \
+    SIGNER_HEALTH_LISTEN=:7071
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s \
-  CMD wget -q -O - http://127.0.0.1:7070/healthz || exit 1
+  CMD wget -q -O - http://127.0.0.1:7071/healthz || exit 1
 
 ENTRYPOINT ["atlantis-signer"]

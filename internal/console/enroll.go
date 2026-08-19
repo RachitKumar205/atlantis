@@ -1,0 +1,545 @@
+package console
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"time"
+
+	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+)
+
+// Enrolment: how a machine gets a client certificate for a caller.
+//
+// # What this replaced, and why
+//
+// handleIssueCert generated a P-256 key inside the console, built a CSR with
+// it, sent the CSR to the signer, and returned the private key to a browser for
+// download. The CSR half was always right. The key was simply born in the wrong
+// process: it crossed the network, sat in JavaScript memory, and landed in a
+// Downloads folder, for no reason anyone could name — the signer has only ever
+// wanted a CSR.
+//
+// Now the machine that will use the key generates it, and only the CSR travels.
+// The console never sees a private key and cannot leak one it does not hold.
+//
+// # Two routes, two different authorities
+//
+// An admin mints a token on the console's normal API, behind session, role,
+// CSRF and sudo. A machine redeems it on the enrolment listener, which has no
+// session and no cookies — the token is the whole of what authorises it.
+//
+// The redemption route is on a separate listener carrying only these routes.
+// The console's main mux ends in a `/` catch-all serving the SPA, so mounting
+// this on it would publish the entire console API on a port every machine that
+// enrols can reach.
+
+// buildEnrollListener prepares the second listener.
+//
+// # Its own mux, and that is the point
+//
+// buildMux ends with a `/` catch-all that serves the SPA, and the *Server is
+// itself the handler for the main listener. Reusing either here would put the
+// whole console API — sign-in, callers, the change policy, audit — on a port
+// that every machine needing a certificate can reach, behind none of the
+// upstream terminator, ingress limits or WAF the main listener sits behind.
+// Two routes, registered here, and nothing else can be added by accident.
+//
+// # VerifyClientCertIfGiven, not Require
+//
+// Enrolment arrives with no certificate — that is what enrolment is. Renewal
+// (K7b) arrives with one. The listener therefore cannot demand one, and each
+// handler asserts what it needs: handleEnroll wants a token, and renewal will
+// want a peer certificate and must check for it itself rather than assume the
+// listener did.
+//
+// No browser reaches this port, so the certificate-selection prompt that
+// requesting a client certificate causes in a browser is not a concern here —
+// which is the other reason it is not on the main listener.
+func (s *Server) buildEnrollListener() error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /enroll", s.handleEnroll)
+
+	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ClientAuth: tls.VerifyClientCertIfGiven,
+	}
+	if s.cfg.EnrollClientCA != "" {
+		caPEM, err := os.ReadFile(s.cfg.EnrollClientCA)
+		if err != nil {
+			return fmt.Errorf("read CONSOLE_ENROLL_CLIENT_CA: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return fmt.Errorf("CONSOLE_ENROLL_CLIENT_CA %s contains no certificate",
+				s.cfg.EnrollClientCA)
+		}
+		tlsCfg.ClientCAs = pool
+	}
+
+	s.enrollSrv = &http.Server{
+		Addr:              s.cfg.EnrollListen,
+		Handler:           mux,
+		TLSConfig:         tlsCfg,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+	}
+	return nil
+}
+
+// ServeEnrollment runs the enrolment listener until it is shut down.
+//
+// Returns nil immediately when enrolment is not configured, so a caller does
+// not have to know whether the feature is on.
+func (s *Server) ServeEnrollment() error {
+	if s.enrollSrv == nil {
+		return nil
+	}
+	s.log.Info("enrolment listener", "addr", s.cfg.EnrollListen)
+	err := s.enrollSrv.ListenAndServeTLS(s.cfg.EnrollTLSCert, s.cfg.EnrollTLSKey)
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+// ShutdownEnrollment stops the enrolment listener.
+func (s *Server) ShutdownEnrollment(ctx context.Context) error {
+	if s.enrollSrv == nil {
+		return nil
+	}
+	return s.enrollSrv.Shutdown(ctx)
+}
+
+// signerTimeout bounds a call to the signer.
+//
+// The old code called http.Post on http.DefaultClient, which has no timeout at
+// all: a signer that accepted the connection and never answered would hold the
+// request until the client gave up, and the console would hold the goroutine
+// for as long as the operating system let it.
+const signerTimeout = 15 * time.Second
+
+// newSignerClient builds the console's client to the signer, or reports why it
+// cannot.
+//
+// Built once at New() rather than per request, so a bad certificate pair is a
+// startup failure rather than something discovered by whoever first tries to
+// enrol a machine.
+func newSignerClient(cfg Config) (*http.Client, error) {
+	cert, err := tls.LoadX509KeyPair(cfg.SignerCert, cfg.SignerKey)
+	if err != nil {
+		return nil, fmt.Errorf("load signer client credentials: %w", err)
+	}
+	caPEM, err := os.ReadFile(cfg.SignerCA)
+	if err != nil {
+		return nil, fmt.Errorf("read ATL_SIGNER_CA: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("ATL_SIGNER_CA %s contains no certificate", cfg.SignerCA)
+	}
+	return &http.Client{
+		Timeout: signerTimeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion:   tls.VersionTLS12,
+				Certificates: []tls.Certificate{cert},
+				RootCAs:      pool,
+			},
+		},
+	}, nil
+}
+
+// ── Minting, on the console's API ───────────────────────────────────────────
+
+// handleMintEnrollToken issues a token for a caller, to be carried to a
+// machine.
+//
+// Admin, CSRF and sudo, the same gating as setting the change policy: this
+// produces a credential that becomes a caller's identity, which is the class of
+// action the console asks somebody to prove themselves for.
+func (s *Server) handleMintEnrollToken(w http.ResponseWriter, r *http.Request) {
+	caller := r.PathValue("caller")
+	if caller == "" {
+		jsonError(w, "caller is required", http.StatusBadRequest)
+		return
+	}
+	if !s.cfg.EnrollmentEnabled() {
+		// Says which, rather than 404ing. The predecessor of this route was
+		// unconfigured in every deployment that ever ran, and the only way to
+		// find that out was to press the button.
+		jsonError(w, "certificate enrolment is not configured on this console: "+
+			"an operator sets ATL_SIGNER_ADDR and the enrolment listener",
+			http.StatusServiceUnavailable)
+		return
+	}
+	u := r.Context().Value(ctxUser).(*User)
+
+	// The caller has to exist in this organisation's atlantis before a token
+	// for it means anything. The signer checks this too, from its own
+	// connection — but that check answers after a token has been minted and
+	// carried to a machine, which is a worse place to discover a typo.
+	atl, err := s.atlFor(r.Context(), u.Org)
+	if err != nil {
+		s.log.Error("resolve organisation's atlantis", "org", u.Org, "err", err)
+		jsonError(w, fmt.Sprintf("no atlantis is registered for %q", u.Org),
+			http.StatusServiceUnavailable)
+		return
+	}
+	callers, err := atl.GetCallers(r.Context(), &adminpb.GetCallersRequest{})
+	if err != nil {
+		s.log.Error("list callers", "org", u.Org, "err", err)
+		jsonError(w, "cannot reach this organisation's atlantis", http.StatusBadGateway)
+		return
+	}
+	known := false
+	for _, c := range callers.GetCallers() {
+		if c.GetCaller() == caller {
+			known = true
+			break
+		}
+	}
+	if !known {
+		jsonError(w, fmt.Sprintf("caller %q is not registered — add it first", caller),
+			http.StatusNotFound)
+		return
+	}
+
+	tok, err := s.db.forOrg(u.Org).createEnrollToken(r.Context(), caller, u.Subject)
+	if err != nil {
+		s.log.Error("mint enrolment token", "org", u.Org, "caller", caller, "err", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Audited at mint, not only at redemption. A token minted and never
+	// redeemed would otherwise leave no trace anywhere, and "fifty tokens were
+	// issued and none used" is exactly the shape somebody would want to see.
+	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "enroll_token_minted",
+		map[string]any{"caller": caller, "expires_at": tok.ExpiresAt.UTC().Format(time.RFC3339)})
+
+	jsonOK(w, map[string]any{
+		"token":      tok.Secret,
+		"caller":     tok.Caller,
+		"org":        u.Org,
+		"expires_at": tok.ExpiresAt.UTC().Format(time.RFC3339),
+	})
+}
+
+// handleGetCallerCerts lists what this console has enrolled, per caller.
+//
+// # What it can and cannot say
+//
+// This is the console's own record, not atlantis's. atlantis binds a caller to
+// one certificate by fingerprint, and GetCallers does not return that
+// fingerprint — so the console cannot report "is this caller bound", only
+// "did this console enrol it, and when".
+//
+// The distinction matters for the warning the page shows, which is why the
+// warning is unconditional: enrolling supersedes whatever certificate that
+// caller was using, whether or not this console knows about it. A caller with
+// no row here is the normal case today — the handler that would have written
+// one answered 503 in every deployment it ever ran in.
+func (s *Server) handleGetCallerCerts(w http.ResponseWriter, r *http.Request) {
+	u := r.Context().Value(ctxUser).(*User)
+	certs, err := s.db.forOrg(u.Org).listCallerCerts(r.Context())
+	if err != nil {
+		s.log.Error("list caller certificates", "org", u.Org, "err", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	out := make([]map[string]any, 0, len(certs))
+	for _, c := range certs {
+		out = append(out, map[string]any{
+			"caller":      c.Caller,
+			"fingerprint": hex.EncodeToString(c.Fingerprint),
+			"issued_at":   c.IssuedAt.UTC().Format(time.RFC3339),
+			"expires_at":  c.ExpiresAt.UTC().Format(time.RFC3339),
+		})
+	}
+	jsonOK(w, map[string]any{"certs": out, "enrolment_enabled": s.cfg.EnrollmentEnabled()})
+}
+
+// ── Redeeming, on the enrolment listener ────────────────────────────────────
+
+type enrollRequest struct {
+	Org    string `json:"org"`
+	Token  string `json:"token"`
+	CSRPEM string `json:"csr_pem"`
+}
+
+// handleEnroll trades a token and a CSR for a signed certificate.
+//
+// Unauthenticated in every ordinary sense: no session, no cookie, no client
+// certificate. The token row is the authority, and it is spent here.
+func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
+	// Same limiter as sign-in, and this route needs it more: it is
+	// unauthenticated, it is reachable by every machine that enrols, and a
+	// token is the only thing between a caller and a certificate.
+	if ok, retry := s.loginLim.allow(clientIP(r)); !ok {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", retry))
+		jsonError(w, "too many attempts, try again shortly", http.StatusTooManyRequests)
+		return
+	}
+	var req enrollRequest
+	if err := readJSON(r, &req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Org == "" || req.Token == "" || req.CSRPEM == "" {
+		jsonError(w, "org, token and csr_pem are required", http.StatusBadRequest)
+		return
+	}
+
+	// The organisation comes from the request and is not trusted — it is what
+	// gets BOUND, and the RESTRICTIVE policy on console.enroll_tokens is what
+	// compares it against the row. A token minted for another organisation
+	// matches nothing and is refused as unknown.
+	//
+	// This is also why the org is a parameter at all. Reading it off the token
+	// row instead would mean nothing was ever compared, and a test named "a
+	// token does not cross organisations" would have no field in which to name
+	// the other one.
+	org := req.Org
+	caller, err := s.db.forOrg(org).spendEnrollToken(r.Context(), req.Token)
+	if err != nil {
+		if !errors.Is(err, ErrEnrollTokenUnusable) {
+			s.log.Error("spend enrolment token", "org", org, "err", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		s.log.Info("enrolment refused", "org", org, "remote", r.RemoteAddr)
+		jsonError(w, "enrolment token is not usable", http.StatusForbidden)
+		return
+	}
+
+	// From here the token is spent whatever happens. Every later failure costs
+	// the operator a new token, which is the right trade: the alternative is a
+	// token that survives a partial enrolment and can be replayed against it.
+	bundle, err := s.issueForCaller(r.Context(), org, caller, req.CSRPEM)
+	if err != nil {
+		s.log.Error("enrolment failed after the token was spent",
+			"org", org, "caller", caller, "err", err)
+		jsonError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	s.db.forOrg(org).logAction(r.Context(), enrolmentActor, "", "enroll_token_spent",
+		map[string]any{
+			"caller":      caller,
+			"fingerprint": hex.EncodeToString(bundle.fingerprint),
+			"expires_at":  bundle.expiresAt,
+			"remote":      r.RemoteAddr,
+		})
+
+	jsonOK(w, map[string]any{
+		"cert_pem":   bundle.certPEM,
+		"ca_pem":     bundle.caPEM,
+		"caller":     caller,
+		"org":        org,
+		"expires_at": bundle.expiresAt,
+	})
+}
+
+// enrolmentActor is who the audit log records for a redemption.
+//
+// A redemption has no session, so there is no person to name. A defined
+// constant rather than an empty string, because an audit row whose actor is
+// blank reads as a bug in the logging rather than as a machine acting on its
+// own behalf. The admin who authorised it is on the matching
+// enroll_token_minted row.
+const enrolmentActor = "enrolment"
+
+// ── The shared issuance path ────────────────────────────────────────────────
+
+type issuedBundle struct {
+	certPEM     string
+	caPEM       string
+	expiresAt   string
+	fingerprint []byte
+}
+
+// issueForCaller sends a CSR to the signer, checks what comes back, and records
+// the result in both places that need it.
+//
+// Shared so K7b's renewal cannot drift from enrolment. Everything that makes
+// the result safe lives here exactly once.
+func (s *Server) issueForCaller(ctx context.Context, org, caller, csrPEM string) (*issuedBundle, error) {
+	// The CN must be the caller the token was minted for.
+	//
+	// The signer compares the CSR's CN to the caller name in the body it is
+	// handed — so if this forwarded a name from the request, that check would
+	// compare two attacker-supplied values and pass. `caller` here comes from
+	// the spent token row and from nowhere else.
+	csr, err := parseCSRPEM(csrPEM)
+	if err != nil {
+		return nil, fmt.Errorf("invalid CSR: %w", err)
+	}
+	if csr.Subject.CommonName != caller {
+		return nil, fmt.Errorf("this enrolment is for caller %q, but the CSR asks for %q",
+			caller, csr.Subject.CommonName)
+	}
+
+	signed, err := s.callSigner(ctx, caller, csrPEM)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parser-strict, and it matters: a malformed or hostile signer response
+	// that got as far as the fingerprint write would bind a caller to a hash of
+	// something that is not its certificate, and nothing it presents afterwards
+	// would ever match. That is a permanent lockout with no error at the time
+	// it happens.
+	block, _ := pem.Decode([]byte(signed.CertPEM))
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, errors.New("the signer returned something that is not a certificate")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("the signer returned an unparseable certificate: %w", err)
+	}
+
+	// The certificate has to be one this organisation's atlantis will accept.
+	//
+	// There is one signer and one CA, while each organisation has its own — so
+	// enrolling into an organisation the signer does not issue for produces a
+	// certificate that fails the handshake at that atlantis. Without this check
+	// it would also supersede the caller that was working there, which turns a
+	// misconfiguration into an outage. Refuse before recording anything.
+	if err := s.verifyLeafForOrg(ctx, org, leaf); err != nil {
+		return nil, err
+	}
+
+	sum := sha256.Sum256(leaf.Raw)
+	fingerprint := sum[:]
+	expiresAt := leaf.NotAfter.UTC().Format(time.RFC3339)
+
+	// atlantis first, because that is the write that decides whether the
+	// certificate authenticates. The console's own row is bookkeeping: if it
+	// fails, the machine still has a working certificate and the console has
+	// lost the ability to tell whose it is — bad, but recoverable by enrolling
+	// again. The other order would mint a certificate the console believes in
+	// and atlantis refuses.
+	atl, err := s.atlFor(ctx, org)
+	if err != nil {
+		return nil, fmt.Errorf("no atlantis is registered for %q", org)
+	}
+	if _, err := atl.RecordCallerCertExpiry(ctx, &adminpb.RecordCallerCertExpiryRequest{
+		Caller:      caller,
+		ExpiresAt:   expiresAt,
+		Fingerprint: hex.EncodeToString(fingerprint),
+	}); err != nil {
+		return nil, fmt.Errorf("certificate minted but binding write failed; "+
+			"the previous certificate still authenticates — enrol again to rotate: %w", err)
+	}
+
+	if err := s.db.recordCallerCert(ctx, callerCert{
+		Fingerprint: fingerprint,
+		Org:         org,
+		Caller:      caller,
+		ExpiresAt:   leaf.NotAfter,
+	}); err != nil {
+		// Not fatal. The certificate works; what is lost is the console's
+		// record of it, which renewal needs. Loud, because renewal will then
+		// refuse and the reason will be here and nowhere else.
+		s.log.Error("record issued certificate", "org", org, "caller", caller, "err", err)
+	}
+
+	return &issuedBundle{
+		certPEM:     signed.CertPEM,
+		caPEM:       signed.CAPEM,
+		expiresAt:   expiresAt,
+		fingerprint: fingerprint,
+	}, nil
+}
+
+// verifyLeafForOrg checks a freshly signed certificate against the CA the
+// organisation's atlantis actually trusts.
+func (s *Server) verifyLeafForOrg(ctx context.Context, org string, leaf *x509.Certificate) error {
+	creds, err := s.db.orgCredentials(ctx, org)
+	if err != nil {
+		return fmt.Errorf("read credentials for %q: %w", org, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM([]byte(creds.CAPEM)) {
+		return fmt.Errorf("organisation %q has no usable CA on file", org)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots:     pool,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		return fmt.Errorf("the signer issued a certificate that %q's atlantis would not accept "+
+			"— the signer holds a different certificate authority: %w", org, err)
+	}
+	return nil
+}
+
+type signerResponse struct {
+	CertPEM   string `json:"cert_pem"`
+	CAPEM     string `json:"ca_pem"`
+	ExpiresAt string `json:"expires_at"`
+	Error     string `json:"error"`
+}
+
+// callSigner posts a CSR over mTLS and returns what came back.
+func (s *Server) callSigner(ctx context.Context, caller, csrPEM string) (*signerResponse, error) {
+	if s.signer == nil {
+		return nil, errors.New("certificate enrolment is not configured on this console")
+	}
+	body, err := json.Marshal(map[string]string{"caller": caller, "csr_pem": csrPEM})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		s.cfg.SignerAddr+"/issue", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.signer.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("signer unreachable: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	var out signerResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&out); err != nil {
+		return nil, errors.New("the signer returned a response this console could not read")
+	}
+	if resp.StatusCode != http.StatusOK {
+		if out.Error != "" {
+			return nil, errors.New(out.Error)
+		}
+		return nil, fmt.Errorf("the signer refused with status %d", resp.StatusCode)
+	}
+	return &out, nil
+}
+
+func parseCSRPEM(pemStr string) (*x509.CertificateRequest, error) {
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil || block.Type != "CERTIFICATE REQUEST" {
+		return nil, errors.New("not a PEM CERTIFICATE REQUEST block")
+	}
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	// A CSR nobody signed proves nothing about who holds the private key, which
+	// is the only thing a CSR is for.
+	if err := csr.CheckSignature(); err != nil {
+		return nil, fmt.Errorf("the CSR's signature does not verify: %w", err)
+	}
+	return csr, nil
+}
