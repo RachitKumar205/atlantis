@@ -133,6 +133,22 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
+	// The signer's own server identity.
+	//
+	// Checked here, with the rest of the configuration, rather than at the
+	// ListenAndServeTLS call that consumes it. Everything that can be decided
+	// by reading the environment is decided before this process connects
+	// anywhere, so an operator setting it up sees every configuration problem
+	// at once instead of one per restart — and a missing certificate is not
+	// reported as a database failure because the database happened to be
+	// checked first.
+	certFile := os.Getenv("SIGNER_TLS_CERT")
+	keyFile := os.Getenv("SIGNER_TLS_KEY")
+	if certFile == "" || keyFile == "" {
+		return errors.New("SIGNER_TLS_CERT and SIGNER_TLS_KEY are required: " +
+			"the signer holds a CA private key and does not serve plaintext")
+	}
+
 	// Connect to atlantis's Postgres so issuance is gated on a registered
 	// caller_identities row.
 	//
@@ -155,12 +171,24 @@ func run(log *slog.Logger) error {
 	cfg.MaxConns = 4
 	cfg.MinConns = 1
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	pgPool, err = pgxpool.NewWithConfig(ctx, cfg)
-	cancel()
 	if err != nil {
 		return fmt.Errorf("connect to PG: %w", err)
 	}
 	defer pgPool.Close()
+
+	// Prove the connection, rather than assume it.
+	//
+	// pgxpool.NewWithConfig is lazy: it validates the DSN and opens nothing. So
+	// a signer pointed at an unreachable database started perfectly happily and
+	// then failed the registration check on every issuance, reporting "identity
+	// lookup failed" — which reads as a problem with the caller, not with this
+	// process's configuration. The whole reason PG_URL became required is that
+	// the check behind it must actually run.
+	if err := pgPool.Ping(ctx); err != nil {
+		return fmt.Errorf("connect to PG: %w", err)
+	}
 
 	log.Info("atlantis-signer ready",
 		"ca_cn", caCert.Subject.CommonName,
@@ -226,14 +254,9 @@ func run(log *slog.Logger) error {
 		}
 	}()
 
-	// The certificate and key are the signer's own server identity, separate
-	// from the CA it issues from.
-	certFile := os.Getenv("SIGNER_TLS_CERT")
-	keyFile := os.Getenv("SIGNER_TLS_KEY")
-	if certFile == "" || keyFile == "" {
-		return errors.New("SIGNER_TLS_CERT and SIGNER_TLS_KEY are required: " +
-			"the signer holds a CA private key and does not serve plaintext")
-	}
+	// certFile and keyFile were validated at the top, with the rest of the
+	// configuration. They are the signer's own server identity, separate from
+	// the CA it issues from.
 	if err := srv.ListenAndServeTLS(certFile, keyFile); !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("signer exited: %w", err)
 	}

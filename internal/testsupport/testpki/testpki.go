@@ -55,6 +55,18 @@ type PKI struct {
 	CertFile string
 	KeyFile  string
 
+	// CAKeyFile is the authority's own private key, beside CAFile.
+	//
+	// Written because cmd/signer loads a CA from a directory holding both —
+	// it issues certificates, so it needs the key, unlike every other consumer
+	// here which only verifies against the certificate. A test that wanted to
+	// boot the signer otherwise had to build a second, near-identical CA of its
+	// own.
+	//
+	// It is a private key on disk under t.TempDir(), which is the same posture
+	// as every other key this package writes.
+	CAKeyFile string
+
 	caCert *x509.Certificate
 	caKey  crypto.Signer
 }
@@ -97,14 +109,21 @@ func New(t *testing.T, dir string) *PKI {
 	}
 
 	p := &PKI{
-		Dir:      dir,
-		CAFile:   filepath.Join(dir, "ca.crt"),
-		CertFile: filepath.Join(dir, "server.crt"),
-		KeyFile:  filepath.Join(dir, "server.key"),
-		caCert:   caCert,
-		caKey:    caKey,
+		Dir:       dir,
+		CAFile:    filepath.Join(dir, "ca.crt"),
+		CAKeyFile: filepath.Join(dir, "ca.key"),
+		CertFile:  filepath.Join(dir, "server.crt"),
+		KeyFile:   filepath.Join(dir, "server.key"),
+		caCert:    caCert,
+		caKey:     caKey,
 	}
 	writePEM(t, p.CAFile, "CERTIFICATE", caDER)
+
+	caKeyDER, err := x509.MarshalECPrivateKey(caKey)
+	if err != nil {
+		t.Fatalf("testpki: marshal ca key: %v", err)
+	}
+	writePEM(t, p.CAKeyFile, "EC PRIVATE KEY", caKeyDER)
 
 	srvDER, srvKeyDER := p.issue(t, "atlantis",
 		[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
