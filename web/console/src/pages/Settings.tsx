@@ -221,7 +221,13 @@ function MembersPanel({ me }: { me?: MeResult }) {
           <div className="setrow">
             <div className="setrow__main">
               <div className="setrow__label">Organisation</div>
-              <div className="setrow__help">This console serves one organisation. Every request is scoped to it.</div>
+              <div className="setrow__help">
+                Every request from this session is scoped to it. This console serves this
+                organisation only;{' '}
+                {(me?.orgs?.length ?? 0) > 1
+                  ? 'use the switcher in the sidebar to sign in to another one you belong to.'
+                  : 'an account in more than one gets a switcher in the sidebar.'}
+              </div>
             </div>
             <div className="setrow__control">
               <span className="set-readout">{me?.org ?? '—'}</span>

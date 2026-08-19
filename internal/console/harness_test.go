@@ -313,7 +313,18 @@ func (f *consoleFixture) assertion(t *testing.T, email, role string) string {
 // isolated nothing would have passed the whole suite.
 func (f *consoleFixture) assertionForOrg(t *testing.T, org, email, role string) string {
 	t.Helper()
-	return f.mint(t, org, email, role, false)
+	return f.mint(t, org, email, role, false, nil)
+}
+
+// assertionWithOrgs mints one that also names the memberships, as Cloud's
+// /authorize does for a console's organisation switcher.
+//
+// A separate helper rather than another parameter on the one above, because
+// almost every test in this package is about something else and an empty list
+// is what a session with nothing to switch to actually carries.
+func (f *consoleFixture) assertionWithOrgs(t *testing.T, org, email, role string, orgs []string) string {
+	t.Helper()
+	return f.mint(t, org, email, role, false, orgs)
 }
 
 // stepUpAssertion mints what Cloud's /authorize?prompt=reauth produces.
@@ -324,23 +335,36 @@ func (f *consoleFixture) assertionForOrg(t *testing.T, org, email, role string) 
 // factor. Sudo requires the second.
 func (f *consoleFixture) stepUpAssertion(t *testing.T, email, role string) string {
 	t.Helper()
-	return f.mint(t, defaultOrg, email, role, true)
+	return f.mint(t, defaultOrg, email, role, true, nil)
 }
 
-func (f *consoleFixture) mint(t *testing.T, org, email, role string, stepUp bool) string {
+func (f *consoleFixture) mint(t *testing.T, org, email, role string, stepUp bool, orgs []string) string {
+	t.Helper()
+	// Subject is scoped by organisation as well as email. Cloud subjects are
+	// globally unique, and two organisations having genuinely different people
+	// at the same address is the case a shared subject would quietly merge.
+	return f.mintAs(t, subjectFor(org, email), org, email, role, stepUp, orgs)
+}
+
+// mintAs mints for a subject the caller names.
+//
+// One case needs it: the organisation switch. That is one person moving between
+// organisations, and a Cloud subject is the user's id — so the subject is
+// exactly what does not change across it. Deriving it from the organisation, as
+// every other test here wants, would make the switched session look like a
+// different person, and a test about the organisation half of an ownership key
+// would then pass on the subject half instead.
+func (f *consoleFixture) mintAs(t *testing.T, subject, org, email, role string, stepUp bool, orgs []string) string {
 	t.Helper()
 	tok, err := f.iss.Mint(issuer.Grant{
-		// Subject is scoped by organisation as well as email. Cloud subjects
-		// are globally unique, and two organisations having genuinely
-		// different people at the same address is the case a shared subject
-		// would quietly merge.
-		Subject:  subjectFor(org, email),
+		Subject:  subject,
 		Org:      org,
 		Role:     identity.Role(role),
 		Email:    email,
 		Name:     "Test User",
 		Audience: f.audience,
 		StepUp:   stepUp,
+		Orgs:     orgs,
 	})
 	if err != nil {
 		t.Fatalf("mint assertion for %s in %s: %v", email, org, err)
@@ -361,21 +385,33 @@ func (f *consoleFixture) signIn(t *testing.T, email, role string) string {
 // signInToOrg returns a session token for a user in a named organisation.
 func (f *consoleFixture) signInToOrg(t *testing.T, org, email, role string) string {
 	t.Helper()
+	return f.exchange(t, f.assertionForOrg(t, org, email, role), "")
+}
 
-	body := fmt.Sprintf(`{"assertion":%q}`, f.assertionForOrg(t, org, email, role))
-	req := f.request(t, http.MethodPost, "/api/auth/exchange", body, "")
+// exchange spends an assertion at the real endpoint and returns the session
+// cookie it sets.
+//
+// carry is the session cookie the browser already holds: empty for a first
+// sign-in, and the live session for an organisation switch. The second case is
+// the one worth having a parameter for — it is where the console has to replace
+// a session rather than open a second one beside it.
+func (f *consoleFixture) exchange(t *testing.T, assertion, carry string) string {
+	t.Helper()
+
+	body := fmt.Sprintf(`{"assertion":%q}`, assertion)
+	req := f.request(t, http.MethodPost, "/api/auth/exchange", body, carry)
 	rec := httptest.NewRecorder()
 	f.srv.handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("exchange for %s in %s: status %d, body %s", email, org, rec.Code, rec.Body.String())
+		t.Fatalf("exchange: status %d, body %s", rec.Code, rec.Body.String())
 	}
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == sessionCookieName {
 			return c.Value
 		}
 	}
-	t.Fatalf("exchange for %s in %s set no session cookie", email, org)
+	t.Fatalf("exchange set no session cookie")
 	return ""
 }
 

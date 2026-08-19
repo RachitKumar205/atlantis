@@ -98,6 +98,69 @@ a { color: inherit; text-decoration: none; }
   opacity: 1;
 }
 
+/* Organisation switcher — the row under the wordmark.
+   The organisation is the frame the schema, callers and audit all sit
+   inside, so it reads as context rather than as a setting: same 18px
+   glyph metrics as a nav row, but no brass tick and no active state,
+   because it is not a destination.
+
+   With one organisation the face is a <div> and there is no popover;
+   see OrgSwitcher for why. .rail-org__face carries both cases so the
+   collapsed rail looks identical either way. */
+/* The popover is `position: fixed` (see .screens-pop) rather than absolute
+   inside this row, because .rail clips its overflow and an absolutely
+   positioned child would be cut off at 56px. A fixed element escapes that:
+   nothing on the way up establishes a containing block for it. */
+.rail-org {
+  margin-bottom: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.rail-org__face {
+  display: flex; align-items: center;
+  width: 100%; height: 34px;
+  padding: 0 13px;   /* 13 + 18/2 = 22; +6 rail pad = 28 (rail center) ✓ */
+  border-radius: var(--radius);
+  color: var(--ink-2);
+  transition: color var(--fast) var(--ease), background var(--fast) var(--ease);
+}
+.rail-org__face svg {
+  width: 18px; height: 18px;
+  flex-shrink: 0;
+  color: var(--ink-3);
+  transition: color var(--fast) var(--ease);
+}
+.rail-org__face--btn:hover { background: var(--canvas-3); color: var(--ink-0); }
+.rail-org__face--btn:hover svg { color: var(--ink-1); }
+.rail-org__face--btn.is-open { background: var(--canvas-3); color: var(--ink-0); }
+.rail-org__face--btn.is-open svg { color: var(--accent); }
+.rail-org__name {
+  font-family: var(--mono); font-size: 11.5px; color: var(--ink-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  margin-left: 0;
+  max-width: 0;
+  opacity: 0;
+  transition:
+    margin-left 220ms cubic-bezier(0.32, 0.72, 0, 1),
+    max-width 220ms cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 200ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.rail:hover .rail-org__name {
+  margin-left: 11px;
+  max-width: 140px;
+  opacity: 1;
+}
+/* The chevron only earns its space once the rail is open — collapsed, it
+   would sit outside the 56px and be clipped mid-glyph. */
+.rail-org__chev {
+  width: 13px !important; height: 13px !important;
+  margin-left: auto;
+  color: var(--ink-4) !important;
+  opacity: 0;
+  transition: opacity 200ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.rail:hover .rail-org__chev { opacity: 1; }
+
 /* screens directory popover */
 .screens-pop {
   position: fixed; left: 58px; top: 12px; width: 234px; z-index: 60;
@@ -105,9 +168,16 @@ a { color: inherit; text-decoration: none; }
   border-radius: var(--radius-lg); padding: 6px;
   box-shadow: 0 18px 50px rgba(0,0,0,.5), 0 2px 6px rgba(0,0,0,.4);
   opacity: 0; pointer-events: none; transform: translateX(-8px) scale(.98);
-  transition: opacity var(--fast) var(--ease), transform var(--fast) var(--ease);
+  /* `visibility` and not only `opacity`: a transparent popover keeps its links
+     in the tab order, so a keyboard user tabbing off the switcher lands inside
+     a menu that is not on screen. visibility is transitioned rather than set
+     outright so the fade-out still plays — it holds `visible` for the duration
+     and flips at the end. */
+  visibility: hidden;
+  transition: opacity var(--fast) var(--ease), transform var(--fast) var(--ease),
+              visibility var(--fast);
 }
-.screens-pop.is-open { opacity: 1; pointer-events: auto; transform: none; }
+.screens-pop.is-open { opacity: 1; visibility: visible; pointer-events: auto; transform: none; }
 .screens-pop__group { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); padding: 9px 10px 5px; }
 .screens-item { display: flex; align-items: center; gap: 11px; width: 100%; height: 36px; padding: 0 10px; border-radius: var(--radius); font-size: 12.5px; color: var(--ink-1); transition: background var(--fast) var(--ease), color var(--fast) var(--ease); text-align: left; }
 .screens-item svg { width: 16px; height: 16px; color: var(--ink-3); flex-shrink: 0; transition: color var(--fast) var(--ease); }
@@ -117,6 +187,10 @@ a { color: inherit; text-decoration: none; }
 .screens-item:hover svg { color: var(--ink-1); }
 .screens-item.is-active { color: var(--accent); }
 .screens-item.is-active svg { color: var(--accent); }
+/* The organisation menu is anchored under the switcher, not at the top of
+   the rail: 14px rail pad + 32px head + 16px head margin. */
+.screens-pop--org { top: 60px; }
+.screens-item__tick { margin-left: auto; color: var(--accent) !important; }
 
 /* auth-page escape cluster */
 .auth-switch { position: fixed; top: 20px; right: 22px; z-index: 40; display: flex; align-items: center; gap: 4px; padding: 4px; background: var(--canvas-2); border: 1px solid var(--line); border-radius: var(--radius-lg); }

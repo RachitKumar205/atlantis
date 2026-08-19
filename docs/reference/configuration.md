@@ -448,6 +448,30 @@ diagnosing a deployment, and the first membership in a new one. It now reads
 the same membership row and refuses without one, and it has no `-role` flag:
 the row decides, so the command and the endpoint cannot disagree.
 
+### Moving between organisations
+
+An account in more than one organisation gets a switcher in the console's
+sidebar. Picking an entry is a full-page navigation to `/authorize?org=<name>`
+— the same route as above, doing the same three things — so the browser may
+come back to this console or land on a different deployment entirely,
+whichever that organisation registered. Nothing needs configuring for either.
+
+Assertions carry an `orgs` claim naming every membership. Names only: no
+roles, no endpoints. The console keeps it on the session row and serves it from
+`/api/auth/me`, because the console cannot ask Cloud what somebody belongs to —
+that separation is what keeps a Cloud outage from being a console outage.
+
+**The list is a snapshot; the membership is the gate.** An organisation removed
+at Cloud keeps appearing in that person's switcher until their session ends,
+and choosing it gets a refusal page, because `/authorize` re-reads the row
+before minting. Nothing in a console decides anything from this claim.
+
+**Every console a user reaches learns the names of their other
+organisations.** That is the cost of a switcher that can offer an organisation
+living on another deployment, and it is accepted deliberately.
+
+With one organisation the sidebar shows a label and no control.
+
 ### Confirming a destructive action
 
 The console's danger-zone actions need step-up, and step-up means presenting a

@@ -64,9 +64,20 @@ const maxSnapshotBytes = 256 << 20 // 256 MiB
 // job. internalID is the runtime's enumerable id; pubID is the
 // 128-bit opaque token we hand to the browser.
 type sandboxMeta struct {
-	pubID         string
-	internalID    string
-	ownerSubject  string
+	pubID      string
+	internalID string
+
+	// ownerSubject and ownerOrg together are the owner.
+	//
+	// The subject alone is not, and treating it as one was a real gap. A person
+	// can belong to two organisations, and since the organisation switcher a
+	// session moves between them without the subject changing — so keyed on the
+	// subject only, a sandbox booted against one organisation's schema stayed
+	// listed, openable and counted after switching to another. Both fields are
+	// compared everywhere ownership is decided.
+	ownerSubject string
+	ownerOrg     string
+
 	createdAt     time.Time
 	lastActive    time.Time
 	schemaVersion string
@@ -104,14 +115,17 @@ func newSandboxLayer(perUser int, ttl time.Duration) *sandboxLayer {
 // lookup returns meta + ownership-check result. Called from the proxy
 // path; if ok=false the caller returns 404 (we don't distinguish
 // "not yours" from "doesn't exist" to avoid pubID enumeration leaks).
-func (l *sandboxLayer) lookup(pubID string, ownerSubject string) (*sandboxMeta, bool) {
+func (l *sandboxLayer) lookup(pubID string, ownerSubject, ownerOrg string) (*sandboxMeta, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	m, ok := l.byPub[pubID]
 	if !ok {
 		return nil, false
 	}
-	if m.ownerSubject != ownerSubject {
+	// Both halves. A sandbox is bound to the schema of the organisation it was
+	// booted against, so reaching one from a session in another organisation
+	// would be reading that organisation's shape.
+	if m.ownerSubject != ownerSubject || m.ownerOrg != ownerOrg {
 		return nil, false
 	}
 	return m, true
@@ -130,12 +144,12 @@ func (l *sandboxLayer) touchActivity(pubID string) {
 
 // listForUser returns the user's active sandboxes, ordered by createdAt
 // descending (most recent first). RLock-only; cheap.
-func (l *sandboxLayer) listForUser(ownerSubject string) []*sandboxMeta {
+func (l *sandboxLayer) listForUser(ownerSubject, ownerOrg string) []*sandboxMeta {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	var out []*sandboxMeta
 	for _, m := range l.byPub {
-		if m.ownerSubject == ownerSubject {
+		if m.ownerSubject == ownerSubject && m.ownerOrg == ownerOrg {
 			out = append(out, m)
 		}
 	}
@@ -149,12 +163,17 @@ func (l *sandboxLayer) listForUser(ownerSubject string) []*sandboxMeta {
 }
 
 // countForUser is the per-user-limit check helper.
-func (l *sandboxLayer) countForUser(ownerSubject string) int {
+//
+// Per user *per organisation*, following lookup and listForUser: counting
+// across organisations would let a sandbox somebody cannot see stop them
+// booting one they can, and the refusal would name a limit they appear to be
+// nowhere near.
+func (l *sandboxLayer) countForUser(ownerSubject, ownerOrg string) int {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	n := 0
 	for _, m := range l.byPub {
-		if m.ownerSubject == ownerSubject {
+		if m.ownerSubject == ownerSubject && m.ownerOrg == ownerOrg {
 			n++
 		}
 	}
@@ -298,7 +317,7 @@ type sandboxBootResponse struct {
 // into the meta map. Per-user limit applies; embedded is opt-in.
 func (s *Server) handleSandboxBoot(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(ctxUser).(*User)
-	if s.sandboxes.countForUser(user.Subject) >= s.sandboxes.perUser {
+	if s.sandboxes.countForUser(user.Subject, user.Org) >= s.sandboxes.perUser {
 		jsonError(w, fmt.Sprintf("max %d active sandboxes — destroy one first", s.sandboxes.perUser), http.StatusTooManyRequests)
 		return
 	}
@@ -359,6 +378,7 @@ func (s *Server) handleSandboxBoot(w http.ResponseWriter, r *http.Request) {
 		pubID:         pubID,
 		internalID:    internalID,
 		ownerSubject:  user.Subject,
+		ownerOrg:      user.Org,
 		createdAt:     now,
 		lastActive:    now,
 		schemaVersion: hash,
@@ -425,7 +445,7 @@ type sandboxListResponse struct {
 // else.
 func (s *Server) handleSandboxList(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(ctxUser).(*User)
-	metas := s.sandboxes.listForUser(user.Subject)
+	metas := s.sandboxes.listForUser(user.Subject, user.Org)
 	out := sandboxListResponse{Sandboxes: make([]sandboxListEntry, 0, len(metas))}
 	for _, m := range metas {
 		out.Sandboxes = append(out.Sandboxes, sandboxListEntry{
@@ -446,7 +466,7 @@ func (s *Server) handleSandboxList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSandboxDestroy(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(ctxUser).(*User)
 	pubID := r.PathValue("pubID")
-	if _, ok := s.sandboxes.lookup(pubID, user.Subject); !ok {
+	if _, ok := s.sandboxes.lookup(pubID, user.Subject, user.Org); !ok {
 		jsonError(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -468,7 +488,7 @@ func (s *Server) handleSandboxDestroy(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSandboxProxy(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(ctxUser).(*User)
 	pubID := r.PathValue("pubID")
-	meta, ok := s.sandboxes.lookup(pubID, user.Subject)
+	meta, ok := s.sandboxes.lookup(pubID, user.Subject, user.Org)
 	if !ok {
 		jsonError(w, "not found", http.StatusNotFound)
 		return
@@ -516,7 +536,7 @@ func (s *Server) handleSandboxFork(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	user := r.Context().Value(ctxUser).(*User)
 	pubID := r.PathValue("pubID")
-	parent, ok := s.sandboxes.lookup(pubID, user.Subject)
+	parent, ok := s.sandboxes.lookup(pubID, user.Subject, user.Org)
 	if !ok {
 		jsonError(w, "not found", http.StatusNotFound)
 		return
@@ -533,10 +553,10 @@ func (s *Server) handleSandboxFork(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Per-user budget: existing count + N must stay within the limit.
-	if s.sandboxes.countForUser(user.Subject)+req.N > s.sandboxes.perUser {
+	if s.sandboxes.countForUser(user.Subject, user.Org)+req.N > s.sandboxes.perUser {
 		jsonError(w,
 			fmt.Sprintf("fork would exceed per-user limit (have %d, want %d more, cap %d)",
-				s.sandboxes.countForUser(user.Subject), req.N, s.sandboxes.perUser),
+				s.sandboxes.countForUser(user.Subject, user.Org), req.N, s.sandboxes.perUser),
 			http.StatusTooManyRequests)
 		return
 	}
@@ -592,6 +612,7 @@ func (s *Server) handleSandboxFork(w http.ResponseWriter, r *http.Request) {
 			pubID:         newPub,
 			internalID:    internalID,
 			ownerSubject:  user.Subject,
+			ownerOrg:      user.Org,
 			createdAt:     now,
 			lastActive:    now,
 			schemaVersion: parent.schemaVersion,

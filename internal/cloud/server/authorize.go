@@ -102,6 +102,21 @@ func (s *Server) grantFor(w http.ResponseWriter, r *http.Request, user *store.Us
 		return issuer.Grant{}, false
 	}
 
+	// Every organisation this person belongs to, so the console can draw a
+	// switcher without calling Cloud on each page.
+	//
+	// A failure here is not fatal. The list is a convenience and the gate is
+	// this function; minting without it costs a switcher, and refusing the
+	// sign-in over it would take somebody's console away to save a menu.
+	var orgs []string
+	memberships, err := s.db.MembershipsOf(ctx, user.ID)
+	if err != nil {
+		s.log.Warn("read memberships for the org list", "user", user.ID, "err", err)
+	}
+	for _, m := range memberships {
+		orgs = append(orgs, m.Org)
+	}
+
 	return issuer.Grant{
 		Subject: user.ID,
 		Org:     org,
@@ -111,6 +126,10 @@ func (s *Server) grantFor(w http.ResponseWriter, r *http.Request, user *store.Us
 		// The destination is also the audience. One value, so a token cannot be
 		// delivered somewhere it would not verify.
 		Audience: consoleURL,
+		// Names only. Roles are deliberately absent: a console has no business
+		// knowing what somebody may do somewhere it cannot reach, and the list
+		// is only ever used to draw a menu.
+		Orgs: orgs,
 	}, true
 }
 

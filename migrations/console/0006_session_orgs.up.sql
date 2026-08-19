@@ -1,0 +1,28 @@
+-- The organisations a session's owner belongs to.
+--
+-- Copied off the assertion at sign-in, like every other column on this row. The
+-- console holds no user record and cannot ask Cloud — that separation is
+-- deliberate (step 3), so that Cloud being down does not take a console with
+-- it. Which means the list has to arrive with the assertion and be kept here,
+-- or it is not available at all.
+--
+-- ── What it is for, and what it must not become ──────────────────────────────
+--
+-- Drawing an organisation switcher. Nothing else.
+--
+-- It is a snapshot: a membership revoked at Cloud after sign-in keeps appearing
+-- here until the session ends. That is safe for exactly one reason — Cloud's
+-- /authorize re-reads cloud.memberships before minting, so a stale entry costs
+-- a refusal page and grants nothing. The moment any code authorizes anything
+-- from this column, the staleness stops being free and this comment stops being
+-- true.
+--
+-- TEXT[] rather than a join table. A join table would be the right shape for
+-- something queried across sessions; this is read only as part of the row it
+-- belongs to, always in whole, and never searched.
+--
+-- Defaults to empty, which is also what a session opened before this existed
+-- carries. A console that reads an empty list shows no switcher, rather than
+-- concluding the user belongs nowhere.
+ALTER TABLE console.sessions
+    ADD COLUMN IF NOT EXISTS orgs TEXT[] NOT NULL DEFAULT '{}';

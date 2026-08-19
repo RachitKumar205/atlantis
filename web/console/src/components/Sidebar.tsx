@@ -1,7 +1,11 @@
+import { useEffect, useRef, useState } from 'react'
 import { Link, useRouterState } from '@tanstack/react-router'
 import {
   Activity,
   Box,
+  Building2,
+  Check,
+  ChevronsUpDown,
   Cog,
   Cpu,
   History,
@@ -15,6 +19,7 @@ import {
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import { useMe } from '@/hooks/useAuth'
+import { switcherMode } from '@/lib/session'
 
 const NAV = [
   { to: '/schema',     icon: Layers,   tip: 'Schema' },
@@ -64,6 +69,8 @@ export function Sidebar() {
         <span className="rail__brand">atlantis</span>
       </div>
 
+      <OrgSwitcher />
+
       <div className="rail__group">
         {NAV.map(({ to, icon: Icon, tip }) => (
           <Link
@@ -106,6 +113,106 @@ export function Sidebar() {
         </button>
       </div>
     </nav>
+  )
+}
+
+// OrgSwitcher shows which organisation this console is serving, and offers the
+// others when there are others.
+//
+// Every entry is a plain link to Cloud. The console does not know — and must
+// not decide — where a switch lands: `/authorize?org=<name>` re-reads the
+// membership, mints for that organisation, and redirects to *its* registered
+// console, which may be this deployment or an entirely different one. So a
+// switch is a full-page navigation and never a fetch. `me.orgs` carries a
+// server-built URL per organisation for the same reason `step_up_url` does:
+// nothing here assembles a Cloud URL out of a name it happens to hold.
+//
+// With one organisation this renders a label and no control. A menu that
+// always opens onto a single choice teaches people that it does nothing, and
+// they stop looking at it on the day it has two.
+function OrgSwitcher() {
+  const { data: me } = useMe()
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  // Dismiss on an outside press or Escape. `mousedown` rather than `click` so
+  // the menu is gone before whatever was underneath it reacts, and Escape
+  // because a popover you can only close by aiming at it is a trap for anyone
+  // driving from the keyboard.
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  const mode = switcherMode(me)
+  if (mode === 'none' || !me) return null
+
+  const targets = me.orgs ?? []
+  if (mode === 'label') {
+    return (
+      <div className="rail-org" title={me.org}>
+        <div className="rail-org__face" data-testid="org-label">
+          <Building2 />
+          <span className="rail-org__name">{me.org}</span>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="rail-org" ref={wrapRef}>
+      <button
+        type="button"
+        className={`rail-org__face rail-org__face--btn ${open ? 'is-open' : ''}`}
+        // aria-haspopup="true" and not "menu". role="menu" is a promise of
+        // arrow-key navigation and typeahead; this is a short list of links,
+        // which the browser already moves between with Tab. A role that
+        // announces a keyboard model the component does not implement is worse
+        // than no role.
+        aria-haspopup="true"
+        aria-expanded={open}
+        aria-label={`Organisation: ${me.org}. Switch organisation`}
+        title={me.org}
+        data-testid="org-switcher"
+        onClick={() => setOpen(v => !v)}
+      >
+        <Building2 />
+        <span className="rail-org__name">{me.org}</span>
+        <ChevronsUpDown className="rail-org__chev" />
+      </button>
+
+      <div
+        className={`screens-pop screens-pop--org ${open ? 'is-open' : ''}`}
+        aria-label="Organisations"
+      >
+        <div className="screens-pop__group">Organisations</div>
+        {targets.map(o =>
+          o.name === me.org ? (
+            <div key={o.name} className="screens-item is-active" aria-current="true">
+              <Building2 />
+              <span>{o.name}</span>
+              <Check className="screens-item__tick" />
+            </div>
+          ) : (
+            <a key={o.name} className="screens-item" href={o.url}>
+              <Building2 />
+              <span>{o.name}</span>
+            </a>
+          ),
+        )}
+      </div>
+    </div>
   )
 }
 

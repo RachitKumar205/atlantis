@@ -580,6 +580,23 @@ func (s *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Whatever this browser held before, it does not hold now.
+	//
+	// Setting the cookie below replaces the value, so the previous row becomes
+	// unreachable — but it stays valid until it expires, and a session nobody
+	// can reach still counts wherever sessions are counted: sign-out-all,
+	// "other sessions", any future quota. One browser, one row.
+	//
+	// After the new session exists, so a failure here leaves somebody signed in
+	// rather than signed out of both. Not fatal for the same reason: the
+	// sign-in succeeded, and refusing it over a row that will expire anyway
+	// would be losing the thing to protect the bookkeeping.
+	if prev, err := r.Cookie(sessionCookieName); err == nil && prev.Value != token {
+		if err := s.db.deleteSession(r.Context(), prev.Value); err != nil {
+			s.log.Warn("delete the session being replaced", "err", err)
+		}
+	}
+
 	setSessionCookie(w, token, s.cfg.CookieSecure)
 	s.db.forOrg(claims.Org).logAction(r.Context(), claims.Subject, claims.Email, "signed_in", map[string]any{
 		"org": claims.Org,
@@ -679,7 +696,38 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		// to match exactly, so there is no second value that could drift.
 		"step_up_url": s.cfg.CloudIssuer + "/authorize?org=" +
 			url.QueryEscape(u.Org) + "&prompt=reauth",
+
+		// Every organisation this person belongs to, each with the URL that
+		// switches to it. Built here for the same two reasons as step_up_url,
+		// and one more: a name assembled into a URL by the page is a name the
+		// page could have chosen.
+		//
+		// The URL goes to Cloud, not to the other console. Cloud re-reads the
+		// membership, mints, and redirects to wherever that organisation's
+		// console actually is — which may not be this one. That is the whole
+		// switch, and it is why the console needs no idea where anything else
+		// lives.
+		"orgs": s.switchTargets(u),
 	})
+}
+
+// switchTargets pairs each organisation with the URL that moves to it.
+//
+// The current one is included. A switcher that hid it would have to say what it
+// is showing some other way, and a list where the selected item is missing is a
+// list somebody has to reason about.
+func (s *Server) switchTargets(u *User) []map[string]string {
+	// Never nil. An absent list and an empty one mean the same thing to the
+	// page — draw no switcher — and `null` in JSON is one more shape for it to
+	// handle for no gain.
+	out := make([]map[string]string, 0, len(u.Orgs))
+	for _, org := range u.Orgs {
+		out = append(out, map[string]string{
+			"name": org,
+			"url":  s.cfg.CloudIssuer + "/authorize?org=" + url.QueryEscape(org),
+		})
+	}
+	return out
 }
 
 // ── admin RPC proxies ─────────────────────────────────────────────────────────

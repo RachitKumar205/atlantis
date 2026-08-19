@@ -43,6 +43,22 @@ export interface MeResult {
   // org, so the page never assembles a URL or decides which organisation it is
   // asking about.
   step_up_url: string
+
+  // Every organisation this account belongs to, each with the URL that
+  // switches to it, including the one currently in use.
+  //
+  // A snapshot taken when the session opened — a membership revoked since then
+  // still appears here. That is safe because the URL goes to Cloud, which
+  // re-reads the membership and refuses: the list decides what to draw, never
+  // what is allowed. Nothing here may gate anything.
+  //
+  // Empty for a session opened before this existed, which renders no switcher.
+  orgs: OrgTarget[]
+}
+
+export interface OrgTarget {
+  name: string
+  url: string
 }
 
 export interface SubmittedFile {

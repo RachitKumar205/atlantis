@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
+import { ASSERTION_PARAM, MODE_PARAM } from '@/lib/session'
 
 // Centered authcard: concentric-ring logo above lowercase "atlantis"
 // wordmark. Multiple bolder redesigns (porthole + serif wordmark + depth
@@ -18,8 +19,11 @@ import { api } from '@/api/client'
 // between the browser and here. It is also erased from the address bar below
 // before the exchange resolves, so it does not survive into history or a
 // bookmark.
-const ASSERTION_PARAM = 'assertion'
-const MODE_PARAM = 'mode'
+//
+// ASSERTION_PARAM and MODE_PARAM come from @/lib/session, which is also what
+// the router's guard reads the fragment with. The guard has to let this page
+// render when an assertion is present, so both must agree on what "present"
+// means; when they were two pieces of code they did not have to.
 
 // STEP_UP_MESSAGE is the postMessage type this page sends to its opener.
 //

@@ -226,6 +226,9 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*identity.Claims, 
 		// false, which is the safe direction: the step-up gate refuses, and the
 		// user is asked to prove themselves rather than waved through.
 		StepUp: private.StepUp,
+		// Carried, and used for nothing but drawing a menu. Claims.Orgs says
+		// why that restriction is the whole reason a stale list is harmless.
+		Orgs: private.Orgs,
 	}
 	if registered.Expiry != nil {
 		claims.Expiry = registered.Expiry.Time()

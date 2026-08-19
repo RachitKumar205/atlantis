@@ -71,6 +71,15 @@ type User struct {
 	Role  string // "admin" | "viewer"
 	Email string
 	Name  string
+
+	// Orgs is every organisation this person belongs to, for the switcher.
+	//
+	// A snapshot like everything else here, and unlike everything else here it
+	// is not something to make a decision from. Org above is what this session
+	// acts in and what binds every query; this is a list of names to draw. What
+	// authorizes a move between them is Cloud's /authorize, which re-reads the
+	// membership rather than trusting this.
+	Orgs []string
 }
 
 type store struct {
@@ -402,10 +411,25 @@ func (s *store) createSession(ctx context.Context, c *identity.Claims) (string, 
 	// hex-encoded tokens stay valid because session lookup is a plain
 	// string compare; we only emit the new shape going forward.
 	token := base64.RawURLEncoding.EncodeToString(b)
+
+	// Never nil.
+	//
+	// The column is NOT NULL and pgx encodes a nil slice as NULL, so an
+	// assertion carrying no orgs claim — which is every assertion Cloud minted
+	// before the claim existed, and every one it mints when it cannot read
+	// memberships — would fail this insert. That is sign-in refused outright to
+	// pay for a menu, and the failure is a 500 with nothing in it naming the
+	// column.
+	orgs := c.Orgs
+	if orgs == nil {
+		orgs = []string{}
+	}
+
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO console.sessions (token, subject, org, role, email, name, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-	`, token, c.Subject, c.Org, string(c.Role), c.Email, c.Name, time.Now().Add(sessionTTL))
+		INSERT INTO console.sessions (token, subject, org, role, email, name, orgs, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`, token, c.Subject, c.Org, string(c.Role), c.Email, c.Name, orgs,
+		time.Now().Add(sessionTTL))
 	return token, err
 }
 
@@ -588,10 +612,11 @@ func (s *store) getSessionInfo(ctx context.Context, token string) (*sessionInfo,
 		sudoUntil *time.Time
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT subject, org, role, email, name, expires_at, sudo_until
+		SELECT subject, org, role, email, name, orgs, expires_at, sudo_until
 		FROM console.sessions
 		WHERE token = $1 AND expires_at > NOW()
-	`, token).Scan(&u.Subject, &u.Org, &u.Role, &u.Email, &u.Name, &expiresAt, &sudoUntil)
+	`, token).Scan(&u.Subject, &u.Org, &u.Role, &u.Email, &u.Name, &u.Orgs,
+		&expiresAt, &sudoUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

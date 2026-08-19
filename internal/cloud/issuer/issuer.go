@@ -189,6 +189,10 @@ type Grant struct {
 	// StepUp says a second factor was presented for this assertion. Set only by
 	// the reauth path; see identity.Claims.StepUp for what rests on it.
 	StepUp bool
+
+	// Orgs names every organisation the subject belongs to, for a console's
+	// organisation switcher. A hint only — see identity.Claims.Orgs.
+	Orgs []string
 }
 
 // Mint returns a signed assertion for g.
@@ -221,6 +225,7 @@ func (i *Issuer) Mint(g Grant) (string, error) {
 		Name:    g.Name,
 		Expiry:  expiry,
 		StepUp:  g.StepUp,
+		Orgs:    g.Orgs,
 	}
 	if err := claims.Validate(); err != nil {
 		return "", fmt.Errorf("refusing to mint an assertion no console would accept: %w", err)
@@ -252,6 +257,7 @@ func (i *Issuer) Mint(g Grant) (string, error) {
 		Email:  g.Email,
 		Name:   g.Name,
 		StepUp: g.StepUp,
+		Orgs:   g.Orgs,
 	}
 
 	tok, err := jwt.Signed(signer).Claims(registered).Claims(private).Serialize()

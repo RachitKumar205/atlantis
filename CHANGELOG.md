@@ -13,6 +13,54 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Added
 
+#### Move between the organisations you belong to
+
+A console's sidebar now shows the organisation it is serving, and — for an
+account in more than one — offers the others. Picking one leaves for Cloud,
+which re-reads the membership, mints, and sends the browser to *that*
+organisation's registered console. It may be this deployment or a different one;
+the console does not know and does not decide.
+
+With one organisation it is a label and not a control. A menu that always opens
+onto a single choice teaches people it does nothing, and they stop looking at it
+on the day it has two.
+
+- **Assertions carry an `orgs` claim**, filled from `cloud.memberships` at
+  `/authorize`. Names only, no roles, and it authorizes nothing anywhere. The
+  console stores it on the session row (`console.sessions.orgs`, migration
+  `console/0006`) and returns it from `/api/auth/me` with a URL per
+  organisation, built server-side exactly as `step_up_url` already was.
+- **The list is a snapshot and the gate is elsewhere.** An organisation removed
+  at Cloud keeps appearing in somebody's switcher until their session ends, and
+  costs them a refusal page — because `/authorize` re-reads the row before
+  minting. Refreshing the list from Cloud on every menu open would trade that
+  for a console whose chrome breaks when Cloud is down, which is the dependency
+  the console was deliberately built without.
+- **It is a real disclosure and it is accepted.** Every console a user reaches
+  learns the *names* of their other organisations. Without it the switcher
+  cannot offer the case it exists for, which is an organisation on another
+  deployment.
+
+Three things had to be fixed for the switch to work at all, each of which
+presented as nothing happening:
+
+- **The router bounced the returning browser.** An authenticated browser was
+  redirected away from `/login`, and on a switch within one console the old
+  session is still live when Cloud redirects back — so the assertion in the
+  fragment was dropped and the user landed on the schema page, in the
+  organisation they started in, with no error anywhere. This also silently
+  broke the step-up popup, which shares the session cookie and is therefore
+  authenticated the instant it opens.
+- **Signing in again left the previous session live.** Overwriting the cookie
+  makes a row unreachable, not gone, and an unreachable session still counts
+  wherever sessions are counted. The exchange now deletes the row the browser
+  was carrying — that row, not every row for that person, so switching on a
+  laptop does not sign anybody out on their phone.
+- **Sandboxes were owned by the subject alone.** A subject does not change
+  across a switch, so a sandbox booted against one organisation's schema stayed
+  listed, openable and counted after moving to another. Ownership is now the
+  subject **and** the organisation.
+
 #### Membership is now the gate — breaking for `cloud mint`
 
 `GET /authorize?org=<name>` takes a signed-in Cloud user to that

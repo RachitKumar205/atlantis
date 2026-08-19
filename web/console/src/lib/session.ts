@@ -1,0 +1,73 @@
+import type { MeResult } from '@/api/client'
+
+// Two decisions the chrome makes about a session, kept out of the components
+// that make them.
+//
+// Not for tidiness. Both are one boolean wide, both are invisible when wrong —
+// a switch that appears to do nothing, a menu that is missing — and neither can
+// be reached from a test without a DOM, a router and a rendered tree. Here they
+// are ordinary functions, and the tests beside them are the only thing standing
+// between "the condition is still right" and "the condition still compiles".
+
+// The name Cloud gives the assertion in the redirect fragment, and the flag
+// that says which of the two arrivals it is.
+//
+// Fragment, not query string: it never reaches a server, so it stays out of
+// access logs and out of the Referer header on the next navigation.
+export const ASSERTION_PARAM = 'assertion'
+export const MODE_PARAM = 'mode'
+
+// carriesAssertion reports whether a URL fragment holds an assertion.
+//
+// The router's guard and the login page must agree about this, and before it
+// was one function they did not have to: the guard tested for the substring
+// `assertion=`, which also matches `#my_assertion=x`, while the page parsed the
+// fragment properly. Two answers to one question is how a browser ends up
+// bounced away from a page that was about to consume a credential.
+export function carriesAssertion(hash: string): boolean {
+  const raw = hash.replace(/^#/, '')
+  if (!raw) return false
+  return (new URLSearchParams(raw).get(ASSERTION_PARAM) ?? '') !== ''
+}
+
+// shouldRenderLogin decides whether /login renders or the guard bounces the
+// browser to the console.
+//
+// An authenticated browser normally has no business at /login. Two arrivals are
+// the exception, and both are authenticated by definition:
+//
+//   - Switching organisation. The old session is still live when Cloud
+//     redirects back, so bouncing here drops the assertion in the fragment and
+//     lands the user on /schema, still in the old organisation, with nothing
+//     anywhere to say the switch did not happen.
+//   - Stepping up. The popup shares the session cookie, so it is authenticated
+//     the moment it opens. Bounced, it never runs the page that posts the
+//     assertion back to the dialog waiting in the opener, and the dialog waits
+//     for a message nobody will send.
+//
+// Reading the fragment is not trusting it. Login.tsx still spends the token at
+// the server, which checks the signature, the issuer and the audience, and
+// spends the jti once.
+export function shouldRenderLogin(authed: boolean, hash: string): boolean {
+  return !authed || carriesAssertion(hash)
+}
+
+// How the sidebar draws the organisation control.
+export type SwitcherMode =
+  // Nothing to draw — no session yet.
+  | 'none'
+  // The organisation, as text. One organisation, or a session opened before
+  // the claim existed and carrying an empty list.
+  | 'label'
+  // The organisation, and the others behind it.
+  | 'menu'
+
+// switcherMode picks between them.
+//
+// 'menu' takes two organisations, not one. A control that always opens onto a
+// single choice teaches people it does nothing, and they stop looking at it on
+// the day it has two.
+export function switcherMode(me: Pick<MeResult, 'org' | 'orgs'> | undefined): SwitcherMode {
+  if (!me?.org) return 'none'
+  return (me.orgs?.length ?? 0) > 1 ? 'menu' : 'label'
+}

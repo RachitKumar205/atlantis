@@ -9,6 +9,7 @@ import type { QueryClient } from '@tanstack/react-query'
 import { Sidebar } from '@/components/Sidebar'
 import { CommandBar, useCommandBar } from '@/components/CommandBar'
 import { queries, ApiError } from '@/api/client'
+import { shouldRenderLogin } from '@/lib/session'
 
 // Last-resort error boundary. Without this, an uncaught throw blanks
 // the whole console; with it, the user sees the actual message + stack
@@ -71,9 +72,12 @@ export const Route = createRootRouteWithContext<RouterContext>()({
     }
 
     // /login is reachable unauthenticated, and is where an assertion from
-    // Cloud lands. An authenticated user has no business there.
+    // Cloud lands. Whether an authenticated browser may stay is the whole of
+    // shouldRenderLogin, which is where the reasoning lives.
     if (path.startsWith('/login')) {
-      if (authed) throw redirect({ to: '/' })
+      if (!shouldRenderLogin(authed, window.location.hash)) {
+        throw redirect({ to: '/' })
+      }
       return
     }
 

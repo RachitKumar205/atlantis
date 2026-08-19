@@ -54,6 +54,15 @@ type Private struct {
 	// consumer that has never heard of step-up reads the same token it always
 	// did. What it must never be is *assumed* — see the field in Claims.
 	StepUp bool `json:"step_up,omitempty"`
+
+	// Orgs names every organisation the subject belongs to, sorted.
+	//
+	// Names only — no roles, no endpoints. It exists so a console can draw an
+	// organisation switcher without calling Cloud on every page, which would
+	// make a Cloud outage a console outage.
+	//
+	// It is a hint, not an authority: see the field in Claims.
+	Orgs []string `json:"orgs,omitempty"`
 }
 
 // Claims is a verified assertion. A value of this type means the signature
@@ -113,6 +122,26 @@ type Claims struct {
 	// from context anywhere: an assertion that does not say a factor was
 	// presented did not have one presented.
 	StepUp bool
+
+	// Orgs names every organisation the subject belongs to, at the moment this
+	// assertion was minted.
+	//
+	// # A hint, not an authority
+	//
+	// It exists to populate a switcher, and it is a snapshot: a membership
+	// revoked after minting keeps appearing until the session ends. That is
+	// safe, and the reason is worth stating because it is the only thing
+	// keeping this claim from being a security decision — **/authorize re-reads
+	// cloud.memberships and refuses**, so a stale entry costs one refusal page
+	// and grants nothing.
+	//
+	// Nothing may authorize anything from this list. The moment something does,
+	// the staleness stops being free.
+	//
+	// Empty is normal: it is absent from assertions minted before this existed,
+	// and a console that finds it empty shows no switcher rather than assuming
+	// the user belongs nowhere.
+	Orgs []string
 }
 
 // ErrMissingClaim reports an assertion that verified cryptographically but did
