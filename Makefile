@@ -285,11 +285,48 @@ DEV_CERT_DIR ?= ./certs
 DEV_DATA_KEY_FILE ?= $(DEV_CERT_DIR)/console-data-key
 
 .PHONY: dev-certs
-dev-certs: ## Generate the local CA + server and console certs into ./certs
+dev-certs: ## Generate the local CAs + server, console, signer and enrolment certs into ./certs
 	@which openssl >/dev/null 2>&1 || (echo "openssl not found"; exit 1)
 	CERT_DIR="$(DEV_CERT_DIR)" \
 		CA_PRIVATE_DIR="$(DEV_CERT_DIR)/ca-private" \
 		sh deploy/init-certs.sh
+
+# The certificate signer, run on the host like every other dev target.
+#
+# NOT a compose service, and the reason is worth stating because adding one
+# looks obvious. `make dev` runs atlantis on the host against $(DEV_CERT_DIR),
+# while the compose `certs` service writes an entirely different CA into named
+# volumes — so a compose signer would hold an authority that has signed nothing
+# the locally-run atlantis trusts. A certificate it issued would fail the
+# handshake with no explanation, after having superseded the caller's binding.
+#
+# PG_URL is required: without it the signer cannot tell a registered caller from
+# a name somebody typed. SIGNER_CLIENT_CA is the SECOND authority — see
+# deploy/init-certs.sh for why it must not be the one in CA_DIR.
+.PHONY: dev-signer
+dev-signer: dev-certs ## Run the certificate signer against the local CA
+	CA_DIR="$(DEV_CERT_DIR)/ca-private" \
+		PG_URL="$(PG_URL)" \
+		SIGNER_LISTEN=127.0.0.1:7070 \
+		SIGNER_HEALTH_LISTEN=127.0.0.1:7071 \
+		SIGNER_TLS_CERT="$(DEV_CERT_DIR)/ca-private/signer-server.crt" \
+		SIGNER_TLS_KEY="$(DEV_CERT_DIR)/ca-private/signer-server.key" \
+		SIGNER_CLIENT_CA="$(DEV_CERT_DIR)/signer-ca.crt" \
+		SIGNER_ALLOWED_CLIENT_CNS=atlantis-console \
+		$(GO) run ./cmd/signer
+
+# The environment a console needs to offer enrolment. Used by dev-console.
+#
+# All of it or none of it — the console refuses to start half-configured, so
+# there is no arrangement where enrolment is quietly absent.
+CONSOLE_ENROLL_ENV = \
+	ATL_SIGNER_ADDR="https://127.0.0.1:7070" \
+	ATL_SIGNER_CERT="$(DEV_CERT_DIR)/signer-client.crt" \
+	ATL_SIGNER_KEY="$(DEV_CERT_DIR)/signer-client.key" \
+	ATL_SIGNER_CA="$(DEV_CERT_DIR)/signer-ca.crt" \
+	CONSOLE_ENROLL_LISTEN=127.0.0.1:3443 \
+	CONSOLE_ENROLL_TLS_CERT="$(DEV_CERT_DIR)/enroll-server.crt" \
+	CONSOLE_ENROLL_TLS_KEY="$(DEV_CERT_DIR)/enroll-server.key"
 
 # dev-server, not dev, when Postgres and memcached are already running.
 #
@@ -329,6 +366,7 @@ dev-console: dev-certs dev-console-role dev-data-key build-console ## Run the ma
 		CLOUD_ISSUER="$(CLOUD_ISSUER)" \
 		CLOUD_AUDIENCE="$(CLOUD_AUDIENCE)" \
 		CLOUD_JWKS_URL="$(CLOUD_JWKS_URL)" \
+		$(CONSOLE_ENROLL_ENV) \
 		$(BIN_DIR)/atlantis-console
 
 # ── Per-organisation atlantis registration ─────────────────────────────────

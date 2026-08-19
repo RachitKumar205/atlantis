@@ -7,10 +7,23 @@
 #                               SANs: DNS:atlantis, DNS:localhost, IP:127.0.0.1
 #                               plus DNS:<ATLANTIS_DOMAIN> if set
 #   console.crt / console.key — mTLS client cert for atlantis-console (CN=atlantis-console)
+#   signer-ca.crt             — the authority the signer accepts CALLERS BY (see below)
+#   signer-client.crt / .key  — the console's credential to the signer (CN=atlantis-console)
+#   enroll-server.crt / .key  — the console's enrolment listener; chains to ca.crt
 #
 # Writes to CA_PRIVATE_DIR (default /ca-private):
 #   ca.key   — CA private key (never written to CERT_DIR; only the signer mounts this)
 #   ca.crt   — copy so the signer can load the full CA bundle without mounting atl-certs
+#   signer-ca.key / signer-ca.crt   — the signer's client authority
+#   signer-server.crt / .key        — the signer's own TLS identity
+#
+# ── Two authorities, and why ─────────────────────────────────────────────────
+#
+# ca.* is what the signer ISSUES caller certificates from. signer-ca.* is what
+# the signer ACCEPTS callers by. They must not be the same authority: every
+# caller certificate is marked for client authentication, so a signer trusting
+# its own issuing CA would accept every certificate it had ever produced as a
+# credential to itself — and one caller could then obtain another's identity.
 #
 # Incremental, per artifact. A file that is present, unexpired and current is
 # left exactly as it is; only what is missing, expired or stale is written. So
@@ -60,6 +73,12 @@ fi
 need_ca=0
 need_server=0
 need_console=0
+# The signer's own trust domain. Deliberately a SECOND authority — see the
+# generation block below for why it must not be the one above.
+need_signer_ca=0
+need_signer_server=0
+need_signer_client=0
+need_enroll=0
 
 [ -f "$CERT_DIR/ca.crt" ] && [ -f "$CA_PRIVATE_DIR/ca.key" ] || need_ca=1
 
@@ -117,9 +136,48 @@ fi
 if [ "$need_ca" = 1 ]; then
     need_server=1
     need_console=1
+    # The enrolment listener's certificate chains to the issuing CA, because the
+    # machines that dial it already hold that CA — it arrives with their
+    # certificate bundle.
+    need_enroll=1
 fi
 
-if [ "$need_ca" = 0 ] && [ "$need_server" = 0 ] && [ "$need_console" = 0 ]; then
+# ── The signer's trust domain ────────────────────────────────────────────────
+[ -f "$CERT_DIR/signer-ca.crt" ] && [ -f "$CA_PRIVATE_DIR/signer-ca.key" ] || need_signer_ca=1
+if [ "$need_signer_ca" = 0 ]; then
+    openssl x509 -in "$CERT_DIR/signer-ca.crt" -noout -checkend 0 >/dev/null 2>&1 || {
+        echo "[certs] signer CA has expired — regenerating it and its leaves"
+        need_signer_ca=1
+    }
+fi
+
+[ -f "$CA_PRIVATE_DIR/signer-server.crt" ] && [ -f "$CA_PRIVATE_DIR/signer-server.key" ] || need_signer_server=1
+[ -f "$CERT_DIR/signer-client.crt" ] && [ -f "$CERT_DIR/signer-client.key" ] || need_signer_client=1
+[ -f "$CERT_DIR/enroll-server.crt" ] && [ -f "$CERT_DIR/enroll-server.key" ] || need_enroll=1
+
+for pair in "$CA_PRIVATE_DIR/signer-server.crt:need_signer_server" \
+            "$CERT_DIR/signer-client.crt:need_signer_client" \
+            "$CERT_DIR/enroll-server.crt:need_enroll"; do
+    f=${pair%%:*}
+    [ -f "$f" ] || continue
+    openssl x509 -in "$f" -noout -checkend 0 >/dev/null 2>&1 || {
+        echo "[certs] $(basename "$f") has expired — reissuing"
+        case ${pair#*:} in
+            need_signer_server) need_signer_server=1 ;;
+            need_signer_client) need_signer_client=1 ;;
+            need_enroll)        need_enroll=1 ;;
+        esac
+    }
+done
+
+if [ "$need_signer_ca" = 1 ]; then
+    need_signer_server=1
+    need_signer_client=1
+fi
+
+if [ "$need_ca" = 0 ] && [ "$need_server" = 0 ] && [ "$need_console" = 0 ] &&
+   [ "$need_signer_ca" = 0 ] && [ "$need_signer_server" = 0 ] &&
+   [ "$need_signer_client" = 0 ] && [ "$need_enroll" = 0 ]; then
     echo "[certs] all certificates present, unexpired and current — skipping generation"
     exit 0
 fi
@@ -188,6 +246,113 @@ if [ "$need_console" = 1 ]; then
     rm /tmp/atl-console.csr
 fi
 
+# ── The signer's certificate authority ────────────────────────────────────────
+#
+# A SECOND authority, independent of the one above, and that is the whole point
+# of it.
+#
+# The signer issues caller certificates from CA_DIR (the first CA), and every
+# leaf it issues is marked for client authentication. If the signer verified
+# incoming callers against that same authority, every certificate it had ever
+# issued would also be a valid credential FOR it — so caller `backend` could
+# dial in with its own legitimate certificate, ask for `payments`, and get it.
+# It would then authenticate as `payments`, because atlantis admits any
+# CA-signed certificate for a caller whose fingerprint has never been recorded.
+#
+# So: `ca.*` is what the signer issues FROM, and `signer-ca.*` is what it
+# accepts callers BY. Nothing is signed by both. The signer's allowlist of
+# common names is the second, independent answer to the same question.
+#
+# Regenerating this one does not touch the first, and vice versa. They are
+# separate trust domains and a caller certificate keeps working across a signer
+# CA rotation.
+if [ "$need_signer_ca" = 1 ]; then
+    echo "[certs] generating the signer's client CA (separate from the issuing CA)..."
+    openssl ecparam -genkey -name prime256v1 -noout -out "$CA_PRIVATE_DIR/signer-ca.key"
+    openssl req -new -x509 \
+        -key "$CA_PRIVATE_DIR/signer-ca.key" \
+        -out "$CERT_DIR/signer-ca.crt" \
+        -days "$DAYS" \
+        -subj "/CN=atlantis-signer-clients"
+    # The signer verifies clients against this and never mounts CERT_DIR, so it
+    # needs its own copy. It has no use for signer-ca.key and does not read it.
+    cp "$CERT_DIR/signer-ca.crt" "$CA_PRIVATE_DIR/signer-ca.crt"
+fi
+
+# The signer's own server identity, in CA_PRIVATE_DIR because that is the only
+# directory the signer mounts.
+if [ "$need_signer_server" = 1 ]; then
+    echo "[certs] generating the signer's server certificate..."
+    openssl ecparam -genkey -name prime256v1 -noout -out "$CA_PRIVATE_DIR/signer-server.key"
+    openssl req -new \
+        -key "$CA_PRIVATE_DIR/signer-server.key" \
+        -out /tmp/atl-signer.csr \
+        -subj "/CN=atlantis-signer"
+    printf 'subjectAltName=DNS:atlantis-signer,DNS:localhost,IP:127.0.0.1\n' > /tmp/atl-signer-san.ext
+    openssl x509 -req \
+        -in /tmp/atl-signer.csr \
+        -CA "$CERT_DIR/signer-ca.crt" \
+        -CAkey "$CA_PRIVATE_DIR/signer-ca.key" \
+        -CAcreateserial \
+        -out "$CA_PRIVATE_DIR/signer-server.crt" \
+        -days "$DAYS" \
+        -extfile /tmp/atl-signer-san.ext
+    rm /tmp/atl-signer.csr /tmp/atl-signer-san.ext
+fi
+
+# The console's credential TO the signer. CN=atlantis-console, which is what
+# SIGNER_ALLOWED_CLIENT_CNS names.
+#
+# Distinct from console.crt above, which is the console's credential to
+# ATLANTIS. Same common name, different authority, different purpose — and they
+# must stay distinct: console.crt chains to the issuing CA, so accepting it at
+# the signer would reopen exactly the hole this authority exists to close.
+if [ "$need_signer_client" = 1 ]; then
+    echo "[certs] generating the console's client certificate for the signer..."
+    openssl ecparam -genkey -name prime256v1 -noout -out "$CERT_DIR/signer-client.key"
+    openssl req -new \
+        -key "$CERT_DIR/signer-client.key" \
+        -out /tmp/atl-signer-client.csr \
+        -subj "/CN=atlantis-console"
+    openssl x509 -req \
+        -in /tmp/atl-signer-client.csr \
+        -CA "$CERT_DIR/signer-ca.crt" \
+        -CAkey "$CA_PRIVATE_DIR/signer-ca.key" \
+        -CAcreateserial \
+        -out "$CERT_DIR/signer-client.crt" \
+        -days "$DAYS"
+    rm /tmp/atl-signer-client.csr
+fi
+
+# The console's enrolment listener.
+#
+# Chains to the ISSUING CA, unlike the two above, because the machines that dial
+# it are callers — they already hold ca.crt, so they can verify this without
+# being given anything extra. First contact is the one moment a machine has no
+# certificate of its own; giving it one fewer thing to obtain matters there.
+if [ "$need_enroll" = 1 ]; then
+    echo "[certs] generating the console's enrolment listener certificate..."
+    openssl ecparam -genkey -name prime256v1 -noout -out "$CERT_DIR/enroll-server.key"
+    openssl req -new \
+        -key "$CERT_DIR/enroll-server.key" \
+        -out /tmp/atl-enroll.csr \
+        -subj "/CN=atlantis-console-enroll"
+    ENROLL_SAN="DNS:atlantis-console,DNS:localhost,IP:127.0.0.1"
+    if [ -n "$ATLANTIS_DOMAIN" ]; then
+        ENROLL_SAN="${ENROLL_SAN},DNS:${ATLANTIS_DOMAIN}"
+    fi
+    printf 'subjectAltName=%s\n' "$ENROLL_SAN" > /tmp/atl-enroll-san.ext
+    openssl x509 -req \
+        -in /tmp/atl-enroll.csr \
+        -CA "$CERT_DIR/ca.crt" \
+        -CAkey "$CA_PRIVATE_DIR/ca.key" \
+        -CAcreateserial \
+        -out "$CERT_DIR/enroll-server.crt" \
+        -days "$DAYS" \
+        -extfile /tmp/atl-enroll-san.ext
+    rm /tmp/atl-enroll.csr /tmp/atl-enroll-san.ext
+fi
+
 # ── Permissions ───────────────────────────────────────────────────────────────
 # 644 so non-root service containers (atlantis UID 10001, console app user,
 # signer's "signer" user) can read keys from the volumes. The security
@@ -196,7 +361,7 @@ fi
 #   - atl-ca-private is mounted ONLY by signer (ro) + certs (rw)
 # Nothing else in the compose stack ever sees the CA key.
 chmod 644 "$CERT_DIR/"*.key "$CERT_DIR/"*.crt
-chmod 644 "$CA_PRIVATE_DIR/ca.key" "$CA_PRIVATE_DIR/ca.crt"
+chmod 644 "$CA_PRIVATE_DIR/"*.key "$CA_PRIVATE_DIR/"*.crt
 # (Caller-side keys get 600 because they live on a host filesystem, not inside
 # a scoped volume.)
 
