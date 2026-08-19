@@ -242,7 +242,7 @@ Read by `cmd/console`, not the Atlantis server.
 | `ATL_SIGNER_CA` | (unset) | Verifies the signer's server certificate. Not the authority any caller is issued from. |
 | `CONSOLE_ENROLL_LISTEN` | (unset) | Address for the enrolment listener, e.g. `:3443`. Carries two routes and never the console API or SPA. |
 | `CONSOLE_ENROLL_TLS_CERT` / `_KEY` | (unset) | That listener's own server certificate. It terminates its own TLS, unlike `CONSOLE_LISTEN`. |
-| `CONSOLE_ENROLL_CLIENT_CA` | (unset) | Verifies a machine renewing with its current certificate. Not yet required — renewal is the next step. |
+| `CONSOLE_ENROLL_CLIENT_CA` | (unset) | Verifies a machine renewing with its current certificate. Set it to the organisation's own CA — that is what its callers hold. |
 | `SANDBOX_PER_USER_LIMIT` | `3` | Maximum concurrent sandboxes per authenticated user. A boot beyond this returns HTTP `429`. The limit also caps fork count — forking N children requires `N + parent` headroom. |
 | `SANDBOX_TTL` | `30m` | Idle window after which the BFF's janitor evicts a sandbox. Go duration syntax. Set lower (`10s`) for CI; higher (`2h`) for long agent loops. |
 
@@ -502,6 +502,26 @@ completing an enrolment stops the previous one authenticating — for every
 machine still using it. The console warns before you start, and cannot tell you
 whether there is a previous one: it does not see atlantis's fingerprint, only
 its own record of what it has enrolled.
+
+#### Renewing
+
+A machine renews by presenting the certificate it is replacing — no token. The
+request carries only a CSR: the organisation and the caller come from the
+console's record of what it issued, looked up by the presented certificate's
+fingerprint. A certificate this console did not issue cannot be renewed here,
+which includes anything from `make dev-caller-cert`; those keep authenticating
+and are replaced by enrolling.
+
+**The certificate being replaced keeps working for 24 hours.** atlantis binds a
+caller to one certificate, so without an overlap a renewal whose response is
+lost — a timeout, a 502, a crash before the file lands — leaves the machine
+holding something that no longer authenticates and needing a valid certificate
+to try again. The window is what makes that recoverable without an operator.
+
+**Ephemeral CI runners do not renew.** A runner that cannot keep its key between
+runs never reaches the renewal threshold, and its certificate expires at 90
+days. Those callers should keep the key in a secret, as
+`guides/set-up-caller-ci.md` describes.
 
 #### The signer
 

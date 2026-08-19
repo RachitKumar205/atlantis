@@ -69,6 +69,7 @@ import (
 func (s *Server) buildEnrollListener() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /enroll", s.handleEnroll)
+	mux.HandleFunc("POST /renew", s.handleRenew)
 
 	tlsCfg := &tls.Config{
 		MinVersion: tls.VersionTLS12,
@@ -302,6 +303,23 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse the CSR BEFORE spending the token.
+	//
+	// Whether the request is a well-formed, self-signed certificate request is a
+	// question about its bytes. It has nothing to do with whether the token
+	// authorises anything, and answering it costs no secret — so a machine that
+	// sends a malformed CSR should get a 400 and keep its token, rather than
+	// having to go back to an admin for another one because of a typo.
+	//
+	// The CN check is deliberately NOT here: it compares against the caller on
+	// the token's row, which is not known until the row is spent. That one is an
+	// authority question, and getting it wrong does cost the token.
+	csr, err := parseCSRPEM(req.CSRPEM)
+	if err != nil {
+		jsonError(w, "invalid CSR: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	// The organisation comes from the request and is not trusted — it is what
 	// gets BOUND, and the RESTRICTIVE policy on console.enroll_tokens is what
 	// compares it against the row. A token minted for another organisation
@@ -313,7 +331,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	// the other one.
 	org := req.Org
 	caller, err := s.db.forOrg(org).spendEnrollToken(r.Context(), req.Token)
-	if err != nil {
+	if err != nil { //nolint:nestif // the branches are one refusal and one 500
 		if !errors.Is(err, ErrEnrollTokenUnusable) {
 			s.log.Error("spend enrolment token", "org", org, "err", err)
 			jsonError(w, "internal error", http.StatusInternalServerError)
@@ -327,7 +345,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	// From here the token is spent whatever happens. Every later failure costs
 	// the operator a new token, which is the right trade: the alternative is a
 	// token that survives a partial enrolment and can be replayed against it.
-	bundle, err := s.issueForCaller(r.Context(), org, caller, req.CSRPEM)
+	bundle, err := s.issueForCaller(r.Context(), org, caller, csr, req.CSRPEM)
 	if err != nil {
 		s.log.Error("enrolment failed after the token was spent",
 			"org", org, "caller", caller, "err", err)
@@ -348,6 +366,112 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		"ca_pem":     bundle.caPEM,
 		"caller":     caller,
 		"org":        org,
+		"expires_at": bundle.expiresAt,
+	})
+}
+
+// ── Renewing, with the certificate the machine already holds ────────────────
+
+type renewRequest struct {
+	CSRPEM string `json:"csr_pem"`
+}
+
+// handleRenew reissues a certificate for a machine that presents the one it
+// already has.
+//
+// # What authorises this, and what does not
+//
+// The peer certificate, and nothing else. There is no token: a token would be a
+// long-lived minting credential sitting on disk, which is the thing enrolment
+// exists to avoid. A machine that has a working certificate has already proved
+// it is the caller; renewal only asks it to prove that again.
+//
+// # The request names neither the organisation nor the caller
+//
+// Both come from console.caller_certs, looked up by the SHA-256 of the leaf the
+// peer presented. That is deliberate and it is the only shape that works. There
+// is one signing authority and signCSR copies only the subject, so a leaf
+// carries a common name and nothing more — and caller names are `backend`,
+// `api`, `worker`, which collide across organisations as a matter of course. A
+// request that named its organisation would be naming something the console
+// could not check, and acme's `backend` could renew into globex's atlantis and
+// supersede the identity working there.
+//
+// A certificate this console did not issue has no row, so it cannot renew. That
+// includes certificates minted by `make dev-caller-cert` or straight from the
+// signer: they authenticate at atlantis perfectly well and are simply not
+// renewable here, which is the honest answer rather than a guess about who they
+// belong to.
+func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
+	if ok, retry := s.loginLim.allow(clientIP(r)); !ok {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", retry))
+		jsonError(w, "too many attempts, try again shortly", http.StatusTooManyRequests)
+		return
+	}
+
+	// The listener is VerifyClientCertIfGiven, because enrolment arrives with
+	// no certificate. So this handler asserts what it needs rather than assuming
+	// the listener did — and that assertion is the whole of renewal's
+	// authentication.
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		jsonError(w, "renewal requires the certificate you are replacing",
+			http.StatusUnauthorized)
+		return
+	}
+	peerLeaf := r.TLS.PeerCertificates[0]
+	sum := sha256.Sum256(peerLeaf.Raw)
+
+	var req renewRequest
+	if err := readJSON(r, &req); err != nil || req.CSRPEM == "" {
+		jsonError(w, "csr_pem is required", http.StatusBadRequest)
+		return
+	}
+	csr, err := parseCSRPEM(req.CSRPEM)
+	if err != nil {
+		jsonError(w, "invalid CSR: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	rec, err := s.db.callerCertByFingerprint(r.Context(), sum[:])
+	if errors.Is(err, ErrNotFound) {
+		s.log.Info("renewal refused: unknown certificate",
+			"cn", peerLeaf.Subject.CommonName, "remote", r.RemoteAddr)
+		jsonError(w, "this console did not issue the certificate you presented, "+
+			"so it cannot renew it — enrol instead", http.StatusForbidden)
+		return
+	}
+	if err != nil {
+		s.log.Error("look up the presented certificate", "err", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	bundle, err := s.issueForCaller(r.Context(), rec.Org, rec.Caller, csr, req.CSRPEM)
+	if err != nil {
+		s.log.Error("renewal failed", "org", rec.Org, "caller", rec.Caller, "err", err)
+		jsonError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// Both fingerprints, because a renewal is the one event where two
+	// certificates are briefly valid for one caller. An audit trail that named
+	// only the new one could not answer "which certificate was this?" for
+	// anything that happened during the overlap.
+	s.db.forOrg(rec.Org).logAction(r.Context(), enrolmentActor, "", "certificate_renewed",
+		map[string]any{
+			"caller":       rec.Caller,
+			"replaced":     hex.EncodeToString(rec.Fingerprint),
+			"fingerprint":  hex.EncodeToString(bundle.fingerprint),
+			"expires_at":   bundle.expiresAt,
+			"remote":       r.RemoteAddr,
+			"presented_cn": peerLeaf.Subject.CommonName,
+		})
+
+	jsonOK(w, map[string]any{
+		"cert_pem":   bundle.certPEM,
+		"ca_pem":     bundle.caPEM,
+		"caller":     rec.Caller,
+		"org":        rec.Org,
 		"expires_at": bundle.expiresAt,
 	})
 }
@@ -375,17 +499,20 @@ type issuedBundle struct {
 //
 // Shared so K7b's renewal cannot drift from enrolment. Everything that makes
 // the result safe lives here exactly once.
-func (s *Server) issueForCaller(ctx context.Context, org, caller, csrPEM string) (*issuedBundle, error) {
+func (s *Server) issueForCaller(
+	ctx context.Context, org, caller string, csr *x509.CertificateRequest, csrPEM string,
+) (*issuedBundle, error) {
 	// The CN must be the caller the token was minted for.
 	//
 	// The signer compares the CSR's CN to the caller name in the body it is
 	// handed — so if this forwarded a name from the request, that check would
 	// compare two attacker-supplied values and pass. `caller` here comes from
 	// the spent token row and from nowhere else.
-	csr, err := parseCSRPEM(csrPEM)
-	if err != nil {
-		return nil, fmt.Errorf("invalid CSR: %w", err)
-	}
+	//
+	// The CSR arrives parsed, because its shape was checked before the token was
+	// spent: a malformed request is the sender's mistake and should not cost
+	// them a credential. This check is the other kind — asking for a name the
+	// token does not grant is an authority question, and it costs the token.
 	if csr.Subject.CommonName != caller {
 		return nil, fmt.Errorf("this enrolment is for caller %q, but the CSR asks for %q",
 			caller, csr.Subject.CommonName)

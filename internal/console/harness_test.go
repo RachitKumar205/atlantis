@@ -94,9 +94,29 @@ type consoleFixture struct {
 	// boundary can reach its CA and its certificate — the two halves it needs
 	// to build a deliberately mismatched pair.
 	atl *atlStack
+
+	// signer is the fake certificate signer, or nil when the fixture was built
+	// without enrolment.
+	signer *fakeSigner
 }
 
 func newConsoleFixture(t *testing.T) *consoleFixture {
+	t.Helper()
+	return newFixture(t, false)
+}
+
+// newEnrolmentFixture is the same console with certificate enrolment configured
+// and a fake signer behind it.
+//
+// Separate because enrolment is off by default and most of this package is
+// about something else — and because a fixture that always stood up a signer
+// would make every unrelated test depend on it.
+func newEnrolmentFixture(t *testing.T) *consoleFixture {
+	t.Helper()
+	return newFixture(t, true)
+}
+
+func newFixture(t *testing.T, enrolment bool) *consoleFixture {
 	t.Helper()
 	adminDSN := requireTestPG(t)
 
@@ -159,7 +179,7 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 	const audience = "https://console.test"
 
 	keyset := testKeyset(t)
-	srv, err := New(Config{
+	cfg := Config{
 		PGURL:               consoleDSN,
 		SessionSecret:       strings.Repeat("k", 32),
 		DataKeyset:          keyset,
@@ -168,7 +188,38 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 		CloudIssuer:         iss.Name(),
 		CloudAudience:       audience,
 		CloudJWKSURL:        jwks.URL + issuer.JWKSPath,
-	}, nil, quiet)
+	}
+
+	var signer *fakeSigner
+	if enrolment {
+		// The signer issues from the ORGANISATION's authority — stack.pki —
+		// because that is what the organisation's atlantis trusts, and
+		// issueForCaller verifies the returned leaf against it before recording
+		// anything.
+		//
+		// It accepts callers by a SECOND authority, signerPKI, which is the
+		// arrangement production requires: every leaf the signer issues carries
+		// ExtKeyUsage: ClientAuth, so a signer trusting its own issuing CA would
+		// accept everything it had ever produced as a credential to itself.
+		signer = newFakeSigner(t, stack.pki)
+		cfg.SignerAddr = signer.URL
+		cfg.SignerCert, cfg.SignerKey = signer.clientCert, signer.clientKey
+		cfg.SignerCA = signer.pki.CAFile
+
+		// The enrolment listener's own certificate chains to the ORGANISATION's
+		// authority, which is what deploy/init-certs.sh does and for the same
+		// reason: the machines that dial it are callers, and they already hold
+		// that CA. First contact is the one moment a machine has no certificate
+		// of its own, so giving it one fewer thing to obtain matters there.
+		//
+		// Its client CA is that authority too, so a machine renewing presents a
+		// certificate the listener can verify.
+		cfg.EnrollListen = "127.0.0.1:0"
+		cfg.EnrollTLSCert, cfg.EnrollTLSKey = stack.pki.CertFile, stack.pki.KeyFile
+		cfg.EnrollClientCA = stack.pki.CAFile
+	}
+
+	srv, err := New(cfg, nil, quiet)
 	if err != nil {
 		t.Fatalf("console New: %v", err)
 	}
@@ -177,7 +228,7 @@ func newConsoleFixture(t *testing.T) *consoleFixture {
 	f := &consoleFixture{
 		srv: srv, adminSv: stack.svc, pool: stack.pool, dsn: dsn,
 		consoleDSN: consoleDSN, keyset: keyset,
-		iss: iss, audience: audience, atl: stack,
+		iss: iss, audience: audience, atl: stack, signer: signer,
 	}
 
 	// The console has no process-wide endpoint or certificate any more, so an

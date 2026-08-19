@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/rachitkumar205/atlantis/internal/server/interceptors"
 )
 
 // The storage half of enrolment. See migrations/console/0007 for why the token
@@ -214,6 +216,50 @@ func (o *orgStore) listCallerCerts(ctx context.Context) ([]callerCert, error) {
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// callerCertByFingerprint answers "whose certificate is this".
+//
+// The lookup renewal is built on, and the reason console.caller_certs carries no
+// row-level security: it runs before anything knows which organisation is
+// involved, which is the entire point of it. Not a search — the key is a
+// SHA-256 over a certificate nobody else holds, so the only row anybody can
+// find is the one for a certificate they already have.
+//
+// # A superseded certificate can still renew, inside its window
+//
+// This looked wrong on the first attempt and the test caught it. Excluding
+// superseded rows is the obvious reading — "you have been replaced, renew from
+// the replacement" — and it destroys the exact recovery the overlap exists for.
+//
+// Walk it through. A machine holding certificate A renews, the console records
+// B and marks A superseded, and the response is lost. The machine still holds A
+// and nothing else. If A cannot renew, it cannot get anything, ever: that is
+// the lockout, reintroduced one layer up from where it was removed.
+//
+// So the window is the same on both sides. atlantis accepts A for
+// RenewalOverlap after B replaces it, and so does this. Anything else leaves a
+// band in which a machine can authenticate but cannot renew — which is a
+// lockout that only appears for certificates of one particular age.
+//
+// What is still refused is a certificate replaced longer ago than the window,
+// and one this console never issued.
+func (s *store) callerCertByFingerprint(ctx context.Context, fingerprint []byte) (*callerCert, error) {
+	c := callerCert{Fingerprint: fingerprint}
+	err := s.pool.QueryRow(ctx, `
+		SELECT org, caller, issued_at, expires_at
+		  FROM console.caller_certs
+		 WHERE fingerprint = $1
+		   AND (superseded_at IS NULL OR superseded_at > NOW() - $2::interval)
+	`, fingerprint, interceptors.RenewalOverlap.String()).
+		Scan(&c.Org, &c.Caller, &c.IssuedAt, &c.ExpiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
 }
 
 // currentCallerCert returns the live certificate this console issued for a

@@ -35,6 +35,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -185,6 +187,61 @@ func (p *PKI) ServerTLS(t *testing.T) *tls.Config {
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		MinVersion:   tls.VersionTLS13,
 	}
+}
+
+// SignCSR issues a client certificate for a certificate signing request,
+// returning it PEM-encoded alongside this authority's own certificate.
+//
+// What a fake signer needs to be a fake of something real. Every other method
+// here generates the keypair too, which is exactly what enrolment exists to
+// stop: the point of a CSR is that the private key stayed on the machine that
+// made it, and a stand-in that quietly minted its own key would let a console
+// pass a test it should fail.
+//
+// The subject is taken from the request, so a test can present a CSR whose
+// common name is not the caller it claims and watch the console refuse it. Only
+// the common name is copied — the rest of a CSR's subject is attacker-supplied
+// and nothing downstream reads it.
+//
+// # Why this returns an error rather than taking a *testing.T
+//
+// It is called from an HTTP handler, which runs on the server's goroutine.
+// t.Fatalf there calls runtime.Goexit on a goroutine that is not the test's:
+// the test is marked failed but the handler never answers, so the client waits
+// on a connection nobody will close and the run hangs somewhere unrelated. A
+// returned error becomes a 4xx, which is what the code under test should see
+// anyway.
+func (p *PKI) SignCSR(csrPEM string) (certPEM, caPEM string, err error) {
+	block, _ := pem.Decode([]byte(csrPEM))
+	if block == nil || block.Type != "CERTIFICATE REQUEST" {
+		return "", "", errors.New("testpki: not a PEM CERTIFICATE REQUEST block")
+	}
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return "", "", fmt.Errorf("testpki: parse CSR: %w", err)
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return "", "", fmt.Errorf("testpki: CSR signature: %w", err)
+	}
+
+	tmpl := &x509.Certificate{
+		SerialNumber: nextSerial(),
+		Subject:      pkix.Name{CommonName: csr.Subject.CommonName},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	// csr.PublicKey — the key the requester holds. Nothing here ever sees its
+	// private half, which is the whole property under test.
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, p.caCert, csr.PublicKey, p.caKey)
+	if err != nil {
+		return "", "", fmt.Errorf("testpki: sign CSR: %w", err)
+	}
+
+	certPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	caPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: p.caCert.Raw}))
+	return certPEM, caPEM, nil
 }
 
 func (p *PKI) issue(

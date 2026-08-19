@@ -13,6 +13,42 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Added
 
+#### A machine renews with the certificate it already holds
+
+`POST /renew` on the enrolment listener takes a CSR and the certificate being
+replaced. There is no token: a token would be a long-lived minting credential
+sitting on disk, which is what enrolment exists to avoid. A machine with a
+working certificate has already proved it is the caller.
+
+**The request names neither the organisation nor the caller.** Both come from
+`console.caller_certs`, looked up by the SHA-256 of the leaf the peer presented.
+That is the only shape that works: there is one signing authority and a leaf
+carries a common name and nothing else, while caller names — `backend`, `api`,
+`worker` — collide across organisations as a matter of course. A request that
+named its organisation would be naming something the console could not check.
+
+**A renewal no longer locks a machine out when its response is lost.**
+`caller_identities` held one fingerprint and the interceptor accepted exactly
+that one, so the moment a renewal was recorded the certificate the machine was
+still holding stopped working — and every step after that write is one where the
+response can go missing. Migration `infra/0031` adds `prev_cert_fingerprint` and
+`prev_valid_until`; the interceptor accepts either, and the console lets a
+superseded certificate renew again for the same 24 hours.
+
+The window is bounded by time rather than by "has the replacement been used
+yet". First use is observed inside the cert-binding interceptor, on every
+authenticated RPC, and retiring the old fingerprint there means writing from the
+hottest read path in the product behind a five-second cache. One comparison and
+no write was the better trade; the exposure it buys is a superseded certificate
+surviving one extra day inside the 90 it already had.
+
+**Known gap: ephemeral CI runners never renew.** A GitHub Actions runner cannot
+hold `~/.atlantis/<org>/client.key` across runs, so it never reaches the 14-day
+threshold and its certificate simply expires at 90 days.
+`docs/guides/set-up-caller-ci.md` still documents putting the key in a secret,
+which continues to work and is what those callers should keep doing. Giving them
+a first-class path is `tide login`'s problem, not this one.
+
 #### A machine keeps its own private key
 
 The console no longer generates caller private keys. `POST /api/callers/{caller}/cert/issue`
