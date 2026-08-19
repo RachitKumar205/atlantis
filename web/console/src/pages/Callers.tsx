@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Check, Copy, Key, Link2, Plus, Trash2, X } from 'lucide-react'
 import { api, ApiError, queries, type CallerInfo, type EnrollTokenResponse } from '@/api/client'
 import { useIsAdmin } from '@/hooks/useAuth'
+import { enrolControlState, type EnrolControl } from '@/lib/session'
 import { PageShell } from '@/components/PageShell'
 import { HoverInfo } from '@/components/HoverInfo'
 import { SudoConfirmDialog } from './Settings'
@@ -131,7 +132,7 @@ export function Callers() {
                   canAdmin={isAdmin}
                   onEnrol={() => { setEnrollingCaller(c.caller); enrolM.mutate(c.caller) }}
                   isEnrolling={enrollingCaller === c.caller}
-                  enrolmentEnabled={certs?.enrolment_enabled ?? false}
+                  enrolState={enrolControlState(certs, c.caller)}
                   enrolledAt={certs?.certs.find(x => x.caller === c.caller)?.issued_at}
                   onRevoke={() => setRevoking(c.caller)}
                   onManageAliases={() => setAliasEditing(c.caller)}
@@ -196,7 +197,7 @@ function CallerCard({
   canAdmin,
   onEnrol,
   isEnrolling,
-  enrolmentEnabled,
+  enrolState,
   enrolledAt,
   onRevoke,
   onManageAliases,
@@ -205,7 +206,7 @@ function CallerCard({
   canAdmin: boolean
   onEnrol: () => void
   isEnrolling: boolean
-  enrolmentEnabled: boolean
+  enrolState: EnrolControl
   /** When this console last enrolled this caller, if it ever did. Absent is the
    * normal case: enrolment is new, and the issuance path it replaces answered
    * 503 in every deployment it ever ran in. */
@@ -268,19 +269,19 @@ function CallerCard({
               side="bottom"
               inline
               content={
-                enrolmentEnabled ? (
-                  <>
-                    <p>Mint a single-use enrolment token. The machine generates its own key and sends only a certificate request — no private key leaves it.</p>
-                    <p className="hi-foot">
-                      {enrolledAt
-                        ? `Last enrolled ${enrolledAt.slice(0, 10)}. Enrolling again supersedes that certificate — atlantis stops authenticating it.`
-                        : 'Enrolling supersedes whatever certificate this caller is using now — atlantis stops authenticating it.'}
-                    </p>
-                  </>
-                ) : (
+                enrolState === 'unconfigured' ? (
                   <>
                     <p>Certificate enrolment is not configured on this console.</p>
                     <p className="hi-foot">An operator sets a signer address and the enrolment listener.</p>
+                  </>
+                ) : (
+                  <>
+                    <p>Mint a single-use enrolment token. The machine generates its own key and sends only a certificate request — no private key leaves it.</p>
+                    <p className="hi-foot">
+                      {enrolState === 'reenrol' && enrolledAt
+                        ? `Last enrolled ${enrolledAt.slice(0, 10)}. Enrolling again supersedes that certificate — atlantis stops authenticating it.`
+                        : 'Enrolling supersedes whatever certificate this caller is using now — atlantis stops authenticating it.'}
+                    </p>
                   </>
                 )
               }
@@ -288,7 +289,7 @@ function CallerCard({
               <button
                 className="btn btn--sm btn--ghost btn--icon"
                 onClick={onEnrol}
-                disabled={isEnrolling || !enrolmentEnabled}
+                disabled={isEnrolling || enrolState === 'unconfigured'}
                 aria-label="Enrol a machine"
               >
                 {isEnrolling ? <span className="spin" /> : <Key size={13} />}

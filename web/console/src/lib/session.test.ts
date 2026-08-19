@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { carriesAssertion, shouldRenderLogin, switcherMode } from './session'
+import { carriesAssertion, enrolControlState, shouldRenderLogin, switcherMode } from './session'
 
 // Two branches nobody would notice breaking.
 //
@@ -85,5 +85,44 @@ describe('switcherMode', () => {
       org: 'acme',
       orgs: [{ name: 'acme', url: 'u1' }, { name: 'globex', url: 'u2' }],
     })).toBe('menu')
+  })
+})
+
+describe('enrolControlState', () => {
+  const enabled = (callers: string[]) => ({
+    enrolment_enabled: true,
+    certs: callers.map(caller => ({ caller })),
+  })
+
+  it('offers nothing when no signer is configured', () => {
+    expect(enrolControlState({ enrolment_enabled: false, certs: [] }, 'backend'))
+      .toBe('unconfigured')
+  })
+
+  it('offers nothing before the answer has arrived', () => {
+    // undefined is the loading state and the error state at once. Reading it as
+    // ready puts a live button in front of somebody on a console that may have
+    // no signer at all, and pressing it returns 503 — which is the failure
+    // enrolment was built to remove, reappearing in the browser.
+    expect(enrolControlState(undefined, 'backend')).toBe('unconfigured')
+  })
+
+  it('is a first enrolment when this console has never enrolled the caller', () => {
+    expect(enrolControlState(enabled([]), 'backend')).toBe('first')
+    // Another caller's enrolment is not this one's.
+    expect(enrolControlState(enabled(['payments']), 'backend')).toBe('first')
+  })
+
+  it('is a re-enrolment once the caller has a certificate on record', () => {
+    expect(enrolControlState(enabled(['backend']), 'backend')).toBe('reenrol')
+    expect(enrolControlState(enabled(['payments', 'backend']), 'backend')).toBe('reenrol')
+  })
+
+  it('never confuses a caller with one whose name contains it', () => {
+    // `backend` and `backend-worker` are ordinary names to pick, and a prefix
+    // or substring match would report the wrong one as already enrolled — so
+    // the warning would name a date belonging to a different machine.
+    expect(enrolControlState(enabled(['backend-worker']), 'backend')).toBe('first')
+    expect(enrolControlState(enabled(['backend']), 'backend-worker')).toBe('first')
   })
 })

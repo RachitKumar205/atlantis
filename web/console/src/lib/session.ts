@@ -71,3 +71,33 @@ export function switcherMode(me: Pick<MeResult, 'org' | 'orgs'> | undefined): Sw
   if (!me?.org) return 'none'
   return (me.orgs?.length ?? 0) > 1 ? 'menu' : 'label'
 }
+
+// How the Callers page draws the enrol control for one caller.
+export type EnrolControl =
+  // No signer is configured, so the control is inert and says why. Pressing an
+  // enabled button here would return 503 — the exact failure enrolment was
+  // built to remove, reappearing in the browser.
+  | 'unconfigured'
+  // This console has never enrolled this caller.
+  | 'first'
+  // It has. The warning names the date, because enrolling again supersedes it.
+  | 'reenrol'
+
+// enrolControlState picks between them.
+//
+// Lifted out of the page for the same reason switcherMode was: it is a decision
+// rather than markup, it is one boolean wide, and it is invisible when wrong.
+// A console with no signer that still offers the button looks completely normal
+// until somebody presses it.
+//
+// `certs` being undefined is the loading state and the error state at once, and
+// both must read as 'unconfigured' rather than as ready — offering the control
+// before the answer arrives is the same defect as offering it when the answer
+// is no.
+export function enrolControlState(
+  certs: { enrolment_enabled: boolean; certs: { caller: string }[] } | undefined,
+  caller: string,
+): EnrolControl {
+  if (!certs?.enrolment_enabled) return 'unconfigured'
+  return certs.certs.some(c => c.caller === caller) ? 'reenrol' : 'first'
+}
