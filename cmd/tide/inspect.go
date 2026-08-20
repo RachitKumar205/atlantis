@@ -44,7 +44,6 @@ func cmdInspect(args []string) int {
 	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
-	against := fs.String("against", "", "Server endpoint override (host:port); defaults to tide.yaml's endpoint")
 	timeout := fs.Duration("timeout", 120*time.Second, "RPC timeout (introspecting a large schema takes a while)")
 	format := fs.String("format", "table", "Output format: table or json")
 	generate := fs.String("generate", "", "Write .atl for tables no declaration mentions into this directory")
@@ -57,9 +56,6 @@ func cmdInspect(args []string) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide:", err)
 		return 3
-	}
-	if *against != "" {
-		cfg.Endpoint = *against
 	}
 
 	// --generate is the one subcommand that is SUPPOSED to run in a repo with

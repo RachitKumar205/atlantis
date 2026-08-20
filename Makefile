@@ -659,9 +659,10 @@ dev-caller-cert: dev-certs ## Issue a local caller cert signed by the dev CA: ma
 	@chmod 600 "$(DEV_CERT_DIR)/callers/$(CALLER)/client.key"
 	@echo
 	@echo "Issued $(DEV_CERT_DIR)/callers/$(CALLER)/client.crt (CN=$(CALLER))"
-	@echo "  export TIDE_TLS_CERT=$(DEV_CERT_DIR)/callers/$(CALLER)/client.crt"
-	@echo "  export TIDE_TLS_KEY=$(DEV_CERT_DIR)/callers/$(CALLER)/client.key"
-	@echo "  export TIDE_TLS_CA=$(DEV_CERT_DIR)/ca.crt"
+	@echo
+	@echo "NOTE: tide no longer reads certificates from paths or TIDE_TLS_*."
+	@echo "      Use \`tide login\` — the console's Callers page prints the command."
+	@echo "      This pair is for inspecting a handshake, not for running tide."
 
 .PHONY: dev-isolated
 dev-isolated: ## Full local stack via docker-compose (server + pg + memcached)

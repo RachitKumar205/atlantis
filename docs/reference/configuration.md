@@ -307,7 +307,7 @@ certificate belong to an organisation rather than to the process. They are
 columns in `console.orgs`, written by `cloud org register`.
 
 *(The variable names are still live elsewhere. `tide` and `tidectl` read
-`ATL_ENDPOINT` and the TLS trio for their own connections. Only the console
+`ATL_ENDPOINT` for its own connections. Only the console
 stopped.)*
 
 ```bash
@@ -513,16 +513,22 @@ fingerprint. A certificate this console did not issue cannot be renewed here,
 which includes anything from `make dev-caller-cert`; those keep authenticating
 and are replaced by enrolling.
 
-**The certificate being replaced keeps working for 24 hours.** atlantis binds a
-caller to one certificate, so without an overlap a renewal whose response is
-lost — a timeout, a 502, a crash before the file lands — leaves the machine
-holding something that no longer authenticates and needing a valid certificate
-to try again. The window is what makes that recoverable without an operator.
+**A replaced certificate keeps working until it expires.** atlantis no longer
+binds a caller to one certificate, so a renewal whose response is lost — a
+timeout, a 502, a crash before the file lands — leaves the machine holding one
+that still works, and it simply tries again. This needed a 24-hour overlap
+window while certificates were pinned; shortening them to seven days removed
+both the pinning and the need for the window.
 
-**Ephemeral CI runners do not renew.** A runner that cannot keep its key between
-runs never reaches the renewal threshold, and its certificate expires at 90
-days. Those callers should keep the key in a secret, as
-`guides/set-up-caller-ci.md` describes.
+**`tide` renews on its own**, at two thirds of the certificate's life, which is
+around day five of seven. A failed renewal is a warning rather than an error:
+the certificate is not expired yet, and refusing to run because a refresh failed
+would turn a console outage into a caller outage.
+
+**Ephemeral CI runners cannot use any of this.** A runner with no state between
+runs cannot hold a key, so it can neither enrol nor renew — and the variables
+that used to carry a key into CI are gone. There is no supported way to run
+`tide` from CI today; see `docs/examples/README.md`.
 
 #### The signer
 

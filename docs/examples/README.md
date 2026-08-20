@@ -1,94 +1,34 @@
-# atlantis caller CI templates
+# Examples
 
-Two GitHub Actions workflows that wire a caller repo to your atlantis
-server. Drop them into your caller repo's `.github/workflows/`, configure
-four secrets + one variable, and you have schema-as-code with required
-review for every change.
+## Caller CI is not currently supported
 
-## Files
+This directory held two GitHub Actions workflows: one running `tide plan` on
+every pull request, one running `tide apply` on merge. Both are gone, along with
+`guides/set-up-caller-ci.md`, because the mechanism they depended on no longer
+exists.
 
-| File | Triggers on | Runs |
+They worked by putting a client certificate and **its private key** into
+repository secrets, as `TIDE_TLS_CERT_PEM` / `TIDE_TLS_KEY_PEM` / `TIDE_TLS_CA_PEM`,
+and the server address into `ATL_ENDPOINT`. Certificate enrolment replaced that:
+a machine generates its own key, sends only a certificate signing request, and
+`tide login` writes the result to `~/.atlantis`. Nothing pastes a private key
+anywhere, which was the point.
+
+An ephemeral CI runner cannot use that store. It has no state between runs, so
+it cannot hold a key, and a certificate it enrolled would be discarded when the
+job ended.
+
+**So there is no supported way to run `tide` from CI today.** That is a real
+gap, recorded rather than papered over. Designing the replacement — a reusable
+enrolment credential, workload identity, something else — is its own piece of
+work.
+
+What still holds from the old workflows, and will hold in whatever replaces
+them:
+
+| Exit code | Meaning | What CI should do |
 |---|---|---|
-| `atlantis-plan.yml` | PR opened / synchronize (touching `**/*.atl`) | `tide plan` — read-only impact report; exit 2 on breaking and exit 4 on destructive → blocks merge via branch protection |
-| `atlantis-apply.yml` | Push to `main` (touching `**/*.atl`) | `tide apply` — the only path schema reaches prod; exit 2 means the change is waiting for approval and the job ends green with a notice |
-
-## Setup, step by step
-
-### 1. Register two callers in the atlantis console
-
-You need two distinct identities so the apply path can't be triggered
-from anything but `main` CI:
-
-- **`ci-<your-caller>-readonly`** — `can_mutate=false`. Used by the plan
-  workflow on every PR.
-- **`ci-<your-caller>-apply`** — `can_mutate=true`. Used by the apply
-  workflow only.
-
-Register both via the console's **Callers → Add caller** dialog. Issue a
-cert for each (key icon on the row).
-
-### 2. Drop the workflow files into your repo
-
-```sh
-mkdir -p .github/workflows
-cp /path/to/atlantis/docs/examples/atlantis-plan.yml  .github/workflows/
-cp /path/to/atlantis/docs/examples/atlantis-apply.yml .github/workflows/
-```
-
-Edit both files and replace the `ORG=rachitkumar205` line with your
-atlantis fork's GitHub org so the `curl` URL points at the right
-releases. (Pin the tide binary you'll install; don't track `latest`.)
-
-### 3. Configure repository secrets
-
-Settings → Secrets and variables → Actions → **New repository secret**:
-
-| Secret name | Value | Used by |
-|---|---|---|
-| `ATL_ENDPOINT` | `atlantis.yourco.com:443` (host:port) | both |
-| `TIDE_TLS_CA_PEM` | contents of `ca.crt` from the cert bundle | both |
-| `TIDE_TLS_CERT_PEM` | contents of `client.crt` from the **readonly** bundle | plan only |
-| `TIDE_TLS_KEY_PEM` | contents of `client.key` from the **readonly** bundle | plan only |
-
-For the apply workflow, the simplest split is to create a separate
-**environment** in GitHub (Settings → Environments → New environment →
-"prod-apply") and put the apply cert there:
-
-| Environment secret (in `prod-apply`) | Value |
-|---|---|
-| `TIDE_TLS_CERT_PEM` | contents of `client.crt` from the **apply** bundle |
-| `TIDE_TLS_KEY_PEM` | contents of `client.key` from the **apply** bundle |
-
-Then add `environment: prod-apply` under the `apply` job in
-`atlantis-apply.yml`. This lets you require an environment approval
-before any apply ever runs — useful as a backstop while you're new to the
-flow.
-
-### 4. Configure the tide version
-
-Settings → Secrets and variables → Actions → **Variables** tab →
-**New repository variable**:
-
-| Variable | Value |
-|---|---|
-| `TIDE_VERSION` | a release tag like `v0.4.0` |
-
-### 5. Add branch protection
-
-Settings → Branches → Add rule for `main`:
-
-- ✅ Require status checks to pass before merging
-- ✅ Require `tide plan` to succeed (it'll appear after the first PR run)
-- ✅ Do not allow bypass
-
-Branch protection is a gate on your repository, not on your database. It
-stops an unreviewed `.atl` change from reaching `main`; it has no opinion
-about what the server does with one that gets there. The gate on the
-database is the [change policy](../concepts/change-approval.md), which the
-server enforces however the plan arrives — including from a runner with no
-review at all. Set both.
-
-That's it. Open a PR that edits a `.atl` file — `tide plan` runs, the
-impact report appears in the CI log, breaking changes block merge. Merge
-to `main` → `tide apply` runs, and applies unless the change policy holds
-it for a human.
+| 0 | Applied, or nothing to do | Pass |
+| 2 | Cross-caller breaking, or waiting for approval | Block the merge; for `apply`, treat as "waiting" rather than "broken" |
+| 3 | The schema did not parse | Fail |
+| 4 | Destructive | Block; somebody decides whether losing the rows is intended |

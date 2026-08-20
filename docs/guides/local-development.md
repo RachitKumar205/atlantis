@@ -27,7 +27,7 @@ For a client certificate `tide` can use:
 make dev-caller-cert CALLER=backend
 ```
 
-It prints the three `TIDE_TLS_*` values to export.
+It writes the pair into `./certs/callers/<name>/`. Note that `tide` no longer reads certificates from paths — it uses the credential store `tide login` writes — so these are for inspecting a handshake, not for running `tide`.
 
 ## 0b. Create the console's database role
 

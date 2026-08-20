@@ -41,21 +41,27 @@ Each path is walked recursively; every file with extension `.atl` is included. O
 | Variable | Overrides | Notes |
 |---|---|---|
 | `ATL_CALLER` | `caller` | |
-| `ATL_ENDPOINT` | `endpoint` | |
-| `TIDE_TLS_CERT` | `tls.cert` | Path to mTLS client certificate. |
-| `TIDE_TLS_KEY` | `tls.key` | Path to mTLS client key. |
-| `TIDE_TLS_CA` | `tls.ca` | Path to CA certificate for verifying the server. |
+| `ATL_ORG` | `org` | Which organisation this repository's caller belongs to. Needed only when more than one is enrolled. |
 | `ATL_GENERATE` | `generate` | Comma-separated namespace list; replaces the `generate:` field for `tide generate`. |
+| `ATLANTIS_HOME` | — | Where the credential store lives. Defaults to `~/.atlantis`. |
 
-`TIDE_CALLER` and `TIDE_ENDPOINT` are not consulted; use `ATL_CALLER` / `ATL_ENDPOINT`.
+`TIDE_CALLER` is not consulted; use `ATL_CALLER`.
 
-Three additional variables carry inline PEM material so CI runners never write certs to disk. When set they take precedence over the file-path fields; setting both an inline PEM and its file-path counterpart for the same material is a config error.
+### What is no longer configurable
 
-| Variable | Overrides | Notes |
-|---|---|---|
-| `TIDE_TLS_CERT_PEM` | `tls.cert` | Inline PEM client certificate. |
-| `TIDE_TLS_KEY_PEM` | `tls.key` | Inline PEM client key. |
-| `TIDE_TLS_CA_PEM` | `tls.ca` | Inline PEM CA certificate. |
+`ATL_ENDPOINT`, `tls:` in `tide.yaml`, and `TIDE_TLS_CERT` / `TIDE_TLS_KEY` /
+`TIDE_TLS_CA` — along with the three `_PEM` variants — have been removed. So has
+`tide plan --against`.
+
+They existed because a caller used to decide which atlantis it talked to and how
+it proved itself, which made sense when a customer ran their own. The
+organisation owns the address now and issues the credential; `tide login`
+collects both into `~/.atlantis/<org>/<caller>/`, and `tide` renews the
+certificate on its own at two thirds of its life.
+
+The `_PEM` variants were how CI carried a private key into a job. Enrolment
+exists to end exactly that, and nothing replaces it yet — see
+`docs/examples/README.md`.
 
 `tide job` and `tide workflow` read `$USER` to stamp the submitting principal on jobs and workflow runs.
 
@@ -88,12 +94,11 @@ If the database carries a bare unique index the schema doesn't declare — a `CR
 Validates the local schema against the server and reports what would change. Performs no server-side writes.
 
 ```
-tide plan [--against <host:port>] [--format {table|json}] [--no-pull]
+tide plan [--format {table|json}] [--no-pull]
 ```
 
 | Flag | Description |
 |---|---|
-| `--against <host:port>` | Override the configured endpoint for this command only. |
 | `--format {table|json}` | Default `table`. `json` emits the raw planning response for downstream tools. |
 | `--no-pull` | Skip the pre-plan refresh of `.tide-cache/`. |
 
@@ -104,12 +109,11 @@ A bare unique index the schema doesn't declare surfaces as an index-drift warnin
 Reports how the live database differs from your `.atl` files. Writes nothing.
 
 ```
-tide inspect [--against <host:port>] [--format {table|json}] [--timeout <duration>]
+tide inspect [--format {table|json}] [--timeout <duration>]
 ```
 
 | Flag | Description |
 |---|---|
-| `--against <host:port>` | Override the configured endpoint for this command only. |
 | `--format {table|json}` | Default `table`. `json` emits the raw drift report. |
 | `--timeout <duration>` | Default `2m`. Introspecting a large schema takes a while. |
 | `--generate <dir>` | Write `.atl` for tables no declaration mentions into `<dir>`, one file per entity. Never overwrites an existing file. |

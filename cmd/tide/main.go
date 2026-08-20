@@ -3,7 +3,7 @@
 //	tide apply [--no-pull]                     submit + apply this repo's .atl files
 //	tide apply --backfill                      kick off declarative backfill for a backfill_required plan
 //	tide apply --dry-run
-//	tide plan  [--against URL] [--format FMT]   dry-run plan against a server; no mutation
+//	tide plan  [--format FMT]                   dry-run plan; no mutation
 //	tide pull  [--force]                        refresh .tide-cache from server
 //	tide list                                   print every entity in the merged schema
 //	tide show  <path-substring>                 print one .atl file from the merged schema
@@ -29,7 +29,8 @@
 // network is unavailable or the cache is known-current.
 //
 // Network transport is protobuf over gRPC via the generated admin stubs in
-// clients/go; mTLS material is loaded from TIDE_TLS_* env vars or tide.yaml.
+// clients/go. mTLS material and the endpoint come from the credential store
+// `tide login` writes; neither is configurable in tide.yaml.
 package main
 
 import (
@@ -87,6 +88,8 @@ func main() {
 		os.Exit(cmdSandbox(os.Args[2:]))
 	case "caller":
 		os.Exit(cmdCaller(os.Args[2:]))
+	case "login":
+		os.Exit(cmdLogin(os.Args[2:]))
 	case "version":
 		cliout.Logo(os.Stdout, "tide", version)
 	default:
@@ -100,8 +103,8 @@ func printUsage() {
 	cliout.LogoInline(os.Stderr, "tide", version)
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "usage: tide apply    [--backfill] [--dry-run] [--no-pull]")
-	fmt.Fprintln(os.Stderr, "       tide plan     [--against URL] [--format table|json] [--no-pull]")
-	fmt.Fprintln(os.Stderr, "       tide inspect  [--against URL] [--format table|json]")
+	fmt.Fprintln(os.Stderr, "       tide plan     [--format table|json] [--no-pull]")
+	fmt.Fprintln(os.Stderr, "       tide inspect  [--format table|json]")
 	fmt.Fprintln(os.Stderr, "       tide pull     [--force]")
 	fmt.Fprintln(os.Stderr, "       tide generate")
 	fmt.Fprintln(os.Stderr, "       tide list")
@@ -117,7 +120,9 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "       tide rollback --to=<version> [--dry-run] [--yes]")
 	fmt.Fprintln(os.Stderr, "       tide sandbox  boot|shell|spawn ...")
 	fmt.Fprintln(os.Stderr, "       tide caller   alias list|add|rm <caller> [alias]")
+	fmt.Fprintln(os.Stderr, "       tide login    --url URL --org ORG --token TOKEN [--ca FILE]")
 	fmt.Fprintln(os.Stderr, "       tide version")
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "Reads ./tide.yaml for schema paths and atlantis endpoint.")
+	fmt.Fprintln(os.Stderr, "Reads ./tide.yaml for the caller name and schema paths.")
+	fmt.Fprintln(os.Stderr, "Credentials and the atlantis address come from `tide login`.")
 }

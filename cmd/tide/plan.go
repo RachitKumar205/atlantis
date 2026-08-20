@@ -22,11 +22,14 @@ import (
 // without per-step translation. The plan RPC is read-only on the server
 // side, so a `tide plan` is safe to run from any pre-merge environment
 // (including against a production endpoint).
+//
+// --against is gone. It let a caller point at any server, which is the thing
+// this effort removed: the organisation owns the address and `tide login`
+// collects it. Aiming a dry run elsewhere means enrolling there.
 func cmdPlan(args []string) int {
 	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
-	against := fs.String("against", "", "Server endpoint override (host:port); defaults to tide.yaml's endpoint")
 	timeout := fs.Duration("timeout", 30*time.Second, "RPC timeout")
 	noPull := fs.Bool("no-pull", false, "Skip the pre-plan refresh of .tide-cache/")
 	format := fs.String("format", "table", "Output format: table or json")
@@ -38,9 +41,6 @@ func cmdPlan(args []string) int {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide:", err)
 		return 3
-	}
-	if *against != "" {
-		cfg.Endpoint = *against
 	}
 
 	files, err := collectPCFiles(cfg.SchemaPaths)

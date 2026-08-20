@@ -9,7 +9,7 @@ Read [change approval](../concepts/change-approval.md) first if you want the mod
 `tide plan` reports the rule for the class it produced:
 
 ```
-$ tide plan --against=prod
+$ tide plan
 plan ───────────────────
   plan_id  9f2c1ab4e07d
   class    destructive
@@ -33,11 +33,11 @@ $ echo $?
 2
 ```
 
-No `--against` here, unlike `tide plan` above. `apply` reads its endpoint from `tide.yaml`, or from `ATL_ENDPOINT` in the environment.
+`apply` reads its endpoint from the credential store, the same as `plan`.
 
 **Exit code 2 is not a failure.** The gate did its job. The plan — the proposed `.atl` source, the diff, and the SQL that would run — is stored and waiting.
 
-If this is CI, treat 2 as "waiting", not "broken". `docs/examples/atlantis-apply.yml` shows the branch.
+If this is CI, treat 2 as "waiting", not "broken".
 
 ## 3. Decide it in the console
 
@@ -81,5 +81,4 @@ Two things worth knowing before you loosen one:
 ## Related
 
 - [Change approval](../concepts/change-approval.md) — the defaults, and why they differ between fresh and upgraded installs.
-- [Set up caller CI](set-up-caller-ci.md) — running `tide plan` on every pull request.
 - [Deploy to production](deploy-to-production.md) — the rest of the production checklist.

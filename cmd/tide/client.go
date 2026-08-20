@@ -36,13 +36,11 @@ type adminClient struct {
 // printed a warning and then failed at the handshake with an error naming
 // neither the cause nor the fix.
 func dial(cfg *tideConfig) (*adminClient, error) {
-	if cfg.TLS.Cert == "" && cfg.TLS.CertPEM == "" {
+	if cfg.TLS.CertPEM == "" {
 		return nil, fmt.Errorf(
-			"no client certificate configured, and atlantis requires one.\n\n"+
-				"Set tls.cert / tls.key / tls.ca in tide.yaml, or the TIDE_TLS_CERT, "+
-				"TIDE_TLS_KEY and TIDE_TLS_CA environment variables (the _PEM "+
-				"variants take the contents instead of a path).\n\n"+
-				"Endpoint: %s", cfg.Endpoint)
+			"this machine has no certificate for %q, and atlantis requires one.\n\n"+
+				"Run `tide login` — the console's Callers page prints the command.",
+			cfg.Caller)
 	}
 	creds, err := buildTLS(cfg)
 	if err != nil {
@@ -82,42 +80,20 @@ func emitJSON(m proto.Message, inlineJSONBytes ...string) error {
 }
 
 func buildTLS(cfg *tideConfig) (credentials.TransportCredentials, error) {
-	// Source the leaf cert + key. Inline PEM wins when set (config
-	// validation in loadPCConfig already rejected the both-set case);
-	// otherwise fall back to the file-path variant.
-	var (
-		cert tls.Certificate
-		err  error
-	)
-	if cfg.TLS.CertPEM != "" {
-		cert, err = tls.X509KeyPair([]byte(cfg.TLS.CertPEM), []byte(cfg.TLS.KeyPEM))
-		if err != nil {
-			return nil, fmt.Errorf("parse TIDE_TLS_CERT_PEM / TIDE_TLS_KEY_PEM: %w", err)
-		}
-	} else {
-		cert, err = tls.LoadX509KeyPair(cfg.TLS.Cert, cfg.TLS.Key)
-		if err != nil {
-			return nil, fmt.Errorf("load client cert: %w", err)
-		}
-	}
-
-	// CA trust anchor — same pattern.
-	var caPEM []byte
-	if cfg.TLS.CAPEM != "" {
-		caPEM = []byte(cfg.TLS.CAPEM)
-	} else {
-		caPEM, err = os.ReadFile(cfg.TLS.CA)
-		if err != nil {
-			return nil, fmt.Errorf("read CA: %w", err)
-		}
+	// One source now: the credential store, loaded by applyStoreCredentials.
+	// The file-path and inline-PEM variants that used to be selected between
+	// here are gone — see tideConfig for why.
+	//
+	// CertPEM and KeyPEM hold the same bytes: one file with the key and the
+	// certificate in it, so renewal is a single atomic rename. X509KeyPair
+	// searches each buffer independently and finds the half it needs in both.
+	cert, err := tls.X509KeyPair([]byte(cfg.TLS.CertPEM), []byte(cfg.TLS.KeyPEM))
+	if err != nil {
+		return nil, fmt.Errorf("the stored certificate for %q does not load: %w", cfg.Caller, err)
 	}
 	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPEM) {
-		src := cfg.TLS.CA
-		if cfg.TLS.CAPEM != "" {
-			src = "TIDE_TLS_CA_PEM"
-		}
-		return nil, fmt.Errorf("CA %s contains no usable certs", src)
+	if !pool.AppendCertsFromPEM([]byte(cfg.TLS.CAPEM)) {
+		return nil, fmt.Errorf("the stored CA for %q holds no certificate", cfg.Caller)
 	}
 	return credentials.NewTLS(&tls.Config{
 		Certificates: []tls.Certificate{cert},

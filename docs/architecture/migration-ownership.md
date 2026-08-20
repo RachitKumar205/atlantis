@@ -37,8 +37,8 @@ The **unique-index-drift gate** runs inside the locked apply transaction: if the
 This is the standard production flow.
 
 1. A developer edits an `.atl` file in their caller repo and opens a PR.
-2. Caller CI runs `tide plan --against=<prod>` — read-only validation against the live IR.
-3. PR merges; caller CI runs `tide apply` with `ATL_ENDPOINT` set to prod (apply has no `--against`).
+2. Caller CI runs `tide plan` — read-only validation against the live IR.
+3. PR merges; caller CI runs `tide apply`. The endpoint comes from the credential store.
 4. The server validates, acquires the advisory lock, runs the DDL, writes the new `atlantis.ir_checkpoint` row (under content-hash CAS), and inserts an audit row into `atlantis.schema_versions` — all in one Postgres transaction.
 5. `NOTIFY atl_schema_changed` fires from a Postgres trigger on `ir_checkpoint`; the server's listener rebuilds entity metadata and swaps it atomically.
 
@@ -48,7 +48,7 @@ Nothing is written to `migrations/tidectl/` on disk; `atlantis.schema_versions` 
 
 Choose this only when a regulator (SOX, HIPAA, PCI) requires literal SQL review before any production database change. The default flow already provides cross-caller safety, advisory locking, transactional IR writes, and a per-apply audit row in `atlantis.schema_versions`.
 
-1. Developer opens the same caller-repo PR; CI runs `tide plan --against=<prod>`.
+1. Developer opens the same caller-repo PR; CI runs `tide plan`.
 2. PR merges. The server refuses any `tide apply` mutation.
 3. An operator (or webhook) opens a PR against the atlantis deployment repo bumping the caller's ref in `atlantis.workspace.yaml`.
 4. Deployment-repo CI runs `tidectl plan`, which clones each caller at its pinned ref, runs codegen against the unioned IR, and writes `migrations/tidectl/_staged/NNNN_tidectl_staged.up.sql` + `.down.sql`.

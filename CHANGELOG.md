@@ -13,6 +13,51 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Added
 
+#### `tide login`, and the end of caller-side server configuration
+
+A machine enrols itself:
+
+```
+tide login --url https://console.example:3443 --org acme --token <token>
+```
+
+It generates a P-256 key locally, sends only a certificate signing request, and
+writes the result to `~/.atlantis/<org>/<caller>/` — the key at 0600 in a 0700
+directory, alongside the CA, the atlantis address, and where to renew. **tide
+renews on its own** at two thirds of the certificate's life, which is around day
+five of seven.
+
+There is no `--caller`. The token determines which caller it enrols, and the
+signer now names the certificate from that value and takes only the public key
+from the request — so a name supplied here would decide nothing. That also
+closed something worth naming on its own: `signCSR` used to copy the CSR's
+entire subject, validating only the common name, which put attacker-supplied
+fields into every issued certificate.
+
+**Breaking. `tide` no longer takes an endpoint or TLS material from anywhere.**
+Removed:
+
+- `endpoint:` in `tide.yaml`, and `ATL_ENDPOINT` for `tide`. `tidectl` keeps
+  `--endpoint`: it is an operator tool pointed at a named server on purpose.
+- `tls:` in `tide.yaml`, and `TIDE_TLS_CERT` / `TIDE_TLS_KEY` / `TIDE_TLS_CA`.
+- `TIDE_TLS_CERT_PEM` / `TIDE_TLS_KEY_PEM` / `TIDE_TLS_CA_PEM`.
+- `tide plan --against` and `tide inspect --against`.
+
+All of it existed because a caller used to decide which atlantis it talked to
+and how it proved itself. That was right when a customer ran their own; the
+organisation owns the address now, and issues the credential.
+
+`tide.yaml` keeps `caller` and `schema_paths`, and gains an optional `org` —
+needed only when more than one organisation is enrolled on the machine.
+
+**Caller CI does not work.** The `_PEM` variables were how a private key reached
+a build runner, and enrolment exists to end exactly that. An ephemeral runner
+holds no state between runs, so it can neither enrol nor renew.
+`docs/guides/set-up-caller-ci.md` and both example workflows are deleted rather
+than left documenting variables that no longer exist;
+`docs/examples/README.md` says what is missing and what still holds. Designing
+the replacement is its own piece of work, and nothing here pretends otherwise.
+
 #### Caller certificates live seven days, and are no longer pinned
 
 `certTTL` was ninety days, with a comment saying expiry "acts as a natural
