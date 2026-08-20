@@ -37,11 +37,15 @@ services:
       - "5432:5432"
     volumes:
       - atl-pg:/home/postgres/pgdata/data
-      # Extensions, once, when the data directory is created. Read the file for
-      # why atlantis cannot install `vector` for itself: its pool registers the
-      # pgvector types in AfterConnect, so it cannot open a connection to the
-      # database it would run CREATE EXTENSION on.
-      - ./deploy/pg-init.sql:/docker-entrypoint-initdb.d/00-extensions.sql:ro
+      # Extensions, once, when the data directory is created. Read
+      # pg-initdb/00-extensions.sql for why atlantis cannot install `vector`
+      # for itself: its pool registers the pgvector types in AfterConnect, so it
+      # cannot open a connection to the database it would run CREATE EXTENSION
+      # on.
+      #
+      # The whole directory, not the one file: Apple's `container` can only
+      # bind-mount a directory, and this is the form both runtimes accept.
+      - ./deploy/pg-initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "atlantis"]
       interval: 5s

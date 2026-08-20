@@ -6,14 +6,41 @@ SHELL := /bin/bash
 -include .env
 export
 
-PG_URL ?= postgres://atlantis:atlantis@localhost:5432/atlantis?sslmode=disable
+# Where the local Postgres and memcached answer.
+#
+# DNS names, not localhost, because these run as containers under Apple's
+# `container` and are reached by name rather than through a published port.
+# `container run -p` accepts the connection and then fails to relay it —
+# the forwarder logs `backend - connect failed: No route to host` while the
+# service itself is healthy and reachable on its own IP.
+#
+# A name is the better answer regardless: a container gets a new IP every time
+# it starts, and `<name>.test` follows it. Two things make that work, and
+# neither is enough alone — see `dev-infra-dns`.
+#
+# Override both to `localhost` if you go back to Docker; nothing else changes.
+PG_HOST        ?= atlantis-pg.test
+MEMCACHED_HOST ?= atlantis-memcached.test
+
+PG_URL ?= postgres://atlantis:atlantis@$(PG_HOST):5432/atlantis?sslmode=disable
+
+# A variable rather than a per-target export, because the bare `export` above
+# hands every Makefile variable to every recipe — so defining it here reaches
+# `dev`, `dev-server` and `dev-watch` at once.
+#
+# It has to be set somewhere: cmd/server/config.go:219 defaults MEMCACHED_ADDR
+# to localhost:11211, which was right when compose published the port and is
+# wrong now. Nothing fails when it is wrong — the client connects lazily and
+# reports "memcached client ready" against an address with nothing behind it,
+# so the only symptom is that no cache ever hits.
+MEMCACHED_ADDR ?= $(MEMCACHED_HOST):11211
 
 # The console connects as its own role, because it refuses to start on one that
 # reads through row-level security — which the `atlantis` dev role does, being a
 # superuser. `make dev-console-role` creates it.
 CONSOLE_PG_ROLE     ?= atlantis_console
 CONSOLE_PG_PASSWORD ?= console
-CONSOLE_PG_URL      ?= postgres://$(CONSOLE_PG_ROLE):$(CONSOLE_PG_PASSWORD)@localhost:5432/atlantis?sslmode=disable
+CONSOLE_PG_URL      ?= postgres://$(CONSOLE_PG_ROLE):$(CONSOLE_PG_PASSWORD)@$(PG_HOST):5432/atlantis?sslmode=disable
 
 # Identity. The console verifies every sign-in against Atlantis Cloud, with no
 # local accounts and no development bypass, so these are required to start it —
@@ -36,7 +63,7 @@ CLOUD_SIGNING_KEY  ?= $(DEV_CERT_DIR)/cloud-signing-key.pem
 # on the `atlantis` dev role. `make dev-cloud-role` creates this one.
 CLOUD_PG_ROLE      ?= atlantis_cloud
 CLOUD_PG_PASSWORD  ?= cloud
-CLOUD_PG_URL       ?= postgres://$(CLOUD_PG_ROLE):$(CLOUD_PG_PASSWORD)@localhost:5432/atlantis?sslmode=disable
+CLOUD_PG_URL       ?= postgres://$(CLOUD_PG_ROLE):$(CLOUD_PG_PASSWORD)@$(PG_HOST):5432/atlantis?sslmode=disable
 
 # The base every emailed link is built from. Required, with no default in the
 # product — a wrong value does not fail, it sends every user a working link to
@@ -179,13 +206,29 @@ build-console-spa: ## Build the console React SPA and write output to cmd/consol
 	npm ci
 	npm run build --workspace web/console
 
+# Image builds run under Apple's `container`, not Docker. Run
+# `make container-builder` once first — the builder ships with a nameserver
+# that does not answer, and every `RUN` that fetches anything fails without it.
+#
+# BROKEN, and not by the runtime: the console and server images both begin with
+#   FROM --platform=$$BUILDPLATFORM bufbuild/buf:1.41.0 AS proto
+#   RUN buf generate
+# and buf.gen.yaml declares LOCAL plugins (protoc-gen-go, protoc-gen-go-grpc)
+# that the buf image does not ship. `make proto` installs them on the host at
+# pinned versions; the Dockerfiles never do, so the stage fails with
+# `plugin protoc-gen-go: executable file not found in $$PATH`.
+#
+# This fails identically under Docker — it was verified there before the
+# runtime changed, so it is not a regression from the switch. Nothing caught it
+# because no CI job builds these images. `build-signer-image` is unaffected: it
+# has no proto stage.
 .PHONY: build-console-image
-build-console-image: ## Build the atlantis-console Docker image
-	docker build --file Dockerfile.console -t atlantis-console:local .
+build-console-image: ## Build the atlantis-console image (BROKEN: proto stage, see comment)
+	$(CONTAINER) build --file Dockerfile.console -t atlantis-console:local .
 
 .PHONY: build-signer-image
-build-signer-image: ## Build the atlantis-signer Docker image (cert signing service)
-	docker build --file Dockerfile.signer -t atlantis-signer:local .
+build-signer-image: ## Build the atlantis-signer image (cert signing service)
+	$(CONTAINER) build --file Dockerfile.signer -t atlantis-signer:local .
 
 # ---------- codegen ----------
 
@@ -351,9 +394,141 @@ dev-server: dev-certs ## Run the server against Postgres/memcached you started y
 		TLS_CA_FILE="$(DEV_CERT_DIR)/ca.crt" \
 		$(GO) run ./cmd/server
 
+# ── Local infrastructure: Postgres + memcached under Apple's `container` ──────
+#
+# Not docker-compose. `container` has no compose command, so the two services
+# `make dev` needs are started directly. That is the whole of what compose was
+# doing here — the isolated profile is a separate matter, see `dev-isolated`.
+#
+# Three things about `container` that this recipe has to work around, each
+# found by hitting it:
+#
+#  1. A new volume is owned by root, and the Postgres image runs as uid 1000.
+#     Without the chown below, initdb fails with
+#     `mkdir: cannot create directory '/home/postgres/pgdata/data': Permission
+#     denied` and the container exits — visible only in `container logs`.
+#  2. `--mount type=bind` refuses a file: "path ... is not a directory". That
+#     is why the extension script lives in deploy/pg-initdb/ rather than being
+#     mounted as a single file.
+#  3. The builder's default DNS does not resolve, which breaks `container
+#     build` rather than this target. See `container-builder`.
+CONTAINER          ?= container
+PG_IMAGE           ?= timescale/timescaledb-ha:pg17-oss
+MEMCACHED_IMAGE    ?= memcached:1.6.29-alpine
+PG_CONTAINER       ?= atlantis-pg
+MEMCACHED_CONTAINER?= atlantis-memcached
+PG_VOLUME          ?= atl-pg
+# uid:gid the Postgres image runs as. See note 1 above.
+PG_UID_GID         ?= 1000:1000
+
+.PHONY: dev-infra
+dev-infra: ## Start local Postgres + memcached (idempotent)
+	@which $(CONTAINER) >/dev/null 2>&1 || { \
+	  echo "install Apple's container runtime: brew install container"; exit 1; }
+	@$(CONTAINER) system status >/dev/null 2>&1 || { \
+	  echo "==> starting the container system"; $(CONTAINER) system start; }
+	@$(MAKE) --no-print-directory dev-infra-dns
+	@# Running: leave alone. Anything else: delete and recreate.
+	@#
+	@# NOT `container start`. A container gets a new IP every time it starts,
+	@# and recreating is what keeps the DNS record and the container in step.
+	@# It is safe because neither container holds state: Postgres writes to the
+	@# $(PG_VOLUME) volume and memcached is a cache.
+	@#
+	@# No `-p`. Published ports are accepted and then not relayed on this
+	@# runtime — the forwarder logs `backend - connect failed: No route to
+	@# host` while the service answers fine on its own address. Everything
+	@# reaches these two by DNS name instead; see PG_HOST at the top.
+	@if $(CONTAINER) ls --format json 2>/dev/null | grep -q '"id":"$(PG_CONTAINER)"'; then \
+	  echo "==> $(PG_CONTAINER) already running"; \
+	else \
+	  echo "==> creating $(PG_CONTAINER)"; \
+	  $(CONTAINER) rm -f $(PG_CONTAINER) >/dev/null 2>&1 || true; \
+	  $(CONTAINER) volume create $(PG_VOLUME) >/dev/null 2>&1 || true; \
+	  $(CONTAINER) run --rm --user root -v $(PG_VOLUME):/mnt alpine:3.20 \
+	    chown -R $(PG_UID_GID) /mnt >/dev/null; \
+	  $(CONTAINER) run -d --name $(PG_CONTAINER) \
+	    -v $(PG_VOLUME):/home/postgres/pgdata \
+	    --mount type=bind,source="$(CURDIR)/deploy/pg-initdb",target=/docker-entrypoint-initdb.d,readonly \
+	    -e POSTGRES_USER=atlantis -e POSTGRES_PASSWORD=atlantis -e POSTGRES_DB=atlantis \
+	    $(PG_IMAGE) >/dev/null; \
+	fi
+	@if $(CONTAINER) ls --format json 2>/dev/null | grep -q '"id":"$(MEMCACHED_CONTAINER)"'; then \
+	  echo "==> $(MEMCACHED_CONTAINER) already running"; \
+	else \
+	  echo "==> creating $(MEMCACHED_CONTAINER)"; \
+	  $(CONTAINER) rm -f $(MEMCACHED_CONTAINER) >/dev/null 2>&1 || true; \
+	  $(CONTAINER) run -d --name $(MEMCACHED_CONTAINER) \
+	    $(MEMCACHED_IMAGE) -m 256 -I 5m -v >/dev/null; \
+	fi
+	@# Wait for Postgres rather than racing it. `container run -d` returns as
+	@# soon as the VM is up, which is well before initdb has finished on a new
+	@# volume — and AUTO_MIGRATE connects immediately.
+	@printf "==> waiting for postgres at $(PG_HOST)"; \
+	for i in $$(seq 1 60); do \
+	  if PGPASSWORD=atlantis psql -h $(PG_HOST) -p 5432 -U atlantis -d atlantis \
+	       -tAc "SELECT 1" >/dev/null 2>&1; then echo " ready"; exit 0; fi; \
+	  printf "."; sleep 2; \
+	done; \
+	echo; echo "postgres did not become ready. Try: $(CONTAINER) logs $(PG_CONTAINER)"; exit 1
+
+# Both halves of container DNS, checked rather than assumed.
+#
+# They fail in different places and only one of them is obvious, which is why
+# this is a target and not a line in the README:
+#
+#   1. `[dns] domain` in ~/.config/container/config.toml tells the container
+#      service which domain to serve. Without it the service answers NXDOMAIN
+#      for every name — it is running and listening, so nothing looks wrong.
+#   2. `sudo container system dns create test` writes /etc/resolver/... so
+#      macOS asks that service for *.test at all.
+#
+# Doing only the second is the trap: `container system dns ls` lists the
+# domain, the resolver file is present, the DNS port is bound, and every
+# lookup still fails.
+.PHONY: dev-infra-dns
+dev-infra-dns: ## Check that container DNS is set up (both halves)
+	@if ! $(CONTAINER) system property ls 2>/dev/null | grep -A1 '^\[dns\]' | grep -q 'domain'; then \
+	  echo "container DNS is not configured: [dns] domain is unset."; \
+	  echo; \
+	  echo "  mkdir -p ~/.config/container"; \
+	  echo "  printf '[dns]\\ndomain = \"test\"\\n' >> ~/.config/container/config.toml"; \
+	  echo "  $(CONTAINER) system stop && $(CONTAINER) system start"; \
+	  echo; \
+	  exit 1; \
+	fi
+	@if [ ! -f /etc/resolver/containerization.test ]; then \
+	  echo "macOS is not resolving *.test through the container service."; \
+	  echo "Run this in a terminal (it needs your password):"; \
+	  echo; \
+	  echo "  sudo $(CONTAINER) system dns create test"; \
+	  echo; \
+	  exit 1; \
+	fi
+
+.PHONY: dev-infra-down
+dev-infra-down: ## Stop local Postgres + memcached, keeping the data volume
+	-$(CONTAINER) stop $(PG_CONTAINER) $(MEMCACHED_CONTAINER) 2>/dev/null
+	@echo "==> stopped. The $(PG_VOLUME) volume is kept; 'make dev-infra-destroy' removes it."
+
+.PHONY: dev-infra-destroy
+dev-infra-destroy: ## Remove the containers AND the Postgres data volume
+	-$(CONTAINER) rm -f $(PG_CONTAINER) $(MEMCACHED_CONTAINER) 2>/dev/null
+	-$(CONTAINER) volume delete $(PG_VOLUME) 2>/dev/null
+	@echo "==> removed. Next 'make dev-infra' starts a fresh database."
+
+.PHONY: container-builder
+container-builder: ## Restart the image builder with a resolver that works
+	@# `container build` fails on a fresh install with
+	@#   dial tcp: lookup proxy.golang.org on 192.168.64.1:53: connection refused
+	@# because the builder's default nameserver does not answer. This is a
+	@# one-time fix per builder, and it does not survive `container builder delete`.
+	-$(CONTAINER) builder stop 2>/dev/null
+	-$(CONTAINER) builder delete 2>/dev/null
+	$(CONTAINER) builder start --dns 1.1.1.1 --dns 8.8.8.8
+
 .PHONY: dev
-dev: dev-certs ## Start compose Postgres + memcached, then run the server
-	docker compose up -d postgres memcached
+dev: dev-certs dev-infra ## Start Postgres + memcached, then run the server
 	AUTO_MIGRATE=true \
 		ATL_MIRROR_SCHEMA=true \
 		ATL_ALLOW_APPLY_MUTATION=true \
@@ -668,15 +843,35 @@ dev-caller-cert: dev-certs ## Issue a local caller cert signed by the dev CA: ma
 	@echo "      Use \`tide login\` — the console's Callers page prints the command."
 	@echo "      This pair is for inspecting a handshake, not for running tide."
 
+# dev-isolated ran the whole stack, including atlantis itself, from
+# docker-compose. It does not work, for two independent reasons:
+#
+#  1. It builds the atlantis image, and that build fails at the proto stage.
+#     See build-console-image for the detail. This is true under Docker as well.
+#  2. Apple's `container` has no compose command, so `docker compose` needs
+#     Docker Desktop, which this repo's local flow no longer uses.
+#
+# Reason 1 came first: the target was already broken before the runtime moved.
+# Rebuilding it means hand-rolling the certs service, the shared named volumes
+# and the ordering compose was doing — worth doing only once the image builds.
+#
+# `make dev` covers the everyday case: Postgres and memcached in containers,
+# atlantis on the host where a debugger can reach it.
 .PHONY: dev-isolated
-dev-isolated: ## Full local stack via docker-compose (server + pg + memcached)
-	# --build: rebuild atlantis image so a stale one isn't reused.
-	# --profile isolated: opt into the atlantis service (otherwise infra-only).
-	docker compose --profile isolated up --build
+dev-isolated: ## UNAVAILABLE — see the comment above this target
+	@echo "dev-isolated is unavailable."; \
+	echo; \
+	echo "  It needs the atlantis image, and that build fails at the proto"; \
+	echo "  stage: buf.gen.yaml declares local plugins (protoc-gen-go,"; \
+	echo "  protoc-gen-go-grpc) that bufbuild/buf:1.41.0 does not ship."; \
+	echo "  This fails under Docker too — it is not the runtime."; \
+	echo; \
+	echo "  Use 'make dev' instead: Postgres and memcached in containers,"; \
+	echo "  atlantis on the host."; \
+	exit 1
 
 .PHONY: dev-down
-dev-down: ## Tear down the docker-compose stack
-	docker compose --profile isolated down -v
+dev-down: dev-infra-down ## Stop the local containers (alias for dev-infra-down)
 
 # dev-tree: symlink real infra migrations + create empty tidectl dir for dev-build's staged plans.
 .PHONY: dev-tree
@@ -692,7 +887,7 @@ dev-watch: dev-tree ## Hot-reload server on .atl / .go edits (installs air if mi
 		ATL_MIRROR_SCHEMA=true \
 		ATL_ALLOW_APPLY_MUTATION=true \
 		PG_URL="$(PG_URL)" \
-		MEMCACHED_ADDR="$${MEMCACHED_ADDR:-localhost:11211}" \
+		MEMCACHED_ADDR="$(MEMCACHED_ADDR)" \
 		LOG_LEVEL=debug \
 		MIGRATIONS_DIR=./.dev/migrations \
 		air
@@ -744,8 +939,10 @@ dev-reset-db: ## Drop local schema + both migration history tables + reapply all
 # signer service issues them in a deployed stack.
 
 .PHONY: image
-image: ## Build the production image, version-stamped from git
-	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE) .
+image: ## Build the production image, version-stamped from git (BROKEN: proto stage)
+	@# Same proto-stage failure as build-console-image — see the comment there.
+	@# Broken under Docker too; the runtime is not what is wrong.
+	$(CONTAINER) build --build-arg VERSION=$(VERSION) -t $(IMAGE) .
 
 # `deploy`, `systemd-install` and `logs` are gone with the systemd unit they
 # managed. A stack is deployed by the platform, not by `sudo systemctl restart`

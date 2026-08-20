@@ -1,10 +1,16 @@
 -- Extensions the local development database needs before atlantis can connect.
 --
--- Mounted by docker-compose.yml into the postgres service's
+-- The whole of this DIRECTORY is mounted into the postgres service's
 -- /docker-entrypoint-initdb.d, so it runs once, when the data directory is
 -- first created. A container started against an existing volume never runs it
 -- again, which is correct: CREATE EXTENSION IF NOT EXISTS is idempotent and
 -- there is nothing to redo.
+--
+-- A directory rather than this one file, because Apple's `container` can only
+-- bind-mount a directory — `container run --mount type=bind,source=<a file>`
+-- fails with "path ... is not a directory". Docker can mount either, so the
+-- directory form is the one both runtimes accept, and it is the shape
+-- docker-entrypoint-initdb.d expects in any case.
 --
 -- ── Why this exists when atlantis enables extensions itself ──────────────────
 --
