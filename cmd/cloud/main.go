@@ -197,7 +197,13 @@ func serve(args []string, log *slog.Logger) error {
 	}
 	defer db.Close()
 
-	api, err := cloudsrv.New(cfg, db, iss, log)
+	// spa_embed.go or spa_none.go, depending on the embedspa build tag.
+	sub, err := spaFS()
+	if err != nil {
+		return fmt.Errorf("embed the sign-in app: %w", err)
+	}
+
+	api, err := cloudsrv.New(cfg, db, iss, sub, log)
 	if err != nil {
 		return err
 	}
@@ -211,8 +217,13 @@ func serve(args []string, log *slog.Logger) error {
 
 	errc := make(chan error, 1)
 	go func() {
+		// spa_embedded says whether this binary carries the sign-in
+		// application. False is normal for a development build and wrong for a
+		// deployed one, and it is the only place the difference is visible
+		// before somebody loads a page and gets a 404.
 		log.Info("serving", "addr", cfg.Listen, "issuer", iss.Name(),
-			"jwks", issuer.JWKSPath, "kid", key.ID, "public_url", cfg.PublicURL)
+			"jwks", issuer.JWKSPath, "kid", key.ID, "public_url", cfg.PublicURL,
+			"spa_embedded", sub != nil)
 		if cfg.SMTPAddr == "" {
 			// Said at startup as well as at every send, because this is the
 			// setting whose absence looks like everything working: accounts are

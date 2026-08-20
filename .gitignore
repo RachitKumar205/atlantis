@@ -16,12 +16,15 @@
 # is empty, and git cannot re-include a file whose parent directory is excluded,
 # so the negation could never have fired.
 #
-# The consequence is real and is the documented behaviour rather than a bug:
-# `//go:embed dist` needs the directory to exist, so `go build ./cmd/console`
-# requires the SPA to have been built first. That is what `make build-console`
-# means by "requires SPA built first", and what stage 1 of Dockerfile.console
-# does before stage 2 compiles anything.
+# That used to mean `go build ./cmd/console` failed on a clean checkout, since
+# `//go:embed dist` does not compile when dist is absent. It no longer does: the
+# embed lives in a file behind the `embedspa` build tag, and a file excluded by
+# a build constraint is never scanned for embed directives. So the default build
+# needs nothing here, and `make build-console-embedded` is what fills it.
+#
+# See cmd/cloud/spa_none.go for the whole reasoning.
 /cmd/console/dist/
+/cmd/cloud/dist/
 
 # npm workspace. One node_modules at the root; members may still have their own
 # for a hoisting exception, so both shapes are ignored.

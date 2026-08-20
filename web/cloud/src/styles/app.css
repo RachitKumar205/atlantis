@@ -1,0 +1,97 @@
+/* The sign-in application's own styles.
+ *
+ * Palette comes from @atlantis/shared/tokens.css; this file holds only what is
+ * specific to this app.
+ *
+ * ── No inline styles anywhere in this app ──────────────────────────────────
+ *
+ * It is served under `style-src 'self'` with no 'unsafe-inline' (spaCSP in
+ * internal/cloud/server/server.go), which rejects style ATTRIBUTES as well as
+ * <style> blocks. So:
+ *
+ *   - no `style={{ … }}` in any component
+ *   - no `style={{ '--x': v }}` either — a custom property set that way is
+ *     still a style attribute, governed by style-src-attr, which falls back to
+ *     style-src
+ *
+ * Dynamic values go through a class, or through ref + el.style.setProperty(),
+ * which is CSSOM and not governed by CSP.
+ *
+ * None of this fails in `vite dev`, which never applies the policy. It fails in
+ * a tagged binary serving the built app, which is why that check is in the
+ * walkthrough rather than left to be noticed.
+ *
+ * ── Fonts ──────────────────────────────────────────────────────────────────
+ *
+ * There is no @font-face yet. The token stack (--sans, --mono) names Geist
+ * first and falls back to system-ui, so the app renders correctly without it.
+ * When Geist ships, the woff2 files go in src/assets/fonts/ and the @font-face
+ * rules go in a .css file imported from main.tsx — never in a <style> block in
+ * index.html, which the policy rejects.
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--canvas-0);
+  color: var(--ink-1);
+  font-family: var(--sans);
+  font-size: var(--font-body);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* A centred card on an empty ground. The console's /login settled on the same
+ * shape after several bolder attempts were reverted; this is the sign-in
+ * surface, so it follows rather than competes. */
+.shell {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: var(--pad-page);
+}
+
+.card {
+  width: 100%;
+  max-width: 360px;
+  background: var(--canvas-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 28px;
+}
+
+.wordmark {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ink-0);
+  letter-spacing: -0.01em;
+  margin: 0 0 4px;
+}
+
+.muted {
+  color: var(--ink-2);
+  font-size: 12.5px;
+  margin: 0;
+}
+
+.status {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line-soft);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.status--bad {
+  color: var(--coral);
+}

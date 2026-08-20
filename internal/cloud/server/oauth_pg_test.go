@@ -146,7 +146,9 @@ func TestAProviderSignInIsNotASession(t *testing.T) {
 	cookie, state := f.startOAuth(t, "github", "")
 	rec := f.callback(t, "github", cookie, state, nil)
 
-	if rec.Code != http.StatusOK {
+	// 303 back to the sign-in application. It used to be a 200 text/plain page
+	// naming an HTTP route; see handOff.
+	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("callback: %d %s", rec.Code, rec.Body.String())
 	}
 	if got := cookieFrom(rec, sessionCookie); got != "" {
@@ -161,8 +163,9 @@ func TestAProviderSignInIsNotASession(t *testing.T) {
 		t.Fatalf("a pending token resolved as a session: %v", err)
 	}
 	// A brand-new account has no factor, so it may enrol and nothing else.
-	if !strings.Contains(rec.Body.String(), "two-factor") {
-		t.Errorf("the callback did not say what happens next: %s", rec.Body.String())
+	// That now travels in the redirect rather than in a page of prose.
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "next=enrol") {
+		t.Errorf("the callback did not say what happens next: %q", loc)
 	}
 }
 
@@ -172,7 +175,7 @@ func TestAFirstProviderSignInCreatesAnAccount(t *testing.T) {
 	f.fakeFor("google", "goog-9", "fresh@example.com", "Fresh")
 
 	cookie, state := f.startOAuth(t, "google", "")
-	if rec := f.callback(t, "google", cookie, state, nil); rec.Code != http.StatusOK {
+	if rec := f.callback(t, "google", cookie, state, nil); rec.Code != http.StatusSeeOther {
 		t.Fatalf("callback: %d %s", rec.Code, rec.Body.String())
 	}
 
@@ -198,7 +201,7 @@ func TestASecondProviderSignInFindsTheSameAccount(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		cookie, state := f.startOAuth(t, "github", "")
-		if rec := f.callback(t, "github", cookie, state, nil); rec.Code != http.StatusOK {
+		if rec := f.callback(t, "github", cookie, state, nil); rec.Code != http.StatusSeeOther {
 			t.Fatalf("callback %d: %d %s", i, rec.Code, rec.Body.String())
 		}
 	}
@@ -219,7 +222,7 @@ func TestAutoLinkingNeedsTheExistingFactor(t *testing.T) {
 
 	cookie, state := f.startOAuth(t, "github", "")
 	rec := f.callback(t, "github", cookie, state, nil)
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("callback: %d %s", rec.Code, rec.Body.String())
 	}
 	if n := f.identityCount(t, "member@example.com"); n != 1 {
@@ -261,6 +264,9 @@ func TestAutoLinkingIntoAFactorlessAccountIsRefused(t *testing.T) {
 	cookie, state := f.startOAuth(t, "github", "")
 	rec := f.callback(t, "github", cookie, state, nil)
 
+	// Still a 409 page: this is the factorless-account refusal, not the
+	// already-claimed one, and it is not a step in a flow the sign-in app can
+	// continue. Moving it into the app is W4's problem.
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("callback: %d %s", rec.Code, rec.Body.String())
 	}
@@ -346,7 +352,7 @@ func TestASignInFollowsTheSubjectAndNotTheAddress(t *testing.T) {
 
 	cookie, state := f.startOAuth(t, "github", "")
 	rec := f.callback(t, "github", cookie, state, nil)
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("callback: %d %s", rec.Code, rec.Body.String())
 	}
 
@@ -394,8 +400,12 @@ func TestConnectingAClaimedProviderAccountIsRefused(t *testing.T) {
 	rec := f.callback(t, "github", cookie, state,
 		map[string]string{sessionCookie: session})
 
-	if rec.Code != http.StatusConflict {
+	// Back to the account screen with the reason, not a 409 dead end.
+	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("connect: %d %s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "outcome=claimed") {
+		t.Errorf("the refusal does not say why: %q", loc)
 	}
 	stillOwner, err := f.db.UserByIdentity(ctx, "github", "contested")
 	if err != nil {
@@ -487,7 +497,7 @@ func TestAStateCookieIsSpentByTheCallback(t *testing.T) {
 
 	cookie, state := f.startOAuth(t, "github", "")
 	first := f.callback(t, "github", cookie, state, nil)
-	if first.Code != http.StatusOK {
+	if first.Code != http.StatusSeeOther {
 		t.Fatalf("first callback: %d %s", first.Code, first.Body.String())
 	}
 	// The response clears it. A browser would not send it again; this asserts
@@ -510,7 +520,7 @@ func TestThePKCEVerifierSurvivesTheRoundTrip(t *testing.T) {
 	p := f.fakeFor("github", "gh-12", "pkce@example.com", "PKCE")
 
 	cookie, state := f.startOAuth(t, "github", "")
-	if rec := f.callback(t, "github", cookie, state, nil); rec.Code != http.StatusOK {
+	if rec := f.callback(t, "github", cookie, state, nil); rec.Code != http.StatusSeeOther {
 		t.Fatalf("callback: %d %s", rec.Code, rec.Body.String())
 	}
 	if p.lastVerifier == "" {
@@ -638,7 +648,7 @@ func TestTheLastSignInMethodCannotBeUnlinked(t *testing.T) {
 	// Sign in, then enrol, which is what turns the pending login into a session.
 	cookie, state := f.startOAuth(t, "github", "")
 	rec := f.callback(t, "github", cookie, state, nil)
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("callback: %d %s", rec.Code, rec.Body.String())
 	}
 	pending := cookieFrom(rec, pendingCookie)
@@ -747,7 +757,9 @@ func TestLinkingAttachesToTheSignedInAccount(t *testing.T) {
 	cookie, state := f.startOAuth(t, "github", session)
 	rec := f.callback(t, "github", cookie, state,
 		map[string]string{sessionCookie: session})
-	if rec.Code != http.StatusOK {
+	// The link branch returns to the account screen now, where it used to end
+	// on a text/plain page with no way back.
+	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("link: %d %s", rec.Code, rec.Body.String())
 	}
 
@@ -812,7 +824,7 @@ func TestAProviderSignInEndsTheSessionAlreadyInTheBrowser(t *testing.T) {
 	cookie, state := f.startOAuth(t, "github", "")
 	rec := f.callback(t, "github", cookie, state,
 		map[string]string{sessionCookie: session})
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("callback: %d %s", rec.Code, rec.Body.String())
 	}
 
@@ -906,10 +918,14 @@ func TestTheOAuthStartIsRateLimited(t *testing.T) {
 	}
 }
 
-// With a sign-in app configured, the callback redirects instead of answering.
-func TestTheCallbackRedirectsWhenAnAppIsConfigured(t *testing.T) {
+// The callback returns the browser to the sign-in application.
+//
+// It used to answer with a text/plain page naming an HTTP route, and to
+// redirect only when CLOUD_SIGNIN_APP_URL was set. Cloud serves the application
+// itself now, so the redirect is unconditional and the target is relative —
+// which resolves against this origin, the one that just set the pending cookie.
+func TestTheCallbackReturnsToTheSignInApp(t *testing.T) {
 	f := newFixture(t)
-	f.srv.cfg.SignInAppURL = "https://app.cloud.test/signin"
 	f.fakeFor("github", "gh-21", "redirect@example.com", "Redirect")
 
 	cookie, state := f.startOAuth(t, "github", "")
@@ -919,8 +935,13 @@ func TestTheCallbackRedirectsWhenAnAppIsConfigured(t *testing.T) {
 		t.Fatalf("callback: %d %s", rec.Code, rec.Body.String())
 	}
 	loc := rec.Header().Get("Location")
-	if !strings.HasPrefix(loc, "https://app.cloud.test/signin?next=") {
-		t.Fatalf("Location is %q", loc)
+	if !strings.HasPrefix(loc, "/signin?next=") {
+		t.Fatalf("Location is %q, want a relative /signin path", loc)
+	}
+	// Relative on purpose. An absolute URL here would be a second place the
+	// origin is written down, and a stale one strands the sign-in.
+	if strings.Contains(loc, "://") {
+		t.Errorf("Location is absolute: %q", loc)
 	}
 	// Still a pending login and still no session — the answer changed, not the
 	// thing being answered.

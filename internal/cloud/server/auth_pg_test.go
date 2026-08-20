@@ -170,7 +170,9 @@ func newFixtureWith(t *testing.T, adjust func(*Config)) *fixture {
 	}
 
 	f := &fixture{db: db, mailer: &recordingMailer{}}
-	f.srv, err = New(cfg, db, iss, quiet)
+	// nil SPA: the fixture is testing the API, and nil is what every untagged
+	// build has. Tests that need the app served supply their own fs.FS.
+	f.srv, err = New(cfg, db, iss, nil, quiet)
 	if err != nil {
 		t.Fatalf("server: %v", err)
 	}

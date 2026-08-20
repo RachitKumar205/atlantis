@@ -25,6 +25,7 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/console/cloudauth"
 	"github.com/rachitkumar205/atlantis/internal/migrate"
 	"github.com/rachitkumar205/atlantis/internal/secrets"
+	"github.com/rachitkumar205/atlantis/internal/spafs"
 	"github.com/rachitkumar205/atlantis/internal/storage/pg"
 	"github.com/rachitkumar205/atlantis/migrations"
 )
@@ -1690,38 +1691,15 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 
 // ── SPA handler ───────────────────────────────────────────────────────────────
 
+// handleSPA serves the built console.
+//
+// The logic moved to internal/spafs when Cloud grew a SPA of its own and needed
+// the identical three behaviours. Two copies would have meant a fix in one
+// silently missing from the other; the move also brought this path its first
+// tests, a Cache-Control policy, and two defects fixed — see that package.
 func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
-	if s.spaFS == nil {
-		http.Error(w, "console SPA not built yet — run: make build-console-spa", http.StatusNotFound)
-		return
-	}
-
-	// Serve static assets from dist/assets/* directly.
-	// For all other paths serve index.html and let the SPA router handle it.
-	path := strings.TrimPrefix(r.URL.Path, "/")
-	if path == "" {
-		path = "."
-	}
-
-	if _, err := fs.Stat(s.spaFS, path); err == nil && path != "." {
-		http.FileServerFS(s.spaFS).ServeHTTP(w, r)
-		return
-	}
-
-	// SPA fallback: serve index.html.
-	f, err := s.spaFS.Open("index.html")
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	defer f.Close() //nolint:errcheck
-	fi, err := f.Stat()
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	http.ServeContent(w, r, "index.html", fi.ModTime(), f.(io.ReadSeeker))
+	spafs.Handler(s.spaFS, "console SPA not built yet — run: make build-console-spa").
+		ServeHTTP(w, r)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

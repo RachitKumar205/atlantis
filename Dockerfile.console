@@ -70,10 +70,20 @@ COPY --from=proto /src/clients/go/pb ./clients/go/pb
 # Static-linked binary so the runtime image can stay on a minimal base.
 # The pg_query_go vendored libpg_query archive is statically pulled in;
 # the result is a single self-contained executable.
+#
+# -tags embedspa bakes the SPA in. It is NOT the default — an untagged build has
+# no //go:embed directive at all, which is what lets a clean checkout and every
+# CI step compile with no Node. This is a shipped binary, so it opts in. A
+# binary built without it answers 404 on the SPA routes naming the make target,
+# rather than serving a blank page. See cmd/cloud/spa_none.go.
+#
+# The tag goes in the build line, not in GOFLAGS: GOFLAGS already carries the
+# static-link ldflags and appending to it here would be one string doing two
+# unrelated jobs.
 RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=1 \
     GOFLAGS="-ldflags=-extldflags=-static" \
-    go build -o /out/atlantis-console ./cmd/console
+    go build -tags embedspa -o /out/atlantis-console ./cmd/console
 
 # ── Stage 3: runtime ──────────────────────────────────────────────────────────
 FROM alpine:3.20

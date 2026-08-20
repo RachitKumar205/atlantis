@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"embed"
-	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -14,9 +12,6 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/console"
 )
 
-//go:embed dist
-var distFS embed.FS
-
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
@@ -26,12 +21,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Serve dist/ sub-tree so paths are rooted at "/" not "dist/".
-	sub, err := fs.Sub(distFS, "dist")
+	// spa_embed.go or spa_none.go, depending on the embedspa build tag.
+	sub, err := spaFS()
 	if err != nil {
 		log.Error("embed dist", "err", err)
 		os.Exit(1)
 	}
+	log.Info("starting", "spa_embedded", sub != nil)
 
 	srv, err := console.New(cfg, sub, log)
 	if err != nil {

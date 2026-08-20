@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/mail"
@@ -16,6 +17,7 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/cloud/oauth"
 	"github.com/rachitkumar205/atlantis/internal/cloud/store"
 	"github.com/rachitkumar205/atlantis/internal/secrets"
+	"github.com/rachitkumar205/atlantis/internal/spafs"
 )
 
 // Server is Cloud's HTTP surface.
@@ -40,6 +42,12 @@ type Server struct {
 	// — the same seam as mailer, breach and sleep.
 	providers map[string]oauth.Provider
 
+	// spaFS is the built sign-in application, or nil when the binary was
+	// compiled without the embedspa tag. Nil is a supported state, not an
+	// error: it is what every development and CI build looks like. See
+	// cmd/cloud/spa_none.go.
+	spaFS fs.FS
+
 	mux     *http.ServeMux
 	handler http.Handler
 
@@ -56,7 +64,9 @@ type Server struct {
 // neither enrol a second factor nor check one, so every sign-in would fail at
 // the last step with a message about ciphertext rather than about
 // configuration.
-func New(cfg Config, db *store.Store, iss *issuer.Issuer, log *slog.Logger) (*Server, error) {
+// spaFS is the built sign-in application. Nil is supported and means the SPA
+// routes answer 404 naming the command that builds it — see cmd/cloud.
+func New(cfg Config, db *store.Store, iss *issuer.Issuer, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 	keys, err := secrets.FromEnvKeyset(cfg.DataKeyset)
 	if err != nil {
 		return nil, fmt.Errorf("CLOUD_DATA_KEY: %w", err)
@@ -65,6 +75,7 @@ func New(cfg Config, db *store.Store, iss *issuer.Issuer, log *slog.Logger) (*Se
 	s := &Server{
 		cfg: cfg, db: db, iss: iss, log: log,
 		keys:      keys,
+		spaFS:     spaFS,
 		providers: configuredProviders(cfg, log),
 		lim:       newLimiter(),
 		mux:       http.NewServeMux(),
@@ -90,7 +101,7 @@ func New(cfg Config, db *store.Store, iss *issuer.Issuer, log *slog.Logger) (*Se
 	}
 
 	s.routes()
-	s.handler = securityHeaders(s.mux)
+	s.handler = s.securityHeaders(s.mux)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.bgCancel = cancel
@@ -192,21 +203,130 @@ func (s *Server) routes() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+
+	// ── The sign-in application ─────────────────────────────────────────────
+	//
+	// Registered last, and last on purpose: `GET /` matches every GET path, so
+	// everything above has to be more specific to survive. It is — every
+	// pattern in this function is method-qualified and names a literal path, so
+	// net/http's conflict rule never fires and each one still wins.
+	//
+	// `GET /` rather than a method-less `/`, unlike the console
+	// (internal/console/server.go:450). A POST to a page route is a mistake,
+	// and 405 says so; the console answers it with index.html.
+	s.mux.Handle("GET /", s.withSPAPolicy(http.HandlerFunc(s.handleSPA)))
+
+	// An unmatched API path must not be answered by the app.
+	//
+	// Without these, `GET /api/typo` falls to the catch-all and returns 200
+	// with index.html — which reaches a client as a JSON parse error naming
+	// something that has nothing to do with the mistake.
+	//
+	// Both methods, because registering only GET is worse than registering
+	// neither: `POST /api/typo` would then match `GET /api/`'s path but not its
+	// method, and net/http answers that with 405 and a text/plain body.
+	// PUT/DELETE/PATCH still do — Cloud has no such routes, so nothing can
+	// reach it today, and this is the shape to extend when one appears.
+	s.mux.HandleFunc("GET /api/", notFoundJSON)
+	s.mux.HandleFunc("POST /api/", notFoundJSON)
+
+	// Same trap, one level up. OAuth routes are registered only for providers
+	// this deployment has credentials for, so `/auth/google` on a deployment
+	// with no Google credentials used to be a clean 404 — and behind the
+	// catch-all would become 200 index.html. A literal segment beats a
+	// wildcard, so a configured `GET /auth/github` still wins over these.
+	s.mux.HandleFunc("GET /auth/{provider}", notFoundJSON)
+	s.mux.HandleFunc("GET /auth/{provider}/callback", notFoundJSON)
 }
 
-// securityHeaders applies the same baseline the console uses.
+// notFoundJSON answers a path that looks like an API route and is not one.
+func notFoundJSON(w http.ResponseWriter, _ *http.Request) {
+	jsonError(w, "no such route", http.StatusNotFound)
+}
+
+// handleSPA serves the sign-in application.
 //
-// The pages here are tiny and carry no scripts, so the policy can be far
-// stricter than a SPA's: nothing loads from anywhere.
-func securityHeaders(next http.Handler) http.Handler {
+// A method reading s.spaFS per request, rather than a handler built once in
+// routes() around the field's value. The difference is not stylistic: building
+// it once captures whatever spaFS held at construction, which makes the struct
+// field a lie afterwards and silently ignores anything set later. A test
+// swapping in a filesystem is the case that found it, and a test that cannot
+// see its own setup take effect is the failure mode.
+//
+// internal/console does the same for the same reason.
+func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
+	spafs.Handler(s.spaFS, "sign-in app not built yet — run: make build-cloud-spa").
+		ServeHTTP(w, r)
+}
+
+// withSPAPolicy widens the CSP for the one handler that needs it.
+//
+// This is the whole of the opt-in. securityHeaders has already set strictCSP by
+// the time this runs, and nothing has been flushed, so overwriting the header
+// here is what makes the sign-in application loadable — and leaves every other
+// route on `default-src 'none'` without having to remember to.
+func (s *Server) withSPAPolicy(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy",
-			"default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", spaCSP)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// strictCSP is the policy every route gets unless it says otherwise.
+//
+// `default-src 'none'` — nothing loads from anywhere. It fits every route Cloud
+// had before the sign-in application: JSON, and three script-free pages reached
+// with a single-use token in the query string.
+const strictCSP = "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+
+// spaCSP is the policy for the sign-in application, and only for it.
+//
+// Wider than strictCSP because a React page has to load its own bundle, and
+// narrower than the console's because this is the origin holding every
+// password, every TOTP secret and the assertion signing key:
+//
+//   - `script-src 'self'` with no 'unsafe-inline' — the directive that actually
+//     stops injected code running.
+//   - `style-src 'self'` with no 'unsafe-inline', which the console does allow.
+//     The cost is a rule: no inline style attributes anywhere in web/cloud, so
+//     no `style={{…}}` and no `style={{'--x': v}}` either — a style attribute is
+//     governed by style-src-attr, which falls back to here. Dynamic values go
+//     through a class or ref + el.style.setProperty(), which is CSSOM and not
+//     governed by CSP.
+//   - No `data:` in img-src, so Vite must not inline small assets
+//     (assetsInlineLimit: 0). The QR code is inline SVG rectangles, which needs
+//     no allowance at all.
+//   - No external host anywhere. Geist is self-hosted rather than fetched from
+//     Google, because a page where passwords are typed should make no
+//     third-party request.
+const spaCSP = "default-src 'none'; script-src 'self'; style-src 'self'; " +
+	"img-src 'self'; font-src 'self'; connect-src 'self'; " +
+	"form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+
+// securityHeaders applies the baseline to every response.
+//
+// Fail-closed by construction: the strict policy is set HERE, before the mux
+// runs, and a handler that needs something wider overwrites it. Headers are not
+// flushed until WriteHeader, so the overwrite wins — and a route added later
+// that does not think about CSP inherits `default-src 'none'` rather than
+// whatever the loosest route needed.
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", strictCSP)
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
 		// no-referrer matters more here than usual: these pages are reached
 		// with a single-use token in the query string, and the default policy
 		// would put that token in the Referer of anything the page loads.
+		h.Set("Permissions-Policy",
+			"camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+		// Only over HTTPS. HSTS on plain HTTP is a foot-gun, and the console
+		// gates it on the same value for the same reason.
+		if s.cfg.CookieSecure {
+			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 		next.ServeHTTP(w, r)
 	})
 }

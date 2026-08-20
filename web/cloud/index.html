@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Atlantis Cloud</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+
+    <!--
+      No <style> block here, and no font <link>.
+
+      Both would break the Content-Security-Policy this app is served under
+      (spaCSP, internal/cloud/server/server.go):
+
+        - A <style> block is Vite's one inline-style path, and `style-src 'self'`
+          has no 'unsafe-inline'.
+        - A <link> to fonts.googleapis.com is a third-party request from the
+          page where passwords are typed. Geist is self-hosted instead, declared
+          with @font-face in src/styles/fonts.css.
+
+      Neither failure shows up in `vite dev`, which never applies the policy.
+    -->
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

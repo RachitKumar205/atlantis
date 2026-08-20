@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -292,7 +293,7 @@ func (s *Server) adoptOrCreate(w http.ResponseWriter, r *http.Request, provider 
 		created, err := s.db.CreateUserWithIdentity(ctx,
 			id.Email, id.Name, provider, id.Subject, id.Email)
 		if errors.Is(err, store.ErrIdentityClaimed) {
-			s.refuseClaimed(w, provider)
+			s.refuseClaimed(w, r, provider)
 			return nil, false
 		}
 		if err != nil {
@@ -370,7 +371,7 @@ func (s *Server) adoptOrCreate(w http.ResponseWriter, r *http.Request, provider 
 
 	if err := s.db.LinkIdentity(ctx, existing.ID, provider, id.Subject, id.Email); err != nil {
 		if errors.Is(err, store.ErrIdentityClaimed) {
-			s.refuseClaimed(w, provider)
+			s.refuseClaimed(w, r, provider)
 			return nil, false
 		}
 		s.log.Error("link identity", "provider", provider, "err", err)
@@ -411,36 +412,46 @@ func (s *Server) startSecondLeg(w http.ResponseWriter, r *http.Request, user *st
 	if !enrolled {
 		next = "enrol"
 	}
-	s.handOff(w, r, next, providerLabel(provider))
+	// The raw name, not providerLabel's display form. Every redirect out of
+	// this file carries `provider=<id>`, and the page renders the label — one
+	// spelling in the contract, and the app already has to know the ids to draw
+	// its buttons.
+	s.handOff(w, r, next, provider)
 }
 
-// handOff answers the browser at the end of a callback.
+// handOff returns the browser to the sign-in application.
 //
-// With a sign-in app configured this is a redirect; without one it is a page
-// naming the next step. The second form is why these routes work today: an app
-// that does not exist cannot be the only way to finish signing in, and a
-// callback that could not be completed would be a route with no caller.
+// # Relative, and no longer configurable
+//
+// This used to redirect to CLOUD_SIGNIN_APP_URL, and to answer with a
+// text/plain page naming an HTTP route when that was unset. Both are gone:
+// Cloud serves the application itself now, so the setting could only ever
+// duplicate CLOUD_PUBLIC_URL — two values an operator keeps in step by hand,
+// with a stale one stranding sign-ins on another origin after the pending
+// cookie was already set on this one. That is the failure the console_url
+// migration removed by fusing an audience and a redirect into one column, and
+// it is not worth reintroducing.
+//
+// A relative Location resolves against this origin, which is exactly where the
+// application is. `next` is a fixed literal here and in every caller, so there
+// is nothing to escape and nothing to open-redirect through.
+// provider is carried so the page can say which one signed you in.
 func (s *Server) handOff(w http.ResponseWriter, r *http.Request, next, provider string) {
-	if s.cfg.SignInAppURL != "" {
-		http.Redirect(w, r, s.cfg.SignInAppURL+"?next="+next, http.StatusSeeOther)
-		return
-	}
-	if next == "enrol" {
-		page(w, http.StatusOK, "Signed in with "+provider+". One more step: set up "+
-			"two-factor authentication to finish.\n\n"+
-			"POST /api/auth/2fa/enrol/begin")
-		return
-	}
-	page(w, http.StatusOK, "Signed in with "+provider+". One more step: enter the "+
-		"code from your authenticator.\n\n"+
-		"POST /api/auth/2fa/verify")
+	http.Redirect(w, r, "/signin?next="+next+"&provider="+url.QueryEscape(provider),
+		http.StatusSeeOther)
 }
 
-func (s *Server) refuseClaimed(w http.ResponseWriter, provider string) {
-	page(w, http.StatusConflict,
-		"That "+providerLabel(provider)+" account is already connected to a "+
-			"different Atlantis account.\n\n"+
-			"Sign in to that one, or disconnect it there first.")
+// refuseClaimed sends a sign-in back to the application with the reason.
+//
+// It used to answer with a text/plain 409 — accurate, and a dead end: no link
+// back, and nothing the application could read to explain what happened. The
+// link path has its own version of this (backToAccount with "claimed"), because
+// somebody connecting a provider from account settings should land back there
+// rather than on the sign-in screen.
+func (s *Server) refuseClaimed(w http.ResponseWriter, r *http.Request, provider string) {
+	http.Redirect(w, r,
+		"/signin?error=claimed&provider="+url.QueryEscape(provider),
+		http.StatusSeeOther)
 }
 
 // ── Linking, for somebody already signed in ─────────────────────────────────
@@ -463,14 +474,32 @@ func (s *Server) finishLink(w http.ResponseWriter, r *http.Request, provider str
 
 	if err := s.db.LinkIdentity(r.Context(), user.ID, provider, id.Subject, id.Email); err != nil {
 		if errors.Is(err, store.ErrIdentityClaimed) {
-			s.refuseClaimed(w, provider)
+			// The account screen, not the sign-in one: this person is signed in
+			// and was connecting a provider, so the refusal belongs where they
+			// started.
+			s.backToAccount(w, r, provider, "claimed")
 			return
 		}
 		s.log.Error("link identity", "provider", provider, "err", err)
-		page(w, http.StatusInternalServerError, "Could not connect that account. Please try again.")
+		s.backToAccount(w, r, provider, "error")
 		return
 	}
-	page(w, http.StatusOK, providerLabel(provider)+" is now connected to your account.")
+	s.backToAccount(w, r, provider, "connected")
+}
+
+// backToAccount returns the browser to the account screen after a link attempt.
+//
+// Every one of these used to be a text/plain page — "GitHub is now connected to
+// your account." and nothing else: no link, no way back, and no way for the
+// application to know what happened. Connecting a provider from account
+// settings was a one-way trip out of the app.
+//
+// outcome is a fixed literal at every call site, so the query string carries no
+// caller-supplied text.
+func (s *Server) backToAccount(w http.ResponseWriter, r *http.Request, provider, outcome string) {
+	http.Redirect(w, r,
+		"/account?provider="+url.QueryEscape(provider)+"&outcome="+outcome,
+		http.StatusSeeOther)
 }
 
 // handleListIdentities reports which providers are connected.

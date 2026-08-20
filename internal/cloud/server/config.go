@@ -104,13 +104,11 @@ type Config struct {
 	GoogleClientID     string // CLOUD_GOOGLE_CLIENT_ID
 	GoogleClientSecret string // CLOUD_GOOGLE_CLIENT_SECRET
 
-	// SignInAppURL is where a finished OAuth callback sends the browser.
-	//
-	// Optional, and empty until a Cloud sign-in app exists. With no value the
-	// callback answers with a plain page naming the next step, which is what
-	// makes these routes usable — and testable — before there is a frontend.
-	// Setting it turns the same handler into a redirect without a code change.
-	SignInAppURL string // CLOUD_SIGNIN_APP_URL
+	// CLOUD_SIGNIN_APP_URL used to live here, naming where a finished OAuth
+	// callback sent the browser. It is gone: Cloud serves the sign-in
+	// application itself, so the only correct value was PublicURL, and two
+	// settings that must agree are a setting that will eventually disagree.
+	// handOff redirects to a relative path instead.
 
 	// SendTimeout bounds a single mail send.
 	SendTimeout time.Duration
@@ -137,7 +135,6 @@ func ConfigFromEnv() (Config, error) {
 		GitHubClientSecret: os.Getenv("CLOUD_GITHUB_CLIENT_SECRET"),
 		GoogleClientID:     os.Getenv("CLOUD_GOOGLE_CLIENT_ID"),
 		GoogleClientSecret: os.Getenv("CLOUD_GOOGLE_CLIENT_SECRET"),
-		SignInAppURL:       strings.TrimRight(os.Getenv("CLOUD_SIGNIN_APP_URL"), "/"),
 	}
 
 	for _, v := range []struct{ name, val string }{
@@ -198,16 +195,6 @@ func ConfigFromEnv() (Config, error) {
 		}
 	}
 
-	// Same reasoning as CLOUD_PUBLIC_URL, and it matters more here: this one is
-	// a redirect target. A value that does not parse would send every finished
-	// sign-in to a Location header nothing can follow.
-	if c.SignInAppURL != "" {
-		u, err := url.Parse(c.SignInAppURL)
-		if err != nil || u.Scheme == "" || u.Host == "" {
-			return Config{}, fmt.Errorf("CLOUD_SIGNIN_APP_URL must be an absolute URL "+
-				"like https://cloud.atlantis.dev/signin, got %q", c.SignInAppURL)
-		}
-	}
 	return c, nil
 }
 

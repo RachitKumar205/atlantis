@@ -193,9 +193,40 @@ release-clis-native: ## Build cgo CLI tarballs for the native host platform: mak
 	@echo "==> $(RELEASE_DIR)/ (native: $(NATIVE_OS)/$(NATIVE_ARCH))"
 	@ls -la $(RELEASE_DIR)/
 
+# ── Binaries that carry a SPA ────────────────────────────────────────────────
+#
+# Two builds each, and the difference is the `embedspa` tag.
+#
+# WITHOUT it there is no `//go:embed dist` anywhere in the build, so the binary
+# compiles on a machine with no Node and no `dist` directory. That is the
+# development build, and it is the DEFAULT — `build-console` and `build-cloud`
+# are prerequisites of every `make dev-*` target, and tagging them would make
+# `make dev-token` need a frontend toolchain to mint an assertion.
+#
+# WITH it the SPA is baked in. That is what ships. Untagged, the SPA routes
+# answer 404 naming the target below, so a binary built the wrong way says so on
+# the first request instead of serving a blank page.
+#
+# See cmd/cloud/spa_none.go for the whole reasoning.
+EMBED_SPA_TAG := embedspa
+
 .PHONY: build-console
-build-console: ## Build the management console binary (requires SPA built first)
+build-console: ## Build the console binary for development (no SPA embedded)
 	$(GO) build $(GOFLAGS) -o $(BIN_DIR)/atlantis-console ./cmd/console
+
+.PHONY: build-console-embedded
+build-console-embedded: build-console-spa ## Build the console binary with the SPA embedded (what ships)
+	$(GO) build $(GOFLAGS) -tags $(EMBED_SPA_TAG) -o $(BIN_DIR)/atlantis-console ./cmd/console
+
+.PHONY: build-cloud-spa
+build-cloud-spa: ## Build the Cloud sign-in SPA and write output to cmd/cloud/dist/
+	@which npm >/dev/null || (echo "install Node.js: https://nodejs.org" && exit 1)
+	npm ci
+	npm run build --workspace web/cloud
+
+.PHONY: build-cloud-embedded
+build-cloud-embedded: build-cloud-spa ## Build the Cloud binary with the SPA embedded (what ships)
+	$(GO) build $(GOFLAGS) -tags $(EMBED_SPA_TAG) -o $(BIN_DIR)/atlantis-cloud ./cmd/cloud
 
 .PHONY: build-console-spa
 build-console-spa: ## Build the console React SPA and write output to cmd/console/dist/
@@ -688,7 +719,10 @@ dev-token: build-cloud ## Mint a sign-in assertion. EMAIL=you@example.com ROLE=a
 	echo ""
 
 .PHONY: build-cloud
-build-cloud: ## Build the Cloud identity service
+build-cloud: ## Build the Cloud identity service for development (no SPA embedded)
+	@# Untagged deliberately — see build-console-embedded. Every `make dev-*`
+	@# target depends on this one, and they must keep working with no Node
+	@# installed. `make build-cloud-embedded` is the one that ships.
 	$(GO) build $(GOFLAGS) -o $(BIN_DIR)/atlantis-cloud ./cmd/cloud
 
 .PHONY: dev-console-role

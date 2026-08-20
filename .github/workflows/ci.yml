@@ -80,7 +80,7 @@ jobs:
         # for the same reason and no longer needs to be: it imports the
         # runtime IR dispatcher (internal/server/entity), not gen/go/server,
         # so `go list -deps ./cmd/server` names no gen package.
-        run: go vet ./cmd/server ./cmd/tide ./cmd/tidectl ./internal/... ./jobs/...
+        run: go vet ./cmd/server ./cmd/tide ./cmd/tidectl ./cmd/cloud ./cmd/console ./internal/... ./jobs/...
 
       - name: apply infra migrations
         # The pg-gated tests need atlantis.current_partition() and the rest of
@@ -133,7 +133,7 @@ jobs:
           # locally and could never have passed in CI — and the cheapest repair
           # would have been deleting this check, which is the one part of the
           # database work that keeps CI honest as tests are added.
-          go test ./cmd/server ./cmd/tide ./cmd/tidectl ./internal/... ./jobs/... -count=1 -v 2>&1 | tee /tmp/all.txt
+          go test ./cmd/server ./cmd/tide ./cmd/tidectl ./cmd/cloud ./cmd/console ./internal/... ./jobs/... -count=1 -v 2>&1 | tee /tmp/all.txt
           if grep -A2 -- "--- SKIP:" /tmp/all.txt | grep -q "ATLANTIS_TEST_PG"; then
             echo "::error::a test skipped for want of the database, with the database available"
             grep -B1 -A2 -- "--- SKIP:" /tmp/all.txt | grep -B2 "ATLANTIS_TEST_PG"
@@ -158,7 +158,7 @@ jobs:
         # package this close to a limit does not fail reproducibly.
         # Raised rather than tuned to the current number, since the suite
         # only grows.
-        run: go test -race -timeout=25m ./cmd/server ./cmd/tide ./cmd/tidectl ./internal/... ./jobs/...
+        run: go test -race -timeout=25m ./cmd/server ./cmd/tide ./cmd/tidectl ./cmd/cloud ./cmd/console ./internal/... ./jobs/...
 
       - name: codegen freshness
         # Catches "edited .atl but forgot to regenerate" — in a tree that has
@@ -217,7 +217,7 @@ jobs:
           # Explicit package list skips gen/, which only exists once codegen
           # has run against real caller .atl files (this repo ships none by
           # design). Same scoping the go-vet and go-test steps use.
-          args: ./cmd/server/... ./cmd/tide/... ./cmd/tidectl/... ./internal/...
+          args: ./cmd/server/... ./cmd/tide/... ./cmd/tidectl/... ./cmd/cloud/... ./cmd/console/... ./internal/...
 
   migration-safety:
     name: migrate up/down/up
@@ -305,3 +305,32 @@ jobs:
         # The Go binaries embed this output, so a frontend that does not build
         # is a server that ships a stale SPA.
         run: npm run build --workspaces --if-present
+
+      # The only job that can compile the embedding half of cmd/cloud and
+      # cmd/console, and therefore the only thing standing between a typo in a
+      # //go:embed directive and a release.
+      #
+      # The Go jobs deliberately run WITHOUT -tags embedspa, so that they need
+      # no Node and work on a clean checkout — which means spa_embed.go is
+      # excluded from every one of them. This step exists because the npm build
+      # above has just produced both dist trees, so here and nowhere else the
+      # tagged build is possible.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          # Both binaries reach clients/go/pb transitively — cmd/console
+          # through internal/console/client.go, cmd/cloud through the runtime
+          # IR — and that package is generated, not committed. Without this the
+          # build below fails on a missing module rather than on anything to do
+          # with the embed it is here to check.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: generate protobuf
+        run: make proto
+
+      - name: build with the SPA embedded
+        run: go build -tags embedspa ./cmd/cloud ./cmd/console
