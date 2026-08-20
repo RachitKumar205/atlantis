@@ -1,0 +1,19 @@
+{
+  "name": "atlantis-web",
+  "private": true,
+  "version": "0.0.0",
+  "description": "npm workspace root. Holds no source: it exists so web/console, web/cloud and web/shared resolve each other from one lockfile.",
+  "workspaces": [
+    "web/*"
+  ],
+  "engines": {
+    "node": ">=20",
+    "npm": "^10.9.0"
+  },
+  "scripts": {
+    "check-lockfile": "node scripts/check-lockfile-platforms.mjs",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present"
+  }
+}

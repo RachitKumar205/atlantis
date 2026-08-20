@@ -11,6 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@atlantis/shared": "*",
     "@tanstack/react-query": "^5.51.21",
     "@tanstack/react-router": "^1.45.0",
     "framer-motion": "^11.3.19",

@@ -3,9 +3,13 @@ import ReactDOM from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider, createRouter } from '@tanstack/react-router'
 import { routeTree } from './routeTree.gen'
-// Design CSS — Bathysphere. Three files copied verbatim from the
-// handoff bundle; pages target the global class names emitted here.
-import '@/styles/tokens.css'
+// Design CSS — Bathysphere. Pages target the global class names emitted here.
+//
+// fonts.css first, then the tokens: @import must lead a stylesheet, and the
+// tokens now live in @atlantis/shared, which deliberately carries no font
+// load. See web/shared/tokens.css for why the palette does not decide that.
+import '@/styles/fonts.css'
+import '@atlantis/shared/tokens.css'
 import '@/styles/console.css'
 import '@/styles/pages.css'
 // Thin compat shim so legacy CSS-module imports still resolve while

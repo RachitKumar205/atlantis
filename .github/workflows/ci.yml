@@ -255,19 +255,21 @@ jobs:
         # can't slip through. Exercises every migration in migrations/.
         run: make migrate-roundtrip
 
-  console:
-    name: web console
+  web:
+    name: web
     runs-on: ubuntu-latest
 
-    # The console had no CI job at all until now. It was never built, never
+    # The console had no CI job at all until recently. It was never built, never
     # type-checked and never tested on any push — which is how three pages came
     # to silently drop the `destructive` change class, and how the plan-class
     # badge lookup came to miss every hyphenated class name coming out of
     # schema history. Neither breaks a build, so nothing was watching.
-
-    defaults:
-      run:
-        working-directory: web/console
+    #
+    # This job now covers every npm workspace member rather than web/console by
+    # name. `--workspaces --if-present` is what makes that true without editing
+    # this file again: a new package under web/ is picked up by existing steps,
+    # and the failure mode being avoided is a second frontend landing with no
+    # CI and nobody noticing — which is the exact history recorded above.
 
     steps:
       - uses: actions/checkout@v4
@@ -276,20 +278,30 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: web/console/package-lock.json
+          # One lockfile at the root. Per-member lockfiles do not exist under a
+          # workspace, and pointing the cache at one that is gone fails the step.
+          cache-dependency-path: package-lock.json
+
+      - name: lockfile covers every platform that installs it
+        # Before `npm ci`, because a lockfile pruned to one platform fails the
+        # install with `Cannot find module @rollup/rollup-linux-x64-gnu` — an
+        # error that blames an unrelated npm bug and hides the real cause.
+        # See scripts/check-lockfile-platforms.mjs.
+        run: npm run check-lockfile
 
       - name: install
         # ci, not install: fails when package-lock.json and package.json
         # disagree, rather than quietly resolving to something else.
+        # At the root, because that is where the lockfile is.
         run: npm ci
 
       - name: typecheck
-        run: npm run typecheck
+        run: npm run typecheck --workspaces --if-present
 
       - name: unit tests
-        run: npm test
+        run: npm test --workspaces --if-present
 
       - name: build
-        # The Go binary embeds this output, so a console that does not build is
-        # a server that ships a stale SPA.
-        run: npm run build
+        # The Go binaries embed this output, so a frontend that does not build
+        # is a server that ships a stale SPA.
+        run: npm run build --workspaces --if-present

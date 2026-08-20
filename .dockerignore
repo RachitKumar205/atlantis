@@ -28,7 +28,18 @@ bin/
 # Logs + caches
 *.log
 .cache
-node_modules
+
+# node_modules at ANY depth, not just the context root.
+#
+# A bare `node_modules` matches the top level only, so `web/console/node_modules`
+# was travelling into the build and `COPY web/console/ ...` then wrote the host's
+# packages over the ones `npm ci` had just installed in-container. On a macOS
+# host that means darwin-arm64 binaries in a linux-musl image, and the build dies
+# on `Cannot find module @rollup/rollup-linux-arm64-musl` — an error that blames
+# npm's optional-dependency bug and has nothing to do with it.
+#
+# Nothing caught this because no CI job builds the console image.
+**/node_modules
 
 # Docs that don't change the build
 *.md

@@ -23,12 +23,23 @@ RUN buf generate
 # ── Stage 1: SPA build ────────────────────────────────────────────────────────
 FROM --platform=$BUILDPLATFORM node:22-alpine AS spa-build
 
-WORKDIR /app/web/console
-COPY web/console/package.json web/console/package-lock.json* ./
+# An npm workspace, so the install runs at the root and there is exactly one
+# lockfile. Both member manifests are copied before the sources, so a change
+# to a component does not invalidate the install layer.
+#
+# `npm ci` needs every workspace's package.json present: it installs the whole
+# tree from the root lockfile and fails if a member named there is missing.
+# Copying only web/console/ is what the pre-workspace version did, and it is
+# why @atlantis/shared would not resolve here.
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY web/console/package.json ./web/console/
+COPY web/shared/package.json ./web/shared/
 RUN npm ci --prefer-offline
 
-COPY web/console/ ./
-RUN npm run build
+COPY web/shared/ ./web/shared/
+COPY web/console/ ./web/console/
+RUN npm run build --workspace web/console
 
 # ── Stage 2: Go build ─────────────────────────────────────────────────────────
 FROM --platform=$BUILDPLATFORM golang:1.25.12-alpine AS go-build

@@ -172,8 +172,12 @@ build-console: ## Build the management console binary (requires SPA built first)
 
 .PHONY: build-console-spa
 build-console-spa: ## Build the console React SPA and write output to cmd/console/dist/
+	@# npm ci at the repo root, not in web/console. The web packages are one
+	@# npm workspace with a single root lockfile, so `npm ci` inside a member
+	@# has no lockfile to read and fails outright.
 	@which npm >/dev/null || (echo "install Node.js: https://nodejs.org" && exit 1)
-	cd web/console && npm ci && npm run build
+	npm ci
+	npm run build --workspace web/console
 
 .PHONY: build-console-image
 build-console-image: ## Build the atlantis-console Docker image

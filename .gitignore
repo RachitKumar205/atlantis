@@ -9,13 +9,25 @@
 /bin/
 /dist/
 
-# Console SPA build output (placeholder cmd/console/dist/index.html is tracked)
+# SPA build output. Nothing here is tracked.
+#
+# The line below used to claim a placeholder index.html was tracked, and carried
+# a `!` rule to re-include it. Neither was true: `git ls-files cmd/console/dist`
+# is empty, and git cannot re-include a file whose parent directory is excluded,
+# so the negation could never have fired.
+#
+# The consequence is real and is the documented behaviour rather than a bug:
+# `//go:embed dist` needs the directory to exist, so `go build ./cmd/console`
+# requires the SPA to have been built first. That is what `make build-console`
+# means by "requires SPA built first", and what stage 1 of Dockerfile.console
+# does before stage 2 compiles anything.
 /cmd/console/dist/
-!/cmd/console/dist/index.html
 
-# web/console node_modules and local build artifacts
-/web/console/node_modules/
-/web/console/.vite/
+# npm workspace. One node_modules at the root; members may still have their own
+# for a hoisting exception, so both shapes are ignored.
+/node_modules/
+/web/*/node_modules/
+/web/*/.vite/
 
 # Go test / coverage artifacts
 *.exe

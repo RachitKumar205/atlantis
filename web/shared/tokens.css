@@ -1,10 +1,20 @@
 /* ============================================================================
    BATHYSPHERE — design tokens
-   atlantis console. 1950s scientific instrument restraint + Linear discipline.
-   Every value here is referenced by console.css. Change a token, move the system.
-   ============================================================================ */
+   Shared by the atlantis console and the Atlantis Cloud sign-in app.
+   1950s scientific instrument restraint + Linear discipline.
+   Change a token, move both systems.
 
-@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;450;500;600&family=Geist+Mono:wght@400;450;500&display=swap');
+   ── No @font-face and no @import here, deliberately ─────────────────────────
+
+   This file names the families (--sans, --mono) and stops. How a face is
+   fetched is the application's decision, not the palette's, and the two
+   applications answer it differently: the console loads Geist from Google
+   Fonts, and Cloud self-hosts it because Cloud is the origin where passwords
+   are typed and it makes no third-party request.
+
+   An @import here would force one answer on both, and the one it would force
+   is the wrong one for Cloud.
+   ============================================================================ */
 
 :root {
   /* ---- Canvas: warm graphite, six elevation steps -------------------------- */
