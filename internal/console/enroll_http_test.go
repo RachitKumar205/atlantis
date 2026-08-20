@@ -1,6 +1,7 @@
 package console
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Enrolment through the handlers, with a real signer behind real mTLS.
@@ -144,25 +146,55 @@ func TestTheCallerSentToTheSignerComesFromTheTokenRow(t *testing.T) {
 	}
 }
 
-// TestACSRForAnotherCallerIsRefused.
+// TestACSRAskingForAnotherCallerGetsTheTokensCaller.
 //
-// A token minted for `backend`, a request asking for `payments`. Refused before
-// the signer is called at all — the console does not rely on the signer's own
-// common-name check, which cannot see the token.
-func TestACSRForAnotherCallerIsRefused(t *testing.T) {
+// This asserted a refusal. It no longer is one, and the property that replaced
+// it is stronger.
+//
+// The signer names the certificate from the caller it is handed — the console's,
+// read off the row it spent the token against — and takes only the public key
+// from the request. So a CSR asking to be `payments` on a token minted for
+// `backend` does not get refused; it gets a certificate for `backend`, because
+// what the CSR asks to be called stopped deciding anything.
+//
+// Ignoring a field is stronger than comparing it: there is no check left to
+// forget, and no configuration in which the comparison could be skipped. It also
+// removes a step from the client, which is why `tide login` needs no --caller.
+func TestACSRAskingForAnotherCallerGetsTheTokensCaller(t *testing.T) {
 	f := newEnrolmentFixture(t)
 	tok := f.mintToken(t, "backend")
 
-	before := f.signer.callCount()
 	w := f.enrol(t, enrolBody(defaultOrg, tok, newCSR(t, "payments")))
-	if w.Code == http.StatusOK {
-		t.Fatalf("a CSR for another caller was signed: %s", w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("enrol: %d %s", w.Code, w.Body.String())
 	}
-	if f.signer.callCount() != before {
-		t.Error("the console asked the signer for a certificate it should have refused itself")
+	var got struct {
+		CertPEM string `json:"cert_pem"`
+		Caller  string `json:"caller"`
 	}
-	if !strings.Contains(w.Body.String(), "payments") {
-		t.Errorf("the refusal does not say what was asked for: %s", w.Body.String())
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Caller != "backend" {
+		t.Errorf("response names caller %q, want the token's", got.Caller)
+	}
+	// The certificate itself, which is what atlantis authenticates against.
+	block, _ := pem.Decode([]byte(got.CertPEM))
+	if block == nil {
+		t.Fatal("no certificate in the response")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse the issued certificate: %v", err)
+	}
+	if leaf.Subject.CommonName != "backend" {
+		t.Errorf("the issued certificate is named %q — a CSR chose its own identity",
+			leaf.Subject.CommonName)
+	}
+	// And the console still sent the token row's caller, which is the guard the
+	// response cannot show.
+	if sent := f.signer.lastRequest(t).Caller; sent != "backend" {
+		t.Errorf("the console asked the signer for %q, want the token row's caller", sent)
 	}
 }
 
@@ -188,13 +220,14 @@ func TestAnEnrolmentTokenIsSpentEvenWhenTheSignerRefuses(t *testing.T) {
 	}
 }
 
-// TestEnrolmentRecordsTheFingerprintWithAtlantis.
+// TestEnrolmentRecordsTheCertificateItIssued.
 //
-// The write that decides whether the certificate authenticates at all. Its
-// absence is silent: the machine gets a certificate, stores it, and is refused
-// on the first RPC with "cert superseded" — long after anyone would connect the
-// two events.
-func TestEnrolmentRecordsTheFingerprintWithAtlantis(t *testing.T) {
+// This asserted a fingerprint written into atlantis.caller_identities, which
+// was what bound a caller to one leaf. Migration 0032 removed that column with
+// pinning; what remains is the console's own record, and it is not bookkeeping —
+// renewal resolves the organisation and the caller from it, so an enrolment that
+// failed to write it produces a certificate that works and can never be renewed.
+func TestEnrolmentRecordsTheCertificateItIssued(t *testing.T) {
 	f := newEnrolmentFixture(t)
 	tok := f.mintToken(t, "backend")
 
@@ -202,24 +235,30 @@ func TestEnrolmentRecordsTheFingerprintWithAtlantis(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("enrol: %d %s", w.Code, w.Body.String())
 	}
-
-	var fp []byte
-	if err := f.pool.QueryRow(t.Context(),
-		`SELECT cert_fingerprint FROM atlantis.caller_identities WHERE caller = 'backend'`).
-		Scan(&fp); err != nil {
-		t.Fatalf("read the fingerprint: %v", err)
+	var got struct {
+		CertPEM string `json:"cert_pem"`
 	}
-	if len(fp) == 0 {
-		t.Fatal("enrolment left the caller unbound, so any CA-signed certificate still authenticates")
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
 	}
 
-	// And the console's own record agrees, which is what renewal will read.
 	rec, err := f.srv.db.forOrg(defaultOrg).currentCallerCert(t.Context(), "backend")
 	if err != nil {
-		t.Fatalf("the console recorded no certificate: %v", err)
+		t.Fatalf("the console recorded no certificate, so it could never be renewed: %v", err)
 	}
-	if string(rec.Fingerprint) != string(fp) {
-		t.Error("the console and atlantis disagree about which certificate is current")
+	if !bytes.Equal(rec.Fingerprint, leafFingerprint(t, got.CertPEM)) {
+		t.Error("the recorded certificate is not the one that was issued")
+	}
+
+	// And atlantis knows when it runs out, which is what the console displays.
+	var exp *time.Time
+	if err := f.pool.QueryRow(t.Context(),
+		`SELECT cert_expires_at FROM atlantis.caller_identities WHERE caller = 'backend'`).
+		Scan(&exp); err != nil {
+		t.Fatalf("read the expiry: %v", err)
+	}
+	if exp == nil {
+		t.Error("enrolment recorded no expiry with atlantis")
 	}
 }
 
@@ -350,4 +389,92 @@ func readFileString(t *testing.T, path string) string {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(b)
+}
+
+// TestEnrolmentReturnsTheServerCAAndNotTheSignersOwn.
+//
+// The console keeps two roots per organisation and they answer different
+// questions: `console.orgs.ca_pem` is what verifies the organisation's SERVER,
+// and the signer's `ca_pem` is whatever issued the CLIENT leaf. register.go says
+// in as many words that they "are the same CA in every deployment that exists
+// today and are not required to be."
+//
+// tide uses what it is handed as RootCAs to verify the server. Returning the
+// signer's root works in every deployment anyone has tried and breaks the first
+// one provisioned with split roots — as a handshake failure at atlantis, with
+// nothing pointing back at this line.
+//
+// The fixture's fake signer issues from the ORGANISATION's authority, so this
+// asserts the value came from the console's row rather than from the response.
+func TestEnrolmentReturnsTheServerCAAndNotTheSignersOwn(t *testing.T) {
+	f := newEnrolmentFixture(t)
+	tok := f.mintToken(t, "backend")
+
+	w := f.enrol(t, enrolBody(defaultOrg, tok, newCSR(t, "backend")))
+	if w.Code != http.StatusOK {
+		t.Fatalf("enrol: %d %s", w.Code, w.Body.String())
+	}
+	var got struct {
+		CAPEM     string `json:"ca_pem"`
+		Endpoint  string `json:"endpoint"`
+		EnrollURL string `json:"enroll_url"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	creds, err := f.srv.db.orgCredentials(t.Context(), defaultOrg)
+	if err != nil {
+		t.Fatalf("read credentials: %v", err)
+	}
+	if got.CAPEM != creds.CAPEM {
+		t.Error("the CA handed to the machine is not the one that verifies this organisation's server")
+	}
+
+	// And the two addresses the certificate cannot carry.
+	if got.Endpoint != creds.PublicEndpoint || got.Endpoint == "" {
+		t.Errorf("endpoint = %q, want the organisation's caller-facing address %q",
+			got.Endpoint, creds.PublicEndpoint)
+	}
+	if got.EnrollURL != f.srv.cfg.EnrollPublicURL || got.EnrollURL == "" {
+		t.Errorf("enroll_url = %q, want %q — renewal is on this listener, not on atlantis",
+			got.EnrollURL, f.srv.cfg.EnrollPublicURL)
+	}
+}
+
+// The caller-facing endpoint falls back to the console's own when unset.
+//
+// NULL means "the same address", which is true of every organisation registered
+// before migration 0008 and every deployment where the console and its callers
+// share a route. Stored as NULL rather than backfilled so the two cannot
+// silently diverge later.
+func TestTheCallerEndpointFallsBackToTheConsolesOwn(t *testing.T) {
+	f := newEnrolmentFixture(t)
+
+	creds, err := f.srv.db.orgCredentials(t.Context(), defaultOrg)
+	if err != nil {
+		t.Fatalf("read credentials: %v", err)
+	}
+	// The fixture registers without a caller-facing address.
+	if creds.PublicEndpoint != creds.Endpoint {
+		t.Fatalf("with no override the caller endpoint is %q, want the console's %q",
+			creds.PublicEndpoint, creds.Endpoint)
+	}
+
+	// Setting one moves it, and only it.
+	if _, err := f.pool.Exec(t.Context(),
+		`UPDATE console.orgs SET atl_public_endpoint = 'callers.example:9090' WHERE org = $1`,
+		defaultOrg); err != nil {
+		t.Fatalf("set the caller endpoint: %v", err)
+	}
+	creds, err = f.srv.db.orgCredentials(t.Context(), defaultOrg)
+	if err != nil {
+		t.Fatalf("re-read: %v", err)
+	}
+	if creds.PublicEndpoint != "callers.example:9090" {
+		t.Errorf("caller endpoint = %q, want the override", creds.PublicEndpoint)
+	}
+	if creds.Endpoint == "callers.example:9090" {
+		t.Error("the override moved the console's own endpoint too")
+	}
 }

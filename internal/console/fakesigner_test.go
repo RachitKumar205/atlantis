@@ -1,9 +1,7 @@
 package console
 
 import (
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -39,6 +37,10 @@ type fakeSigner struct {
 	// authority, because that is what the organisation's atlantis trusts.
 	issuing *testpki.PKI
 
+	// advertisedCAPEM is what this signer REPORTS as ca_pem, which is not the
+	// authority it signs with. See handle() for why they are made to differ.
+	advertisedCAPEM string
+
 	mu sync.Mutex
 	// requests records what the console actually sent, so a test can assert on
 	// the caller name rather than only on what came back. The CN-to-token match
@@ -67,6 +69,9 @@ func newFakeSigner(t *testing.T, issuing *testpki.PKI) *fakeSigner {
 	f := &fakeSigner{
 		pki: clientPKI, clientCert: certFile, clientKey: keyFile,
 		issuing: issuing,
+		// The client-trust PKI's root: a real certificate, and not the one the
+		// organisation's server is verified against.
+		advertisedCAPEM: readFileString(t, clientPKI.CAFile),
 	}
 
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(f.handle))
@@ -99,7 +104,8 @@ func (f *fakeSigner) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	certPEM, caPEM, err := f.issuing.SignCSR(req.CSRPEM)
+	// req.Caller names the leaf, exactly as cmd/signer does.
+	certPEM, caPEM, err := f.issuing.SignCSR(req.CSRPEM, req.Caller)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -107,38 +113,28 @@ func (f *fakeSigner) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The real signer also refuses a CSR whose common name is not the caller in
-	// the body. Kept here rather than left out, because a console that stopped
-	// checking would otherwise look correct against a stand-in that had also
-	// stopped — and this is the one guard the response cannot reveal.
-	if csrCN(certPEM) != req.Caller {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"error": "CSR CN does not match the caller",
-		})
-		return
-	}
-
+	// Report a DIFFERENT root than the one the leaf chains to.
+	//
+	// Artificial, and deliberately so. In every deployment that exists the
+	// signer's root and the organisation's server root are the same bytes, which
+	// means a test cannot tell whether the console echoes the signer's `ca_pem`
+	// or reads its own `console.orgs.ca_pem` — both produce an identical
+	// response, and a mutation swapping one for the other survives.
+	//
+	// register.go records that the two "are the same CA in every deployment that
+	// exists today and are not required to be". This makes them differ so the
+	// question has an answer: the machine must be handed the root that verifies
+	// the SERVER, and the signer's is the one that issued its CLIENT leaf.
+	//
+	// The leaf still chains to the organisation's authority, so verifyLeafForOrg
+	// is unaffected — only the advertised root differs.
+	_ = caPEM
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"cert_pem":   certPEM,
-		"ca_pem":     caPEM,
+		"ca_pem":     f.advertisedCAPEM,
 		"expires_at": "",
 	})
-}
-
-// csrCN reads the common name back off an issued certificate.
-func csrCN(certPEM string) string {
-	block, _ := pem.Decode([]byte(certPEM))
-	if block == nil {
-		return ""
-	}
-	c, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return ""
-	}
-	return c.Subject.CommonName
 }
 
 // lastRequest returns what the console most recently asked for.
@@ -150,10 +146,4 @@ func (f *fakeSigner) lastRequest(t *testing.T) signerRequest {
 		t.Fatal("the console never called the signer")
 	}
 	return f.requests[len(f.requests)-1]
-}
-
-func (f *fakeSigner) callCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.requests)
 }

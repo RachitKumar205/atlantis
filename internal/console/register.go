@@ -36,6 +36,14 @@ type OrgRegistration struct {
 	CAPEM      string
 	CertPEM    string
 	KeyPEM     []byte
+
+	// PublicEndpoint is what callers dial, when that differs from Endpoint.
+	//
+	// Optional, and the only optional field here. Empty means "the same", which
+	// is stored as NULL so the fallback lives in one place — the COALESCE in
+	// orgCredentials — rather than being copied at registration and then
+	// diverging the first time somebody changes Endpoint alone.
+	PublicEndpoint string
 }
 
 // RegisterOrg records an organisation's atlantis and seals its private key.
@@ -65,12 +73,13 @@ func RegisterOrg(ctx context.Context, pgURL, keyset string, r OrgRegistration) e
 	defer db.close()
 
 	err = db.registerOrg(ctx, orgCredentials{
-		Org:        r.Org,
-		Endpoint:   r.Endpoint,
-		HealthAddr: r.HealthAddr,
-		CAPEM:      r.CAPEM,
-		CertPEM:    r.CertPEM,
-		KeyPEM:     r.KeyPEM,
+		Org:            r.Org,
+		Endpoint:       r.Endpoint,
+		HealthAddr:     r.HealthAddr,
+		CAPEM:          r.CAPEM,
+		CertPEM:        r.CertPEM,
+		KeyPEM:         r.KeyPEM,
+		PublicEndpoint: r.PublicEndpoint,
 	})
 	// The console owns this schema and applies it at startup, so an operator who
 	// registers before the console has ever run gets a bare "relation does not

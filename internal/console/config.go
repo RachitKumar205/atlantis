@@ -69,7 +69,21 @@ type Config struct {
 	EnrollListen   string // CONSOLE_ENROLL_LISTEN
 	EnrollTLSCert  string // CONSOLE_ENROLL_TLS_CERT
 	EnrollTLSKey   string // CONSOLE_ENROLL_TLS_KEY
-	EnrollClientCA string // CONSOLE_ENROLL_CLIENT_CA — for renewal in K7b
+	EnrollClientCA string // CONSOLE_ENROLL_CLIENT_CA — verifies a renewing machine
+
+	// EnrollPublicURL is the address a machine reaches the enrolment listener
+	// at, which is not EnrollListen: that is a bind address, often `:3443` or a
+	// loopback, and says nothing about how anything outside gets here.
+	//
+	// The console cannot derive it. It could read the Host header, and must
+	// not — the same reasoning CLOUD_PUBLIC_URL is held to: the header is
+	// attacker-controlled, and a wrong value here does not fail, it prints an
+	// enrolment command pointing somewhere else. That command carries a live
+	// token, so a wrong host is a token handed to whoever owns it.
+	//
+	// Without it the console still enrols; it just cannot print a command
+	// anybody can run, and says so rather than printing one that looks right.
+	EnrollPublicURL string // CONSOLE_ENROLL_PUBLIC_URL
 
 	// Who this console accepts identity from. All three are required and
 	// none has a default.
@@ -114,10 +128,11 @@ func ConfigFromEnv() (Config, error) {
 		SignerKey:     os.Getenv("ATL_SIGNER_KEY"),
 		SignerCA:      os.Getenv("ATL_SIGNER_CA"),
 
-		EnrollListen:   os.Getenv("CONSOLE_ENROLL_LISTEN"),
-		EnrollTLSCert:  os.Getenv("CONSOLE_ENROLL_TLS_CERT"),
-		EnrollTLSKey:   os.Getenv("CONSOLE_ENROLL_TLS_KEY"),
-		EnrollClientCA: os.Getenv("CONSOLE_ENROLL_CLIENT_CA"),
+		EnrollListen:    os.Getenv("CONSOLE_ENROLL_LISTEN"),
+		EnrollTLSCert:   os.Getenv("CONSOLE_ENROLL_TLS_CERT"),
+		EnrollTLSKey:    os.Getenv("CONSOLE_ENROLL_TLS_KEY"),
+		EnrollClientCA:  os.Getenv("CONSOLE_ENROLL_CLIENT_CA"),
+		EnrollPublicURL: os.Getenv("CONSOLE_ENROLL_PUBLIC_URL"),
 
 		CloudIssuer:   os.Getenv("CLOUD_ISSUER"),
 		CloudAudience: os.Getenv("CLOUD_AUDIENCE"),
@@ -246,6 +261,28 @@ func (c Config) validateEnrollment() error {
 		"CONSOLE_ENROLL_LISTEN":   c.EnrollListen,
 		"CONSOLE_ENROLL_TLS_CERT": c.EnrollTLSCert,
 		"CONSOLE_ENROLL_TLS_KEY":  c.EnrollTLSKey,
+
+		// Both of these were outside this set, and both were broken by it.
+		//
+		// CONSOLE_ENROLL_CLIENT_CA: buildEnrollListener sets ClientCAs only when
+		// it is non-empty, and Go's VerifyClientCertIfGiven with a nil ClientCAs
+		// verifies a presented certificate against the SYSTEM roots. A caller's
+		// certificate never chains there. So a console configured exactly as the
+		// Makefile and the documentation described advertised enrolment as fully
+		// working and rejected every renewal inside the TLS handshake, before
+		// handleRenew ran at all.
+		//
+		// The test suite was green throughout, because the fixture set it
+		// explicitly. A setting that only the fixture supplies is not
+		// configuration, it is a test passing for the wrong reason.
+		"CONSOLE_ENROLL_CLIENT_CA": c.EnrollClientCA,
+
+		// CONSOLE_ENROLL_PUBLIC_URL: without it the console can enrol but cannot
+		// print a command anybody can run, because the address a machine reaches
+		// the enrolment listener at is not something it can derive. It must not
+		// be read from the Host header — that header is attacker-controlled and
+		// the page in question prints a live token.
+		"CONSOLE_ENROLL_PUBLIC_URL": c.EnrollPublicURL,
 	}
 	var missing []string
 	filled := 0

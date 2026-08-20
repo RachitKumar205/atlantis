@@ -576,6 +576,13 @@ func orgRegister(args []string, log *slog.Logger) error {
 		"absolute URL of this organisation's console; also the assertion audience")
 	endpoint := fs.String("endpoint", "", "host:port of this organisation's atlantis admin gRPC service")
 	health := fs.String("health", "", "host:port of the same server's plain-HTTP health endpoint")
+	// Optional, and the only flag here that is. -endpoint is the address the
+	// CONSOLE dials; this is the one handed to callers at enrolment, for the day
+	// those differ — the console may sit inside a network a developer's laptop
+	// does not. Unset means they are the same, which is true of every deployment
+	// today and is what the column's COALESCE expresses.
+	publicEndpoint := fs.String("caller-endpoint", "",
+		"host:port callers dial, if different from -endpoint (default: same)")
 	caPath := fs.String("ca", "", "PEM bundle the console verifies this organisation's atlantis against")
 	certPath := fs.String("cert", "", "PEM client certificate the console presents to it")
 	keyPath := fs.String("key", "", "PEM private key for -cert")
@@ -671,12 +678,13 @@ func orgRegister(args []string, log *slog.Logger) error {
 	// -cert/-key or an expired leaf is refused here rather than found later as
 	// a 503 by whoever next opens the console.
 	if err := console.RegisterOrg(ctx, *dbURL, *keyset, console.OrgRegistration{
-		Org:        *name,
-		Endpoint:   *endpoint,
-		HealthAddr: *health,
-		CAPEM:      string(ca),
-		CertPEM:    string(cert),
-		KeyPEM:     key,
+		Org:            *name,
+		Endpoint:       *endpoint,
+		HealthAddr:     *health,
+		CAPEM:          string(ca),
+		CertPEM:        string(cert),
+		KeyPEM:         key,
+		PublicEndpoint: *publicEndpoint,
 	}); err != nil {
 		return fmt.Errorf("%w\n\n%s exists in Cloud but has no atlantis registered. "+
 			"Both writes are upserts — re-run this command once the problem above "+

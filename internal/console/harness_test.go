@@ -217,6 +217,12 @@ func newFixture(t *testing.T, enrolment bool) *consoleFixture {
 		cfg.EnrollListen = "127.0.0.1:0"
 		cfg.EnrollTLSCert, cfg.EnrollTLSKey = stack.pki.CertFile, stack.pki.KeyFile
 		cfg.EnrollClientCA = stack.pki.CAFile
+
+		// The address a machine is told to come back to. The listener binds
+		// :0 here, so this is not derived from it — which is the same reason
+		// the setting exists at all: a bind address says nothing about how
+		// anything outside reaches you.
+		cfg.EnrollPublicURL = "https://console.test:3443"
 	}
 
 	srv, err := New(cfg, nil, quiet)

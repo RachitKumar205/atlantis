@@ -198,10 +198,10 @@ func (p *PKI) ServerTLS(t *testing.T) *tls.Config {
 // made it, and a stand-in that quietly minted its own key would let a console
 // pass a test it should fail.
 //
-// The subject is taken from the request, so a test can present a CSR whose
-// common name is not the caller it claims and watch the console refuse it. Only
-// the common name is copied — the rest of a CSR's subject is attacker-supplied
-// and nothing downstream reads it.
+// The subject is built from cn, not copied from the request — the same as
+// cmd/signer, which names the leaf from the caller it was handed and takes only
+// the public key from the CSR. A stand-in that copied the CSR's subject would
+// let a console that stopped sending the token row's caller still look correct.
 //
 // # Why this returns an error rather than taking a *testing.T
 //
@@ -211,7 +211,7 @@ func (p *PKI) ServerTLS(t *testing.T) *tls.Config {
 // on a connection nobody will close and the run hangs somewhere unrelated. A
 // returned error becomes a 4xx, which is what the code under test should see
 // anyway.
-func (p *PKI) SignCSR(csrPEM string) (certPEM, caPEM string, err error) {
+func (p *PKI) SignCSR(csrPEM, cn string) (certPEM, caPEM string, err error) {
 	block, _ := pem.Decode([]byte(csrPEM))
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
 		return "", "", errors.New("testpki: not a PEM CERTIFICATE REQUEST block")
@@ -226,7 +226,7 @@ func (p *PKI) SignCSR(csrPEM string) (certPEM, caPEM string, err error) {
 
 	tmpl := &x509.Certificate{
 		SerialNumber: nextSerial(),
-		Subject:      pkix.Name{CommonName: csr.Subject.CommonName},
+		Subject:      pkix.Name{CommonName: cn},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,

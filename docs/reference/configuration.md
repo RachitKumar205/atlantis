@@ -242,7 +242,8 @@ Read by `cmd/console`, not the Atlantis server.
 | `ATL_SIGNER_CA` | (unset) | Verifies the signer's server certificate. Not the authority any caller is issued from. |
 | `CONSOLE_ENROLL_LISTEN` | (unset) | Address for the enrolment listener, e.g. `:3443`. Carries two routes and never the console API or SPA. |
 | `CONSOLE_ENROLL_TLS_CERT` / `_KEY` | (unset) | That listener's own server certificate. It terminates its own TLS, unlike `CONSOLE_LISTEN`. |
-| `CONSOLE_ENROLL_CLIENT_CA` | (unset) | Verifies a machine renewing with its current certificate. Set it to the organisation's own CA — that is what its callers hold. |
+| `CONSOLE_ENROLL_CLIENT_CA` | (unset; **required with the group**) | Verifies a machine renewing with its current certificate. Set it to the organisation's own CA — that is what its callers hold. Unset, the listener verifies against the system roots and refuses every renewal in the handshake. |
+| `CONSOLE_ENROLL_PUBLIC_URL` | (unset; **required with the group**) | Where a machine reaches the enrolment listener. Not derivable from the bind address, and deliberately not read from the `Host` header — the page that uses it prints a live token. |
 | `SANDBOX_PER_USER_LIMIT` | `3` | Maximum concurrent sandboxes per authenticated user. A boot beyond this returns HTTP `429`. The limit also caps fork count — forking N children requires `N + parent` headroom. |
 | `SANDBOX_TTL` | `30m` | Idle window after which the BFF's janitor evicts a sandbox. Go duration syntax. Set lower (`10s`) for CI; higher (`2h`) for long agent loops. |
 

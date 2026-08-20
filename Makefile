@@ -326,7 +326,9 @@ CONSOLE_ENROLL_ENV = \
 	ATL_SIGNER_CA="$(DEV_CERT_DIR)/signer-ca.crt" \
 	CONSOLE_ENROLL_LISTEN=127.0.0.1:3443 \
 	CONSOLE_ENROLL_TLS_CERT="$(DEV_CERT_DIR)/enroll-server.crt" \
-	CONSOLE_ENROLL_TLS_KEY="$(DEV_CERT_DIR)/enroll-server.key"
+	CONSOLE_ENROLL_TLS_KEY="$(DEV_CERT_DIR)/enroll-server.key" \
+	CONSOLE_ENROLL_PUBLIC_URL="https://127.0.0.1:3443" \
+	CONSOLE_ENROLL_CLIENT_CA="$(DEV_CERT_DIR)/ca.crt"
 
 # dev-server, not dev, when Postgres and memcached are already running.
 #

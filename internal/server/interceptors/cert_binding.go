@@ -2,8 +2,6 @@ package interceptors
 
 import (
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"log/slog"
 	"sync"
 	"time"
@@ -15,47 +13,21 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// RenewalOverlap is how long a superseded certificate keeps working after the
-// one replacing it is recorded.
+// CertBinding is what a caller's row says about whether it may authenticate.
 //
-// It lives here because two packages have to agree on it and neither may import
-// the other: internal/server/admin sets prev_valid_until from it when it records
-// a renewal, and internal/console decides from it whether a machine presenting a
-// superseded certificate may renew again. If those two drifted apart, the gap
-// would be a window in which a machine can authenticate but cannot renew — a
-// lockout that appears only for certificates in exactly that band.
+// One field, and it used to be four. Fingerprint, Previous and PreviousUntil
+// pinned a caller to a single leaf and gave a renewal an overlap window to be
+// survivable; migration 0032 removed all three when the certificate lifetime
+// dropped to seven days. See that migration for the reasoning.
 //
-// Sized against what it is for: a machine that has just been handed a
-// certificate and needs to store it. That takes milliseconds, and the failures
-// worth surviving — a lost response, a crash before the file lands, a retry
-// through a queue — resolve in minutes. Twenty-four hours is generous by orders
-// of magnitude, deliberately: too short locks a caller out with no self-service
-// recovery, and too long leaves a stolen certificate alive one extra day inside
-// a 90-day life it already had.
-const RenewalOverlap = 24 * time.Hour
-
-// CertBinding is what a caller's row says about which certificates
-// authenticate as it.
+// What is left is the question the interceptor still answers faster than
+// anything else: does this caller have an identity row right now. RevokeCaller
+// deletes it, this is cached for five seconds, and the auth allowlist behind it
+// refreshes only every thirty — so this is the path a revocation takes effect
+// on.
 type CertBinding struct {
 	// Exists reports whether a caller_identities row is present.
 	Exists bool
-
-	// Fingerprint is the 32-byte SHA-256 of the currently-active cert, or
-	// nil when the row exists and no cert has been recorded — the
-	// back-compat branch for callers minted before binding existed.
-	Fingerprint []byte
-
-	// Previous is the certificate this one replaced, and PreviousUntil is
-	// when it stops being accepted. Both set or neither; a database CHECK
-	// says so (migration 0031).
-	//
-	// The window exists because a renewal's response can be lost after the
-	// new fingerprint is written — a timeout, a 502, a crash before the file
-	// reaches disk. Without it the machine holds a superseded certificate and
-	// needs a valid one to renew, which is a lockout only an operator can
-	// undo, on a path `tide login` walks unattended across a fleet.
-	Previous      []byte
-	PreviousUntil time.Time
 }
 
 // CertBindingLookup returns the binding state for a caller.
@@ -197,15 +169,21 @@ func buildCertBindingCheck(cfg CertBindingConfig) func(ctx context.Context, full
 			return nil
 		}
 
-		// Pull the presented leaf cert. With Enforce=true the listener
-		// is tls.RequireAndVerifyClientCert, so a missing peer cert
-		// here means the listener is mis-configured — fail closed.
-		peerCert, ok := leafCertFromContext(ctx)
-		if !ok {
+		// The peer certificate is still required.
+		//
+		// With Enforce=true the listener is tls.RequireAndVerifyClientCert, so a
+		// missing peer certificate here means the listener is mis-configured —
+		// fail closed rather than trust the caller name alone, which is derived
+		// from that certificate.
+		//
+		// What is NOT done any more is comparing its fingerprint to a stored one.
+		// Migration 0032 removed pinning when the certificate lifetime dropped to
+		// seven days; the chain and the common name are verified by the handshake,
+		// and a certificate that should not exist stops working when it expires.
+		if _, ok := leafCertFromContext(ctx); !ok {
 			log.Warn("cert binding: no peer cert on enforced path", "caller", caller, "method", fullMethod)
 			return status.Error(codes.Unauthenticated, "no peer certificate")
 		}
-		presented := sha256.Sum256(peerCert.Raw)
 
 		b, err := cache.lookup(ctx, caller, cfg.Lookup)
 		if err != nil {
@@ -213,51 +191,17 @@ func buildCertBindingCheck(cfg CertBindingConfig) func(ctx context.Context, full
 			return status.Error(codes.Unauthenticated, "caller binding unavailable")
 		}
 		if !b.Exists {
-			// Caller has no row — either never registered, or revoked.
-			// Either way it can't authenticate. Distinguishing the two
-			// would leak existence; one error code covers both.
+			// Caller has no row — either never registered, or revoked. Either way
+			// it cannot authenticate, and this is the fastest path that says so:
+			// five seconds behind a RevokeCaller, against thirty for the auth
+			// allowlist's refresher.
+			//
+			// Distinguishing "never registered" from "revoked" would leak
+			// existence; one error covers both.
 			log.Info("cert binding: unknown caller", "caller", caller, "method", fullMethod)
 			return status.Errorf(codes.Unauthenticated, "caller %q is not registered", caller)
 		}
-		if b.Fingerprint == nil {
-			// Bootstrap window: row exists but no fingerprint recorded
-			// yet (operator registered the caller, hasn't enrolled a
-			// machine through the console). Accept any CA-signed cert
-			// until the first enrolment binds the fingerprint.
-			return nil
-		}
-		// subtle.ConstantTimeCompare so a timing oracle can't probe
-		// fingerprint bytes one column at a time.
-		if subtle.ConstantTimeCompare(b.Fingerprint, presented[:]) == 1 {
-			return nil
-		}
-
-		// The certificate the current one replaced, inside its overlap window.
-		//
-		// A renewal writes the new fingerprint before the machine can possibly
-		// have stored the certificate, so between those two moments the machine
-		// is still presenting the old one. Refusing it there is a lockout: it
-		// needs a valid certificate to renew and no longer has one.
-		//
-		// Bounded by PreviousUntil rather than by "has the new one been used
-		// yet", because observing first use means writing from this function —
-		// the hottest read path in the product, behind a cache that would let
-		// the write fire repeatedly before its effect was visible.
-		if b.Previous != nil && time.Now().Before(b.PreviousUntil) &&
-			subtle.ConstantTimeCompare(b.Previous, presented[:]) == 1 {
-			log.Info("cert binding: accepted the superseded certificate inside its renewal window",
-				"caller", caller,
-				"method", fullMethod,
-				"window_ends", b.PreviousUntil.UTC().Format(time.RFC3339),
-			)
-			return nil
-		}
-
-		log.Info("cert binding: fingerprint mismatch (cert superseded)",
-			"caller", caller,
-			"method", fullMethod,
-		)
-		return status.Errorf(codes.Unauthenticated, "cert superseded for caller %q", caller)
+		return nil
 	}
 }
 

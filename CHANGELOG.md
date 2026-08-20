@@ -13,6 +13,48 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Added
 
+#### Caller certificates live seven days, and are no longer pinned
+
+`certTTL` was ninety days, with a comment saying expiry "acts as a natural
+revocation mechanism". That was the intent and not the effect: a leaked
+certificate that keeps working for three months is not revoked by its expiry in
+any sense an operator would recognise. What actually provided revocation was
+**fingerprint pinning** — binding each caller to one leaf — and pinning is what
+produced every hard edge around enrolment.
+
+Seven days makes the original claim true, and pinning goes with it. This is the
+posture comparable systems take: smallstep's step-ca puts service certificates
+at "one month or less" and defaults to passive revocation for exactly this
+reason; SPIRE issues workload certificates with a one-hour default and pins
+nothing.
+
+**Deliberate revocation is unchanged and still immediate.** The cert-binding
+interceptor refuses any caller with no `caller_identities` row, on a five-second
+cache, and `RevokeCaller` deletes that row. That was never what pinning
+provided. What pinning added was "this *particular* certificate is superseded",
+and a seven-day life covers it.
+
+Removed with it (migration `infra/0032`):
+
+- `cert_fingerprint`, `prev_cert_fingerprint` and `prev_valid_until`.
+- The 24-hour renewal overlap added last release, and the lockout class it
+  existed to make survivable.
+- A deadlock where two machines sharing one caller name could auto-renew each
+  other into a permanent lockout about a day later, unattended.
+- The console's one-way-door warning, and the renewal window in its
+  certificate lookup. An older certificate is simply still that caller's
+  certificate until it expires.
+
+**One thing worth knowing about what this replaced.** The interceptor had a
+"bootstrap window" that accepted any CA-signed certificate for a caller whose
+fingerprint was NULL — and because the only writer of that column returned 503
+in every deployment that ever ran, *every caller everywhere* sat in that window
+permanently. The behaviour below is what was actually happening, now deliberate
+and bounded by a short certificate rather than by an accident.
+
+`tide` renews at two thirds elapsed, so a machine refreshes around day five with
+two days of slack.
+
 #### A machine renews with the certificate it already holds
 
 `POST /renew` on the enrolment listener takes a CSR and the certificate being

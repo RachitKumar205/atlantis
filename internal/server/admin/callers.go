@@ -260,26 +260,22 @@ func (s *Service) LookupCallerCertBinding(ctx context.Context, caller string) (i
 	if s.pool == nil {
 		return interceptors.CertBinding{}, nil
 	}
-	var (
-		fingerprint []byte
-		prev        []byte
-		prevUntil   *time.Time
-	)
-	err := s.pool.QueryRow(ctx, `
-SELECT cert_fingerprint, prev_cert_fingerprint, prev_valid_until
-  FROM atlantis.caller_identities WHERE caller = $1`, caller).
-		Scan(&fingerprint, &prev, &prevUntil)
+	// Existence, and nothing else. This selected three fingerprint columns
+	// until migration 0032; see it for why a seven-day certificate makes them
+	// unnecessary.
+	//
+	// SELECT 1 rather than a column, so this query does not have to be revisited
+	// the next time the table's shape changes.
+	var one int
+	err := s.pool.QueryRow(ctx,
+		`SELECT 1 FROM atlantis.caller_identities WHERE caller = $1`, caller).Scan(&one)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return interceptors.CertBinding{}, nil
 	}
 	if err != nil {
-		return interceptors.CertBinding{}, fmt.Errorf("lookup caller_identities.cert_fingerprint: %w", err)
+		return interceptors.CertBinding{}, fmt.Errorf("lookup caller_identities: %w", err)
 	}
-	b := interceptors.CertBinding{Exists: true, Fingerprint: fingerprint, Previous: prev}
-	if prevUntil != nil {
-		b.PreviousUntil = *prevUntil
-	}
-	return b, nil
+	return interceptors.CertBinding{Exists: true}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -346,50 +342,20 @@ func (s *Service) RecordCallerCertExpiry(ctx context.Context, req *adminpb.Recor
 		}
 	}
 
-	// One UPDATE so every column flips atomically. If fp is nil
-	// (back-compat caller), COALESCE preserves whatever's already there
-	// — we never *unset* a fingerprint from this path.
+	// Records when this caller's certificate runs out, and nothing else.
 	//
-	// ── The shift into the previous slot ────────────────────────────────
+	// It used to maintain three fingerprint columns and shift one into a
+	// previous slot with a deadline, so a renewal whose response was lost did
+	// not lock the machine out. Migration 0032 removed all of that with pinning;
+	// a seven-day certificate is what makes the overlap unnecessary.
 	//
-	// When a new fingerprint replaces a different existing one, the one being
-	// replaced moves to prev_cert_fingerprint with a deadline. That is what
-	// stops a renewal from locking a machine out: the certificate it is still
-	// holding keeps authenticating until the deadline, which is long enough to
-	// retry a lost response and short enough to bound the exposure.
-	//
-	// Three conditions on the shift, each of them load-bearing:
-	//
-	//   fp IS NOT NULL      — a call that records only an expiry changes
-	//                         nothing about which certificate is current, so
-	//                         there is nothing to supersede.
-	//   old IS NOT NULL     — the first enrolment for a caller replaces
-	//                         nothing. Shifting NULL in would violate the
-	//                         both-or-neither CHECK.
-	//   old IS DISTINCT FROM new — re-recording the SAME certificate is not a
-	//                         renewal. Without this, a retry would push the
-	//                         current certificate into the previous slot and
-	//                         leave both pointing at it, which reads as an
-	//                         overlap that is not happening.
+	// cert_expires_at survives because GetCallers reports it and the console
+	// shows it. "When does this run out" is worth answering whether or not
+	// anything enforces a particular certificate.
 	tag, err := s.pool.Exec(ctx, `
 UPDATE atlantis.caller_identities
-   SET cert_expires_at  = $2,
-       prev_cert_fingerprint = CASE
-           WHEN $3::bytea IS NOT NULL
-            AND cert_fingerprint IS NOT NULL
-            AND cert_fingerprint IS DISTINCT FROM $3::bytea
-           THEN cert_fingerprint
-           ELSE prev_cert_fingerprint
-       END,
-       prev_valid_until = CASE
-           WHEN $3::bytea IS NOT NULL
-            AND cert_fingerprint IS NOT NULL
-            AND cert_fingerprint IS DISTINCT FROM $3::bytea
-           THEN now() + $4::interval
-           ELSE prev_valid_until
-       END,
-       cert_fingerprint = COALESCE($3, cert_fingerprint)
- WHERE caller = $1`, req.GetCaller(), exp.UTC(), fp, interceptors.RenewalOverlap.String())
+   SET cert_expires_at = $2
+ WHERE caller = $1`, req.GetCaller(), exp.UTC())
 	if err != nil {
 		return nil, fmt.Errorf("update caller cert: %w", err)
 	}

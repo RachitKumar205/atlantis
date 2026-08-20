@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net"
 	"net/http"
 	"strings"
@@ -135,13 +136,21 @@ func TestRenewalNeedsTheCertificateItIsReplacing(t *testing.T) {
 	}
 }
 
-// TestRenewalWorksWithTheCurrentCertificate, and rotates the binding.
+// TestRenewalWorksWithTheCurrentCertificate.
+//
+// It used to also assert that atlantis's stored fingerprint rotated. Migration
+// 0032 removed that column with pinning, so what is checked instead is the
+// console's own record — which is what renewal itself resolves from, and so the
+// thing whose staleness would actually break something.
 func TestRenewalWorksWithTheCurrentCertificate(t *testing.T) {
 	f := newEnrolmentFixture(t)
 	m := f.enrolMachine(t, "backend")
 	base := f.startEnrolListener(t)
 
-	before := f.callerFingerprint(t, "backend")
+	before, err := f.srv.db.forOrg(defaultOrg).currentCallerCert(context.Background(), "backend")
+	if err != nil {
+		t.Fatalf("read the current record: %v", err)
+	}
 
 	_, csrPEM := newKeyAndCSR(t, "backend")
 	resp := renew(t, f.renewClient(t, m.certPEM, m.keyPEM), base, csrPEM)
@@ -162,27 +171,34 @@ func TestRenewalWorksWithTheCurrentCertificate(t *testing.T) {
 		t.Errorf("renewal resolved to %s/%s", got.Org, got.Caller)
 	}
 
-	after := f.callerFingerprint(t, "backend")
-	if bytes.Equal(before, after) {
-		t.Error("the binding still names the old certificate")
+	after, err := f.srv.db.forOrg(defaultOrg).currentCallerCert(context.Background(), "backend")
+	if err != nil {
+		t.Fatalf("read back: %v", err)
 	}
-	if want := leafFingerprint(t, got.CertPEM); !bytes.Equal(after, want) {
-		t.Error("the binding does not name the certificate that was just issued")
+	if bytes.Equal(before.Fingerprint, after.Fingerprint) {
+		t.Error("the console still records the old certificate as current")
+	}
+	if !bytes.Equal(after.Fingerprint, leafFingerprint(t, got.CertPEM)) {
+		t.Error("the recorded certificate is not the one just issued")
 	}
 }
 
-// TestTheReplacedCertificateKeepsWorkingForItsWindow.
+// TestAReplacedCertificateCanStillRenew.
 //
-// The failure this whole step exists to remove. A renewal records the new
-// fingerprint before the machine can have stored the certificate, so if the
-// response is lost the machine is still holding the old one — and needs a valid
-// certificate to try again.
-func TestTheReplacedCertificateKeepsWorkingForItsWindow(t *testing.T) {
+// The failure this exists to remove: a renewal records the new certificate
+// before the machine can possibly have stored it, so if the response is lost the
+// machine is still holding the old one — and needs a valid certificate to try
+// again.
+//
+// This used to depend on a 24-hour overlap window, which existed because
+// atlantis pinned a caller to one leaf. Migration 0032 removed the pinning and
+// with it the window: an older certificate is simply still that caller's
+// certificate until it expires, so the recovery below needs no special case at
+// all. That is the simplification a seven-day lifetime bought.
+func TestAReplacedCertificateCanStillRenew(t *testing.T) {
 	f := newEnrolmentFixture(t)
 	m := f.enrolMachine(t, "backend")
 	base := f.startEnrolListener(t)
-
-	old := f.callerFingerprint(t, "backend")
 
 	// Renew, and throw the response away — the lost-response case exactly.
 	_, csrPEM := newKeyAndCSR(t, "backend")
@@ -190,16 +206,7 @@ func TestTheReplacedCertificateKeepsWorkingForItsWindow(t *testing.T) {
 		t.Fatalf("first renewal: %d", resp.StatusCode)
 	}
 
-	// atlantis now names the new certificate, and remembers the old one.
-	prev, until := f.callerPrevious(t, "backend")
-	if !bytes.Equal(prev, old) {
-		t.Fatal("the replaced certificate was not recorded as the previous one")
-	}
-	if until.Before(time.Now()) {
-		t.Fatalf("the overlap window is already over: %s", until)
-	}
-
-	// And the machine, still holding the old certificate, can renew again.
+	// The machine, still holding the certificate it started with, retries.
 	_, csr2 := newKeyAndCSR(t, "backend")
 	resp := renew(t, f.renewClient(t, m.certPEM, m.keyPEM), base, csr2)
 	if resp.StatusCode != http.StatusOK {
@@ -230,23 +237,53 @@ func TestACertificateThisConsoleDidNotIssueCannotRenew(t *testing.T) {
 
 // TestRenewalCannotChangeWhichCallerYouAre.
 //
-// The CSR names a different caller. The console takes the caller from the row
-// the fingerprint resolved to, so the CN check refuses it — a machine cannot
-// renew its way into somebody else's identity.
+// A machine renews with a CSR naming a different caller. It is not refused —
+// the signer names the leaf from the caller the console resolved, so the CSR's
+// subject decides nothing — and what comes back is a certificate for the caller
+// it already was.
+//
+// The assertion used to be "refused". That was weaker: it tested a comparison
+// somebody could remove, where this tests that the identity in the issued
+// certificate never came from the request at all.
 func TestRenewalCannotChangeWhichCallerYouAre(t *testing.T) {
 	f := newEnrolmentFixture(t)
 	m := f.enrolMachine(t, "backend")
-	// A second caller exists, so the refusal is not "payments is unknown".
+	// A second caller exists, so nothing here turns on "payments is unknown".
 	f.mintToken(t, "payments")
 	base := f.startEnrolListener(t)
 
 	_, csrPEM := newKeyAndCSR(t, "payments")
 	resp := renew(t, f.renewClient(t, m.certPEM, m.keyPEM), base, csrPEM)
-	if resp.StatusCode == http.StatusOK {
-		t.Fatal("backend renewed itself into payments")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("renew: %d", resp.StatusCode)
 	}
+	var got struct {
+		CertPEM string `json:"cert_pem"`
+		Caller  string `json:"caller"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Caller != "backend" {
+		t.Errorf("renewal resolved to caller %q, want backend", got.Caller)
+	}
+	block, _ := pem.Decode([]byte(got.CertPEM))
+	if block == nil {
+		t.Fatal("no certificate in the response")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if leaf.Subject.CommonName != "backend" {
+		t.Errorf("renewal issued a certificate for %q — a CSR chose its own identity",
+			leaf.Subject.CommonName)
+	}
+
+	// And payments is untouched: it was never enrolled, so this console holds no
+	// certificate for it.
 	if fp := f.callerFingerprint(t, "payments"); len(fp) != 0 {
-		t.Error("the refused renewal still rebound payments")
+		t.Error("the renewal recorded a certificate against payments")
 	}
 }
 
@@ -285,35 +322,23 @@ func TestRenewalIsAuditedWithBothFingerprints(t *testing.T) {
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
-// callerFingerprint reads what atlantis currently binds a caller to.
+// callerFingerprint reads the certificate this console currently records for a
+// caller, or nil when it has never enrolled one.
+//
+// It used to read atlantis.caller_identities.cert_fingerprint, which migration
+// 0032 dropped — and it swallowed the resulting error and returned nil, so
+// every assertion built on it passed without checking anything. Worth naming:
+// a helper that returns a zero value on error turns three tests into no tests.
 func (f *consoleFixture) callerFingerprint(t *testing.T, caller string) []byte {
 	t.Helper()
-	var fp []byte
-	err := f.pool.QueryRow(context.Background(),
-		`SELECT cert_fingerprint FROM atlantis.caller_identities WHERE caller = $1`,
-		caller).Scan(&fp)
-	if err != nil {
+	rec, err := f.srv.db.forOrg(defaultOrg).currentCallerCert(context.Background(), caller)
+	if errors.Is(err, ErrNotFound) {
 		return nil
 	}
-	return fp
-}
-
-// callerPrevious reads the overlap slot.
-func (f *consoleFixture) callerPrevious(t *testing.T, caller string) ([]byte, time.Time) {
-	t.Helper()
-	var (
-		fp    []byte
-		until *time.Time
-	)
-	if err := f.pool.QueryRow(context.Background(),
-		`SELECT prev_cert_fingerprint, prev_valid_until FROM atlantis.caller_identities WHERE caller = $1`,
-		caller).Scan(&fp, &until); err != nil {
-		t.Fatalf("read the previous fingerprint: %v", err)
+	if err != nil {
+		t.Fatalf("read the recorded certificate for %s: %v", caller, err)
 	}
-	if until == nil {
-		return fp, time.Time{}
-	}
-	return fp, *until
+	return rec.Fingerprint
 }
 
 func leafFingerprint(t *testing.T, certPEM string) []byte {

@@ -471,6 +471,16 @@ type orgCredentials struct {
 	CertPEM    string
 	KeyPEM     []byte
 
+	// PublicEndpoint is the address a CALLER dials, which is not necessarily
+	// Endpoint — that one is the console's own route, and the console may sit
+	// inside a network a developer's laptop does not.
+	//
+	// Falls back to Endpoint when unset, which is every organisation registered
+	// before migration 0008 and every deployment where the two are the same.
+	// Read through COALESCE rather than backfilled, so the two cannot silently
+	// diverge the first time somebody changes Endpoint.
+	PublicEndpoint string
+
 	// UpdatedAt is what the connection pool compares to decide whether a
 	// cached client is still built from the current row. A rotated certificate
 	// moves it, and the pool rebuilds without a restart.
@@ -488,11 +498,15 @@ func (s *store) orgCredentials(ctx context.Context, org string) (*orgCredentials
 		c                                    orgCredentials
 		endpoint, healthAddr, caPEM, certPEM *string
 		keyCT                                []byte
+		// COALESCEd against atl_endpoint, so this is NULL only when both are —
+		// which the provisioning check below already refuses.
+		publicEndpoint *string
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT atl_endpoint, atl_health_addr, ca_pem, client_cert_pem, client_key_ct, updated_at
+		SELECT atl_endpoint, atl_health_addr, ca_pem, client_cert_pem, client_key_ct, updated_at,
+		       COALESCE(atl_public_endpoint, atl_endpoint)
 		FROM console.orgs WHERE org = $1
-	`, org).Scan(&endpoint, &healthAddr, &caPEM, &certPEM, &keyCT, &c.UpdatedAt)
+	`, org).Scan(&endpoint, &healthAddr, &caPEM, &certPEM, &keyCT, &c.UpdatedAt, &publicEndpoint)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -523,6 +537,10 @@ func (s *store) orgCredentials(ctx context.Context, org string) (*orgCredentials
 	c.CAPEM = *caPEM
 	c.CertPEM = *certPEM
 	c.KeyPEM = keyPEM
+	c.PublicEndpoint = *endpoint
+	if publicEndpoint != nil {
+		c.PublicEndpoint = *publicEndpoint
+	}
 	return &c, nil
 }
 
@@ -545,16 +563,22 @@ func (s *store) registerOrg(ctx context.Context, c orgCredentials) error {
 		return fmt.Errorf("seal the private key for %s: %w", c.Org, err)
 	}
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO console.orgs (org, atl_endpoint, atl_health_addr, ca_pem, client_cert_pem, client_key_ct, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+		INSERT INTO console.orgs (org, atl_endpoint, atl_health_addr, ca_pem, client_cert_pem, client_key_ct, updated_at, atl_public_endpoint)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)
 		ON CONFLICT (org) DO UPDATE SET
 			atl_endpoint    = EXCLUDED.atl_endpoint,
 			atl_health_addr = EXCLUDED.atl_health_addr,
 			ca_pem          = EXCLUDED.ca_pem,
 			client_cert_pem = EXCLUDED.client_cert_pem,
 			client_key_ct   = EXCLUDED.client_key_ct,
+			-- Written as NULL when the caller-facing address was not given, which
+			-- restores the fallback rather than freezing whatever was there
+			-- before. A re-registration that omits it means "these are the same
+			-- address again", not "keep the old override".
+			atl_public_endpoint = EXCLUDED.atl_public_endpoint,
 			updated_at      = NOW()
-	`, c.Org, c.Endpoint, c.HealthAddr, c.CAPEM, c.CertPEM, keyCT)
+	`, c.Org, c.Endpoint, c.HealthAddr, c.CAPEM, c.CertPEM, keyCT,
+		nullIfEmpty(c.PublicEndpoint))
 	return err
 }
 
@@ -661,4 +685,17 @@ func (s *store) deleteExpiredSessions(ctx context.Context) (int64, error) {
 func (s *store) deleteSession(ctx context.Context, token string) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM console.sessions WHERE token = $1`, token)
 	return err
+}
+
+// nullIfEmpty writes an unset optional column as NULL rather than as "".
+//
+// The difference is load-bearing for atl_public_endpoint: NULL means "fall back
+// to atl_endpoint" through the COALESCE in orgCredentials, while an empty
+// string is a value that satisfies COALESCE and hands every caller an address
+// of "".
+func nullIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }

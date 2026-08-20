@@ -2,7 +2,6 @@ package interceptors
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -112,13 +111,8 @@ func peerCtx(parent context.Context, rawCertBytes []byte) context.Context {
 }
 
 type cbLookupResult struct {
-	exists      bool
-	fingerprint []byte
-	// previous and previousUntil are the renewal overlap: the certificate this
-	// one replaced, and when it stops being accepted.
-	previous      []byte
-	previousUntil time.Time
-	err           error
+	exists bool
+	err    error
 }
 
 type recordingLookup struct {
@@ -132,12 +126,7 @@ func (r *recordingLookup) lookup(_ context.Context, caller string) (CertBinding,
 	if !ok {
 		return CertBinding{}, nil
 	}
-	return CertBinding{
-		Exists:        got.exists,
-		Fingerprint:   got.fingerprint,
-		Previous:      got.previous,
-		PreviousUntil: got.previousUntil,
-	}, got.err
+	return CertBinding{Exists: got.exists}, got.err
 }
 
 func runCertBindingUnary(t *testing.T, c *CertBindingChecker, ctx context.Context, method string) error {
@@ -223,56 +212,54 @@ func TestCertBinding_UnknownCallerRejected(t *testing.T) {
 	}
 }
 
-func TestCertBinding_BootstrapWindowPasses(t *testing.T) {
-	// Row exists but no fingerprint yet → operator registered the
-	// caller but hasn't issued a cert. Accept any CA-signed cert
-	// until the first binding is recorded.
+// Any certificate that passed the handshake is accepted for a registered
+// caller.
+//
+// This replaces three tests — a "bootstrap window" that accepted anything until
+// the first fingerprint was recorded, a mismatch rejection, and a match pass.
+// All three described pinning, which migration 0032 removed when the leaf
+// lifetime dropped to seven days.
+//
+// The bootstrap window is the one worth remembering: it accepted ANY CA-signed
+// certificate for a caller whose fingerprint was NULL, and because the only
+// writer of that column never ran in any deployment, every caller everywhere sat
+// in it permanently. The behaviour below is what that window actually was, now
+// made deliberate and bounded by a short certificate rather than by an accident.
+func TestCertBinding_AnyValidCertPassesForARegisteredCaller(t *testing.T) {
 	rl := &recordingLookup{results: map[string]cbLookupResult{
-		"alice": {exists: true, fingerprint: nil},
+		"alice": {exists: true},
 	}}
 	c := NewCertBindingChecker(CertBindingConfig{
 		Enforce:           true,
 		Lookup:            rl.lookup,
 		CallerFromContext: callerFrom,
 	})
-	ctx := peerCtx(callCtx("alice"), []byte("any-cert"))
-	if err := runCertBindingStream(t, c, ctx, "/x.Y/Z"); err != nil {
-		t.Errorf("bootstrap window should pass: %v", err)
+	// Two different certificates, both fine: the handshake already established
+	// that each chains to the authority and names this caller.
+	for _, raw := range [][]byte{[]byte("first-cert"), []byte("renewed-cert")} {
+		ctx := peerCtx(callCtx("alice"), raw)
+		if err := runCertBindingStream(t, c, ctx, "/x.Y/Z"); err != nil {
+			t.Errorf("a valid certificate for a registered caller was refused: %v", err)
+		}
 	}
 }
 
-func TestCertBinding_FingerprintMismatchRejected(t *testing.T) {
-	storedFP := sha256.Sum256([]byte("real-cert-bytes"))
-	rl := &recordingLookup{results: map[string]cbLookupResult{
-		"alice": {exists: true, fingerprint: storedFP[:]},
-	}}
+// Revocation still takes effect here, and this is the fastest path it has.
+//
+// RevokeCaller deletes the identity row; this check is cached for five seconds,
+// against thirty for the auth allowlist's refresher. Dropping pinning did not
+// change that, and it is the reason this interceptor still exists.
+func TestCertBinding_ARevokedCallerIsRefusedWithAValidCert(t *testing.T) {
+	rl := &recordingLookup{results: map[string]cbLookupResult{}}
 	c := NewCertBindingChecker(CertBindingConfig{
 		Enforce:           true,
 		Lookup:            rl.lookup,
 		CallerFromContext: callerFrom,
+		CacheTTL:          time.Nanosecond,
 	})
-	// Present a DIFFERENT cert — fingerprint won't match the stored one.
-	ctx := peerCtx(callCtx("alice"), []byte("rotated-cert-bytes"))
-	err := runCertBindingStream(t, c, ctx, "/x.Y/Z")
-	if status.Code(err) != codes.Unauthenticated {
-		t.Errorf("fingerprint mismatch should be Unauthenticated, got %v err=%v", status.Code(err), err)
-	}
-}
-
-func TestCertBinding_FingerprintMatchPasses(t *testing.T) {
-	rawCert := []byte("real-cert-bytes")
-	storedFP := sha256.Sum256(rawCert)
-	rl := &recordingLookup{results: map[string]cbLookupResult{
-		"alice": {exists: true, fingerprint: storedFP[:]},
-	}}
-	c := NewCertBindingChecker(CertBindingConfig{
-		Enforce:           true,
-		Lookup:            rl.lookup,
-		CallerFromContext: callerFrom,
-	})
-	ctx := peerCtx(callCtx("alice"), rawCert)
-	if err := runCertBindingStream(t, c, ctx, "/x.Y/Z"); err != nil {
-		t.Errorf("fingerprint match should pass: %v", err)
+	ctx := peerCtx(callCtx("alice"), []byte("a-perfectly-good-cert"))
+	if err := runCertBindingStream(t, c, ctx, "/x.Y/Z"); status.Code(err) != codes.Unauthenticated {
+		t.Errorf("a caller with no identity row was admitted: %v", status.Code(err))
 	}
 }
 
@@ -300,9 +287,8 @@ func TestCertBinding_LookupErrorRejected(t *testing.T) {
 // once, regardless of which flavor opened the first call.
 func TestCertBinding_SharedCacheAcrossUnaryAndStream(t *testing.T) {
 	rawCert := []byte("shared-cert")
-	storedFP := sha256.Sum256(rawCert)
 	rl := &recordingLookup{results: map[string]cbLookupResult{
-		"alice": {exists: true, fingerprint: storedFP[:]},
+		"alice": {exists: true},
 	}}
 	c := NewCertBindingChecker(CertBindingConfig{
 		Enforce:           true,
@@ -333,9 +319,8 @@ func TestCertBinding_SharedCacheAcrossUnaryAndStream(t *testing.T) {
 // path to deduplication.
 func TestCertBinding_SeparateCachesWithLegacyAPI(t *testing.T) {
 	rawCert := []byte("legacy-cert")
-	storedFP := sha256.Sum256(rawCert)
 	rl := &recordingLookup{results: map[string]cbLookupResult{
-		"alice": {exists: true, fingerprint: storedFP[:]},
+		"alice": {exists: true},
 	}}
 	cfg := CertBindingConfig{
 		Enforce:           true,
@@ -372,11 +357,10 @@ func TestCertBinding_SeparateCachesWithLegacyAPI(t *testing.T) {
 // retry on a stream.
 func TestCertBinding_StreamMatchesUnary(t *testing.T) {
 	rawCert := []byte("alice-cert")
-	storedFP := sha256.Sum256(rawCert)
 	cfg := CertBindingConfig{
 		Enforce: true,
 		Lookup: (&recordingLookup{results: map[string]cbLookupResult{
-			"alice":   {exists: true, fingerprint: storedFP[:]},
+			"alice":   {exists: true},
 			"mallory": {exists: false},
 		}}).lookup,
 		CallerFromContext: callerFrom,
@@ -388,7 +372,11 @@ func TestCertBinding_StreamMatchesUnary(t *testing.T) {
 		wantCode codes.Code
 	}{
 		{"valid", peerCtx(callCtx("alice"), rawCert), codes.OK},
-		{"wrong_fingerprint", peerCtx(callCtx("alice"), []byte("rotated")), codes.Unauthenticated},
+		// Was "wrong_fingerprint", expecting Unauthenticated. A renewed
+		// certificate for a registered caller is now accepted — that is what
+		// dropping pinning means, and the two flavours must agree about it just
+		// as they agreed about refusing it.
+		{"renewed_cert", peerCtx(callCtx("alice"), []byte("rotated")), codes.OK},
 		{"unknown_caller", peerCtx(callCtx("mallory"), rawCert), codes.Unauthenticated},
 		{"no_peer_cert", callCtx("alice"), codes.Unauthenticated},
 	}
@@ -467,112 +455,5 @@ func TestAuth_StreamMatchesUnary(t *testing.T) {
 				t.Errorf("stream code = %v, want %v", status.Code(streamErr), tc.wantCode)
 			}
 		})
-	}
-}
-
-// ── The renewal overlap ─────────────────────────────────────────────────────
-//
-// A renewal records the new fingerprint before the machine can possibly have
-// stored the certificate, so between those two moments the machine is still
-// presenting the old one. Refusing it there is a lockout: renewing needs a
-// valid certificate and it no longer has one.
-//
-// Each of these kills a different way of getting the window wrong — accepting
-// nothing, accepting forever, or accepting the wrong certificate.
-
-func TestCertBinding_SupersededCertPassesInsideItsWindow(t *testing.T) {
-	oldCert := []byte("the-certificate-the-machine-still-holds")
-	newCert := []byte("the-replacement-it-has-not-stored-yet")
-	oldFP := sha256.Sum256(oldCert)
-	newFP := sha256.Sum256(newCert)
-
-	rl := &recordingLookup{results: map[string]cbLookupResult{
-		"alice": {
-			exists:        true,
-			fingerprint:   newFP[:],
-			previous:      oldFP[:],
-			previousUntil: time.Now().Add(time.Hour),
-		},
-	}}
-	c := NewCertBindingChecker(CertBindingConfig{
-		Enforce: true, Lookup: rl.lookup, CallerFromContext: callerFrom,
-	})
-
-	if err := runCertBindingStream(t, c, peerCtx(callCtx("alice"), oldCert), "/x.Y/Z"); err != nil {
-		t.Errorf("the superseded certificate was refused inside its window: %v", err)
-	}
-	// And the replacement works, which is the whole point of having recorded it.
-	if err := runCertBindingStream(t, c, peerCtx(callCtx("alice"), newCert), "/x.Y/Z"); err != nil {
-		t.Errorf("the current certificate was refused: %v", err)
-	}
-}
-
-func TestCertBinding_SupersededCertIsRefusedOnceTheWindowPasses(t *testing.T) {
-	oldCert := []byte("the-certificate-the-machine-still-holds")
-	newCert := []byte("the-replacement")
-	oldFP := sha256.Sum256(oldCert)
-	newFP := sha256.Sum256(newCert)
-
-	rl := &recordingLookup{results: map[string]cbLookupResult{
-		"alice": {
-			exists:      true,
-			fingerprint: newFP[:],
-			previous:    oldFP[:],
-			// Already over. Without this assertion the window would be an
-			// accept-forever second slot, which is not a renewal overlap — it is
-			// a caller with two permanent identities.
-			previousUntil: time.Now().Add(-time.Minute),
-		},
-	}}
-	c := NewCertBindingChecker(CertBindingConfig{
-		Enforce: true, Lookup: rl.lookup, CallerFromContext: callerFrom,
-	})
-
-	err := runCertBindingStream(t, c, peerCtx(callCtx("alice"), oldCert), "/x.Y/Z")
-	if status.Code(err) != codes.Unauthenticated {
-		t.Errorf("an expired overlap still accepted the old certificate: %v err=%v",
-			status.Code(err), err)
-	}
-}
-
-func TestCertBinding_TheWindowAcceptsOnlyTheCertificateItNames(t *testing.T) {
-	newCert := []byte("the-replacement")
-	oldFP := sha256.Sum256([]byte("the-one-it-replaced"))
-	newFP := sha256.Sum256(newCert)
-
-	rl := &recordingLookup{results: map[string]cbLookupResult{
-		"alice": {
-			exists:        true,
-			fingerprint:   newFP[:],
-			previous:      oldFP[:],
-			previousUntil: time.Now().Add(time.Hour),
-		},
-	}}
-	c := NewCertBindingChecker(CertBindingConfig{
-		Enforce: true, Lookup: rl.lookup, CallerFromContext: callerFrom,
-	})
-
-	// A third certificate, matching neither slot. An open window must not become
-	// an open door.
-	err := runCertBindingStream(t, c, peerCtx(callCtx("alice"), []byte("somebody-else's-cert")), "/x.Y/Z")
-	if status.Code(err) != codes.Unauthenticated {
-		t.Errorf("an unrelated certificate passed during a renewal window: %v err=%v",
-			status.Code(err), err)
-	}
-}
-
-func TestCertBinding_NoWindowMeansTheOldBehaviour(t *testing.T) {
-	newCert := []byte("current")
-	newFP := sha256.Sum256(newCert)
-	rl := &recordingLookup{results: map[string]cbLookupResult{
-		"alice": {exists: true, fingerprint: newFP[:]}, // no previous
-	}}
-	c := NewCertBindingChecker(CertBindingConfig{
-		Enforce: true, Lookup: rl.lookup, CallerFromContext: callerFrom,
-	})
-
-	err := runCertBindingStream(t, c, peerCtx(callCtx("alice"), []byte("anything-else")), "/x.Y/Z")
-	if status.Code(err) != codes.Unauthenticated {
-		t.Errorf("a caller with no overlap accepted a second certificate: %v", err)
 	}
 }

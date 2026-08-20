@@ -279,8 +279,8 @@ function CallerCard({
                     <p>Mint a single-use enrolment token. The machine generates its own key and sends only a certificate request — no private key leaves it.</p>
                     <p className="hi-foot">
                       {enrolState === 'reenrol' && enrolledAt
-                        ? `Last enrolled ${enrolledAt.slice(0, 10)}. Enrolling again supersedes that certificate — atlantis stops authenticating it.`
-                        : 'Enrolling supersedes whatever certificate this caller is using now — atlantis stops authenticating it.'}
+                        ? `Last enrolled ${enrolledAt.slice(0, 10)}. Certificates last seven days and renew themselves; enrol again only for a new machine.`
+                        : 'Certificates last seven days and renew themselves. Enrol once per machine.'}
                     </p>
                   </>
                 )
@@ -490,9 +490,16 @@ function EnrolDialog({
     ? token.expires_at
     : exp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 
+  // --url, because without it the command cannot run. It was missing when this
+  // dialog was first written, which made the whole thing an instruction nobody
+  // could follow.
+  //
+  // --caller is deliberately absent. The token determines which caller it
+  // enrols, server-side and unforgeably; a flag for it would read as an input
+  // somebody could change, and changing it does nothing.
   const cmd = `tide login \\
+  --url ${token.enroll_url} \\
   --org ${token.org} \\
-  --caller ${token.caller} \\
   --token ${token.token}`
 
   return (
@@ -506,16 +513,12 @@ function EnrolDialog({
           </div>
         </div>
         <div className="modal__body">
-          {/* Unconditional, and it has to be. Enrolling supersedes whatever
-              certificate this caller is using — and the console cannot see
-              atlantis's fingerprint, so it cannot know whether there is one to
-              supersede. Saying "this may replace something" only when we happen
-              to know would be silent in exactly the case that hurts. */}
-          <div className="banner banner--warn" style={{ marginBottom: 14 }}>
-            Completing this enrolment replaces the certificate <span className="mono">{token.caller}</span> is
-            using now. atlantis stops authenticating the old one as soon as the new one is recorded — any
-            machine still holding it starts failing.
-          </div>
+          {/* This carried a warning that enrolling would break every other
+              machine using this caller, which was true while atlantis pinned a
+              caller to one certificate. It no longer does: certificates live
+              seven days and any valid one authenticates, so enrolling a second
+              machine is an ordinary thing to do and warning about it would be
+              teaching people to fear a hazard that has been removed. */}
 
           <div className="section-label" style={{ marginBottom: 8 }}>On the target machine</div>
           <pre style={{

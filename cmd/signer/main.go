@@ -3,9 +3,10 @@
 // behalf of the console.
 //
 // The signer never exports the CA key. It accepts a PEM-encoded CSR
-// (POST /issue) and returns a signed leaf cert.  The CN in the CSR must
-// match the caller name in the request body, and it must not be on the
-// reserved-CN denylist — those names belong to atlantis infrastructure.
+// (POST /issue) and returns a signed leaf cert. The certificate is named from
+// the caller in the request body, NOT from the CSR — only the public key is
+// taken from the request. That name must not be on the reserved-CN denylist,
+// which covers atlantis's own infrastructure identities.
 //
 // # Who may ask
 //
@@ -50,6 +51,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -76,9 +78,27 @@ var reservedCNs = map[string]bool{
 	"atlantis-signer":  true,
 }
 
-// certTTL is the lifetime of issued leaf certs. Short TTL means expiry
-// acts as a natural revocation mechanism — no CRL/OCSP needed.
-const certTTL = 90 * 24 * time.Hour
+// certTTL is the lifetime of an issued leaf.
+//
+// Seven days. It was ninety, with a comment saying that expiry "acts as a
+// natural revocation mechanism" — which was the intent and not the effect: a
+// leaked certificate that keeps working for three months is not revoked by its
+// expiry in any sense an operator would recognise. What actually provided
+// revocation was fingerprint pinning, and pinning is what produced the lockout
+// class, the overlap window and the one-way door around enrolment.
+//
+// Seven days makes the original claim true instead. It sits inside smallstep's
+// published guidance for step-ca, which puts service certificates at "one month
+// or less" and defaults to passive revocation for this reason; SPIRE issues
+// SVIDs with a one-hour default and pins nothing at all. One hour is not
+// reachable here — atlantis callers are laptops and build runners, not
+// workloads beside a co-located agent — but ninety days was well outside the
+// band anybody operates in.
+//
+// tide renews at two thirds elapsed, so a machine refreshes around day five and
+// has two days of slack before anything stops working. Migration 0032 removed
+// the pinning this replaces.
+const certTTL = 7 * 24 * time.Hour
 
 var (
 	caCert *x509.Certificate
@@ -389,12 +409,15 @@ func handleIssue(w http.ResponseWriter, r *http.Request, log *slog.Logger) {
 		jsonError(w, "invalid CSR: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if csr.Subject.CommonName != caller {
-		jsonError(w, fmt.Sprintf("CSR CN %q must match caller %q", csr.Subject.CommonName, caller), http.StatusBadRequest)
-		return
-	}
-
-	certPEM, expiresAt, err := signCSR(csr)
+	// No CN comparison. signCSR builds the subject from `caller` and takes only
+	// the public key from the request, so whatever the CSR asks to be called has
+	// stopped deciding anything — ignoring it is stronger than comparing it,
+	// because there is no check left to forget.
+	//
+	// `caller` is the console's, from the row it spent the enrolment token
+	// against. It has already been checked against the reserved names and
+	// against caller_identities above.
+	certPEM, expiresAt, err := signCSR(csr, caller)
 	if err != nil {
 		log.Error("sign CSR", "caller", caller, "err", err)
 		jsonError(w, "signing failed", http.StatusInternalServerError)
@@ -415,7 +438,22 @@ func handleIssue(w http.ResponseWriter, r *http.Request, log *slog.Logger) {
 	})
 }
 
-func signCSR(csr *x509.CertificateRequest) (string, time.Time, error) {
+// signCSR issues a leaf for caller, using only the public key from the request.
+//
+// # The subject is built here, not copied from the CSR
+//
+// It used to be `Subject: csr.Subject`, which took the whole subject from a
+// document the requester wrote — organisation, unit, locality, everything —
+// and validated only the common name. Nothing downstream reads those fields
+// today, which is the sort of thing that stops being true quietly.
+//
+// Building it from `caller` also removes a step from the client: `tide login`
+// no longer has to be told which caller it is enrolling as, because the CSR's
+// common name has stopped deciding anything. The token decides, the console
+// reads the caller off the row it spent, and that name is what appears here.
+// A CSR that asks for something else is not refused — it is ignored, which is
+// a stronger property than a comparison somebody has to remember to make.
+func signCSR(csr *x509.CertificateRequest, caller string) (string, time.Time, error) {
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("generate serial: %w", err)
@@ -426,7 +464,7 @@ func signCSR(csr *x509.CertificateRequest) (string, time.Time, error) {
 
 	template := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      csr.Subject,
+		Subject:      pkix.Name{CommonName: caller},
 		// Slight backdate to tolerate clock skew between containers.
 		NotBefore:             now.Add(-time.Minute),
 		NotAfter:              expiresAt,

@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-
-	"github.com/rachitkumar205/atlantis/internal/server/interceptors"
 )
 
 // The storage half of enrolment. See migrations/console/0007 for why the token
@@ -226,32 +224,33 @@ func (o *orgStore) listCallerCerts(ctx context.Context) ([]callerCert, error) {
 // SHA-256 over a certificate nobody else holds, so the only row anybody can
 // find is the one for a certificate they already have.
 //
-// # A superseded certificate can still renew, inside its window
+// # Superseded rows are accepted, and there is no window
 //
-// This looked wrong on the first attempt and the test caught it. Excluding
-// superseded rows is the obvious reading — "you have been replaced, renew from
-// the replacement" — and it destroys the exact recovery the overlap exists for.
+// This had a window once, and before that it excluded superseded rows outright.
+// Both were consequences of certificate pinning, and migration 0032 removed it.
 //
-// Walk it through. A machine holding certificate A renews, the console records
-// B and marks A superseded, and the response is lost. The machine still holds A
-// and nothing else. If A cannot renew, it cannot get anything, ever: that is
-// the lockout, reintroduced one layer up from where it was removed.
+// The reasoning now is short. A certificate presented here has already passed
+// mTLS on the enrolment listener: it chains to the organisation's authority and
+// it has not expired. Whether this console later issued a newer one for the
+// same caller says nothing about whether this one is still that caller's
+// certificate — it is, for the seven days it lives. Refusing it would only
+// reintroduce the lockout the window existed to prevent: a machine whose
+// renewal response was lost holds nothing else.
 //
-// So the window is the same on both sides. atlantis accepts A for
-// RenewalOverlap after B replaces it, and so does this. Anything else leaves a
-// band in which a machine can authenticate but cannot renew — which is a
-// lockout that only appears for certificates of one particular age.
+// Nor does accepting it grant anything. Renewal from a leaked certificate
+// produces another certificate for a caller the holder could already act as,
+// and the answer to that is RevokeCaller, which deletes the identity row and
+// takes effect within five seconds.
 //
-// What is still refused is a certificate replaced longer ago than the window,
-// and one this console never issued.
+// What is still refused is a certificate this console never issued: there is no
+// row, so there is no organisation to resolve, and the honest answer is "enrol".
 func (s *store) callerCertByFingerprint(ctx context.Context, fingerprint []byte) (*callerCert, error) {
 	c := callerCert{Fingerprint: fingerprint}
 	err := s.pool.QueryRow(ctx, `
 		SELECT org, caller, issued_at, expires_at
 		  FROM console.caller_certs
 		 WHERE fingerprint = $1
-		   AND (superseded_at IS NULL OR superseded_at > NOW() - $2::interval)
-	`, fingerprint, interceptors.RenewalOverlap.String()).
+	`, fingerprint).
 		Scan(&c.Org, &c.Caller, &c.IssuedAt, &c.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound

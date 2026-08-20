@@ -462,6 +462,16 @@ export interface EnrollTokenResponse {
   caller: string
   org: string
   expires_at: string
+
+  /** Where the machine redeems this token.
+   *
+   * The console cannot derive it — the enrolment listener's bind address says
+   * nothing about how anything outside reaches it, and reading the Host header
+   * would mean trusting an attacker-controlled value on a page that prints a
+   * live credential. It comes from CONSOLE_ENROLL_PUBLIC_URL, which the console
+   * refuses to start without once enrolment is on.
+   */
+  enroll_url: string
 }
 
 /** What this console has enrolled, per caller.

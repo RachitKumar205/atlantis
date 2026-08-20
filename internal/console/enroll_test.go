@@ -27,6 +27,14 @@ var enrolmentEnv = map[string]string{
 	"CONSOLE_ENROLL_LISTEN":   ":3443",
 	"CONSOLE_ENROLL_TLS_CERT": "/certs/enroll.crt",
 	"CONSOLE_ENROLL_TLS_KEY":  "/certs/enroll.key",
+
+	// These two were outside the required set and both were silently broken by
+	// it. See validateEnrollment for what each one's absence did; the short
+	// version is that a console configured exactly as the Makefile described
+	// rejected every renewal inside the TLS handshake, and the fixture was the
+	// only thing anywhere that set the variable which would have prevented it.
+	"CONSOLE_ENROLL_CLIENT_CA":  "/certs/ca.crt",
+	"CONSOLE_ENROLL_PUBLIC_URL": "https://console.internal:3443",
 }
 
 func setEnrolmentEnv(t *testing.T) {
@@ -126,11 +134,74 @@ func TestTheRefusalNamesEveryMissingSetting(t *testing.T) {
 //
 // It is only needed for renewal, which is K7b. Demanding it now would make
 // K7a's own configuration impossible to satisfy.
-func TestTheRenewalClientCAIsNotYetRequired(t *testing.T) {
+// TestEnrolmentRequiresTheRenewalClientCA.
+//
+// This test previously asserted the opposite — that the client CA was "not yet
+// required", on the reasoning that renewal was a later step. Renewal shipped
+// and the setting stayed optional, which is how the following arrangement
+// survived a green suite:
+//
+// buildEnrollListener sets ClientCAs only when CONSOLE_ENROLL_CLIENT_CA is
+// non-empty. Go's VerifyClientCertIfGiven with a nil ClientCAs verifies a
+// presented certificate against the SYSTEM root pool, where no caller
+// certificate chains. So a console started from CONSOLE_ENROLL_ENV in the
+// Makefile — which did not set it either — advertised enrolment as fully
+// configured and refused every renewal inside the TLS handshake, before
+// handleRenew was reached.
+//
+// Every renewal test passed throughout, because the fixture set the variable
+// the product did not require. That is the shape to watch for: a setting only
+// the test supplies is not configuration.
+func TestEnrolmentRequiresTheRenewalClientCA(t *testing.T) {
+	setConsoleEnv(t)
+	setEnrolmentEnv(t)
+	t.Setenv("CONSOLE_ENROLL_CLIENT_CA", "")
+
+	_, err := ConfigFromEnv()
+	if err == nil {
+		t.Fatal("a console that cannot verify a renewing machine started anyway")
+	}
+	if !strings.Contains(err.Error(), "CONSOLE_ENROLL_CLIENT_CA") {
+		t.Errorf("the error does not name the missing setting: %v", err)
+	}
+}
+
+// The same for the public URL, which is what makes the printed enrolment
+// command runnable. Without it the console enrols perfectly and prints an
+// instruction nobody can follow.
+func TestEnrolmentRequiresThePublicURL(t *testing.T) {
+	setConsoleEnv(t)
+	setEnrolmentEnv(t)
+	t.Setenv("CONSOLE_ENROLL_PUBLIC_URL", "")
+
+	_, err := ConfigFromEnv()
+	if err == nil {
+		t.Fatal("enrolment started with no address to send anybody to")
+	}
+	if !strings.Contains(err.Error(), "CONSOLE_ENROLL_PUBLIC_URL") {
+		t.Errorf("the error does not name the missing setting: %v", err)
+	}
+}
+
+// And the field is actually read from the environment.
+//
+// It was declared, documented, and never populated by ConfigFromEnv — so it was
+// permanently empty and no test noticed, because none of them looked at a value
+// rather than at an error.
+func TestThePublicURLIsReadFromTheEnvironment(t *testing.T) {
 	setConsoleEnv(t)
 	setEnrolmentEnv(t)
 
-	if _, err := ConfigFromEnv(); err != nil {
-		t.Fatalf("enrolment was refused without the renewal client CA: %v", err)
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv: %v", err)
+	}
+	if cfg.EnrollPublicURL != enrolmentEnv["CONSOLE_ENROLL_PUBLIC_URL"] {
+		t.Errorf("EnrollPublicURL = %q, want %q — the field is not being read",
+			cfg.EnrollPublicURL, enrolmentEnv["CONSOLE_ENROLL_PUBLIC_URL"])
+	}
+	if cfg.EnrollClientCA != enrolmentEnv["CONSOLE_ENROLL_CLIENT_CA"] {
+		t.Errorf("EnrollClientCA = %q, want %q",
+			cfg.EnrollClientCA, enrolmentEnv["CONSOLE_ENROLL_CLIENT_CA"])
 	}
 }

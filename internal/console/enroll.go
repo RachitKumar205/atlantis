@@ -75,18 +75,33 @@ func (s *Server) buildEnrollListener() error {
 		MinVersion: tls.VersionTLS12,
 		ClientAuth: tls.VerifyClientCertIfGiven,
 	}
-	if s.cfg.EnrollClientCA != "" {
-		caPEM, err := os.ReadFile(s.cfg.EnrollClientCA)
-		if err != nil {
-			return fmt.Errorf("read CONSOLE_ENROLL_CLIENT_CA: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(caPEM) {
-			return fmt.Errorf("CONSOLE_ENROLL_CLIENT_CA %s contains no certificate",
-				s.cfg.EnrollClientCA)
-		}
-		tlsCfg.ClientCAs = pool
+	// Required, not conditional.
+	//
+	// This used to be `if s.cfg.EnrollClientCA != ""`, and the empty case was the
+	// one every deployment was in. A nil ClientCAs does not disable client
+	// verification — Go's VerifyClientCertIfGiven falls back to the SYSTEM root
+	// pool, where no caller certificate chains — so the listener came up looking
+	// healthy and refused every renewal inside the handshake, before handleRenew
+	// could log anything.
+	//
+	// Checked here as well as in validateEnrollment because Config is also built
+	// directly, by tests and by anything embedding this package. A gate that only
+	// covers the environment path is a gate with a way around it.
+	if s.cfg.EnrollClientCA == "" {
+		return errors.New("CONSOLE_ENROLL_CLIENT_CA is required when the enrolment " +
+			"listener is enabled: without it a renewing machine is verified against " +
+			"the system roots, which no caller certificate chains to")
 	}
+	caPEM, err := os.ReadFile(s.cfg.EnrollClientCA)
+	if err != nil {
+		return fmt.Errorf("read CONSOLE_ENROLL_CLIENT_CA: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return fmt.Errorf("CONSOLE_ENROLL_CLIENT_CA %s contains no certificate",
+			s.cfg.EnrollClientCA)
+	}
+	tlsCfg.ClientCAs = pool
 
 	s.enrollSrv = &http.Server{
 		Addr:              s.cfg.EnrollListen,
@@ -231,9 +246,13 @@ func (s *Server) handleMintEnrollToken(w http.ResponseWriter, r *http.Request) {
 		map[string]any{"caller": caller, "expires_at": tok.ExpiresAt.UTC().Format(time.RFC3339)})
 
 	jsonOK(w, map[string]any{
-		"token":      tok.Secret,
-		"caller":     tok.Caller,
-		"org":        u.Org,
+		"token":  tok.Secret,
+		"caller": tok.Caller,
+		"org":    u.Org,
+		// Where to redeem it. The page cannot work this out and must not read it
+		// from the Host header, so it comes from configuration the console
+		// refuses to start without.
+		"enroll_url": s.cfg.EnrollPublicURL,
 		"expires_at": tok.ExpiresAt.UTC().Format(time.RFC3339),
 	})
 }
@@ -362,10 +381,15 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		})
 
 	jsonOK(w, map[string]any{
-		"cert_pem":   bundle.certPEM,
-		"ca_pem":     bundle.caPEM,
-		"caller":     caller,
-		"org":        org,
+		"cert_pem": bundle.certPEM,
+		"ca_pem":   bundle.caPEM,
+		"caller":   caller,
+		"org":      org,
+		// Everything the machine needs and cannot work out for itself: where
+		// atlantis is, and where to come back to renew. The certificate carries
+		// neither, and renewal is on this listener rather than on atlantis.
+		"endpoint":   bundle.endpoint,
+		"enroll_url": bundle.enrollURL,
 		"expires_at": bundle.expiresAt,
 	})
 }
@@ -468,10 +492,14 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		})
 
 	jsonOK(w, map[string]any{
-		"cert_pem":   bundle.certPEM,
-		"ca_pem":     bundle.caPEM,
-		"caller":     rec.Caller,
-		"org":        rec.Org,
+		"cert_pem": bundle.certPEM,
+		"ca_pem":   bundle.caPEM,
+		"caller":   rec.Caller,
+		"org":      rec.Org,
+		// Returned on renewal too, so a machine picks up a moved address or a
+		// rotated CA without being re-enrolled by hand.
+		"endpoint":   bundle.endpoint,
+		"enroll_url": bundle.enrollURL,
 		"expires_at": bundle.expiresAt,
 	})
 }
@@ -488,8 +516,29 @@ const enrolmentActor = "enrolment"
 // ── The shared issuance path ────────────────────────────────────────────────
 
 type issuedBundle struct {
-	certPEM     string
-	caPEM       string
+	certPEM string
+
+	// caPEM is the root the machine verifies the SERVER against, taken from
+	// console.orgs — NOT the signer's `ca_pem`.
+	//
+	// They are different questions and the codebase already says so: the
+	// registration guard notes that the console's CAPEM "is the root this
+	// console verifies the organisation's *server* against; the client leaf is
+	// issued by whatever root that server trusts for clients", and that the two
+	// "are the same CA in every deployment that exists today and are not
+	// required to be."
+	//
+	// Handing back the signer's root would work everywhere it has ever been
+	// tried and break the first organisation provisioned with split roots — as
+	// a handshake failure at atlantis, with nothing pointing back here.
+	caPEM string
+
+	// Where the machine talks to atlantis, and where it renews. Neither is
+	// derivable from the certificate, and renewal lives on the enrolment
+	// listener rather than on atlantis, so both have to travel.
+	endpoint  string
+	enrollURL string
+
 	expiresAt   string
 	fingerprint []byte
 }
@@ -502,22 +551,19 @@ type issuedBundle struct {
 func (s *Server) issueForCaller(
 	ctx context.Context, org, caller string, csr *x509.CertificateRequest, csrPEM string,
 ) (*issuedBundle, error) {
-	// The CN must be the caller the token was minted for.
+	// No comparison against the CSR's common name.
 	//
-	// The signer compares the CSR's CN to the caller name in the body it is
-	// handed — so if this forwarded a name from the request, that check would
-	// compare two attacker-supplied values and pass. `caller` here comes from
-	// the spent token row and from nowhere else.
+	// The signer builds the certificate's subject from the caller name it is
+	// handed and takes only the public key from the request, so what a CSR asks
+	// to be called decides nothing. Refusing a mismatch would reject a harmless
+	// request, and — more to the point — `tide login` cannot know the caller
+	// name before enrolling: the token determines it, server-side, on the row
+	// spent below.
 	//
-	// The CSR arrives parsed, because its shape was checked before the token was
-	// spent: a malformed request is the sender's mistake and should not cost
-	// them a credential. This check is the other kind — asking for a name the
-	// token does not grant is an authority question, and it costs the token.
-	if csr.Subject.CommonName != caller {
-		return nil, fmt.Errorf("this enrolment is for caller %q, but the CSR asks for %q",
-			caller, csr.Subject.CommonName)
-	}
-
+	// What is load-bearing, and is asserted by a test, is that the `caller` sent
+	// to the signer comes from that spent row and from nowhere else. Forwarding
+	// a name out of the request would hand the requester whatever identity it
+	// asked for, and nothing in the response would look wrong.
 	signed, err := s.callSigner(ctx, caller, csrPEM)
 	if err != nil {
 		return nil, err
@@ -537,6 +583,13 @@ func (s *Server) issueForCaller(
 		return nil, fmt.Errorf("the signer returned an unparseable certificate: %w", err)
 	}
 
+	// Read once, used three times: to verify the leaf below, and to tell the
+	// machine which CA to trust and which address to dial.
+	creds, err := s.db.orgCredentials(ctx, org)
+	if err != nil {
+		return nil, fmt.Errorf("read credentials for %q: %w", org, err)
+	}
+
 	// The certificate has to be one this organisation's atlantis will accept.
 	//
 	// There is one signer and one CA, while each organisation has its own — so
@@ -544,7 +597,7 @@ func (s *Server) issueForCaller(
 	// certificate that fails the handshake at that atlantis. Without this check
 	// it would also supersede the caller that was working there, which turns a
 	// misconfiguration into an outage. Refuse before recording anything.
-	if err := s.verifyLeafForOrg(ctx, org, leaf); err != nil {
+	if err := verifyLeafForOrg(org, creds, leaf); err != nil {
 		return nil, err
 	}
 
@@ -584,8 +637,11 @@ func (s *Server) issueForCaller(
 	}
 
 	return &issuedBundle{
-		certPEM:     signed.CertPEM,
-		caPEM:       signed.CAPEM,
+		certPEM: signed.CertPEM,
+		// creds.CAPEM, not signed.CAPEM. See the field's comment.
+		caPEM:       creds.CAPEM,
+		endpoint:    creds.PublicEndpoint,
+		enrollURL:   s.cfg.EnrollPublicURL,
 		expiresAt:   expiresAt,
 		fingerprint: fingerprint,
 	}, nil
@@ -593,11 +649,11 @@ func (s *Server) issueForCaller(
 
 // verifyLeafForOrg checks a freshly signed certificate against the CA the
 // organisation's atlantis actually trusts.
-func (s *Server) verifyLeafForOrg(ctx context.Context, org string, leaf *x509.Certificate) error {
-	creds, err := s.db.orgCredentials(ctx, org)
-	if err != nil {
-		return fmt.Errorf("read credentials for %q: %w", org, err)
-	}
+//
+// Takes the credentials rather than reading them, because issueForCaller now
+// needs the same row for the caller-facing endpoint and the CA it hands back —
+// and reading it twice invites the two reads to disagree across a rotation.
+func verifyLeafForOrg(org string, creds *orgCredentials, leaf *x509.Certificate) error {
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM([]byte(creds.CAPEM)) {
 		return fmt.Errorf("organisation %q has no usable CA on file", org)
