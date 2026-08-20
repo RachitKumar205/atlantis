@@ -247,12 +247,16 @@ func isTOTPShaped(s string) bool {
 	return true
 }
 
-// completeSignIn spends the pending login and issues the session.
-func (s *Server) completeSignIn(w http.ResponseWriter, r *http.Request, userID string) {
+// spendPendingLogin claims the half-finished login and proves it belongs to
+// userID. It answers the request and returns false on every failure.
+//
+// Extracted because both callers must do exactly this, and one of them used to
+// do it too late — see handleEnrolFinish.
+func (s *Server) spendPendingLogin(w http.ResponseWriter, r *http.Request, userID string) bool {
 	pendingToken, _ := r.Cookie(pendingCookie)
 	if pendingToken == nil {
 		jsonError(w, "your sign-in has expired — start again", http.StatusUnauthorized)
-		return
+		return false
 	}
 
 	// Spent here, in one statement, so two requests presenting the same pending
@@ -260,20 +264,33 @@ func (s *Server) completeSignIn(w http.ResponseWriter, r *http.Request, userID s
 	spentUser, err := s.db.SpendPendingLogin(r.Context(), pendingToken.Value)
 	if errors.Is(err, store.ErrNoSession) {
 		jsonError(w, "your sign-in has expired — start again", http.StatusUnauthorized)
-		return
+		return false
 	}
 	if err != nil {
 		s.log.Error("spend pending login", "err", err)
 		jsonError(w, "could not sign in", http.StatusInternalServerError)
-		return
+		return false
 	}
 	// Belt and braces: the pending login just spent must be the one the factor
 	// was checked against. Only reachable if two requests interleaved, and a
 	// mismatch here would mean issuing a session for the wrong account.
+	//
+	// It matters more on the enrolment path, where userID comes from
+	// requireEnrolable and prefers a live SESSION over the pending login: a
+	// browser holding one account's session and another's pending cookie would
+	// otherwise enrol a factor on the first while spending the second.
 	if subtle.ConstantTimeCompare([]byte(spentUser), []byte(userID)) != 1 {
 		s.log.Error("pending login changed account mid-request",
 			"checked", userID, "spent", spentUser)
 		jsonError(w, "could not sign in", http.StatusInternalServerError)
+		return false
+	}
+	return true
+}
+
+// completeSignIn spends the pending login and issues the session.
+func (s *Server) completeSignIn(w http.ResponseWriter, r *http.Request, userID string) {
+	if !s.spendPendingLogin(w, r, userID) {
 		return
 	}
 
@@ -377,6 +394,38 @@ func (s *Server) handleEnrolFinish(w http.ResponseWriter, r *http.Request) {
 			"and try the next one", http.StatusBadRequest)
 		return
 	}
+
+	// ── Order matters here, and it used to be wrong ─────────────────────────
+	//
+	// Enrolling during a sign-in completes it; enrolling from a session that
+	// already exists does not need to. Either way the pending login is claimed
+	// FIRST, before anything is committed.
+	//
+	// It used to be claimed last, after ConfirmTOTP and ReplaceBackupCodes had
+	// both written — so when the claim failed, this handler answered "your
+	// sign-in has expired" and dropped the `codes` slice holding the only copy
+	// of the plaintext. The account kept a confirmed factor and ten
+	// backup-code hashes nobody had ever seen.
+	//
+	// The reachable shape is NOT a pending login that merely timed out. That
+	// case never gets here: requireEnrolable resolves it through
+	// requirePending, which refuses an expired one before any of this runs.
+	//
+	// It is a live SESSION plus a stale pending cookie. requireEnrolable
+	// prefers the session and never looks at the pending login, so the handler
+	// runs to completion and only the spend at the end fails. A browser gets
+	// into that state by starting a second sign-in and abandoning it, which is
+	// also why the account-settings enrolment path is the one that suffers:
+	// re-enrolling replaces the existing backup codes, so the failure does not
+	// just withhold new codes, it destroys working ones.
+	completing := false
+	if _, err := r.Cookie(pendingCookie); err == nil {
+		if !s.spendPendingLogin(w, r, userID) {
+			return
+		}
+		completing = true
+	}
+
 	// Confirmed with the step recorded, so the proving code cannot immediately
 	// be replayed as a sign-in.
 	if err := us.ConfirmTOTP(r.Context(), step); err != nil {
@@ -385,6 +434,23 @@ func (s *Server) handleEnrolFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if completing {
+		token, err := s.db.CreateSession(r.Context(), userID)
+		if err != nil {
+			s.log.Error("create session", "user", userID, "err", err)
+			jsonError(w, "could not sign in", http.StatusInternalServerError)
+			return
+		}
+		s.clearCookie(w, pendingCookie)
+		s.setCookie(w, sessionCookie, token, store.SessionTTL)
+	}
+
+	// Last, so the gap between storing the hashes and handing back the
+	// plaintext is as small as it can be made. It cannot be closed: any
+	// shown-once secret has a window where the server has written it and the
+	// client has not received it — a dropped response is enough. What makes
+	// that survivable is being able to mint a fresh set, which is why
+	// regenerating backup codes is a route and not a support ticket.
 	codes, hashes, err := authn.NewBackupCodes()
 	if err != nil {
 		s.log.Error("generate backup codes", "err", err)
@@ -397,55 +463,13 @@ func (s *Server) handleEnrolFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enrolling during a sign-in completes it. Enrolling from a session that
-	// already exists does not need to.
-	if _, err := r.Cookie(pendingCookie); err == nil {
-		s.completeSignInWithCodes(w, r, userID, codes)
-		return
+	message := "Two-factor authentication is on. Save these codes somewhere safe — they are shown once."
+	if completing {
+		message = "Two-factor authentication is on and you are signed in. Save these codes somewhere safe — they are shown once."
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"backup_codes": codes,
-		"message":      "Two-factor authentication is on. Save these codes somewhere safe — they are shown once.",
-	})
-}
-
-func (s *Server) completeSignInWithCodes(w http.ResponseWriter, r *http.Request, userID string, codes []string) {
-	pendingToken, err := r.Cookie(pendingCookie)
-	if err != nil {
-		jsonError(w, "your sign-in has expired — start again", http.StatusUnauthorized)
-		return
-	}
-	spentUser, err := s.db.SpendPendingLogin(r.Context(), pendingToken.Value)
-	if err != nil {
-		jsonError(w, "your sign-in has expired — start again", http.StatusUnauthorized)
-		return
-	}
-	// The same cross-check completeSignIn makes, and it was missing here.
-	//
-	// This function's userID comes from requireEnrolable, which prefers a live
-	// SESSION over the pending login. So a browser holding one account's session
-	// and another's pending cookie enrols the factor on the session's account
-	// while spending the pending login of the other, and walks away with a
-	// session for the first. That combination used to need contriving; an OAuth
-	// callback makes it a thing a shared browser produces by accident.
-	if subtle.ConstantTimeCompare([]byte(spentUser), []byte(userID)) != 1 {
-		s.log.Error("pending login belongs to another account",
-			"enrolled", userID, "spent", spentUser)
-		jsonError(w, "could not sign in", http.StatusInternalServerError)
-		return
-	}
-	token, err := s.db.CreateSession(r.Context(), userID)
-	if err != nil {
-		s.log.Error("create session", "err", err)
-		jsonError(w, "could not sign in", http.StatusInternalServerError)
-		return
-	}
-	s.clearCookie(w, pendingCookie)
-	s.setCookie(w, sessionCookie, token, store.SessionTTL)
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"backup_codes": codes,
-		"message":      "Two-factor authentication is on and you are signed in. Save these codes somewhere safe — they are shown once.",
+		"message":      message,
 	})
 }
 
@@ -488,6 +512,67 @@ func (s *Server) requireEnrolable(w http.ResponseWriter, r *http.Request) (strin
 		return "", false
 	}
 	return p.UserID, true
+}
+
+// handleAuthConfig reports what the sign-in screen has to know up front.
+//
+// Unauthenticated, and deliberately thin: the names of the configured OAuth
+// providers and nothing else. Anything account-shaped added here would be a
+// disclosure to an anonymous caller.
+func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
+	// providerNames() builds with make(), so this is `[]` and never `null` on
+	// a deployment with no providers configured. That distinction is load
+	// bearing — the page branches on length, and `null` is not a length — so
+	// TestAuthConfigReportsNoProvidersAsAnEmptyList asserts the wire format
+	// rather than trusting the constructor to stay that way.
+	//
+	// A `if providers == nil` normalisation stood here first and was removed:
+	// mutation testing showed nothing could make it fire.
+	providers := s.providerNames()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"providers": providers,
+	})
+}
+
+// handlePendingState reports whether a half-finished sign-in is in progress.
+//
+// # Why this is not a disclosure
+//
+// It answers only for the pending cookie the caller already holds, and says no
+// more than handleLogin already said when it set that cookie: `next` is the
+// same value, computed the same way. Somebody holding the cookie is past the
+// password.
+//
+// It deliberately does NOT return the email address or the user id. The page
+// does not need them to render, and a half-finished login is exactly the state
+// where the least should be said.
+func (s *Server) handlePendingState(w http.ResponseWriter, r *http.Request) {
+	c, err := r.Cookie(pendingCookie)
+	if err != nil {
+		// Not an error. "No sign-in in progress" is a normal answer, and a 401
+		// here would make the app treat a first visit as a failure.
+		writeJSON(w, http.StatusOK, map[string]any{"pending": false})
+		return
+	}
+	p, err := s.db.PendingLoginFor(r.Context(), c.Value)
+	if err != nil {
+		// Expired or already spent. Clear the cookie so the next load does not
+		// ask again with the same dead token.
+		s.clearCookie(w, pendingCookie)
+		writeJSON(w, http.StatusOK, map[string]any{"pending": false})
+		return
+	}
+
+	// The same value handleLogin returned when it set this cookie, computed the
+	// same way. That is what makes a reload continuous rather than a restart.
+	next := "verify"
+	if p.MayEnrol {
+		next = "enrol"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pending": true,
+		"next":    next,
+	})
 }
 
 // handleLogout ends a session.

@@ -135,6 +135,26 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/auth/2fa/enrol/finish", s.handleEnrolFinish)
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
 
+	// What the sign-in screen needs before anybody has signed in.
+	//
+	// Unauthenticated by necessity: the page has to decide whether to draw a
+	// "Continue with GitHub" button before there is a session to ask about.
+	// providerNames() was otherwise reachable only through
+	// handleListIdentities, which starts with requireSession.
+	//
+	// It discloses which providers this deployment configured, which is already
+	// observable — /auth/github either redirects to GitHub or it does not.
+	s.mux.HandleFunc("GET /api/auth/config", s.handleAuthConfig)
+
+	// Whether a half-finished sign-in is in progress, and what it needs next.
+	//
+	// The pending cookie is HttpOnly, so a reloaded page cannot read it and has
+	// no other way to ask. Without this the app shows a fresh sign-in form to
+	// somebody who is mid-enrolment; on the password path they can retype a
+	// password, but on the OAuth path there is nothing to retype and the whole
+	// provider round trip has to be done again for no visible reason.
+	s.mux.HandleFunc("GET /api/auth/pending", s.handlePendingState)
+
 	// Signing in through a provider. Registered per provider and only when it
 	// is configured, so an unconfigured one is absent rather than present and
 	// failing — see configuredProviders.
@@ -224,7 +244,19 @@ func (s *Server) sweepExpired(ctx context.Context) {
 
 // ── Small helpers ───────────────────────────────────────────────────────────
 
+// writeJSON answers with a JSON body that is never stored.
+//
+// no-store on every response rather than on the ones that need it, for the same
+// reason page() does it: the list of routes carrying something private is not
+// stable, and the failure is silent. Two of them already do —
+// /api/auth/2fa/enrol/begin returns the raw TOTP secret, and
+// /api/auth/2fa/enrol/finish returns the backup codes in plaintext — and both
+// were cacheable until this line existed.
+//
+// Nothing here is worth caching in the first place: every route is a state
+// change or an answer scoped to one session.
 func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)

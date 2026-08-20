@@ -248,6 +248,252 @@ func TestEnrolmentCompletesASignIn(t *testing.T) {
 	}
 }
 
+// getWithCookie sends a GET carrying one cookie.
+func (f *fixture) getWithCookie(t *testing.T, path, name, value string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodGet, path, nil)
+	r.RemoteAddr = f.nextIP() + ":1234"
+	if value != "" {
+		r.AddCookie(&http.Cookie{Name: name, Value: value})
+	}
+	rec := httptest.NewRecorder()
+	f.srv.ServeHTTP(rec, r)
+	return rec
+}
+
+// The sign-in screen can discover the providers before anybody has signed in.
+//
+// Without this the page cannot decide whether to draw a "Continue with GitHub"
+// button: providerNames() was reachable only through handleListIdentities,
+// which begins with requireSession.
+func TestAuthConfigListsProvidersWithoutASession(t *testing.T) {
+	f := newFixture(t)
+
+	rec := f.get(t, "/api/auth/config")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("config: %d %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Providers []string `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.Providers) == 0 {
+		t.Fatal("the fixture configures providers but none were reported")
+	}
+
+	// Nothing about an account may appear here — it is an anonymous route.
+	for _, banned := range []string{"email", "user", "session", "@"} {
+		if strings.Contains(rec.Body.String(), banned) {
+			t.Errorf("the anonymous config route mentions %q: %s", banned, rec.Body.String())
+		}
+	}
+}
+
+// A deployment with no provider credentials reports an empty list, not null.
+//
+// `null` and `[]` both decode to an empty slice in Go and to different things
+// in a browser, and the page branches on length.
+func TestAuthConfigReportsNoProvidersAsAnEmptyList(t *testing.T) {
+	f := newFixtureWithoutProviders(t)
+
+	rec := f.get(t, "/api/auth/config")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("config: %d %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"providers":[]`) {
+		t.Fatalf("want an empty array, got %s", rec.Body.String())
+	}
+}
+
+// A reloaded page can find out that a sign-in is half-finished.
+//
+// The pending cookie is HttpOnly, so the page cannot read it. Without this
+// route it shows a fresh sign-in form to somebody mid-enrolment — and on the
+// OAuth path there is no password to retype, so the entire provider round trip
+// has to be repeated.
+func TestPendingStateSurvivesAReload(t *testing.T) {
+	f := newFixture(t)
+	f.verifiedAccount(t, "reload@example.com")
+
+	// No cookie at all: a normal first visit, not an error.
+	fresh := f.get(t, "/api/auth/pending")
+	if fresh.Code != http.StatusOK {
+		t.Fatalf("a first visit was an error: %d %s", fresh.Code, fresh.Body.String())
+	}
+	if !strings.Contains(fresh.Body.String(), `"pending":false`) {
+		t.Fatalf("want pending false, got %s", fresh.Body.String())
+	}
+
+	login := f.post(t, "/api/auth/login",
+		`{"email":"reload@example.com","password":"`+goodPassword+`"}`)
+	pending := cookieFrom(login, pendingCookie)
+	if pending == "" {
+		t.Fatal("login set no pending cookie")
+	}
+
+	rec := f.getWithCookie(t, "/api/auth/pending", pendingCookie, pending)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pending: %d %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Pending bool   `json:"pending"`
+		Next    string `json:"next"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Pending {
+		t.Fatal("a live pending login reported itself as absent")
+	}
+	// This account has no factor yet, so the next step is enrolment — the same
+	// value handleLogin returned, which is what makes the reload continuous.
+	if got.Next != "enrol" {
+		t.Errorf("next = %q, want enrol", got.Next)
+	}
+
+	// It says no more than that. The email address is what a shared machine
+	// would leak, and the page does not need it.
+	if strings.Contains(rec.Body.String(), "reload@example.com") {
+		t.Errorf("the pending route disclosed the email address: %s", rec.Body.String())
+	}
+}
+
+// A spent pending login reports absent, and the dead cookie is cleared.
+func TestPendingStateForgetsASpentLogin(t *testing.T) {
+	f := newFixture(t)
+	f.verifiedAccount(t, "spent@example.com")
+
+	login := f.post(t, "/api/auth/login",
+		`{"email":"spent@example.com","password":"`+goodPassword+`"}`)
+	pending := cookieFrom(login, pendingCookie)
+	if _, err := f.db.SpendPendingLogin(context.Background(), pending); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	rec := f.getWithCookie(t, "/api/auth/pending", pendingCookie, pending)
+	if !strings.Contains(rec.Body.String(), `"pending":false`) {
+		t.Fatalf("a spent login still reported as pending: %s", rec.Body.String())
+	}
+	// Cleared, so the next load does not ask again with the same dead token.
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == pendingCookie && c.MaxAge >= 0 && c.Value != "" {
+			t.Errorf("the dead pending cookie was not cleared: %+v", c)
+		}
+	}
+}
+
+// postWithCookies sends a request carrying several cookies.
+//
+// A separate helper rather than a variadic postWithCookie, because the case it
+// exists for is specifically a browser holding BOTH a session and a pending
+// login — the combination that used to strand backup codes.
+func (f *fixture) postWithCookies(t *testing.T, path, body string, cookies map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	r.RemoteAddr = f.nextIP() + ":1234"
+	for name, value := range cookies {
+		if value != "" {
+			r.AddCookie(&http.Cookie{Name: name, Value: value})
+		}
+	}
+	rec := httptest.NewRecorder()
+	f.srv.ServeHTTP(rec, r)
+	return rec
+}
+
+// Re-enrolling must not destroy the backup codes it fails to replace.
+//
+// The reachable shape, which took a surviving mutation to find: a live session
+// AND a stale pending cookie. requireEnrolable prefers the session and never
+// consults the pending login, so the handler runs all the way to the end and
+// only the spend fails there. A pending login that has merely timed out does
+// NOT reach this code — requirePending refuses it first — so a test built on
+// expiry alone passes against the broken ordering while proving nothing.
+//
+// What made the old ordering harmful is that enrolment REPLACES backup codes.
+// Confirming the factor and writing the new hashes before discovering the
+// sign-in could not be completed left the account with codes nobody had seen,
+// and the ones it had been using were already gone.
+//
+// The assertion is therefore about the codes the user actually holds, not
+// about which columns moved.
+func TestARefusedReEnrolmentKeepsTheExistingBackupCodes(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// Signed in, with a factor and a set of backup codes in hand.
+	f.verifiedAccount(t, "restrand@example.com")
+	session, _, original := f.enrol(t, "restrand@example.com")
+	if session == "" || len(original) == 0 {
+		t.Fatal("setup: no session or no backup codes")
+	}
+
+	// A second sign-in is started in the same browser and abandoned. Consumed
+	// out of band here, which reaches the same branch expiry does without
+	// costing the test ten minutes.
+	second := f.postFrom(t, "198.51.100.60", "/api/auth/login",
+		`{"email":"restrand@example.com","password":"`+goodPassword+`"}`)
+	stale := cookieFrom(second, pendingCookie)
+	if stale == "" {
+		t.Fatal("setup: the second login set no pending cookie")
+	}
+	if _, err := f.db.SpendPendingLogin(ctx, stale); err != nil {
+		t.Fatalf("setup: could not consume the pending login: %v", err)
+	}
+
+	// Now enrol a new authenticator from the session, with the dead pending
+	// cookie still attached.
+	both := map[string]string{sessionCookie: session, pendingCookie: stale}
+
+	begin := f.postWithCookies(t, "/api/auth/2fa/enrol/begin", `{}`, both)
+	if begin.Code != http.StatusOK {
+		t.Fatalf("enrol begin from a session: %d %s", begin.Code, begin.Body.String())
+	}
+	var started struct{ Secret string }
+	if err := json.Unmarshal(begin.Body.Bytes(), &started); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	finish := f.postWithCookies(t, "/api/auth/2fa/enrol/finish",
+		`{"code":`+jsonString(codeAt(t, started.Secret, time.Now()))+`}`, both)
+
+	// Either it succeeded and handed back a fresh set, or it refused and left
+	// the old set working. What must not happen is a refusal that replaced them.
+	if finish.Code == http.StatusOK {
+		var done struct {
+			BackupCodes []string `json:"backup_codes"`
+		}
+		if err := json.Unmarshal(finish.Body.Bytes(), &done); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(done.BackupCodes) != authn.BackupCodeCount {
+			t.Fatalf("enrolment succeeded with %d codes, want %d",
+				len(done.BackupCodes), authn.BackupCodeCount)
+		}
+		return
+	}
+
+	// Refused. The codes the user is holding must still sign them in.
+	login := f.postFrom(t, "198.51.100.61", "/api/auth/login",
+		`{"email":"restrand@example.com","password":"`+goodPassword+`"}`)
+	pending := cookieFrom(login, pendingCookie)
+	if pending == "" {
+		t.Fatal("no pending cookie for the recovery sign-in")
+	}
+	used := f.postWithCookie(t, "/api/auth/2fa/verify",
+		`{"code":`+jsonString(original[0])+`}`, pendingCookie, pending)
+	if used.Code != http.StatusOK {
+		t.Fatalf("a refused re-enrolment destroyed the backup codes the user "+
+			"was holding: %d %s", used.Code, used.Body.String())
+	}
+	if cookieFrom(used, sessionCookie) == "" {
+		t.Fatal("the surviving backup code produced no session")
+	}
+}
+
 // An account that already has a factor cannot enrol from a pending login.
 //
 // Otherwise somebody holding only a password replaces the second factor with
