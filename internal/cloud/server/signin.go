@@ -470,6 +470,12 @@ func (s *Server) handleEnrolFinish(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"backup_codes": codes,
 		"message":      message,
+		// Stated as a field rather than left to be read out of the message.
+		// This route has two exits — enrolling during a sign-in completes it,
+		// enrolling from a session does not — and the client has to know which
+		// one it took. The session cookie that would otherwise say so is
+		// HttpOnly, so the alternative was matching on English prose.
+		"signed_in": completing,
 	})
 }
 

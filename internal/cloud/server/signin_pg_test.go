@@ -494,6 +494,77 @@ func TestARefusedReEnrolmentKeepsTheExistingBackupCodes(t *testing.T) {
 	}
 }
 
+// Finishing enrolment says whether it also signed the person in.
+//
+// The route has two exits: during a sign-in it completes one, from an existing
+// session it does not. The client has to know which, and the session cookie
+// that would otherwise say so is HttpOnly — so it is a field. Matching on the
+// message text was the alternative, and prose is not a contract.
+func TestFinishingEnrolmentSaysWhetherItSignedYouIn(t *testing.T) {
+	f := newFixture(t)
+
+	// During a sign-in: completes it.
+	f.verifiedAccount(t, "duringsignin@example.com")
+	login := f.post(t, "/api/auth/login",
+		`{"email":"duringsignin@example.com","password":"`+goodPassword+`"}`)
+	pending := cookieFrom(login, pendingCookie)
+
+	begin := f.postWithCookie(t, "/api/auth/2fa/enrol/begin", `{}`, pendingCookie, pending)
+	var started struct{ Secret string }
+	if err := json.Unmarshal(begin.Body.Bytes(), &started); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	finish := f.postWithCookie(t, "/api/auth/2fa/enrol/finish",
+		`{"code":`+jsonString(codeAt(t, started.Secret, time.Now()))+`}`,
+		pendingCookie, pending)
+	if finish.Code != http.StatusOK {
+		t.Fatalf("enrol finish: %d %s", finish.Code, finish.Body.String())
+	}
+	var done struct {
+		SignedIn bool `json:"signed_in"`
+	}
+	if err := json.Unmarshal(finish.Body.Bytes(), &done); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !done.SignedIn {
+		t.Error("enrolling during a sign-in reported signed_in false")
+	}
+	if cookieFrom(finish, sessionCookie) == "" {
+		t.Error("signed_in was true but no session cookie was set")
+	}
+
+	// From an existing session: does not.
+	f.verifiedAccount(t, "fromsession@example.com")
+	session, _, _ := f.enrol(t, "fromsession@example.com")
+	if session == "" {
+		t.Fatal("setup: enrolling produced no session")
+	}
+
+	begin2 := f.postWithCookie(t, "/api/auth/2fa/enrol/begin", `{}`, sessionCookie, session)
+	if begin2.Code != http.StatusOK {
+		t.Fatalf("enrol begin from a session: %d %s", begin2.Code, begin2.Body.String())
+	}
+	var started2 struct{ Secret string }
+	if err := json.Unmarshal(begin2.Body.Bytes(), &started2); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	finish2 := f.postWithCookie(t, "/api/auth/2fa/enrol/finish",
+		`{"code":`+jsonString(codeAt(t, started2.Secret, nextWindow()))+`}`,
+		sessionCookie, session)
+	if finish2.Code != http.StatusOK {
+		t.Fatalf("enrol finish from a session: %d %s", finish2.Code, finish2.Body.String())
+	}
+	var done2 struct {
+		SignedIn bool `json:"signed_in"`
+	}
+	if err := json.Unmarshal(finish2.Body.Bytes(), &done2); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if done2.SignedIn {
+		t.Error("re-enrolling from a session reported signed_in true")
+	}
+}
+
 // An account that already has a factor cannot enrol from a pending login.
 //
 // Otherwise somebody holding only a password replaces the second factor with
