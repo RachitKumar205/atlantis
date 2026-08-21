@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -205,67 +204,87 @@ func (s *store) ensureAuditPartition(ctx context.Context, t time.Time) error {
 	return nil
 }
 
-// dropAuditPartitionsOlderThan removes every audit_log partition whose
-// upper bound is at or before `cutoff`. Idempotent.
+// dropAuditPartitionsOlderThan removes every audit_log partition whose upper
+// bound is at or before `cutoff`. Idempotent.
 //
-// Reads pg_partitions metadata to get bounds rather than parsing partition
-// names — partition naming is for human eyeballing, not for the worker to
-// trust.
+// # Three things this got wrong, all of which meant nothing was ever dropped
+//
+// It selected on `relispartition = true AND relname LIKE 'audit_log_p%'` and
+// scanned pg_get_expr into a non-nullable string.
+//
+//  1. That predicate matches the partitions' INDEXES as well as their tables.
+//     An index has relispartition true and relpartbound NULL, so the scan failed
+//     on the first one and discarded every candidate already read. The sweep had
+//     never dropped a partition; the only symptom was one ERROR line a day, on a
+//     24-hour timer, which is why it went unnoticed.
+//
+//  2. Filtering to relkind 'r' would have been the next mistake: a partition
+//     that is itself partitioned is 'p', so retention would silently abandon it
+//     while dropping its grandchildren — whose bounds are sub-ranges the parent
+//     never had. `relkind IN ('r','p')` is what the rest of this codebase uses
+//     (policyguard.go, internal/introspect), and DROP TABLE on a 'p' takes its
+//     children with it without CASCADE.
+//
+//  3. The name filter contradicted this function's own comment about not
+//     trusting partition names. Joining pg_inherits to the real parent selects
+//     direct children by construction, which also excludes grandchildren.
+//
+// # And why the bound is compared in SQL
+//
+// It used to be rendered by pg_get_expr and parsed back with time.Parse.
+// pg_get_expr renders using the SESSION's TimeZone and DateStyle, so on a
+// connection carrying anything but UTC/ISO the output is
+// `TO ('2026-09-01 05:30:00+05:30')` or `TO ('01/09/2026 00:00:00 UTC')` —
+// neither of which the two layouts matched. The loop then `continue`d, silently.
+//
+// That is worse than the bug it sat behind: no error, no log line, and nothing
+// dropped, forever. Comparing in SQL lets Postgres parse its own output, and
+// removes the round trip through a rendered string entirely.
 func (s *store) dropAuditPartitionsOlderThan(ctx context.Context, cutoff time.Time) (dropped []string, err error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT c.relname,
-		       pg_get_expr(c.relpartbound, c.oid) AS bound_expr
-		FROM pg_class c
-		JOIN pg_namespace n ON c.relnamespace = n.oid
-		WHERE n.nspname = 'console'
-		  AND c.relispartition = true
-		  AND c.relname LIKE 'audit_log_p%'`)
+		SELECT c.relname
+		  FROM pg_inherits i
+		  JOIN pg_class  c ON c.oid = i.inhrelid
+		  JOIN pg_class  p ON p.oid = i.inhparent
+		  JOIN pg_namespace n ON n.oid = p.relnamespace
+		 WHERE n.nspname = 'console'
+		   AND p.relname = 'audit_log'
+		   AND c.relkind IN ('r', 'p')
+		   AND (substring(
+		          pg_get_expr(c.relpartbound, c.oid)
+		          from $1
+		        ))::timestamptz <= $2
+		 ORDER BY c.relname`,
+		// The upper bound out of `FOR VALUES FROM (...) TO ('<here>')`. Extracted
+		// in SQL and cast by Postgres, so the session's DateStyle and TimeZone
+		// cannot change the meaning — they only change the spelling, and the cast
+		// reads the spelling Postgres just produced.
+		`TO \('([^']+)'\)`, cutoff)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	type cand struct{ name, expr string }
-	var cands []cand
+	var names []string
 	for rows.Next() {
-		var c cand
-		if err := rows.Scan(&c.name, &c.expr); err != nil {
+		var name string
+		if err := rows.Scan(&name); err != nil {
 			return nil, err
 		}
-		cands = append(cands, c)
+		names = append(names, name)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
-	// Bound expr looks like: FOR VALUES FROM ('2026-05-01 00:00:00+00')
-	// TO ('2026-06-01 00:00:00+00'). Extract the TO bound.
-	for _, c := range cands {
-		const marker = "TO ('"
-		i := strings.Index(c.expr, marker)
-		if i < 0 {
-			continue
+	for _, name := range names {
+		// Quoted rather than interpolated. The value comes from pg_class so it
+		// is not attacker-supplied today, and identifier quoting costs nothing.
+		if _, err := s.pool.Exec(ctx,
+			"DROP TABLE "+pgx.Identifier{"console", name}.Sanitize()); err != nil {
+			return dropped, fmt.Errorf("drop %s: %w", name, err)
 		}
-		rest := c.expr[i+len(marker):]
-		j := strings.IndexByte(rest, '\'')
-		if j < 0 {
-			continue
-		}
-		upper, err := time.Parse("2006-01-02 15:04:05-07", rest[:j])
-		if err != nil {
-			// Older PG formats use space-separated TZ — try another shape.
-			upper, err = time.Parse("2006-01-02 15:04:05+00", rest[:j])
-			if err != nil {
-				continue
-			}
-		}
-		if upper.After(cutoff) {
-			continue
-		}
-		if _, err := s.pool.Exec(ctx, fmt.Sprintf("DROP TABLE console.%s", c.name)); err != nil {
-			return dropped, fmt.Errorf("drop %s: %w", c.name, err)
-		}
-		dropped = append(dropped, c.name)
+		dropped = append(dropped, name)
 	}
 	return dropped, nil
 }

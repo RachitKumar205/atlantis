@@ -794,7 +794,22 @@ export function SudoConfirmDialog({
             <div className="field">
               <label className="field__label" htmlFor="sudo-assertion">
                 Your browser blocked the window. Open{' '}
-                <a href={me?.step_up_url} target="_blank" rel="noreferrer">this link</a>{' '}
+                {/*
+                  rel="opener", NOT the reflexive noreferrer.
+
+                  noreferrer implies noopener, so a tab opened that way has
+                  window.opener === null — and the page it lands on hands the
+                  assertion back with `window.opener?.postMessage(...)`, which
+                  then silently does nothing and closes. The documented way out
+                  of a blocked popup discarded the credential without a word,
+                  which is the exact dead end this field exists to prevent.
+
+                  Nothing is leaked by allowing the opener: both windows are
+                  this console's own origin by the time the handover happens,
+                  Cloud sets Referrer-Policy: no-referrer itself, and the
+                  postMessage names its target origin explicitly.
+                */}
+                <a href={me?.step_up_url} target="_blank" rel="opener">this link</a>{' '}
                 and paste the code it gives you.
               </label>
               <input

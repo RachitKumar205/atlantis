@@ -568,17 +568,35 @@ dev: dev-certs dev-infra ## Start Postgres + memcached, then run the server
 		TLS_CA_FILE="$(DEV_CERT_DIR)/ca.crt" \
 		$(GO) run ./cmd/server
 
+# The console's development environment, in one place.
+#
+# Shared by dev-console (API only) and dev-console-app (with its pages). They
+# were byte-for-byte copies, which meant a change to one would silently not
+# reach the other and nobody would notice until the browser target behaved
+# differently from the one everything else uses.
+CONSOLE_DEV_ENV = \
+	CONSOLE_PG_URL="$(CONSOLE_PG_URL)" \
+	CONSOLE_SESSION_SECRET="$${CONSOLE_SESSION_SECRET:-dev-secret-change-in-prod-32chars!!}" \
+	CONSOLE_LISTEN=":3000" \
+	CONSOLE_COOKIE_SECURE=false \
+	CONSOLE_DATA_KEY="$$(cat $(DEV_DATA_KEY_FILE))" \
+	CLOUD_ISSUER="$(CLOUD_ISSUER)" \
+	CLOUD_AUDIENCE="$(CLOUD_AUDIENCE)" \
+	CLOUD_JWKS_URL="$(CLOUD_JWKS_URL)" \
+	$(CONSOLE_ENROLL_ENV)
+
+
 .PHONY: dev-console
 dev-console: dev-certs dev-console-role dev-data-key build-console ## Run the management console BFF against the local dev server
-	CONSOLE_PG_URL="$(CONSOLE_PG_URL)" \
-		CONSOLE_SESSION_SECRET="$${CONSOLE_SESSION_SECRET:-dev-secret-change-in-prod-32chars!!}" \
-		CONSOLE_LISTEN=":3000" \
-		CONSOLE_COOKIE_SECURE=false \
-		CONSOLE_DATA_KEY="$$(cat $(DEV_DATA_KEY_FILE))" \
-		CLOUD_ISSUER="$(CLOUD_ISSUER)" \
-		CLOUD_AUDIENCE="$(CLOUD_AUDIENCE)" \
-		CLOUD_JWKS_URL="$(CLOUD_JWKS_URL)" \
-		$(CONSOLE_ENROLL_ENV) \
+	$(CONSOLE_DEV_ENV) \
+		$(BIN_DIR)/atlantis-console
+
+.PHONY: dev-console-app
+dev-console-app: dev-certs dev-console-role dev-data-key build-console-embedded ## Run the console WITH its pages, for using the product locally
+	@# The same service as dev-console, from the binary that carries the SPA.
+	@# See dev-auth-app for why these are two targets: `dev-console` must stay
+	@# buildable with no Node, and a browser needs the pages.
+	$(CONSOLE_DEV_ENV) \
 		$(BIN_DIR)/atlantis-console
 
 # ── Per-organisation atlantis registration ─────────────────────────────────
@@ -681,16 +699,39 @@ dev-cloud-data-key: ## Create (once) the keyset Cloud seals second-factor secret
 	@# everyone re-enrols.
 	@echo "$$(cat $(CLOUD_DATA_KEY_FILE))"
 
+# Cloud's development environment, in one place. See CONSOLE_DEV_ENV.
+CLOUD_DEV_ENV = \
+	CLOUD_ISSUER="$(CLOUD_ISSUER)" \
+	CLOUD_PG_URL="$(CLOUD_PG_URL)" \
+	CLOUD_PUBLIC_URL="$(CLOUD_PUBLIC_URL)" \
+	CLOUD_DATA_KEY="$$(cat $(CLOUD_DATA_KEY_FILE))"
+
 .PHONY: dev-auth
 dev-auth: dev-cloud-role dev-cloud-data-key build-cloud ## Serve Cloud: the key set the console verifies against, plus the account routes
 	@# No CLOUD_SMTP_ADDR here, so verification and reset links are written to
 	@# this terminal instead of emailed. `cloud serve` warns about it at startup
 	@# and at every send — that is the intended development flow, and the
 	@# warning is what stops it being the accidental production one.
-	CLOUD_ISSUER="$(CLOUD_ISSUER)" \
-		CLOUD_PG_URL="$(CLOUD_PG_URL)" \
-		CLOUD_PUBLIC_URL="$(CLOUD_PUBLIC_URL)" \
-		CLOUD_DATA_KEY="$$(cat $(CLOUD_DATA_KEY_FILE))" \
+	$(CLOUD_DEV_ENV) \
+		$(BIN_DIR)/atlantis-cloud serve \
+			-key "$(CLOUD_SIGNING_KEY)" \
+			-listen "$(CLOUD_LISTEN)"
+
+.PHONY: dev-auth-app
+dev-auth-app: dev-cloud-role dev-cloud-data-key build-cloud-embedded ## Serve Cloud WITH the sign-in pages, for using the product locally
+	@# The same service as dev-auth, from the binary that carries the SPA.
+	@#
+	@# Two targets rather than one because they answer different questions.
+	@# `dev-auth` is the API, and it must stay buildable with no Node — it is a
+	@# prerequisite of dev-token, dev-cloud-seed and dev-org-register, and those
+	@# have no business needing a frontend toolchain. This one is for signing in
+	@# through a browser, which needs the pages.
+	@#
+	@# Building the frontend for the Cloud front end is also what you want when
+	@# WORKING on it — except then you want `npm run dev --workspace web/cloud`
+	@# beside `make dev-auth`, so the page reloads on save and the API is
+	@# proxied. Use this one to USE the product, that one to change it.
+	$(CLOUD_DEV_ENV) \
 		$(BIN_DIR)/atlantis-cloud serve \
 			-key "$(CLOUD_SIGNING_KEY)" \
 			-listen "$(CLOUD_LISTEN)"

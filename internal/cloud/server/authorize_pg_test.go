@@ -310,6 +310,63 @@ func TestReauthDemandsAFactorEvenWithASession(t *testing.T) {
 	}
 }
 
+// The reauth page's CSP permits the redirect the page exists to make.
+//
+// The form POSTs same-origin, so `form-action 'self'` looks correct and is
+// not: the handler answers 303 to the CONSOLE's origin, and browsers enforce
+// form-action across the whole redirect chain. With `'self'` alone the browser
+// accepts the POST, lets the server mint the assertion, and then refuses to
+// follow the redirect.
+//
+// The failure has no symptom. Nothing navigates, nothing errors, and the
+// operator resends a code that is now spent and is told the code is wrong —
+// the one explanation that is false. Found in a browser, because no test could
+// see it: httptest does not enforce CSP, and the assertion below is the
+// closest a test can get.
+func TestTheReauthPageAllowsItsOwnRedirect(t *testing.T) {
+	f := newFixture(t)
+	session := f.member(t, "csp@example.com", "acme", testConsole, identity.RoleAdmin)
+
+	rec := f.authorize(t, session, "org=acme&prompt=reauth")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reauth: %d %s", rec.Code, rec.Body.String())
+	}
+
+	csp := rec.Header().Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("the reauth page carries no policy at all")
+	}
+	// The console's origin, by name. Not a wildcard: it is this organisation's
+	// console_url, the same value the assertion's audience is pinned to.
+	if !strings.Contains(csp, "form-action 'self' "+testConsole) {
+		t.Errorf("form-action does not permit the console:\n%s", csp)
+	}
+	// And nothing else was loosened while fixing that.
+	if !strings.Contains(csp, "default-src 'none'") {
+		t.Errorf("the page stopped being script-free:\n%s", csp)
+	}
+	for _, banned := range []string{"'unsafe-inline'", "script-src", "*"} {
+		if strings.Contains(csp, banned) {
+			t.Errorf("the reauth policy now allows %s:\n%s", banned, csp)
+		}
+	}
+
+	// The RETRY screen, which is the one the operator was actually stranded on.
+	//
+	// serveReauthPage has two callers — the GET above and the wrong-code
+	// re-render. A fix applied to only the first passes everything above while
+	// leaving the second broken, and the second is where somebody lands after
+	// the attempt that silently did nothing.
+	retry := f.postFormWithCookie(t, "/authorize/reauth",
+		url.Values{"org": {"acme"}, "code": {"000000"}}, sessionCookie, session)
+	if retry.Code != http.StatusOK {
+		t.Fatalf("the wrong-code re-render: %d %s", retry.Code, retry.Body.String())
+	}
+	if got := retry.Header().Get("Content-Security-Policy"); got != csp {
+		t.Errorf("the retry screen carries a different policy:\n got  %q\n want %q", got, csp)
+	}
+}
+
 // A correct code produces an assertion that says so.
 func TestReauthMintsAStepUpAssertion(t *testing.T) {
 	f := newFixture(t)

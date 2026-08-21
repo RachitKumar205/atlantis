@@ -5,6 +5,7 @@ import (
 	"html"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/rachitkumar205/atlantis/internal/cloud/issuer"
 	"github.com/rachitkumar205/atlantis/internal/cloud/store"
@@ -55,7 +56,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// prompt=reauth means the caller wants an assertion that says a factor was
 	// presented. A session is not that, however recent — see the reauth page.
 	if r.URL.Query().Get("prompt") == "reauth" {
-		s.serveReauthPage(w, org, "")
+		s.serveReauthPage(w, org, grant.Audience, "")
 		return
 	}
 
@@ -164,6 +165,30 @@ func (s *Server) redirectWithAssertion(w http.ResponseWriter, r *http.Request, g
 
 // ── Step-up ─────────────────────────────────────────────────────────────────
 
+// originOf reduces a URL to a CSP source expression.
+//
+// A source expression may carry a path, but matching then becomes path-prefix
+// matching and the redirect target here is /login — so anything but the bare
+// origin risks a policy that looks right and blocks the one navigation this
+// page exists to make.
+//
+// This is load-bearing, not belt and braces. Migration 0004's CHECK is
+// `console_url ~ '^https?://[^/]+'`, which is UNANCHORED at the end and so
+// admits `https://example.com/console`; `cloud org register` permits a path
+// too. Reducing to the origin is what keeps the directive correct for those.
+//
+// An unparseable value yields the empty string, which leaves form-action at
+// 'self' — the page still renders and the redirect is still refused, which is
+// the same failure as before rather than a new one. It cannot be reached from
+// a registered organisation.
+func originOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
 // serveReauthPage asks for a second factor.
 //
 // # Why this page exists when C3 deleted its sibling
@@ -176,12 +201,38 @@ func (s *Server) redirectWithAssertion(w http.ResponseWriter, r *http.Request, g
 // Script-free, so Cloud stays under `default-src 'none'`. The postMessage that
 // hands the result back runs on the *console's* origin, under the console's own
 // script-src, after the redirect below.
-func (s *Server) serveReauthPage(w http.ResponseWriter, org, errMsg string) {
+func (s *Server) serveReauthPage(w http.ResponseWriter, org, consoleURL, errMsg string) {
 	banner := ""
 	if errMsg != "" {
 		banner = `<p><strong>` + html.EscapeString(errMsg) + `</strong></p>`
 	}
 	w.Header().Set("Cache-Control", "no-store")
+
+	// form-action has to name the console, and `'self'` alone silently breaks
+	// this page.
+	//
+	// The form POSTs same-origin to /authorize/reauth, which is what `'self'`
+	// covers — but that handler answers 303 to the console's origin, and
+	// browsers enforce form-action ACROSS the redirect chain. With `'self'`
+	// only, Chrome and Firefox accept the POST, let the server mint the
+	// assertion, and then refuse to follow the redirect.
+	//
+	// The failure has no symptom. The page does not navigate and no error is
+	// shown, so the operator presses the button again, resends a code that is
+	// now spent, and is told the code is wrong — which is the one explanation
+	// that is not true. It cost an afternoon to find.
+	//
+	// The console's origin is not a wildcard: it is cloud.orgs.console_url for
+	// this organisation, the same value used as the assertion's audience, so an
+	// assertion cannot be posted anywhere it would not verify. Only the origin
+	// is used — the column is constrained to scheme://host[:port] — because a
+	// CSP source expression with a path would not match.
+	w.Header().Set("Content-Security-Policy", strings.Join([]string{
+		"default-src 'none'",
+		"form-action 'self' " + originOf(consoleURL),
+		"base-uri 'none'",
+		"frame-ancestors 'none'",
+	}, "; "))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8">` +
 		`<title>Confirm it is you</title>` +
@@ -244,7 +295,14 @@ func (s *Server) handleReauth(w http.ResponseWriter, r *http.Request) {
 		// The page comes back rather than a dead end, and the session survives:
 		// a mistyped digit should cost a retry, not the sign-in. The rate
 		// limiter is what bounds guessing.
-		s.serveReauthPage(w, org, "That code is not right. Try the next one.")
+		// "Try the next one" and not "try again": SpendTOTPStep accepts a code
+		// only from a step strictly later than the last one used, so
+		// resubmitting the code still on screen is refused however correct it
+		// looks. That is deliberate — it is what stops a code seen over a
+		// shoulder being replayed inside its ninety-second validity.
+		s.serveReauthPage(w, org, grant.Audience,
+			"That code is not right, or it has already been used. "+
+				"Wait for your authenticator to show a new one.")
 		return
 	}
 

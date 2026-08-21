@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Check, Copy, Key, Link2, Plus, Trash2, X } from 'lucide-react'
 import { api, ApiError, queries, type CallerInfo, type EnrollTokenResponse } from '@/api/client'
@@ -57,17 +57,61 @@ export function Callers() {
     setTimeout(() => setToast(null), 2400)
   }
 
-  const enrolM = useMutation({
-    mutationFn: (name: string) => api.callers.enroll(name),
-    onSuccess: (tok) => {
-      setEnrollingCaller(null)
+  // Minting an enrolment token needs sudo, and the button has to supply it.
+  //
+  // This used to call api.callers.enroll directly. The route is
+  // auth + admin + csrf + requireSudo (internal/console/server.go), so the
+  // server refused every time with "sudo required" and the page turned that
+  // into a toast — a control that could not succeed, whose entire behaviour
+  // was displaying its own refusal.
+  //
+  // Nothing caught it because the server tests assert the route refuses
+  // WITHOUT sudo, which it does, correctly. Nothing asserted that an operator
+  // can obtain sudo, because until the Cloud sign-in application existed
+  // nobody could: reaching the step-up page needs a Cloud session and a
+  // confirmed second factor. So the feature was dead from the day it shipped
+  // and the suite stayed green about it.
+  //
+  // The working pattern was already on this page, guarding the alias save
+  // fifty lines below. This is that pattern.
+  const [enrolSudoFor, setEnrolSudoFor] = useState<string | null>(null)
+  const [enrolError, setEnrolError] = useState<string | null>(null)
+  // Whether the gate is on screen, readable from an async continuation that
+  // captured its state value before a dismissal. See the catch in enrolWithSudo.
+  const enrolOpen = useRef(false)
+  const openEnrolGate = (caller: string | null) => {
+    enrolOpen.current = caller !== null
+    setEnrolSudoFor(caller)
+  }
+
+  const enrolWithSudo = async (assertion: string) => {
+    const caller = enrolSudoFor
+    if (!caller) return
+    setEnrollingCaller(caller)
+    setEnrolError(null)
+    try {
+      // Elevate first, then mint. Two calls rather than one because sudo is a
+      // property of the session, not an argument to this route.
+      await api.auth.sudo(assertion)
+      const tok = await api.callers.enroll(caller)
+      openEnrolGate(null)
       setEnrolment(tok)
-    },
-    onError: (err) => {
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Could not mint an enrolment token'
+      // The dialog stays open holding the error, so a wrong or stale code is
+      // one retry rather than a return to the list.
+      //
+      // Unless it is already gone. SudoConfirmDialog dismisses on a backdrop
+      // mousedown regardless of `pending`, so a failure arriving after that
+      // would set state nothing renders and the operator would be told nothing
+      // at all — worse than the toast this replaced. A ref, not the state
+      // value, because the closure captured it before the dismissal.
+      if (enrolOpen.current) setEnrolError(msg)
+      else showToast(msg)
+    } finally {
       setEnrollingCaller(null)
-      showToast(err instanceof Error ? err.message : 'Could not mint an enrolment token')
-    },
-  })
+    }
+  }
 
   const revokeM = useMutation({
     mutationFn: (name: string) => api.callers.revoke(name),
@@ -130,7 +174,7 @@ export function Callers() {
                   key={c.caller}
                   caller={c}
                   canAdmin={isAdmin}
-                  onEnrol={() => { setEnrollingCaller(c.caller); enrolM.mutate(c.caller) }}
+                  onEnrol={() => { setEnrolError(null); openEnrolGate(c.caller) }}
                   isEnrolling={enrollingCaller === c.caller}
                   enrolState={enrolControlState(certs, c.caller)}
                   enrolledAt={certs?.certs.find(x => x.caller === c.caller)?.issued_at}
@@ -157,6 +201,37 @@ export function Callers() {
           isPending={revokeM.isPending}
           onCancel={() => setRevoking(null)}
           onConfirm={() => revokeM.mutate(revoking)}
+        />
+      )}
+
+      {/*
+        The sudo gate for minting an enrolment token.
+        Rendered before EnrolDialog and cleared by enrolWithSudo on success, so
+        the two are never on screen together — the same "one modal at a time"
+        rule the alias save follows.
+      */}
+      {enrolSudoFor && (
+        <SudoConfirmDialog
+          title="Mint an enrolment token"
+          icon={<Key size={18} />}
+          body={
+            <div className="col">
+              <p>
+                This produces a single-use token that lets{' '}
+                <span className="mono">{enrolSudoFor}</span> obtain a certificate
+                — the machine&rsquo;s full identity at atlantis.
+              </p>
+              <p className="muted">
+                It is good for fifteen minutes and can be redeemed once. Enrolling
+                supersedes any certificate that caller already holds.
+              </p>
+            </div>
+          }
+          confirmLabel="Mint the token"
+          pending={enrollingCaller === enrolSudoFor}
+          error={enrolError}
+          onCancel={() => { openEnrolGate(null); setEnrolError(null) }}
+          onConfirm={enrolWithSudo}
         />
       )}
 

@@ -25,6 +25,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -43,8 +44,12 @@ func cmdLogin(args []string) int {
 	url := fs.String("url", "", "enrolment listener URL, from the console's enrol dialog")
 	org := fs.String("org", "", "organisation to enrol into")
 	token := fs.String("token", "", "single-use enrolment token")
+	// Local development only. A deployment's enrolment endpoint carries a
+	// publicly-trusted certificate, so the system roots verify it and this flag
+	// has nothing to do. It exists because the certificates deploy/init-certs.sh
+	// makes are signed by a CA that is in no system store.
 	caFile := fs.String("ca", "",
-		"PEM root that verifies the enrolment listener; omit to use the system roots")
+		"local development only: PEM root that verifies the enrolment listener")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -143,6 +148,35 @@ func enrol(baseURL, org, token, caFile string) (*storedCredentials, error) {
 
 	resp, err := client.Post(baseURL+"/enroll", "application/json", bytes.NewReader(body))
 	if err != nil {
+		// A trust failure is worth naming, because the raw error does not
+		// describe the situation to anybody who has to act on it. On macOS it
+		// reads "certificate is not standards compliant", which is Apple's
+		// phrasing for one of its own rules and says nothing about trust.
+		//
+		// It deliberately does NOT suggest -ca. A deployment's enrolment
+		// endpoint is publicly trusted, so for anyone but us this means the
+		// deployment is misconfigured — and answering that with a flag that
+		// bypasses verification is advice to work around a real security
+		// failure. -ca exists for local development and is documented there.
+		var ce *tls.CertificateVerificationError
+		if errors.As(err, &ce) {
+			// An expired certificate is the one trust failure that is often
+			// this machine's fault — a clock hours out of true rejects a
+			// perfectly good certificate. Saying "the deployment is broken"
+			// there would repeat the mistake this whole branch exists to fix:
+			// naming a cause that is not the cause.
+			var ci x509.CertificateInvalidError
+			if errors.As(err, &ci) && ci.Reason == x509.Expired {
+				return nil, fmt.Errorf(
+					"the certificate at %s is outside its validity window — "+
+						"check this machine's clock before anything else", baseURL)
+			}
+			// The URL is already in the wrapped *url.Error, so it is not
+			// repeated here.
+			return nil, fmt.Errorf(
+				"could not verify the server's certificate: %w — "+
+					"the deployment is misconfigured", err)
+		}
 		return nil, fmt.Errorf("reach %s: %w", baseURL, err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
