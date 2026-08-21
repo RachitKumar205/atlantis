@@ -14,7 +14,17 @@
 # internal/runtime/pagination.go (reachable from internal/console/sandbox.go)
 # imports. Running buf generate inside the build lets a clean clone produce a
 # working image with no host-side codegen step.
-FROM --platform=$BUILDPLATFORM bufbuild/buf:1.41.0 AS proto
+#
+# The base used to be `bufbuild/buf:1.41.0`, which ships neither of the LOCAL
+# plugins buf.gen.yaml declares, so this stage always failed with
+# `plugin protoc-gen-go: executable file not found in $PATH`. See the same note
+# in Dockerfile. Plugin versions match `make proto`; change them together.
+FROM --platform=$BUILDPLATFORM golang:1.25.12-alpine AS proto
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go install github.com/bufbuild/buf/cmd/buf@v1.41.0 && \
+    go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6 && \
+    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
 WORKDIR /src
 COPY buf.yaml buf.gen.yaml ./
 COPY atlantis ./atlantis

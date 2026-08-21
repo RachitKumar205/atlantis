@@ -1,0 +1,63 @@
+# Dockerfile.pg — the Postgres image provisioned organisations run.
+#
+# Derived from CloudNativePG's own image rather than from timescale/timescaledb-ha,
+# because CNPG requires specific things of whatever it runs: the postgres user at
+# uid 26, the pgdg binary layout, and the instance-manager entrypoint contract.
+# Starting from CNPG and adding an extension is a much smaller claim than
+# starting from Timescale and reconstructing all of that.
+#
+# What the stock image already provides, measured rather than assumed:
+#
+#     citext | 1.6
+#     vector | 0.8.6
+#
+# pgvector is the one atlantis cannot start without — internal/storage/pg/pool.go
+# registers pgvector types in AfterConnect, so a database without the extension
+# fails at pool-open and the server never serves. That it ships in the base image
+# is why this file only has to add one thing.
+#
+# TimescaleDB is the thing it has to add. The infra migrations do not use it, but
+# the product does: create_hypertable appears throughout internal/runtime/sandbox
+# and internal/introspect, so a customer whose schema declares a hypertable would
+# otherwise be provisioned onto a database that cannot hold it.
+#
+# The -oss package, deliberately. `timescaledb-2-postgresql-17` is the Community
+# (TSL) build; `timescaledb-2-oss-postgresql-17` is Apache-2. The hosted product
+# cannot ship the TSL build, which is what ATL_REQUIRE_APACHE_TIMESCALE exists to
+# assert at boot — set it on the provisioned Deployment so a wrong image is
+# refused at startup rather than discovered in a licence review.
+
+FROM ghcr.io/cloudnative-pg/postgresql:17
+
+# Root only for the install; the final USER goes back to postgres. CNPG will not
+# run an image whose default user is root.
+USER root
+
+# One layer, and the apt lists are removed in it, so the index never reaches the
+# published image. gnupg and curl are build-time only and are removed again.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release; \
+    curl -fsSL https://packagecloud.io/timescale/timescaledb/gpgkey \
+        | gpg --dearmor -o /etc/apt/trusted.gpg.d/timescaledb.gpg; \
+    echo "deb https://packagecloud.io/timescale/timescaledb/debian/ $(lsb_release -c -s) main" \
+        > /etc/apt/sources.list.d/timescaledb.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends timescaledb-2-oss-postgresql-17; \
+    apt-get purge -y --auto-remove curl gnupg lsb-release; \
+    rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/timescaledb.list
+
+# uid 26, not the name: CNPG matches on the numeric id.
+USER 26
+
+# Tag this image with a Postgres version, not `local`. CloudNativePG reads the
+# major version out of the tag and refuses anything else at admission:
+#   spec.imageName: Invalid value: "...:local": invalid version tag
+# `make build-pg-image` uses PG_IMAGE_TAG for exactly this reason.
+#
+# TimescaleDB needs shared_preload_libraries = 'timescaledb', which is a
+# Cluster-spec setting rather than an image one — set it under
+# spec.postgresql.shared_preload_libraries. CREATE EXTENSION still has to run as
+# superuser in the Cluster's bootstrap SQL, because neither timescaledb nor
+# vector is a trusted extension and the application role is deliberately not a
+# superuser.

@@ -241,21 +241,45 @@ build-console-spa: ## Build the console React SPA and write output to cmd/consol
 # `make container-builder` once first — the builder ships with a nameserver
 # that does not answer, and every `RUN` that fetches anything fails without it.
 #
-# BROKEN, and not by the runtime: the console and server images both begin with
-#   FROM --platform=$$BUILDPLATFORM bufbuild/buf:1.41.0 AS proto
-#   RUN buf generate
-# and buf.gen.yaml declares LOCAL plugins (protoc-gen-go, protoc-gen-go-grpc)
-# that the buf image does not ship. `make proto` installs them on the host at
-# pinned versions; the Dockerfiles never do, so the stage fails with
-# `plugin protoc-gen-go: executable file not found in $$PATH`.
+# Both of these were broken until 2026-08-22, in two independent ways, and the
+# second was hidden behind the first:
 #
-# This fails identically under Docker — it was verified there before the
-# runtime changed, so it is not a regression from the switch. Nothing caught it
-# because no CI job builds these images. `build-signer-image` is unaffected: it
-# has no proto stage.
+#   1. The proto stage ran `buf generate` inside `bufbuild/buf:1.41.0`, which
+#      ships neither of the LOCAL plugins buf.gen.yaml declares. It installs
+#      them itself now, at the versions `make proto` pins.
+#   2. Every stage that was not the signer's asked for
+#      `golang:1.25.12-alpine3.21`, a tag that does not exist — the registry
+#      answers 404. `Dockerfile.signer` said `golang:1.25.12-alpine` and is
+#      exactly why it was the one image that built.
+#
+# Nothing caught either, because no CI job builds these images. That is still
+# true and is the reason to run them by hand after touching a Dockerfile.
 .PHONY: build-console-image
-build-console-image: ## Build the atlantis-console image (BROKEN: proto stage, see comment)
+build-console-image: ## Build the atlantis-console image
 	$(CONTAINER) build --file Dockerfile.console -t atlantis-console:local .
+
+.PHONY: build-server-image
+build-server-image: ## Build the atlantis server image for the local cluster
+	$(CONTAINER) build --file Dockerfile -t atlantis-server:local .
+
+# CloudNativePG's image plus Apache-2 TimescaleDB. The stock CNPG image already
+# carries pgvector and citext — pgvector being the one atlantis cannot open a
+# pool without — so this only adds the extension the product needs for
+# hypertables. See Dockerfile.pg for why it derives from CNPG rather than from
+# timescale/timescaledb-ha, and why it must be the -oss package.
+#
+# The tag has to parse as a Postgres version. CNPG reads the major version out
+# of it to decide upgrade compatibility, and rejects anything else at admission
+# with `spec.imageName: Invalid value: ... invalid version tag` — so `:local`,
+# which every other image here uses, is the one tag this image cannot have.
+PG_IMAGE_TAG ?= 17.11
+
+.PHONY: build-pg-image
+build-pg-image: ## Build the Postgres image provisioned organisations run
+	$(CONTAINER) build --file Dockerfile.pg -t atlantis-pg:$(PG_IMAGE_TAG) .
+
+.PHONY: build-provision-images
+build-provision-images: build-server-image build-signer-image build-pg-image ## Build every image the local cluster runs
 
 .PHONY: build-signer-image
 build-signer-image: ## Build the atlantis-signer image (cert signing service)
@@ -547,6 +571,31 @@ dev-infra-destroy: ## Remove the containers AND the Postgres data volume
 	-$(CONTAINER) rm -f $(PG_CONTAINER) $(MEMCACHED_CONTAINER) 2>/dev/null
 	-$(CONTAINER) volume delete $(PG_VOLUME) 2>/dev/null
 	@echo "==> removed. Next 'make dev-infra' starts a fresh database."
+
+# ── the local Kubernetes cluster provisioning runs against ───────────────────
+#
+# Separate from dev-infra: that is the Postgres and memcached the host-side
+# services use, this is where provisioned organisations live. Both can run at
+# once and they do not share anything.
+
+K8S_CLUSTER ?= atl-dev
+
+.PHONY: dev-k8s
+dev-k8s: ## Create the local Kubernetes cluster with storage and CloudNativePG
+	CLUSTER=$(K8S_CLUSTER) CONTAINER=$(CONTAINER) ./deploy/k8s-dev.sh
+
+# FORCE_LOAD, because a rebuilt image keeps its tag: without it the script sees
+# the tag already in the cluster and skips, leaving the old binary running.
+# Pods still have to be restarted afterwards to pick the new image up.
+.PHONY: dev-k8s-load
+dev-k8s-load: build-provision-images ## Rebuild the images and push them into the cluster
+	CLUSTER=$(K8S_CLUSTER) CONTAINER=$(CONTAINER) FORCE_LOAD=1 ./deploy/k8s-dev.sh
+
+.PHONY: dev-k8s-destroy
+dev-k8s-destroy: ## Delete the cluster entirely (every provisioned organisation goes with it)
+	-$(CONTAINER) k8s delete --name $(K8S_CLUSTER) 2>/dev/null
+	-$(CONTAINER) rm $(K8S_CLUSTER) 2>/dev/null
+	@echo "==> cluster removed. 'make dev-k8s' builds a fresh one."
 
 .PHONY: container-builder
 container-builder: ## Restart the image builder with a resolver that works
@@ -1028,9 +1077,7 @@ dev-reset-db: ## Drop local schema + both migration history tables + reapply all
 # signer service issues them in a deployed stack.
 
 .PHONY: image
-image: ## Build the production image, version-stamped from git (BROKEN: proto stage)
-	@# Same proto-stage failure as build-console-image — see the comment there.
-	@# Broken under Docker too; the runtime is not what is wrong.
+image: ## Build the production image, version-stamped from git
 	$(CONTAINER) build --build-arg VERSION=$(VERSION) -t $(IMAGE) .
 
 # `deploy`, `systemd-install` and `logs` are gone with the systemd unit they

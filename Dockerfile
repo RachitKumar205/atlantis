@@ -7,7 +7,22 @@
 # `buf generate` inside the image build, so a clean clone can `docker build`
 # without any host-side codegen step. Cached separately from the Go build —
 # proto sources change rarely.
-FROM --platform=$BUILDPLATFORM bufbuild/buf:1.41.0 AS proto
+#
+# This used to be `FROM bufbuild/buf:1.41.0` and it could never have worked:
+# buf.gen.yaml declares LOCAL plugins, so buf shells out to protoc-gen-go and
+# protoc-gen-go-grpc, and that image ships neither. The stage failed with
+# `plugin protoc-gen-go: executable file not found in $PATH` and nothing caught
+# it because no CI job builds this image.
+#
+# The plugin versions are the ones `make proto` pins on the host. They are
+# duplicated rather than shared because a Dockerfile cannot read the Makefile —
+# if you change one, change the other.
+FROM --platform=$BUILDPLATFORM golang:1.25.12-alpine AS proto
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go install github.com/bufbuild/buf/cmd/buf@v1.41.0 && \
+    go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.6 && \
+    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
 WORKDIR /src
 COPY buf.yaml buf.gen.yaml ./
 COPY atlantis ./atlantis
@@ -18,7 +33,7 @@ RUN buf generate
 # Silicon, amd64 on CI). pg_query_go's vendored C parser compiles fine on both
 # architectures with musl + build-base. For a forced amd64 production image,
 # pass --platform linux/amd64 to docker build or use a CI runner.
-FROM --platform=$BUILDPLATFORM golang:1.25.12-alpine3.21 AS build
+FROM --platform=$BUILDPLATFORM golang:1.25.12-alpine AS build
 
 # CGO toolchain for pg_query_go (vendored C parser, statically linked).
 RUN apk add --no-cache build-base
