@@ -506,7 +506,13 @@ func memberChange(args []string, add bool, log *slog.Logger) error {
 
 	u, err := db.UserByEmail(ctx, *email)
 	if errors.Is(err, store.ErrNotFound) {
-		return fmt.Errorf("no account for %s — create it with `cloud user create`", *email)
+		// Points at signing up rather than at `cloud user create`, which makes
+		// an account with no password that cannot then be signed up for — the
+		// sign-up form takes its already-exists branch and sends no
+		// verification link, so the browser shows success and nothing arrives.
+		// `make dev-cloud-seed` stopped calling it for that reason, and this
+		// message is the other half of the same correction.
+		return fmt.Errorf("no account for %s — sign up first, then run this to grant membership", *email)
 	}
 	if err != nil {
 		return err
