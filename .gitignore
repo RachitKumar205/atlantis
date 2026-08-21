@@ -62,7 +62,10 @@ Thumbs.db
 
 # Air hot-reload (see .air.toml)
 .air/
-tmp/
+# Anchored for the same reason as /certs/ below. Air's tmp_dir is .air, so this
+# only catches a stock-configured Air run at the repo root — unanchored it would
+# also have hidden any package named tmp/.
+/tmp/
 
 # Docker layer cache
 .docker-cache/
@@ -84,7 +87,11 @@ atlantis.dev.yaml
 # server and console leaf certs, and any caller certs from
 # `make dev-caller-cert`. Machine-specific and secret — a committed CA key
 # would let anyone mint a certificate every developer's server trusts.
-certs/
+#
+# Anchored. Unanchored, this matched every directory named `certs` at any
+# depth, so a source package called certs/ was silently untracked: `git add`
+# reported success, staged nothing, and the commit went out without it.
+/certs/
 
 # Local tide cache (in case someone runs `tide` from within this repo)
 .tide-cache/
