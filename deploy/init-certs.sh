@@ -42,11 +42,41 @@ set -e
 CERT_DIR="${CERT_DIR:-/certs}"
 CA_PRIVATE_DIR="${CA_PRIVATE_DIR:-/ca-private}"
 ATLANTIS_DOMAIN="${ATLANTIS_DOMAIN:-}"
-# 10-year CA + leaf. There is no online rotation path today, so a stack runs
-# against this CA for its life. To rotate: stop the stack, delete the files in
-# CERT_DIR and CA_PRIVATE_DIR, re-run this script, then re-issue every caller
+# 10-year CA. There is no online rotation path today, so a stack runs against
+# this CA for its life. To rotate: stop the stack, delete the files in CERT_DIR
+# and CA_PRIVATE_DIR, re-run this script, then re-issue every caller
 # certificate.
+#
+# Client certificates take the same lifetime. Nothing caps how long a client
+# certificate may live — the limit below is a rule about TLS *server*
+# certificates — and rotating them means re-issuing to every holder.
 DAYS=3650
+
+# TLS server certificates: 820 days.
+#
+# Apple's verifier refuses a server certificate valid for more than 825 days,
+# and Go defers to it whenever it falls back to the system roots. The failure is
+# not "untrusted", it is `x509: "name" certificate is not standards compliant` —
+# a message naming one of Apple's rules that says nothing about trust, and which
+# cost an hour of misdiagnosis the first time `tide login` met it.
+#
+# Measured at the boundary rather than looked up: 825 days fails with
+# `certificate signed by unknown authority` (the honest error), 826 days with
+# the opaque one.
+#
+# 820 rather than 825 leaves room for clock skew between issuing and verifying.
+SERVER_DAYS=820
+
+# How close to expiry a certificate may get before this script reissues it.
+#
+# `-checkend 0` means "already expired", which at a ten-year lifetime is
+# theoretical and at 820 days is a scheduled outage: the certs step runs once at
+# container start, so a stack whose leaf lapsed stays broken until somebody
+# restarts it. Thirty days is a window a weekly restart cannot miss.
+#
+# The CAs keep `-checkend 0`. Reissuing one invalidates every certificate under
+# it, so that is an event for a person, not for a start-up script.
+RENEW_WINDOW=$((30 * 86400))
 
 mkdir -p "$CERT_DIR" "$CA_PRIVATE_DIR"
 
@@ -95,8 +125,8 @@ fi
 [ -f "$CERT_DIR/console.crt" ] && [ -f "$CERT_DIR/console.key" ] || need_console=1
 
 if [ "$need_server" = 0 ]; then
-    openssl x509 -in "$CERT_DIR/server.crt" -noout -checkend 0 >/dev/null 2>&1 || {
-        echo "[certs] server certificate has expired — reissuing"
+    openssl x509 -in "$CERT_DIR/server.crt" -noout -checkend "$RENEW_WINDOW" >/dev/null 2>&1 || {
+        echo "[certs] server certificate expires within 30 days — reissuing"
         need_server=1
     }
 fi
@@ -160,8 +190,8 @@ for pair in "$CA_PRIVATE_DIR/signer-server.crt:need_signer_server" \
             "$CERT_DIR/enroll-server.crt:need_enroll"; do
     f=${pair%%:*}
     [ -f "$f" ] || continue
-    openssl x509 -in "$f" -noout -checkend 0 >/dev/null 2>&1 || {
-        echo "[certs] $(basename "$f") has expired — reissuing"
+    openssl x509 -in "$f" -noout -checkend "$RENEW_WINDOW" >/dev/null 2>&1 || {
+        echo "[certs] $(basename "$f") expires within 30 days — reissuing"
         case ${pair#*:} in
             need_signer_server) need_signer_server=1 ;;
             need_signer_client) need_signer_client=1 ;;
@@ -218,7 +248,7 @@ if [ "$need_server" = 1 ]; then
         -CAkey "$CA_PRIVATE_DIR/ca.key" \
         -CAcreateserial \
         -out "$CERT_DIR/server.crt" \
-        -days "$DAYS" \
+        -days "$SERVER_DAYS" \
         -extfile /tmp/atl-server-san.ext
 
     rm /tmp/atl-server.csr /tmp/atl-server-san.ext
@@ -295,7 +325,7 @@ if [ "$need_signer_server" = 1 ]; then
         -CAkey "$CA_PRIVATE_DIR/signer-ca.key" \
         -CAcreateserial \
         -out "$CA_PRIVATE_DIR/signer-server.crt" \
-        -days "$DAYS" \
+        -days "$SERVER_DAYS" \
         -extfile /tmp/atl-signer-san.ext
     rm /tmp/atl-signer.csr /tmp/atl-signer-san.ext
 fi
@@ -348,7 +378,7 @@ if [ "$need_enroll" = 1 ]; then
         -CAkey "$CA_PRIVATE_DIR/ca.key" \
         -CAcreateserial \
         -out "$CERT_DIR/enroll-server.crt" \
-        -days "$DAYS" \
+        -days "$SERVER_DAYS" \
         -extfile /tmp/atl-enroll-san.ext
     rm /tmp/atl-enroll.csr /tmp/atl-enroll-san.ext
 fi

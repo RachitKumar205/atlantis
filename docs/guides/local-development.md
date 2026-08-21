@@ -29,6 +29,25 @@ make dev-caller-cert CALLER=backend
 
 It writes the pair into `./certs/callers/<name>/`. Note that `tide` no longer reads certificates from paths — it uses the credential store `tide login` writes — so these are for inspecting a handshake, not for running `tide`.
 
+### `tide login` needs `--ca` locally
+
+The console's enrol dialog prints a command without it, and that command is
+correct for a deployment: Atlantis Cloud's enrolment endpoint carries a
+publicly-trusted certificate, so the system roots verify it.
+
+Locally they do not. `deploy/init-certs.sh` signs with a CA that is in no
+system store, so add the root:
+
+```bash
+tide login --url https://127.0.0.1:3443 --org acme --token <token> \
+           --ca ./certs/ca.crt
+```
+
+Without it you get `could not verify the server's certificate`. **`--ca` is a
+local-development flag and nothing else** — if it is ever needed against a real
+deployment, that deployment's certificate is wrong and passing a CA would be
+working around a genuine failure rather than fixing it.
+
 ## 0b. Create the console's database role
 
 ```bash
@@ -53,7 +72,46 @@ Atlantis Cloud runs, not a test double.
 `make dev-auth` creates a signing key in `./certs` on first run and serves the
 key set on `:9500`. Leave it running.
 
-To sign in:
+### Two targets, and which one you want
+
+`dev-auth` and `dev-console` serve the **API only**. Their binaries carry no
+pages, deliberately: the sign-in application lives behind the `embedspa` build
+tag, so these stay buildable with no Node installed — which matters because
+`make dev-token`, `make dev-cloud-seed` and `make dev-org-register` all depend
+on them and have no business needing a frontend toolchain.
+
+For a browser, use the `-app` variants:
+
+| Target | Serves | Use it to |
+|---|---|---|
+| `make dev-auth` / `make dev-console` | API | run everything else |
+| `make dev-auth-app` / `make dev-console-app` | API **and pages** | sign in, use the console |
+
+Working *on* a frontend is a third case: run `npm run dev --workspace web/cloud`
+beside `make dev-auth`, so the page reloads on save and `/api` is proxied.
+
+### Signing in
+
+`make dev-token` mints an assertion directly and is the operator shortcut —
+useful, and not what a person does. To go through the product:
+
+```bash
+make dev-auth-app        # serves the sign-in pages
+make dev-cloud-seed EMAIL=you@example.com ORG=acme
+make dev-org-register ORG=acme
+```
+
+Then open `http://localhost:9500/signin`, create an account, and enrol an
+authenticator. Verification and reset links are printed to the `dev-auth-app`
+terminal rather than emailed.
+
+**Sign up before seeding.** `dev-cloud-seed` grants membership to an account
+that already exists; it no longer creates one. It used to, and that account
+could not be used: signing up for an address that already has a row answers
+"check your email" and sends no verification link, so the browser shows success
+and nothing arrives.
+
+Or the shortcut, which skips all of that:
 
 ```bash
 make dev-token EMAIL=you@example.com ROLE=admin

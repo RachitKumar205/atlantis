@@ -624,28 +624,42 @@ dev-data-key: ## Create (once) the local keyset that seals organisation credenti
 	@echo "$$(cat $(DEV_DATA_KEY_FILE))"
 
 .PHONY: dev-cloud-seed
-dev-cloud-seed: dev-cloud-role build-cloud ## Create an account, an org, and a grant: make dev-cloud-seed EMAIL=you@example.com ORG=acme
+dev-cloud-seed: dev-cloud-role build-cloud ## Put an existing account in an org: make dev-cloud-seed EMAIL=you@example.com ORG=acme
 	@test -n "$(EMAIL)" -a -n "$(ORG)" || { \
 	  echo "Usage:   make dev-cloud-seed EMAIL=<address> ORG=<name>"; \
 	  echo "Example: make dev-cloud-seed EMAIL=you@example.com ORG=acme"; \
+	  echo; \
+	  echo "Sign up at $(CLOUD_PUBLIC_URL)/signin first — this grants an"; \
+	  echo "account membership, it does not create one."; \
 	  exit 1; \
 	}
-	@# Three commands rather than one, because they are three different things
-	@# and an operator will need them separately. This target exists because
-	@# running all three by hand is the common case during development.
+	@# This used to run `cloud user create` too, and that account was a dead end.
 	@#
-	@# These rows are the gate. Cloud's /authorize reads them before minting,
-	@# and so does `make dev-token` — neither will produce an assertion for a
-	@# pair with no membership row, so this target is a prerequisite for signing
-	@# in rather than a convenience.
-	@# No `-` prefix on any of these. All three are idempotent, so re-running
-	@# this target is not an error — and a `-` would swallow the failures that
-	@# are, which is how a seed that stopped working looks exactly like one that
-	@# worked.
+	@# It writes a row with no password. Signing up for the same address then
+	@# takes handleSignup's ErrAlreadyExists branch, which deliberately answers
+	@# exactly as a real sign-up does and sends "somebody tried to sign up with
+	@# your address" instead of a verification link — so the browser shows the
+	@# success screen and the operator waits for a mail that never comes. It cost
+	@# an hour during the first end-to-end walkthrough, and the abandoned rows are
+	@# still in the development database.
+	@#
+	@# Sign-up in a browser is the path that works now, so the seed does the two
+	@# things a browser cannot: create the organisation and grant membership.
+	@#
+	@# The membership row is the gate. Cloud's /authorize reads it before minting
+	@# and so does `make dev-token`; neither produces an assertion for a pair
+	@# without one. `member add` refuses cleanly when the account does not exist
+	@# yet, which is the correct order of operations stated as an error.
+	@#
+	@# No `-` prefix. Both are idempotent, so re-running is not an error — and a
+	@# `-` would swallow the failures that are, which is how a seed that stopped
+	@# working looks exactly like one that worked.
 	CLOUD_PG_URL="$(CLOUD_PG_URL)" $(BIN_DIR)/atlantis-cloud org create -org "$(ORG)"
-	CLOUD_PG_URL="$(CLOUD_PG_URL)" $(BIN_DIR)/atlantis-cloud user create -email "$(EMAIL)"
 	CLOUD_PG_URL="$(CLOUD_PG_URL)" $(BIN_DIR)/atlantis-cloud member add \
 		-email "$(EMAIL)" -org "$(ORG)" -role admin
+	@echo
+	@echo "==> $(EMAIL) is admin of $(ORG)."
+	@echo "    Next: make dev-org-register ORG=$(ORG), then sign in at $(CLOUD_PUBLIC_URL)/signin"
 
 .PHONY: dev-org-register
 dev-org-register: dev-certs dev-data-key dev-cloud-role build-cloud ## Point an org at the local atlantis: make dev-org-register ORG=<name>
