@@ -35,6 +35,16 @@ CLUSTER="${CLUSTER:-atl-dev}"
 CPUS="${CPUS:-4}"
 MEMORY="${MEMORY:-6g}"
 CNPG_VERSION="${CNPG_VERSION:-1.30.0}"
+CALICO_VERSION="${CALICO_VERSION:-v3.32.1}"
+# The cluster's pod network, as kubeadm configured it. Calico's own default is
+# 192.168.0.0/16, which overlaps the host's container network on this machine.
+#
+# This must match provision.Config.PodCIDR, which writes it into every tenant's
+# NetworkPolicy as the range to exclude. A drift between the two fails open —
+# tenant pods land outside the exception and are admitted — so the guard is
+# TestK8sTenantsCannotReachEachOthersDatabase, which probes the property rather
+# than comparing the two settings.
+POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
 LPP_VERSION="${LPP_VERSION:-v0.0.37}"
 CONTAINER="${CONTAINER:-container}"
 
@@ -45,6 +55,9 @@ REMOTE_IMAGES=(
     "docker.io/rancher/local-path-provisioner:${LPP_VERSION}"
     "docker.io/library/busybox:1.36"
     "docker.io/library/memcached:${MEMCACHED_VERSION:-1.6.29-alpine}"
+    "quay.io/calico/node:${CALICO_VERSION:-v3.32.1}"
+    "quay.io/calico/cni:${CALICO_VERSION:-v3.32.1}"
+    "quay.io/calico/kube-controllers:${CALICO_VERSION:-v3.32.1}"
 )
 
 # Built by `make build-server-image` / `build-signer-image` / `build-pg-image`.
@@ -176,6 +189,72 @@ for ref in "${LOCAL_IMAGES[@]}"; do
     "$CONTAINER" image rm "$qualified" >/dev/null 2>&1 || true
     echo "loaded $qualified"
 done
+
+# ---------- 3b. the CNI ----------
+#
+# kindnet is replaced by Calico because kindnet enforces no NetworkPolicy at
+# all. Its entire flag set is logging flags — the API server accepts a policy
+# and nothing implements it, so tenant namespaces would appear isolated while
+# every pod could reach every other pod's database. A control that cannot fire
+# is worse than a missing one, because it reads as present.
+#
+# CALICO_IPV4POOL_CIDR is the setting to get right, and it has to be right the
+# first time: the manifest's own comment says changing it after installation has
+# no effect. Calico's default pool is 192.168.0.0/16, which overlaps Apple
+# `container`'s host network (192.168.64.0/24) — so the default here does not
+# merely misconfigure the cluster, it breaks networking for every container on
+# the machine.
+say "CNI (Calico ${CALICO_VERSION:-v3.32.1})"
+if kubectl --context "$CLUSTER" get daemonset -n kube-system calico-node >/dev/null 2>&1; then
+    echo "calico present"
+else
+    manifest="$(mktemp -t calico)"
+    # .bak too: sed -i on BSD writes one and would otherwise leave it behind.
+    trap 'rm -f "$manifest" "$manifest.bak"' EXIT
+    curl -fsSL -o "$manifest" \
+        "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION:-v3.32.1}/manifests/calico.yaml"
+
+    # The pool CIDR ships commented out. Fail loudly if the shape ever changes
+    # rather than applying a manifest that silently keeps the default — the
+    # whole point of this block is the one value it sets.
+    # POSIX character classes, not \s. This is BSD sed on macOS, where \s
+    # matches nothing at all and the substitution silently does nothing — which
+    # is precisely why the check below exists rather than trusting the edit.
+    if ! grep -q '^[[:space:]]*# - name: CALICO_IPV4POOL_CIDR' "$manifest"; then
+        echo "the Calico manifest no longer has a commented CALICO_IPV4POOL_CIDR;" >&2
+        echo "check what it looks like now before trusting this step" >&2
+        exit 1
+    fi
+    sed -i.bak \
+        -e 's|^\([[:space:]]*\)# - name: CALICO_IPV4POOL_CIDR|\1- name: CALICO_IPV4POOL_CIDR|' \
+        -e 's|^\([[:space:]]*\)#   value: "192.168.0.0/16"|\1  value: "'"$POD_CIDR"'"|' \
+        "$manifest"
+    if ! grep -q "value: \"$POD_CIDR\"" "$manifest"; then
+        echo "failed to set CALICO_IPV4POOL_CIDR to $POD_CIDR" >&2
+        exit 1
+    fi
+
+    # kindnet first, so there is never a moment with two CNIs writing config.
+    kubectl --context "$CLUSTER" delete daemonset -n kube-system kindnet --ignore-not-found >/dev/null
+    "$CONTAINER" exec "$CLUSTER" rm -f /etc/cni/net.d/10-kindnet.conflist 2>/dev/null || true
+
+    kubectl --context "$CLUSTER" apply -f "$manifest" >/dev/null
+fi
+
+kubectl --context "$CLUSTER" -n kube-system rollout status daemonset/calico-node --timeout=300s
+
+# Verify rather than assume. A pool that came up on the default would collide
+# with the host network, and the symptom is every container on the machine
+# losing connectivity — a long way from anything that mentions Kubernetes.
+pool="$(kubectl --context "$CLUSTER" get ippool default-ipv4-ippool \
+    -o jsonpath='{.spec.cidr}' 2>/dev/null || true)"
+if [ -n "$pool" ] && [ "$pool" != "$POD_CIDR" ]; then
+    echo "Calico's IP pool is $pool, expected $POD_CIDR." >&2
+    echo "It cannot be changed after installation — delete the cluster and start again:" >&2
+    echo "  container k8s delete --name ${CLUSTER} && $0" >&2
+    exit 1
+fi
+echo "pod network ${pool:-$POD_CIDR}, NetworkPolicy enforced"
 
 # ---------- 4. storage ----------
 #

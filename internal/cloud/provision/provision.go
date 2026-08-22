@@ -154,10 +154,20 @@ type Config struct {
 	//
 	// The network policy is written as "everything except this range", which is
 	// what lets the console and callers reach an organisation from outside the
-	// cluster while no pod inside it can. A wrong value here fails safe in one
-	// direction and open in the other: too narrow and the console is blocked,
-	// too wide and tenant pods are admitted. It cannot be derived from the API,
-	// so it is configuration.
+	// cluster while no pod inside it can.
+	//
+	// A wrong value is not symmetric. Too narrow and the console is blocked,
+	// which is loud. Too wide, or simply stale, and tenant pods fall outside
+	// the exception and are **admitted** — the isolation silently stops
+	// existing while every manifest still says it is there.
+	//
+	// It has to match the value deploy/k8s-dev.sh gives Calico as
+	// CALICO_IPV4POOL_CIDR, and nothing mechanically enforces that: the cluster
+	// CIDR is not readable from the API (a Node's spec.podCIDR is that node's
+	// slice, not the cluster's range). What does catch a mismatch is
+	// TestK8sTenantsCannotReachEachOthersDatabase, which probes the property
+	// rather than the configuration — so if these two ever drift, that test is
+	// what says so.
 	PodCIDR string
 
 	// OperatorNamespace is where CloudNativePG runs.

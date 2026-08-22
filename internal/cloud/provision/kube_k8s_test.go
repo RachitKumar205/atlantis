@@ -11,6 +11,8 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
@@ -152,6 +154,127 @@ func TestK8sProvisionsAWorkingOrganisation(t *testing.T) {
 			t.Fatal("the authority changed on re-provision; every issued caller certificate is now orphaned")
 		}
 	})
+}
+
+// Tenant isolation, proven rather than declared.
+//
+// The policy objects are applied whether or not the cluster enforces them: an
+// API server accepts a NetworkPolicy under any CNI, and kindnet implements
+// none. So this asserts the mechanism, not the manifest.
+//
+// It runs both directions on purpose. A test that only checks the blocked case
+// passes just as happily when the probe itself is broken — a typo in the
+// address, a pod that never started, an image that is not there. The
+// same-namespace probe is the control that says the probe can succeed at all.
+func TestK8sTenantsCannotReachEachOthersDatabase(t *testing.T) {
+	if os.Getenv("ATLANTIS_TEST_K8S") == "" {
+		t.Skip("set ATLANTIS_TEST_K8S to exercise network policy against a real cluster")
+	}
+
+	cfg, err := ctrlconfig.GetConfig()
+	if err != nil {
+		t.Fatalf("no cluster configuration: %v", err)
+	}
+	scheme, err := NewScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := ctrlclient.New(cfg, ctrlclient.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pcfg := testConfig()
+	pcfg.ReadyTimeout = 6 * time.Minute
+	pcfg.MemcachedAddr = "memcached.atlantis-system.svc.cluster.local:11211"
+	k, err := NewKube(pcfg, c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const victim = "victim"
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = k.Destroy(context.Background(), victim)
+		_ = c.Delete(context.Background(), &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{Name: "tenant-probe"},
+		})
+	})
+
+	if _, err := k.Ensure(ctx, Spec{Org: victim}); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.WaitReady(ctx, victim); err != nil {
+		t.Log(describe(ctx, t, k, victim))
+		t.Fatalf("WaitReady: %v", err)
+	}
+
+	victimNS := k.cfg.Namespace(victim)
+	target := fmt.Sprintf("pg-rw.%s.svc.cluster.local", victimNS)
+
+	// Control: from inside the organisation, the database is reachable. If this
+	// fails the isolation result below means nothing.
+	if code := probeTCP(ctx, t, c, victimNS, "control", target, 5432); code != 0 {
+		t.Fatalf("the control probe could not reach %s from inside %s (exit %d); "+
+			"the isolation check below cannot be trusted", target, victimNS, code)
+	}
+
+	// The property: another tenant's pod cannot.
+	if err := c.Create(ctx, &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "tenant-probe"},
+	}); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatal(err)
+	}
+	if code := probeTCP(ctx, t, c, "tenant-probe", "intruder", target, 5432); code == 0 {
+		t.Fatalf("a pod in another namespace reached %s: tenant databases are not isolated", target)
+	}
+}
+
+// probeTCP runs one TCP connect from a pod in ns and returns its exit code.
+//
+// busybox, because it is already loaded into the cluster — a probe that needs
+// an image the node cannot pull would fail for reasons that look exactly like
+// the policy working.
+func probeTCP(ctx context.Context, t *testing.T, c ctrlclient.Client, ns, name, host string, port int32) int32 {
+	t.Helper()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers: []corev1.Container{{
+				Name:            "probe",
+				Image:           "docker.io/library/busybox:1.36",
+				ImagePullPolicy: corev1.PullIfNotPresent,
+				Command: []string{
+					"sh", "-c",
+					fmt.Sprintf("nc -z -w 5 %s %d", host, port),
+				},
+			}},
+		},
+	}
+	_ = c.Delete(ctx, pod)
+	if err := c.Create(ctx, pod); err != nil {
+		t.Fatalf("create probe pod: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Delete(context.Background(), pod) })
+
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		var got corev1.Pod
+		if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, &got); err != nil {
+			t.Fatalf("read probe pod: %v", err)
+		}
+		for _, cs := range got.Status.ContainerStatuses {
+			if cs.State.Terminated != nil {
+				return cs.State.Terminated.ExitCode
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("probe pod %s/%s did not finish: %s", ns, name, got.Status.Phase)
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
 
 // describe collects enough to tell why an organisation is not ready, because
