@@ -48,6 +48,13 @@ var unpolicedTables = map[string]string{
 	"email_tokens":   "a reset link is spent by token hash with nobody signed in, so a policy keyed to the current user matches nothing and every reset reports an invalid token",
 	"sessions":       "the bootstrap table: the session lookup is what discovers which user a request is",
 	"pending_logins": "the same, one step earlier — a half-finished login is resolved by token before anybody is identified",
+
+	// The two below are written by the provisioner, which runs as no user at
+	// all: it claims work from a queue rather than serving a request. A policy
+	// keyed to current_user_id would match nothing and hide every row from the
+	// only process that has to read them.
+	"org_provisioning": "a work queue claimed by a background process, which has no current user to be filtered by",
+	"audit_log":        "the record of what that process did; scoped by organisation rather than by user, and read by operators looking at an organisation they may not belong to",
 }
 
 // VerifyPolicies asks the live catalogue whether every table in schema cloud is
