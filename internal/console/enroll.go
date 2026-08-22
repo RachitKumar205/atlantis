@@ -146,6 +146,38 @@ func (s *Server) ShutdownEnrollment(ctx context.Context) error {
 // for as long as the operating system let it.
 const signerTimeout = 15 * time.Second
 
+// orgSignerClient builds a client to one organisation's own signer.
+//
+// The same shape as newSignerClient below, from PEM in the registry row rather
+// than paths on disk — the same difference, and for the same reason, as
+// buildOrgTLS versus the files the console used to load. There is one set of
+// these per organisation and they arrive while the process is running.
+//
+// The caller has already established that all four columns are present;
+// SignerConfigured is the question, and asking it here as well would be a
+// second place for the answer to differ.
+func orgSignerClient(creds *orgCredentials) (*http.Client, error) {
+	cert, err := tls.X509KeyPair([]byte(creds.SignerClientCertPEM), creds.SignerClientKeyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("signer client certificate for %s does not match its key: %w",
+			creds.Org, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM([]byte(creds.SignerCAPEM)) {
+		return nil, fmt.Errorf("signer CA for %s contains no usable certificates", creds.Org)
+	}
+	return &http.Client{
+		Timeout: signerTimeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion:   tls.VersionTLS12,
+				Certificates: []tls.Certificate{cert},
+				RootCAs:      pool,
+			},
+		},
+	}, nil
+}
+
 // newSignerClient builds the console's client to the signer, or reports why it
 // cannot.
 //
@@ -564,7 +596,7 @@ func (s *Server) issueForCaller(
 	// to the signer comes from that spent row and from nowhere else. Forwarding
 	// a name out of the request would hand the requester whatever identity it
 	// asked for, and nothing in the response would look wrong.
-	signed, err := s.callSigner(ctx, caller, csrPEM)
+	signed, err := s.callSigner(ctx, org, caller, csrPEM)
 	if err != nil {
 		return nil, err
 	}
@@ -675,23 +707,48 @@ type signerResponse struct {
 	Error     string `json:"error"`
 }
 
-// callSigner posts a CSR over mTLS and returns what came back.
-func (s *Server) callSigner(ctx context.Context, caller, csrPEM string) (*signerResponse, error) {
+// signerFor returns the client and address for an organisation's signer.
+//
+// Its own if it has one, the console's process-wide client otherwise. That
+// fallback is not a transitional convenience: it is what every organisation
+// registered before migration 0009 uses, and what `make dev-signer` serves.
+//
+// Both halves come from one place, which is the point. An organisation's client
+// certificate paired with the shared address — or the reverse — is refused at a
+// signer's handshake with a message about a certificate, and nothing in it
+// names the row that produced the mismatch.
+func (s *Server) signerFor(ctx context.Context, org string) (*http.Client, string, error) {
+	e, err := s.orgs.get(ctx, org)
+	if err != nil {
+		return nil, "", err
+	}
+	if e.signer != nil {
+		return e.signer, e.signerAddr, nil
+	}
 	if s.signer == nil {
-		return nil, errors.New("certificate enrolment is not configured on this console")
+		return nil, "", errors.New("certificate enrolment is not configured on this console")
+	}
+	return s.signer, s.cfg.SignerAddr, nil
+}
+
+// callSigner posts a CSR over mTLS and returns what came back.
+func (s *Server) callSigner(ctx context.Context, org, caller, csrPEM string) (*signerResponse, error) {
+	client, addr, err := s.signerFor(ctx, org)
+	if err != nil {
+		return nil, err
 	}
 	body, err := json.Marshal(map[string]string{"caller": caller, "csr_pem": csrPEM})
 	if err != nil {
 		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		s.cfg.SignerAddr+"/issue", bytes.NewReader(body))
+		addr+"/issue", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := s.signer.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("signer unreachable: %w", err)
 	}

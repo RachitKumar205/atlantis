@@ -62,6 +62,18 @@ type orgClientEntry struct {
 	endpoint string
 	health   string
 
+	// signer is this organisation's own certificate signer, or nil when it has
+	// none and the console's process-wide client applies.
+	//
+	// Cached here rather than built per request for the same reason the admin
+	// channel is: it is a certificate parse and a TLS config, and it is built
+	// from the same row. Keeping the two together also means a rotation moves
+	// both at once — updatedAt governs this exactly as it governs the channel,
+	// so a signer certificate replaced in the database comes into use without a
+	// restart and without a second freshness rule to get wrong.
+	signer     *http.Client
+	signerAddr string
+
 	// updatedAt is the row's value when this client was built. A rotation
 	// moves it, and the refresh below rebuilds rather than serving a channel
 	// whose certificate has been replaced.
@@ -75,6 +87,25 @@ type orgClientEntry struct {
 
 func newOrgClients(db *store) *orgClients {
 	return &orgClients{db: db, now: time.Now, by: map[string]*orgClientEntry{}}
+}
+
+// closeEntry tears down both clients an entry holds.
+//
+// One place rather than three, because the signer arrived after the channel and
+// the three existing teardown paths would each have had to remember it. An
+// *http.Client has no Close, so its transport's idle connections are what there
+// is to release — leaking those is not fatal, which is exactly why it would go
+// unnoticed.
+func closeEntry(e *orgClientEntry) {
+	if e == nil {
+		return
+	}
+	if e.client != nil {
+		_ = e.client.Close()
+	}
+	if e.signer != nil {
+		e.signer.CloseIdleConnections()
+	}
 }
 
 // get returns the channel for an organisation, dialling it if necessary.
@@ -144,12 +175,30 @@ func (p *orgClients) get(ctx context.Context, org string) (*orgClientEntry, erro
 		return nil, fmt.Errorf("connect to %s's atlantis at %s: %w", org, creds.Endpoint, err)
 	}
 
+	// Built here, so a broken signer certificate is reported against the
+	// organisation it belongs to rather than surfacing later as a failed
+	// enrolment. Nil when the organisation has none — the caller falls back to
+	// the process-wide client, which is what every organisation registered
+	// before migration 0009 uses.
+	var signer *http.Client
+	if creds.SignerConfigured() {
+		signer, err = orgSignerClient(creds)
+		if err != nil {
+			// The atlantis channel is already built and would be dropped on the
+			// floor by returning here, so close it.
+			_ = client.Close()
+			return nil, fmt.Errorf("build %s's signer client: %w", org, err)
+		}
+	}
+
 	fresh := &orgClientEntry{
-		client:    client,
-		endpoint:  creds.Endpoint,
-		health:    creds.HealthAddr,
-		updatedAt: creds.UpdatedAt,
-		checkedAt: p.now(),
+		client:     client,
+		endpoint:   creds.Endpoint,
+		health:     creds.HealthAddr,
+		signer:     signer,
+		signerAddr: creds.SignerAddr,
+		updatedAt:  creds.UpdatedAt,
+		checkedAt:  p.now(),
 	}
 
 	p.mu.Lock()
@@ -163,9 +212,7 @@ func (p *orgClients) get(ctx context.Context, org string) (*orgClientEntry, erro
 	// would stall every other organisation's lookup behind one slow teardown.
 	// The sandbox layer makes the same point about Unregister
 	// (internal/console/sandbox.go:185).
-	if previous != nil && previous.client != nil {
-		_ = previous.client.Close()
-	}
+	closeEntry(previous)
 	return fresh, nil
 }
 
@@ -179,9 +226,7 @@ func (p *orgClients) evict(org string) {
 	delete(p.by, org)
 	p.mu.Unlock()
 
-	if e != nil && e.client != nil {
-		_ = e.client.Close()
-	}
+	closeEntry(e)
 }
 
 // close tears down every channel.
@@ -199,9 +244,7 @@ func (p *orgClients) close() {
 	p.mu.Unlock()
 
 	for _, e := range entries {
-		if e.client != nil {
-			_ = e.client.Close()
-		}
+		closeEntry(e)
 	}
 }
 
