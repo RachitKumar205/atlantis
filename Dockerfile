@@ -17,7 +17,7 @@
 # The plugin versions are the ones `make proto` pins on the host. They are
 # duplicated rather than shared because a Dockerfile cannot read the Makefile —
 # if you change one, change the other.
-FROM --platform=$BUILDPLATFORM golang:1.25.12-alpine AS proto
+FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine AS proto
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go install github.com/bufbuild/buf/cmd/buf@v1.41.0 && \
@@ -33,7 +33,7 @@ RUN buf generate
 # Silicon, amd64 on CI). pg_query_go's vendored C parser compiles fine on both
 # architectures with musl + build-base. For a forced amd64 production image,
 # pass --platform linux/amd64 to docker build or use a CI runner.
-FROM --platform=$BUILDPLATFORM golang:1.25.12-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine AS build
 
 # CGO toolchain for pg_query_go (vendored C parser, statically linked).
 RUN apk add --no-cache build-base

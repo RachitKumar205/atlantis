@@ -19,7 +19,7 @@
 # plugins buf.gen.yaml declares, so this stage always failed with
 # `plugin protoc-gen-go: executable file not found in $PATH`. See the same note
 # in Dockerfile. Plugin versions match `make proto`; change them together.
-FROM --platform=$BUILDPLATFORM golang:1.25.12-alpine AS proto
+FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine AS proto
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go install github.com/bufbuild/buf/cmd/buf@v1.41.0 && \
@@ -52,7 +52,7 @@ COPY web/console/ ./web/console/
 RUN npm run build --workspace web/console
 
 # ── Stage 2: Go build ─────────────────────────────────────────────────────────
-FROM --platform=$BUILDPLATFORM golang:1.25.12-alpine AS go-build
+FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine AS go-build
 
 # CGO toolchain. The console binary embeds the sandbox runtime, which
 # depends on pg_query_go (vendored libpg_query, statically linked).

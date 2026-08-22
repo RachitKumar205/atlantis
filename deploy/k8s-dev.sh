@@ -44,6 +44,7 @@ REMOTE_IMAGES=(
     "ghcr.io/cloudnative-pg/cloudnative-pg:${CNPG_VERSION}"
     "docker.io/rancher/local-path-provisioner:${LPP_VERSION}"
     "docker.io/library/busybox:1.36"
+    "docker.io/library/memcached:${MEMCACHED_VERSION:-1.6.29-alpine}"
 )
 
 # Built by `make build-server-image` / `build-signer-image` / `build-pg-image`.
@@ -127,24 +128,53 @@ for ref in "${REMOTE_IMAGES[@]}"; do
     echo "loaded $ref"
 done
 
+# Local images are tagged into docker.io/library/ before they are loaded, and
+# that is not cosmetic.
+#
+# containerd stores an image under the exact reference it was imported with, and
+# `container build -t atlantis-server:local` produces the bare name. Kubernetes
+# normalises an unqualified image in a pod spec to docker.io/library/..., so
+# kubelet then asks for a name the store does not have, decides the image is
+# absent, and tries to pull it from Docker Hub — which these nodes cannot reach.
+#
+# What makes it expensive to diagnose is that `crictl images` *displays* the
+# normalised form, so the listing looks exactly right while the lookup fails.
+# `crictl inspecti docker.io/library/atlantis-server:local` is the honest check.
+#
+# We never push anything to a registry; docker.io/library here is only the
+# namespace Kubernetes resolves bare names into.
+#
 # FORCE_LOAD exists because a locally built image keeps its tag when it is
 # rebuilt. Skipping on "the tag is already in the cluster" is right for the
 # remote images above, whose tags are immutable, and silently wrong here: it
 # would leave yesterday's binary running and report success. `make dev-k8s-load`
 # sets it for exactly that reason.
 for ref in "${LOCAL_IMAGES[@]}"; do
-    if ! "$CONTAINER" image ls 2>/dev/null | awk '{print $1":"$2}' | grep -qx "$ref"; then
-        echo "not built, skipping: $ref"
-        continue
-    fi
+    qualified="docker.io/library/${ref}"
+
+    # The cluster is asked before the host store, and the order matters: this
+    # script deletes the host copy once an image is loaded, so checking the host
+    # first would report "not built" for an image that is present and working in
+    # the cluster.
+    #
+    # Ask the way kubelet asks. Matching on the `crictl images` listing instead
+    # is what hid the qualification bug: that output is normalised for display
+    # and happily lists an image kubelet cannot resolve.
     if [ -z "${FORCE_LOAD:-}" ] &&
-        "$CONTAINER" exec "$CLUSTER" crictl images 2>/dev/null |
-        awk '{print $1":"$2}' | grep -q "${ref##*/}"; then
-        echo "in cluster: $ref (set FORCE_LOAD=1 to replace a rebuilt image)"
+        "$CONTAINER" exec "$CLUSTER" crictl inspecti "$qualified" >/dev/null 2>&1; then
+        echo "in cluster: $qualified (set FORCE_LOAD=1 to replace a rebuilt image)"
         continue
     fi
-    "$CONTAINER" k8s load-image --name "$CLUSTER" "$ref" >/dev/null
-    echo "loaded $ref"
+
+    if ! "$CONTAINER" image ls 2>/dev/null | awk '{print $1":"$2}' | grep -qx "$ref"; then
+        echo "not built, skipping: $ref (run: make build-provision-images)"
+        continue
+    fi
+
+    "$CONTAINER" image tag "$ref" "$qualified" >/dev/null 2>&1 || true
+    "$CONTAINER" k8s load-image --name "$CLUSTER" "$qualified" >/dev/null
+    "$CONTAINER" image rm "$qualified" >/dev/null 2>&1 || true
+    echo "loaded $qualified"
 done
 
 # ---------- 4. storage ----------
@@ -190,6 +220,64 @@ kubectl --context "$CLUSTER" -n cnpg-system patch deployment cnpg-controller-man
 
 kubectl --context "$CLUSTER" -n cnpg-system rollout status \
     deployment/cnpg-controller-manager --timeout=300s
+
+# ---------- 6. the shared cache ----------
+#
+# One memcached for every organisation, in a platform namespace rather than a
+# tenant one. It is shared because there is nothing tenant-specific in it and a
+# cache per organisation would be the largest per-tenant cost on the node.
+#
+# Not optional, despite being a cache. atlantis's readiness probe performs a
+# real cache operation and reports 503 on anything that is not a hit or a miss,
+# so an organisation whose MEMCACHED_ADDR points nowhere never becomes Ready —
+# and because the client connects lazily, the process starts happily and simply
+# never passes readiness.
+say "shared cache"
+kubectl --context "$CLUSTER" apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: atlantis-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: memcached
+  namespace: atlantis-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: memcached }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: memcached }
+    spec:
+      containers:
+        - name: memcached
+          image: docker.io/library/memcached:${MEMCACHED_VERSION:-1.6.29-alpine}
+          imagePullPolicy: IfNotPresent
+          args: ["-m", "256", "-I", "5m"]
+          ports:
+            - name: memcached
+              containerPort: 11211
+          resources:
+            requests:
+              memory: 64Mi
+              cpu: 25m
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: memcached
+  namespace: atlantis-system
+spec:
+  selector: { app.kubernetes.io/name: memcached }
+  ports:
+    - name: memcached
+      port: 11211
+      targetPort: 11211
+EOF
+kubectl --context "$CLUSTER" -n atlantis-system rollout status deployment/memcached --timeout=120s
 
 say "ready"
 kubectl --context "$CLUSTER" get nodes
