@@ -697,17 +697,24 @@ dev-cloud-seed: dev-cloud-role build-cloud ## Put an existing account in an org:
 	@#
 	@# The membership row is the gate. Cloud's /authorize reads it before minting
 	@# and so does `make dev-token`; neither produces an assertion for a pair
-	@# without one. `member add` refuses cleanly when the account does not exist
+	@# without one. `org create` refuses cleanly when the account does not exist
 	@# yet, which is the correct order of operations stated as an error.
 	@#
-	@# No `-` prefix. Both are idempotent, so re-running is not an error — and a
+	@# One command, where this used to be two.
+	@#
+	@# `org create` now takes the owner, because an organisation with no member
+	@# is a 403 from /authorize no matter how well it is provisioned —
+	@# membership is checked before anything else. Splitting the two left that
+	@# state one forgotten command away, and this target is where it was
+	@# forgotten from.
+	@#
+	@# No `-` prefix. It is idempotent, so re-running is not an error — and a
 	@# `-` would swallow the failures that are, which is how a seed that stopped
 	@# working looks exactly like one that worked.
-	CLOUD_PG_URL="$(CLOUD_PG_URL)" $(BIN_DIR)/atlantis-cloud org create -org "$(ORG)"
-	CLOUD_PG_URL="$(CLOUD_PG_URL)" $(BIN_DIR)/atlantis-cloud member add \
-		-email "$(EMAIL)" -org "$(ORG)" -role admin
+	CLOUD_PG_URL="$(CLOUD_PG_URL)" $(BIN_DIR)/atlantis-cloud org create \
+		-org "$(ORG)" -owner "$(EMAIL)"
 	@echo
-	@echo "==> $(EMAIL) is admin of $(ORG)."
+	@echo "==> $(EMAIL) owns $(ORG), which is queued for provisioning."
 	@echo "    Next: make dev-org-register ORG=$(ORG), then sign in at $(CLOUD_PUBLIC_URL)/signin"
 
 .PHONY: dev-org-register

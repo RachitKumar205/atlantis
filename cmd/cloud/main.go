@@ -557,16 +557,40 @@ func org(args []string, log *slog.Logger) error {
 	}
 }
 
+// orgCreate records an organisation, grants its owner, and queues it for
+// provisioning.
+//
+// # Why -owner is required rather than a second command
+//
+// It used to write the organisation row and nothing else, leaving `cloud member
+// add` to grant somebody access. That ordering produced a state the product
+// answers badly: /authorize checks membership BEFORE it checks whether an
+// atlantis is registered, so an organisation with no member is a 403 —
+// "you are not a member" — no matter how perfectly it was provisioned.
+//
+// Making the owner optional would keep that state one flag away, and the whole
+// point of this step is that it should not be reachable. `make dev-cloud-seed`
+// ran exactly these two commands in sequence and is now one call.
+//
+// The owner must already have an account, which is the same constraint `cloud
+// member add` has always had. An organisation owned by an address nobody has
+// verified is an organisation nobody can enter.
 func orgCreate(args []string, log *slog.Logger) error {
 	fs := flag.NewFlagSet("org create", flag.ExitOnError)
 	name := fs.String("org", "", "organisation name: lowercase, alphanumeric and hyphens, max 63")
 	display := fs.String("display-name", "", "human-readable name (optional)")
+	owner := fs.String("owner", "", "email address of the first admin; the account must already exist")
 	dbURL := cloudDBFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *name == "" {
-		return errors.New("-org is required")
+	for _, r := range []struct{ flag, val string }{
+		{"-org", *name},
+		{"-owner", *owner},
+	} {
+		if r.val == "" {
+			return fmt.Errorf("%s is required", r.flag)
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -578,11 +602,22 @@ func orgCreate(args []string, log *slog.Logger) error {
 	}
 	defer db.Close()
 
-	if err := db.CreateOrg(ctx, *name, *display); err != nil {
+	u, err := db.UserByEmail(ctx, *owner)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("no account for %s — sign up first, then run this to create "+
+			"the organisation they will own", *owner)
+	}
+	if err != nil {
 		return err
 	}
-	fmt.Printf("organisation %s exists\n", *name)
-	fmt.Fprintln(os.Stderr, "cloud: it has no atlantis yet — `cloud org register` points it at one")
+
+	if err := db.CreateOrgWithOwner(ctx, *name, *display, u.ID, identity.RoleAdmin); err != nil {
+		return err
+	}
+
+	fmt.Printf("organisation %s exists, owned by %s\n", *name, *owner)
+	fmt.Fprintln(os.Stderr, "cloud: queued for provisioning — `cloud org register` is "+
+		"only needed for an atlantis the provisioner did not build")
 	return nil
 }
 
