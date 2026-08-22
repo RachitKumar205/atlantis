@@ -20,10 +20,6 @@ var ErrNoSecondFactor = errors.New("no second factor is enrolled")
 // much worse thing to conclude wrongly than "something failed".
 var ErrNoUser = errors.New("no user bound")
 
-// bindTimeout bounds the commit and rollback below, which deliberately do not
-// use the request context. See tx.
-const bindTimeout = 5 * time.Second
-
 // UserStore is a Store bound to one user.
 //
 // # Why this exists now and not in C1
@@ -76,7 +72,7 @@ func (u *UserStore) tx(ctx context.Context, fn func(pgx.Tx) error) error {
 		// pooled connection when a rollback Exec fails, so rolling back on a
 		// cancelled context churns the pool — and a cancelled request is the
 		// common case, not an exotic one.
-		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bindTimeout)
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), txFinishTimeout)
 		defer cancel()
 		_ = tx.Rollback(rctx)
 	}()
@@ -92,7 +88,7 @@ func (u *UserStore) tx(ctx context.Context, fn func(pgx.Tx) error) error {
 		return err
 	}
 
-	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bindTimeout)
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), txFinishTimeout)
 	defer cancel()
 	if err := tx.Commit(cctx); err != nil {
 		return fmt.Errorf("commit: %w", err)

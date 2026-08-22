@@ -138,6 +138,61 @@ func (s *Store) Close() { s.pool.Close() }
 // ask the live catalogue rather than the code.
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 
+// txFinishTimeout bounds the commit and rollback in both transaction helpers,
+// which deliberately do not use the caller's context. See tx.
+//
+// Named for what it bounds. It was bindTimeout, which read as though it were
+// about `cloud.set_user` — the one statement it has never applied to.
+const txFinishTimeout = 5 * time.Second
+
+// tx runs fn inside a transaction.
+//
+// This is UserStore.tx with the RLS bind taken out. That one exists to hold
+// `cloud.set_user` for the life of a statement and is therefore bound to a user
+// id; this one is for writes that span tables and belong to nobody — creating an
+// organisation with its owner and its queue row, for instance, where two of the
+// three existing without the third is a state the product cannot recover from.
+//
+// # Why the commit and rollback abandon the caller's context
+//
+// pgx destroys the pooled connection when a rollback Exec fails, so rolling
+// back on a context that has already been cancelled churns the pool — and a
+// cancelled caller is the common case rather than an exotic one. The same
+// applies to the commit, more sharply: a caller that gives up between the last
+// statement and COMMIT would otherwise abandon a write that has already
+// happened, and the retry then collides with it.
+//
+// CreateUserWithIdentity had this skeleton inline before this existed, with a
+// comment pointing at UserStore.tx and saying it was "the same discipline".
+// Two copies of a discipline is one copy too many.
+func (s *Store) tx(ctx context.Context, fn func(pgx.Tx) error) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), txFinishTimeout)
+		defer cancel()
+		_ = tx.Rollback(rctx)
+	}()
+
+	if err := fn(tx); err != nil {
+		return err
+	}
+
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), txFinishTimeout)
+	defer cancel()
+	if err := tx.Commit(cctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	committed = true
+	return nil
+}
+
 // newPoolConfig builds the pool's configuration.
 //
 // Every new physical connection has its user discriminator cleared. Cloud's own
@@ -555,64 +610,44 @@ func (s *Store) CreateUserWithIdentity(
 		return nil, errors.New("email is required")
 	}
 
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin: %w", err)
-	}
-	committed := false
-	defer func() {
-		if committed {
-			return
-		}
-		// Bounded, and on a context the request cannot cancel — the same
-		// discipline as UserStore.tx, for the same reason: pgx destroys the
-		// pooled connection when a rollback Exec fails, and a browser that
-		// closed mid-callback is the common case rather than an exotic one.
-		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bindTimeout)
-		defer cancel()
-		_ = tx.Rollback(rctx)
-	}()
-
 	id, err := newUserID()
 	if err != nil {
 		return nil, err
 	}
 	u := &User{ID: id, Email: email, Name: name}
-	err = tx.QueryRow(ctx, `
-		INSERT INTO cloud.users (id, email, name, email_verified_at)
-		VALUES ($1, $2, $3, NOW())
-		RETURNING created_at, email_verified_at
-	`, u.ID, u.Email, u.Name).Scan(&u.CreatedAt, &u.EmailVerifiedAt)
-	if err != nil {
-		if isUniqueViolation(err) {
-			return nil, fmt.Errorf("%s %w", email, ErrAlreadyExists)
+
+	err = s.tx(ctx, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `
+			INSERT INTO cloud.users (id, email, name, email_verified_at)
+			VALUES ($1, $2, $3, NOW())
+			RETURNING created_at, email_verified_at
+		`, u.ID, u.Email, u.Name).Scan(&u.CreatedAt, &u.EmailVerifiedAt)
+		if err != nil {
+			if isUniqueViolation(err) {
+				return fmt.Errorf("%s %w", email, ErrAlreadyExists)
+			}
+			return err
 		}
-		return nil, err
-	}
 
-	tag, err := tx.Exec(ctx, `
-		INSERT INTO cloud.identities (provider, provider_subject, user_id, provider_email)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (provider, provider_subject) DO NOTHING
-	`, provider, subject, u.ID, providerEmail)
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO cloud.identities (provider, provider_subject, user_id, provider_email)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (provider, provider_subject) DO NOTHING
+		`, provider, subject, u.ID, providerEmail)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			// The provider account was linked to somebody else between the
+			// caller's lookup and here. Rolling back takes the half-made user
+			// with it.
+			return fmt.Errorf("%s account %s: %w", provider, subject, ErrIdentityClaimed)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if tag.RowsAffected() == 0 {
-		// The provider account was linked to somebody else between the caller's
-		// lookup and here. Rolling back takes the half-made user with it.
-		return nil, fmt.Errorf("%s account %s: %w", provider, subject, ErrIdentityClaimed)
-	}
-
-	// Committed on a context the request cannot cancel, so a browser that gives
-	// up mid-callback does not abort a write that has already happened —
-	// leaving an account the retry then collides with on the UNIQUE email.
-	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bindTimeout)
-	defer cancel()
-	if err := tx.Commit(cctx); err != nil {
-		return nil, fmt.Errorf("commit: %w", err)
-	}
-	committed = true
 	return u, nil
 }
 
