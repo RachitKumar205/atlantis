@@ -496,7 +496,19 @@ func parseCSR(pemStr string) (*x509.CertificateRequest, error) {
 }
 
 // loadCA reads the CA certificate and private key from dir.
-// The key is expected to be a SEC1 EC private key (openssl ecparam output).
+//
+// The key may be SEC 1 or PKCS#8. It used to accept only SEC 1, which is what
+// `openssl ecparam -genkey` writes and therefore what deploy/init-certs.sh had
+// always produced — so the narrower parser went unnoticed for as long as a
+// shell script was the only thing feeding this. internal/cloud/provision/certs
+// mints the same authority in Go and marshals PKCS#8, and the signer refused it
+// at boot with `parse /ca-private/ca.key`.
+//
+// Accepting both is the fix rather than changing what the generator emits: a CA
+// key that is perfectly valid and merely wrapped differently should not be a
+// boot failure, and this is the only reader in the tree fussy enough to care.
+// Everything else goes through tls.X509KeyPair, which has always taken either —
+// which is precisely why the gap was invisible.
 func loadCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey, []byte, error) {
 	crtPath := dir + "/ca.crt"
 	crtBytes, err := os.ReadFile(crtPath)
@@ -521,12 +533,36 @@ func loadCA(dir string) (*x509.Certificate, *ecdsa.PrivateKey, []byte, error) {
 	if keyBlock == nil {
 		return nil, nil, nil, fmt.Errorf("%s: no PEM block", keyPath)
 	}
-	key, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+	key, err := parseECPrivateKey(keyBlock.Bytes)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("parse %s: %w", keyPath, err)
 	}
 
 	return cert, key, crtBytes, nil
+}
+
+// parseECPrivateKey accepts an EC private key in either SEC 1 or PKCS#8 form.
+//
+// SEC 1 is tried first because it is what every certificate this repo has
+// issued so far carries, so the common path stays one call. The PKCS#8 error is
+// the one reported when both fail: it is the more informative of the two, and a
+// key that is neither is far more likely to be PKCS#8-shaped than SEC 1-shaped.
+func parseECPrivateKey(der []byte) (*ecdsa.PrivateKey, error) {
+	if key, err := x509.ParseECPrivateKey(der); err == nil {
+		return key, nil
+	}
+	any8, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return nil, err
+	}
+	key, ok := any8.(*ecdsa.PrivateKey)
+	if !ok {
+		// Named rather than generic: the signer issues EC leaves from an EC
+		// authority, and an RSA CA here would otherwise fail later with a
+		// signature error that says nothing about the key.
+		return nil, fmt.Errorf("want an EC private key, got %T", any8)
+	}
+	return key, nil
 }
 
 func jsonError(w http.ResponseWriter, msg string, code int) {
