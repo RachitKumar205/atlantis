@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -39,11 +41,27 @@ type OrgRegistration struct {
 
 	// PublicEndpoint is what callers dial, when that differs from Endpoint.
 	//
-	// Optional, and the only optional field here. Empty means "the same", which
-	// is stored as NULL so the fallback lives in one place — the COALESCE in
-	// orgCredentials — rather than being copied at registration and then
-	// diverging the first time somebody changes Endpoint alone.
+	// Optional. Empty means "the same", which is stored as NULL so the fallback
+	// lives in one place — the COALESCE in orgCredentials — rather than being
+	// copied at registration and then diverging the first time somebody changes
+	// Endpoint alone.
 	PublicEndpoint string
+
+	// This organisation's own certificate signer.
+	//
+	// Optional, and optional AS A GROUP: all four or none. Empty means the
+	// console uses its process-wide ATL_SIGNER_* settings, which is what every
+	// organisation registered before migration 0009 does and what
+	// `make dev-signer` serves.
+	//
+	// A mixture is refused rather than stored. Three of four is not "mostly
+	// configured": it produces a console dialling one signer while presenting
+	// credentials for another, which fails at that signer's handshake with an
+	// error about a certificate rather than about this row.
+	SignerAddr          string
+	SignerCAPEM         string
+	SignerClientCertPEM string
+	SignerClientKeyPEM  []byte
 }
 
 // RegisterOrg records an organisation's atlantis and seals its private key.
@@ -80,6 +98,11 @@ func RegisterOrg(ctx context.Context, pgURL, keyset string, r OrgRegistration) e
 		CertPEM:        r.CertPEM,
 		KeyPEM:         r.KeyPEM,
 		PublicEndpoint: r.PublicEndpoint,
+
+		SignerAddr:          r.SignerAddr,
+		SignerCAPEM:         r.SignerCAPEM,
+		SignerClientCertPEM: r.SignerClientCertPEM,
+		SignerClientKeyPEM:  r.SignerClientKeyPEM,
 	})
 	// The console owns this schema and applies it at startup, so an operator who
 	// registers before the console has ever run gets a bare "relation does not
@@ -166,6 +189,58 @@ func validateOrgCredentials(c orgCredentials) error {
 	case now.After(leaf.NotAfter):
 		return fmt.Errorf("the client certificate expired on %s",
 			leaf.NotAfter.Format(time.RFC3339))
+	}
+
+	return validateOrgSigner(c)
+}
+
+// validateOrgSigner refuses a half-supplied signer, and checks the rest of it
+// the same way the atlantis credentials above are checked.
+//
+// The group check comes first and is the important one. A mixture is not a
+// smaller version of a working configuration: it is a console that dials one
+// signer holding another's credentials, refused at that signer's handshake with
+// a message about a certificate rather than about this registration.
+func validateOrgSigner(c orgCredentials) error {
+	if !c.SignerConfigured() {
+		if c.signerHalfConfigured() {
+			return errors.New("a signer needs its address, CA, client certificate and key — " +
+				"supply all four to give this organisation its own, or none to use the " +
+				"console's shared one")
+		}
+		// None of the four. The organisation uses the process-wide signer,
+		// which is the ordinary state.
+		return nil
+	}
+
+	if _, err := url.Parse(c.SignerAddr); err != nil {
+		return fmt.Errorf("the signer address %q is not a URL: %w", c.SignerAddr, err)
+	}
+	if !strings.HasPrefix(c.SignerAddr, "https://") {
+		// The console presents a client certificate to this address and
+		// receives a certificate authority's output back. Plain HTTP would
+		// send the first in the clear and take the second on trust.
+		return fmt.Errorf("the signer address %q must be https://", c.SignerAddr)
+	}
+	if !x509.NewCertPool().AppendCertsFromPEM([]byte(c.SignerCAPEM)) {
+		return errors.New("the signer CA bundle contains no usable certificates")
+	}
+	if _, err := tls.X509KeyPair([]byte(c.SignerClientCertPEM), c.SignerClientKeyPEM); err != nil {
+		return fmt.Errorf("the signer client certificate and key are not a pair: %w", err)
+	}
+
+	signerLeaf, err := leafOf(c.SignerClientCertPEM)
+	if err != nil {
+		return fmt.Errorf("signer client certificate: %w", err)
+	}
+	now := time.Now()
+	switch {
+	case now.Before(signerLeaf.NotBefore):
+		return fmt.Errorf("the signer client certificate is not valid until %s",
+			signerLeaf.NotBefore.Format(time.RFC3339))
+	case now.After(signerLeaf.NotAfter):
+		return fmt.Errorf("the signer client certificate expired on %s",
+			signerLeaf.NotAfter.Format(time.RFC3339))
 	}
 	return nil
 }

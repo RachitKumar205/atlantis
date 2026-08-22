@@ -1,0 +1,67 @@
+-- Each organisation's own certificate signer.
+--
+-- Migration 0005 gave every organisation its own atlantis behind its own CA,
+-- and said why: with a shared authority, a certificate issued for one
+-- organisation authenticates at another's server, because caller identity is
+-- the common name and caller names are chosen by customers. "backend", "api"
+-- and "prod" collide across customers as a matter of course.
+--
+-- It left one half of that undone. The console still reaches ONE signer, at
+-- ATL_SIGNER_ADDR, presenting ONE client certificate — so an organisation with
+-- its own authority cannot have a certificate issued for it at all. The code
+-- already knows: verifyLeafForOrg refuses the result and says "the signer holds
+-- a different certificate authority", which is an accurate message about a
+-- system that cannot work rather than a mistake somebody made.
+--
+-- ── Why these are four columns and not one ──────────────────────────────────
+--
+-- Reaching a signer needs an address, the root that verifies the signer's own
+-- certificate, and a client certificate and key to present to it. All four are
+-- per-organisation once the authority is, and none is derivable from another.
+--
+-- ── They are read as a GROUP, never column by column ────────────────────────
+--
+-- This is the trap 0008's per-column COALESCE would set here, and it is worth
+-- naming because the fallback below looks exactly like that one.
+--
+-- Four columns falling back independently produce mixtures. An organisation
+-- with signer_addr set and signer_client_cert_pem NULL would dial ITS OWN
+-- signer while presenting the PROCESS-WIDE client certificate — which that
+-- signer refuses, because SIGNER_CLIENT_CA does not chain it. The mirror case,
+-- its own CA against the shared address, is the mis-issue verifyLeafForOrg
+-- catches after the fact.
+--
+-- So: all four present means per-organisation. All four absent means the
+-- process-wide settings, which is what both organisations registered today use
+-- and what `make dev-signer` serves. Anything in between is an error naming
+-- this row, and it must NOT be the "not provisioned" error — see below.
+--
+-- ── Nullable, and why that does not repeat 0005's all-or-nothing gate ───────
+--
+-- store.orgCredentials treats any NULL among 0005's five columns as
+-- ErrOrgNotProvisioned. These four must stay outside that check, and the reason
+-- is sharper than tidiness: orgClients.get treats ErrOrgNotProvisioned as an
+-- ANSWER and evicts the cached client, closing the connection. Every other
+-- error keeps serving. Widening that gate would therefore not fail a request —
+-- it would de-provision every organisation registered before this migration,
+-- which today is both of them.
+ALTER TABLE console.orgs ADD COLUMN IF NOT EXISTS signer_addr            TEXT;
+ALTER TABLE console.orgs ADD COLUMN IF NOT EXISTS signer_ca_pem          TEXT;
+ALTER TABLE console.orgs ADD COLUMN IF NOT EXISTS signer_client_cert_pem TEXT;
+
+-- The private half, encrypted, exactly as client_key_ct is.
+--
+-- ── A different associated data string, and this is load-bearing ────────────
+--
+-- client_key_ct is sealed with the organisation name and nothing else. Sealing
+-- this one the same way would make the two ciphertexts INTERCHANGEABLE: anybody
+-- who can UPDATE this table could copy signer_client_key_ct into client_key_ct
+-- and it would decrypt cleanly, because the associated data matches. The
+-- console would then present the signer's client certificate to atlantis.
+--
+-- The binding that stops a key being lifted between ORGANISATIONS does not stop
+-- it being lifted between COLUMNS of one row. So this column's associated data
+-- names the field as well as the organisation. That is a new convention in this
+-- codebase and it is introduced deliberately, in one place, rather than
+-- discovered later by somebody wondering why two blobs are swappable.
+ALTER TABLE console.orgs ADD COLUMN IF NOT EXISTS signer_client_key_ct   BYTEA;

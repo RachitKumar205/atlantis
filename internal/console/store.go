@@ -477,6 +477,19 @@ func (s *store) rememberOrg(ctx context.Context, org string) error {
 // the stack, which is an operator's problem and not the user's mistake.
 var ErrOrgNotProvisioned = errors.New("organisation has no atlantis registered")
 
+// ErrOrgSignerIncomplete reports a row with some of the four signer columns and
+// not all of them.
+//
+// A third answer, distinct from ErrOrgNotProvisioned on purpose. That one means
+// "there is no atlantis here" and the connection pool treats it as grounds to
+// evict a cached client; this one means "the atlantis is fine, its certificate
+// signer is misconfigured", which must not close a working connection.
+//
+// Distinct from "no signer at all" too: an organisation with none of the four
+// falls back to the process-wide settings, which is the ordinary state of every
+// organisation registered before migration 0009.
+var ErrOrgSignerIncomplete = errors.New("organisation's signer is only partly configured")
+
 // orgCredentials is everything needed to reach one organisation's atlantis.
 //
 // The private key is already decrypted here. It exists in this form only
@@ -500,10 +513,46 @@ type orgCredentials struct {
 	// diverge the first time somebody changes Endpoint.
 	PublicEndpoint string
 
+	// The organisation's own certificate signer, or all empty when it has none
+	// and the process-wide settings apply.
+	//
+	// All four together or none of them — never a mixture. Reaching a signer
+	// needs an address, the root that verifies it, and a certificate and key to
+	// present; a row with some of those would dial one organisation's signer
+	// holding another's credentials, which that signer refuses at the
+	// handshake. SignerConfigured reports which case this is, and
+	// ErrOrgSignerIncomplete is the third answer for the states in between.
+	//
+	// Deliberately NOT part of the all-or-nothing provisioning check below: a
+	// missing signer means "enrolment is not configured for this organisation",
+	// which is a different thing from "this organisation does not exist", and
+	// conflating them evicts a live client.
+	SignerAddr          string
+	SignerCAPEM         string
+	SignerClientCertPEM string
+	SignerClientKeyPEM  []byte
+
 	// UpdatedAt is what the connection pool compares to decide whether a
 	// cached client is still built from the current row. A rotated certificate
 	// moves it, and the pool rebuilds without a restart.
 	UpdatedAt time.Time
+}
+
+// SignerConfigured reports whether this organisation has its own signer.
+//
+// Answers for the group, because that is the only question worth asking: three
+// of four columns is not "mostly configured", it is a row that produces a
+// confusing refusal at a signer somewhere.
+func (c *orgCredentials) SignerConfigured() bool {
+	return c.SignerAddr != "" && c.SignerCAPEM != "" &&
+		c.SignerClientCertPEM != "" && len(c.SignerClientKeyPEM) > 0
+}
+
+// signerHalfConfigured reports a row with some of the four but not all.
+func (c *orgCredentials) signerHalfConfigured() bool {
+	any := c.SignerAddr != "" || c.SignerCAPEM != "" ||
+		c.SignerClientCertPEM != "" || len(c.SignerClientKeyPEM) > 0
+	return any && !c.SignerConfigured()
 }
 
 // orgCredentials reads one organisation's address and credentials, decrypting
@@ -520,12 +569,20 @@ func (s *store) orgCredentials(ctx context.Context, org string) (*orgCredentials
 		// COALESCEd against atl_endpoint, so this is NULL only when both are —
 		// which the provisioning check below already refuses.
 		publicEndpoint *string
+
+		// The signer four, read raw. Whether they are usable is decided as a
+		// group, below, and deliberately NOT by the all-or-nothing check that
+		// governs the columns above.
+		signerAddr, signerCAPEM, signerCertPEM *string
+		signerKeyCT                            []byte
 	)
 	err := s.pool.QueryRow(ctx, `
 		SELECT atl_endpoint, atl_health_addr, ca_pem, client_cert_pem, client_key_ct, updated_at,
-		       COALESCE(atl_public_endpoint, atl_endpoint)
+		       COALESCE(atl_public_endpoint, atl_endpoint),
+		       signer_addr, signer_ca_pem, signer_client_cert_pem, signer_client_key_ct
 		FROM console.orgs WHERE org = $1
-	`, org).Scan(&endpoint, &healthAddr, &caPEM, &certPEM, &keyCT, &c.UpdatedAt, &publicEndpoint)
+	`, org).Scan(&endpoint, &healthAddr, &caPEM, &certPEM, &keyCT, &c.UpdatedAt, &publicEndpoint,
+		&signerAddr, &signerCAPEM, &signerCertPEM, &signerKeyCT)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -544,7 +601,7 @@ func (s *store) orgCredentials(ctx context.Context, org string) (*orgCredentials
 	// The organisation name is the associated data the key was sealed with, so
 	// a key copied from another row will not open here. See
 	// internal/secrets.
-	keyPEM, err := s.keys.Decrypt(keyCT, []byte(org))
+	keyPEM, err := s.keys.Decrypt(keyCT, clientKeyAAD(org))
 	if err != nil {
 		return nil, fmt.Errorf("decrypt credentials for %s "+
 			"(wrong CONSOLE_DATA_KEY, or the row was tampered with): %w", org, err)
@@ -560,7 +617,44 @@ func (s *store) orgCredentials(ctx context.Context, org string) (*orgCredentials
 	if publicEndpoint != nil {
 		c.PublicEndpoint = *publicEndpoint
 	}
+
+	c.SignerAddr = deref(signerAddr)
+	c.SignerCAPEM = deref(signerCAPEM)
+	c.SignerClientCertPEM = deref(signerCertPEM)
+
+	if len(signerKeyCT) > 0 {
+		// A different associated data string from the one above. See
+		// signerKeyAAD: with the same one, the two ciphertexts in this row
+		// would be interchangeable.
+		signerKeyPEM, derr := s.keys.Decrypt(signerKeyCT, signerKeyAAD(org))
+		if derr != nil {
+			return nil, fmt.Errorf("decrypt the signer client key for %s "+
+				"(wrong CONSOLE_DATA_KEY, or the row was tampered with): %w", org, derr)
+		}
+		c.SignerClientKeyPEM = signerKeyPEM
+	}
+
+	// After the decrypt, not before: the completeness question is about the
+	// four values, and one of them does not exist until it has been opened.
+	// Asking first would call every configured organisation half-configured.
+	//
+	// Refused here rather than at the handshake it would otherwise fail at, and
+	// with its OWN error — not ErrOrgNotProvisioned. That is the whole reason
+	// these columns sit outside the check above: orgClients.get treats that
+	// error as an ANSWER and evicts the cached client, so an organisation whose
+	// signer row is half-written would lose its working atlantis connection
+	// over a certificate-issuance setting it may never use.
+	if c.signerHalfConfigured() {
+		return nil, fmt.Errorf("%w: %s", ErrOrgSignerIncomplete, org)
+	}
 	return &c, nil
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // registerOrg stores an organisation's address and credentials, sealing the
@@ -569,6 +663,25 @@ func (s *store) orgCredentials(ctx context.Context, org string) (*orgCredentials
 // Used by `cloud org register`. Upserts, so re-registering rotates a
 // certificate in place — and touches updated_at, which is how a running console
 // notices.
+// Associated data for the sealed columns on console.orgs.
+//
+// # Why these are not both the organisation name
+//
+// internal/secrets authenticates the associated data without storing it, so two
+// ciphertexts sealed with the SAME associated data are interchangeable: anybody
+// who can UPDATE this table could move one column's bytes into the other and it
+// would decrypt cleanly. The binding that stops a key being lifted between
+// organisations does nothing about lifting it between columns of one row, and
+// the two keys here authenticate to different systems — one to the
+// organisation's atlantis, one to its signer.
+//
+// clientKeyAAD is the bare organisation name because that is what every row
+// written before this was sealed with, and changing it would make those rows
+// unopenable. New columns name their field as well.
+func clientKeyAAD(org string) []byte { return []byte(org) }
+
+func signerKeyAAD(org string) []byte { return []byte(org + "/signer-client-key") }
+
 func (s *store) registerOrg(ctx context.Context, c orgCredentials) error {
 	// Refuse a registration that cannot dial, here rather than in the exported
 	// wrapper, so this is the only door and there is no second one that skips
@@ -577,13 +690,28 @@ func (s *store) registerOrg(ctx context.Context, c orgCredentials) error {
 	if err := validateOrgCredentials(c); err != nil {
 		return fmt.Errorf("register %s: %w", c.Org, err)
 	}
-	keyCT, err := s.keys.Encrypt(c.KeyPEM, []byte(c.Org))
+	keyCT, err := s.keys.Encrypt(c.KeyPEM, clientKeyAAD(c.Org))
 	if err != nil {
 		return fmt.Errorf("seal the private key for %s: %w", c.Org, err)
 	}
+
+	// Sealed only when there is one. An organisation with no signer of its own
+	// writes NULL here and falls back to the process-wide settings, the same
+	// shape atl_public_endpoint uses — except decided for the group rather than
+	// per column, because a mixture reaches a signer holding the wrong
+	// credentials.
+	var signerKeyCT []byte
+	if len(c.SignerClientKeyPEM) > 0 {
+		signerKeyCT, err = s.keys.Encrypt(c.SignerClientKeyPEM, signerKeyAAD(c.Org))
+		if err != nil {
+			return fmt.Errorf("seal the signer client key for %s: %w", c.Org, err)
+		}
+	}
+
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO console.orgs (org, atl_endpoint, atl_health_addr, ca_pem, client_cert_pem, client_key_ct, updated_at, atl_public_endpoint)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)
+		INSERT INTO console.orgs (org, atl_endpoint, atl_health_addr, ca_pem, client_cert_pem, client_key_ct, updated_at, atl_public_endpoint,
+		                          signer_addr, signer_ca_pem, signer_client_cert_pem, signer_client_key_ct)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8, $9, $10, $11)
 		ON CONFLICT (org) DO UPDATE SET
 			atl_endpoint    = EXCLUDED.atl_endpoint,
 			atl_health_addr = EXCLUDED.atl_health_addr,
@@ -595,9 +723,19 @@ func (s *store) registerOrg(ctx context.Context, c orgCredentials) error {
 			-- before. A re-registration that omits it means "these are the same
 			-- address again", not "keep the old override".
 			atl_public_endpoint = EXCLUDED.atl_public_endpoint,
+			-- The signer four move together, for the same reason and with the
+			-- same consequence: a re-registration that omits them means "this
+			-- organisation uses the shared signer again", not "keep the old
+			-- ones". Updating them individually is what would leave a mixture.
+			signer_addr            = EXCLUDED.signer_addr,
+			signer_ca_pem          = EXCLUDED.signer_ca_pem,
+			signer_client_cert_pem = EXCLUDED.signer_client_cert_pem,
+			signer_client_key_ct   = EXCLUDED.signer_client_key_ct,
 			updated_at      = NOW()
 	`, c.Org, c.Endpoint, c.HealthAddr, c.CAPEM, c.CertPEM, keyCT,
-		nullIfEmpty(c.PublicEndpoint))
+		nullIfEmpty(c.PublicEndpoint),
+		nullIfEmpty(c.SignerAddr), nullIfEmpty(c.SignerCAPEM),
+		nullIfEmpty(c.SignerClientCertPEM), signerKeyCT)
 	return err
 }
 
