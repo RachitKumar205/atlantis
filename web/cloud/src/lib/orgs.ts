@@ -1,0 +1,145 @@
+// What the organisations screen decides, as plain functions with tests.
+//
+// The same reasoning as lib/flow.ts records for the sign-in flow: these lived as
+// inline expressions in the component first, where a wrong one is invisible and
+// unreachable from a test. web/cloud has no jsdom and no React Testing Library —
+// its vitest environment is `node` — so a decision left inside a component is a
+// decision nothing can check.
+
+/** The provisioning states the server reports. Empty means no queue row. */
+export type OrgState = 'pending' | 'provisioning' | 'ready' | 'failed' | ''
+
+export type Org = {
+  name: string
+  displayName: string
+  role: string
+  state: OrgState
+  attempts: number
+  /** Cloud's /authorize link. Empty until there is a console to reach. */
+  url: string
+  createdByMe: boolean
+}
+
+export type Me = {
+  email: string
+  name: string
+  orgs: Org[]
+  orgLimit: number
+  orgsCreated: number
+}
+
+/**
+ * stateLabel is what somebody reads next to an organisation.
+ *
+ * Deliberately not the raw state. "provisioning" is a word this system uses
+ * about itself; the person waiting wants to know whether to keep waiting.
+ *
+ * The empty state is the organisations registered by hand, which have no queue
+ * row and never will. They work — they were simply never queued — so they are
+ * described as ready rather than as an unknown.
+ */
+export function stateLabel(state: OrgState): string {
+  switch (state) {
+    case 'pending':
+      return 'Queued'
+    case 'provisioning':
+      return 'Setting up'
+    case 'ready':
+    case '':
+      return 'Ready'
+    case 'failed':
+      return 'Setup failed'
+    default:
+      return 'Unknown'
+  }
+}
+
+/**
+ * isSettling reports whether this organisation is still on its way.
+ *
+ * What the screen polls on. `failed` is deliberately excluded even though the
+ * provisioner will retry it: a screen that kept polling a failed organisation
+ * would poll for as long as the tab stayed open, and the backoff means nothing
+ * changes for minutes at a time.
+ */
+export function isSettling(state: OrgState): boolean {
+  return state === 'pending' || state === 'provisioning'
+}
+
+/** Whether any organisation in the list is still coming up. */
+export function anySettling(orgs: Org[]): boolean {
+  return orgs.some(o => isSettling(o.state))
+}
+
+/**
+ * canEnter reports whether clicking an organisation would go anywhere.
+ *
+ * Keyed on the link the server built, not on the state. The two can disagree
+ * for a moment — registration writes the console row and the queue row
+ * separately — and the link is the half that decides whether /authorize will
+ * answer.
+ */
+export function canEnter(org: Org): boolean {
+  return org.url !== ''
+}
+
+/** How many more organisations this account may create. */
+export function remainingSlots(me: Me): number {
+  const left = me.orgLimit - me.orgsCreated
+  return left > 0 ? left : 0
+}
+
+/**
+ * canCreate reports whether to offer the form at all.
+ *
+ * An account at its limit gets an explanation instead of a form that always
+ * refuses. The count is of organisations this account *created*, not ones it
+ * can act in — being added to somebody else's does not use a slot.
+ */
+export function canCreate(me: Me): boolean {
+  return remainingSlots(me) > 0
+}
+
+/**
+ * limitMessage explains a full account.
+ *
+ * Says the number rather than "you have reached your limit", because the next
+ * question is always "which is what?".
+ */
+export function limitMessage(me: Me): string {
+  const n = me.orgLimit
+  return `This account can create ${n} organisation${n === 1 ? '' : 's'}, and has created ${me.orgsCreated}.`
+}
+
+/**
+ * normaliseOrg converts one organisation from the wire.
+ *
+ * snake_case to camelCase happens here and nowhere else, matching how api.ts
+ * treats every other response. Unknown states pass through rather than being
+ * coerced: stateLabel answers "Unknown" for them, which is honest, where
+ * defaulting to 'ready' would tell somebody an organisation works when nothing
+ * said so.
+ */
+export function normaliseOrg(raw: Record<string, unknown>): Org {
+  return {
+    name: typeof raw.name === 'string' ? raw.name : '',
+    displayName: typeof raw.display_name === 'string' ? raw.display_name : '',
+    role: typeof raw.role === 'string' ? raw.role : '',
+    state: (typeof raw.state === 'string' ? raw.state : '') as OrgState,
+    attempts: typeof raw.attempts === 'number' ? raw.attempts : 0,
+    url: typeof raw.url === 'string' ? raw.url : '',
+    createdByMe: raw.created_by_me === true,
+  }
+}
+
+/** normaliseMe converts the account payload from the wire. */
+export function normaliseMe(raw: Record<string, unknown>): Me {
+  const orgs = Array.isArray(raw.orgs) ? raw.orgs : []
+  return {
+    email: typeof raw.email === 'string' ? raw.email : '',
+    name: typeof raw.name === 'string' ? raw.name : '',
+    orgs: orgs.map(o => normaliseOrg(o as Record<string, unknown>)),
+    orgLimit: typeof raw.org_limit === 'number' ? raw.org_limit : 0,
+    orgsCreated: typeof raw.orgs_created === 'number' ? raw.orgs_created : 0,
+  }
+}

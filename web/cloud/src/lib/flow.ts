@@ -12,6 +12,7 @@
 // with the one that actually gates access.
 
 export type Screen =
+  | 'organisations'
   | 'signin'
   | 'signup'
   | 'check-email'

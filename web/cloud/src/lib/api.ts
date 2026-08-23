@@ -13,6 +13,8 @@
  * every route and five per minute is reachable by an honest person, so "wait
  * this long" is worth saying precisely.
  */
+import { normaliseMe, normaliseOrg, type Me, type Org } from './orgs'
+
 export class ApiError extends Error {
   readonly status: number
   readonly retryAfter: string | null
@@ -127,6 +129,41 @@ export async function verifySecondFactor(code: string): Promise<void> {
 export async function requestPasswordReset(email: string): Promise<string> {
   const res = await request('POST', '/api/auth/reset/request', { email })
   return typeof res.message === 'string' ? res.message : 'Check your email.'
+}
+
+/**
+ * The signed-in account and its organisations.
+ *
+ * Also how the application discovers it is signed in at all. Everything else it
+ * boots on answers for a pre-session state, so before this route existed there
+ * was no way to ask — which is why /organisations rendered the sign-in form.
+ *
+ * A 401 here is not an error to show. It means "not signed in", which is an
+ * answer, and the caller turns it into the sign-in screen.
+ */
+export async function fetchMe(): Promise<Me> {
+  return normaliseMe(await request('GET', '/api/account/me'))
+}
+
+/** Creates an organisation and queues it for provisioning. */
+export async function createOrg(name: string, displayName: string): Promise<Org> {
+  return normaliseOrg(await request('POST', '/api/orgs', { name, display_name: displayName }))
+}
+
+/** Reads one organisation, for a screen waiting on it to come up. */
+export async function fetchOrg(name: string): Promise<Org> {
+  return normaliseOrg(await request('GET', `/api/orgs/${encodeURIComponent(name)}`))
+}
+
+/**
+ * Ends the session.
+ *
+ * The organisations screen is the first page in this application somebody stays
+ * on, so it is the first that needs a way out. Without it, arriving there is a
+ * room with no door.
+ */
+export async function signOut(): Promise<void> {
+  await request('POST', '/api/auth/logout')
 }
 
 /**

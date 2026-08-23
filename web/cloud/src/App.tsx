@@ -6,8 +6,11 @@ import {
   fetchAuthConfig,
   fetchPending,
   finishEnrolment,
+  createOrg,
+  fetchMe,
   requestPasswordReset,
   signIn,
+  signOut,
   signUp,
   verifySecondFactor,
 } from '@/lib/api'
@@ -18,9 +21,11 @@ import {
   screenForNext,
   type Screen,
 } from '@/lib/flow'
+import { anySettling, type Me } from '@/lib/orgs'
 import { BackupCodes } from '@/screens/BackupCodes'
 import { Enrol } from '@/screens/Enrol'
 import { Message } from '@/screens/Message'
+import { Organisations } from '@/screens/Organisations'
 import { ResetRequest } from '@/screens/ResetRequest'
 import { SignIn } from '@/screens/SignIn'
 import { SignUp } from '@/screens/SignUp'
@@ -33,7 +38,15 @@ import { Verify } from '@/screens/Verify'
 // that onto a screen and does not decide for itself what follows what — the
 // decisions that are its own live in lib/flow.ts, as functions with tests.
 
-/** Where a completed sign-in goes. Replaced by the organisation landing in W5. */
+/**
+ * Where a completed sign-in goes.
+ *
+ * A full navigation rather than a state change, and it stays that way now the
+ * screen behind it exists. The reload is what re-runs boot, which asks
+ * /api/account/me and lands on the organisations screen — so the session is
+ * established by the server and discovered, rather than assumed by a client
+ * that just watched a request succeed.
+ */
 const AFTER_SIGN_IN = '/organisations'
 
 export function App() {
@@ -45,6 +58,7 @@ export function App() {
   const [enrolment, setEnrolment] = useState<{ secret: string; uri: string } | null>(null)
   const [enrolRetried, setEnrolRetried] = useState(false)
   const [codes, setCodes] = useState<{ codes: string[]; signedIn: boolean } | null>(null)
+  const [me, setMe] = useState<Me | null>(null)
 
   // One place that turns a failure into something the screens can show.
   //
@@ -71,10 +85,19 @@ export function App() {
   // Boot: what is configured, and whether a sign-in is already in progress.
   useEffect(() => {
     let live = true
-    Promise.all([fetchAuthConfig(), fetchPending()])
-      .then(([config, pending]) => {
+    // Whether there is already a session is asked first, and a 401 is an
+    // answer rather than a failure. Before /api/account/me existed there was
+    // nothing to ask — every route this application booted on reported a
+    // pre-session state — which is why /organisations rendered a sign-in form.
+    Promise.all([fetchAuthConfig(), fetchPending(), fetchMe().catch(() => null)])
+      .then(([config, pending, account]) => {
         if (!live) return
         setProviders(config.providers)
+        if (account) {
+          setMe(account)
+          setScreen('organisations')
+          return
+        }
         const next = new URLSearchParams(window.location.search).get('next')
         setScreen(arrivalScreen(pending, next))
       })
@@ -116,6 +139,57 @@ export function App() {
     [run],
   )
 
+  // Refresh the account, after creating and while anything is still coming up.
+  const refresh = useCallback(async () => {
+    const account = await fetchMe()
+    setMe(account)
+  }, [])
+
+  const createOrganisation = useCallback(
+    (name: string, displayName: string) =>
+      run(async () => {
+        await createOrg(name, displayName)
+        await refresh()
+      }),
+    [run, refresh],
+  )
+
+  const endSession = useCallback(
+    () =>
+      run(async () => {
+        await signOut()
+        setMe(null)
+        setScreen('signin')
+      }),
+    [run],
+  )
+
+  // Poll while an organisation is being built, and stop when none is.
+  //
+  // A fixed interval rather than a backoff: provisioning takes about a minute,
+  // so this runs a handful of times and then stops on its own. The condition is
+  // anySettling, which excludes a failure deliberately — the provisioner retries
+  // those on a backoff measured in minutes, and polling one would poll for as
+  // long as the tab stayed open while nothing changed.
+  useEffect(() => {
+    if (screen !== 'organisations' || me === null || !anySettling(me.orgs)) return
+    let live = true
+    const t = setInterval(() => {
+      // Failures here are deliberately silent. This is a background refresh of
+      // a screen that is already rendered, and turning a blip into an error
+      // banner over a working list would be worse than showing a stale one.
+      fetchMe()
+        .then(account => {
+          if (live) setMe(account)
+        })
+        .catch(() => {})
+    }, 4000)
+    return () => {
+      live = false
+      clearInterval(t)
+    }
+  }, [screen, me])
+
   if (screen === null) {
     // The boot request has not answered. Deliberately blank rather than a
     // flash of the sign-in form for somebody who is mid-enrolment.
@@ -123,6 +197,18 @@ export function App() {
   }
 
   switch (screen) {
+    case 'organisations':
+      // me is set before the screen is, in boot and in endSession. Guarding
+      // rather than asserting: a null here would be a blank page, not a crash.
+      return me === null ? null : (
+        <Organisations
+          me={me}
+          error={error}
+          busy={busy}
+          onCreate={createOrganisation}
+          onSignOut={endSession}
+        />
+      )
     case 'signin':
       return (
         <SignIn
