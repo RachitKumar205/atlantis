@@ -164,7 +164,19 @@ func (k *Kube) Ensure(ctx context.Context, spec Spec) (Status, error) {
 	// address as well as a running pod. The two can lag each other by a moment
 	// and the answer must be the conjunction, not the workload half alone.
 	status.Ready = ready && status.Endpoint != "" && status.HealthAddr != "" && status.SignerAddr != ""
-	log.Info("provisioned", "ready", ready, "endpoint", status.Endpoint)
+	// "converged", not "provisioned", and it reports the conjunction above
+	// rather than the workload half.
+	//
+	// Both halves of that were wrong and both mislead in the same direction.
+	// Ensure runs on every call, including the ones that applied everything and
+	// are still waiting on a pod or a NodePort, so a success-sounding message
+	// here is how a watcher concludes an organisation is serving when it is
+	// not — which is exactly what happened the first time cmd/provisioner was
+	// run against a real cluster. And logging `ready` rather than
+	// `status.Ready` reports something the caller never sees: they differ
+	// precisely when the pods are up and no address has been allocated yet,
+	// which is the ordinary state of a first call.
+	log.Info("converged", "ready", status.Ready, "endpoint", status.Endpoint)
 	return status, nil
 }
 
