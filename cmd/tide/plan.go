@@ -75,7 +75,7 @@ func cmdPlan(args []string) int {
 		Caller: cfg.Caller, Files: files,
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tide plan:", err)
+		fmt.Fprintln(os.Stderr, "tide plan:", explainAuthz(err))
 		return 3
 	}
 

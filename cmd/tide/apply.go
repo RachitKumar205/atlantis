@@ -105,7 +105,7 @@ func cmdApply(args []string) int {
 		Caller: cfg.Caller, Files: files,
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tide plan:", err)
+		fmt.Fprintln(os.Stderr, "tide plan:", explainAuthz(err))
 		return 3
 	}
 
@@ -337,7 +337,7 @@ func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan *ad
 			}
 			return 2
 		}
-		fmt.Fprintln(os.Stderr, "tide apply:", err)
+		fmt.Fprintln(os.Stderr, "tide apply:", explainAuthz(err))
 		return 3
 	}
 	cliout.Successf("applied at %s", applyResp.GetAppliedAt())
@@ -514,7 +514,31 @@ func collectPCFiles(paths []string) ([]*adminpb.SubmittedFile, error) {
 			if err != nil {
 				return err
 			}
-			if d.IsDir() || filepath.Ext(path) != ".atl" {
+			// Hidden directories are not schema, and one of them is ours.
+			//
+			// `tide pull` writes the merged schema of the whole organisation
+			// into .tide-cache/schema/ for editors to read, and `tide plan`
+			// runs a pull before it plans. With the documented
+			// `schema_paths: ["."]`, the next plan then submits the caller's
+			// own entities twice — once from source and once from the mirror —
+			// and the server refuses with "duplicate entity", pointing at a
+			// path the author never created.
+			//
+			// So: the first `tide apply` in a fresh workspace succeeds and
+			// every one after it fails, which is the worst possible order to
+			// discover this in. Skipping every dot-directory rather than
+			// .tide-cache alone also keeps .git and vendored virtualenvs out,
+			// and none of them is a place schema belongs.
+			//
+			// The root itself is never skipped: `schema_paths: ["."]` arrives
+			// here as a path of exactly ".".
+			if d.IsDir() {
+				if path != root && strings.HasPrefix(d.Name(), ".") {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if filepath.Ext(path) != ".atl" {
 				return nil
 			}
 			data, err := os.ReadFile(path)
