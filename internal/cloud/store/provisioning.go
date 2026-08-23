@@ -286,3 +286,68 @@ func (s *Store) ProvisioningFor(ctx context.Context, org string) (*Provisioning,
 	}
 	return &p, nil
 }
+
+// ReadyOrgs lists organisations the queue believes are serving.
+//
+// The input to reconciliation. Nothing else reads this state: the claim
+// predicate deliberately ignores 'ready', so without a caller here an
+// organisation that stops existing stays ready for ever.
+//
+// Ordered by name rather than by time so a reconciliation pass that is
+// interrupted and repeated covers the same organisations in the same order,
+// which makes "it always gets stuck on the same one" a visible symptom rather
+// than a coincidence.
+func (s *Store) ReadyOrgs(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT org FROM cloud.org_provisioning
+		 WHERE state = 'ready'
+		 ORDER BY org
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var org string
+		if err := rows.Scan(&org); err != nil {
+			return nil, err
+		}
+		out = append(out, org)
+	}
+	return out, rows.Err()
+}
+
+// Requeue puts a ready organisation back in the queue to be rebuilt.
+//
+// # Why this is guarded on the ready state
+//
+// Reconciliation reads a list, then checks each organisation against the
+// cluster, then writes. Between the read and the write an operator may have
+// deleted the organisation, or a provisioner may have claimed it after somebody
+// reset it by hand. Without `state = 'ready'` in the predicate this would
+// stamp 'pending' over a claim that is actively being worked, and two
+// provisioners would build the same organisation.
+//
+// attempts is deliberately not reset. A row that has been rebuilt four times is
+// telling you something, and clearing the count hides it.
+func (s *Store) Requeue(ctx context.Context, org, reason string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE cloud.org_provisioning
+		   SET state = 'pending', last_error = $2,
+		       claimed_by = NULL, claimed_until = NULL, next_attempt_after = NULL,
+		       updated_at = NOW()
+		 WHERE org = $1 AND state = 'ready'
+	`, org, reason)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		// Not an error worth failing a reconciliation pass over: it means the
+		// row moved while we were looking at the cluster, which is the case the
+		// predicate exists to lose safely.
+		return fmt.Errorf("%s: %w", org, ErrNotFound)
+	}
+	return nil
+}

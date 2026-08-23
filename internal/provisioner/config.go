@@ -40,12 +40,13 @@ import (
 // working on it. The lease has to be sized against this number, so this number
 // has to be known here rather than defaulted out of sight inside NewKube.
 const (
-	DefaultPollInterval = 10 * time.Second
-	DefaultReadyTimeout = 5 * time.Minute
-	DefaultHeartbeat    = 30 * time.Second
-	DefaultRetryBase    = 30 * time.Second
-	DefaultRetryMax     = 30 * time.Minute
-	DefaultHealthAddr   = ":8082"
+	DefaultPollInterval      = 10 * time.Second
+	DefaultReconcileInterval = 5 * time.Minute
+	DefaultReadyTimeout      = 5 * time.Minute
+	DefaultHeartbeat         = 30 * time.Second
+	DefaultRetryBase         = 30 * time.Second
+	DefaultRetryMax          = 30 * time.Minute
+	DefaultHealthAddr        = ":8082"
 
 	// leaseFactor sizes the default lease from ReadyTimeout. Three times leaves
 	// room for the two Ensure calls either side of the wait, both of which do
@@ -95,6 +96,12 @@ type Config struct {
 	// is honest and a trigger channel would be machinery with no reader.
 	PollInterval time.Duration
 
+	// ReconcileInterval is how often ready organisations are checked against
+	// the cluster. Much slower than PollInterval: it lists every ready
+	// organisation and asks the API server about each, so it is the one loop
+	// whose cost grows with the number of customers.
+	ReconcileInterval time.Duration
+
 	// Lease is how long a claim is held before another provisioner may take it.
 	// Heartbeat extends it while a wait is in progress.
 	Lease     time.Duration
@@ -130,12 +137,13 @@ func ConfigFromEnv() (Config, error) {
 		// Trimmed, so validate's empty check is a guard that can actually fire.
 		// envOr only rejects the empty string, so " " would otherwise sail
 		// through and put a blank-looking claimant on every row.
-		ClaimedBy:    strings.TrimSpace(envOr("PROVISIONER_NAME", defaultName())),
-		PollInterval: envDuration("PROVISIONER_POLL_INTERVAL", DefaultPollInterval),
-		Heartbeat:    envDuration("PROVISIONER_LEASE_HEARTBEAT", DefaultHeartbeat),
-		RetryBase:    envDuration("PROVISIONER_RETRY_BASE", DefaultRetryBase),
-		RetryMax:     envDuration("PROVISIONER_RETRY_MAX", DefaultRetryMax),
-		HealthAddr:   envOr("PROVISIONER_HEALTH_LISTEN", DefaultHealthAddr),
+		ClaimedBy:         strings.TrimSpace(envOr("PROVISIONER_NAME", defaultName())),
+		PollInterval:      envDuration("PROVISIONER_POLL_INTERVAL", DefaultPollInterval),
+		ReconcileInterval: envDuration("PROVISIONER_RECONCILE_INTERVAL", DefaultReconcileInterval),
+		Heartbeat:         envDuration("PROVISIONER_LEASE_HEARTBEAT", DefaultHeartbeat),
+		RetryBase:         envDuration("PROVISIONER_RETRY_BASE", DefaultRetryBase),
+		RetryMax:          envDuration("PROVISIONER_RETRY_MAX", DefaultRetryMax),
+		HealthAddr:        envOr("PROVISIONER_HEALTH_LISTEN", DefaultHealthAddr),
 
 		Provision: provision.Config{
 			// Set here, deliberately, because the lease is sized from it.
@@ -248,6 +256,9 @@ func (c Config) validate() error {
 	}
 	if c.PollInterval <= 0 {
 		return errors.New("PROVISIONER_POLL_INTERVAL must be positive")
+	}
+	if c.ReconcileInterval <= 0 {
+		return errors.New("PROVISIONER_RECONCILE_INTERVAL must be positive")
 	}
 	if c.ClaimedBy == "" {
 		return errors.New("PROVISIONER_NAME must not be empty")

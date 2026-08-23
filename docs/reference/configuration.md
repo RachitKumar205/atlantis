@@ -579,6 +579,7 @@ factor and the assertion signing key.
 | `PROVISIONER_LEASE` | 3 × ready timeout | How long a claim is held. Must exceed the ready timeout. |
 | `PROVISIONER_LEASE_HEARTBEAT` | `30s` | How often the lease is extended during a wait. |
 | `PROVISIONER_POLL_INTERVAL` | `10s` | How often an idle queue is checked. |
+| `PROVISIONER_RECONCILE_INTERVAL` | `5m` | How often ready organisations are checked against the cluster and requeued if absent. |
 | `PROVISIONER_RETRY_BASE` / `_MAX` | `30s` / `30m` | Backoff after a failed attempt: doubling, capped. |
 | `PROVISIONER_NAME` | the hostname | Names this process in the queue. In Kubernetes the hostname is the pod name. |
 
@@ -608,6 +609,25 @@ you are overriding one deliberately.
 LOCKED` under a lease, so two provisioners never take the same organisation, and
 one that dies mid-work frees its organisation when the lease expires. There is no
 sweeper to run.
+
+**It reconciles absence, not shape.** Every `PROVISIONER_RECONCILE_INTERVAL` it
+asks the cluster whether each ready organisation still exists, and requeues the
+ones that do not. It does **not** detect drift inside a namespace — a Deployment
+scaled to zero, a NetworkPolicy removed, a Secret edited — because a partial
+version of that would report an organisation as reconciled while leaving whole
+classes of drift unchecked.
+
+Rebuilding an organisation mints a **new certificate authority**, because the old
+one lived in a Secret that went with the namespace. Every caller certificate
+issued under it stops working, and those callers must enrol again. Watch
+`atlantis_provisioning_reconciled_total`: it should be zero, and a non-zero value
+means somebody's namespace disappeared.
+
+**Credentials are re-read, not cached.** If the cluster refuses this process —
+a rotated authority, an expired token — it rebuilds the connection and retries
+once. If that fails it reports itself unready and stops claiming, rather than
+marking healthy organisations failed one per tick with an error that names none
+of them.
 
 ### Confirming a destructive action
 

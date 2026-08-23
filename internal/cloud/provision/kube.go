@@ -393,6 +393,32 @@ func (k *Kube) WaitReady(ctx context.Context, org string) error {
 // creates is namespaced, so there is nothing to clean up outside it. Whether
 // the Postgres volume survives is the storage class's reclaim policy to decide,
 // not this function's.
+// Exists reports whether this organisation is still present in the cluster.
+//
+// The namespace stands in for the whole organisation because everything Ensure
+// creates lives inside it and goes with it: if the namespace is gone, so are
+// the certificates, the database and both workloads, and there is nothing left
+// to converge towards.
+//
+// A namespace being deleted right now counts as absent. It cannot be reused —
+// Kubernetes refuses to create objects in a terminating namespace — so treating
+// it as present would report an organisation as healthy for as long as its
+// teardown took, which is exactly when somebody is looking.
+func (k *Kube) Exists(ctx context.Context, org string) (bool, error) {
+	if org == "" {
+		return false, errors.New("provision: an organisation name is required")
+	}
+	var ns corev1.Namespace
+	err := k.c.Get(ctx, ctrlclient.ObjectKey{Name: k.cfg.Namespace(org)}, &ns)
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return ns.DeletionTimestamp == nil, nil
+}
+
 func (k *Kube) Destroy(ctx context.Context, org string) error {
 	if org == "" {
 		return errors.New("provision: an organisation name is required")

@@ -338,3 +338,112 @@ func TestTheQueueRefusesAnUnusableRequest(t *testing.T) {
 		t.Error("an unnamed claimant took a lease")
 	}
 }
+
+// Reconciliation reads ready organisations and puts absent ones back.
+//
+// The gap this closes: nothing else looks at a ready row. The claim predicate
+// covers pending, failed and expired-provisioning, and deliberately not ready —
+// so before ReadyOrgs existed, an organisation whose cluster was rebuilt stayed
+// ready for ever while serving nothing.
+func TestReadyOrganisationsCanBeListedAndRequeued(t *testing.T) {
+	db := newTestStore(t)
+	ctx := context.Background()
+	owner := ownerFor(t, db, "reconcile-owner@example.com")
+
+	for _, org := range []string{"recon-a", "recon-b", "recon-c"} {
+		if err := db.CreateOrgWithOwner(ctx, org, "", owner, identity.RoleAdmin); err != nil {
+			t.Fatalf("create %s: %v", org, err)
+		}
+	}
+
+	// Only the two that reach ready should be listed. The third stays pending,
+	// which is what proves the query filters rather than returning everything.
+	for _, org := range []string{"recon-a", "recon-b"} {
+		if _, err := db.ClaimForProvisioning(ctx, "t", time.Minute); err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		if err := db.MarkProvisioned(ctx, org); err != nil {
+			t.Fatalf("mark %s: %v", org, err)
+		}
+	}
+
+	ready, err := db.ReadyOrgs(ctx)
+	if err != nil {
+		t.Fatalf("ReadyOrgs: %v", err)
+	}
+	got := map[string]bool{}
+	for _, o := range ready {
+		got[o] = true
+	}
+	if !got["recon-a"] || !got["recon-b"] {
+		t.Errorf("ReadyOrgs = %v, want it to include recon-a and recon-b", ready)
+	}
+	if got["recon-c"] {
+		t.Errorf("ReadyOrgs = %v, but recon-c was never provisioned", ready)
+	}
+
+	if err := db.Requeue(ctx, "recon-a", "the cluster no longer has this organisation"); err != nil {
+		t.Fatalf("Requeue: %v", err)
+	}
+	p, err := db.ProvisioningFor(ctx, "recon-a")
+	if err != nil {
+		t.Fatalf("ProvisioningFor: %v", err)
+	}
+	if p.State != StatePending {
+		t.Errorf("state = %q after requeue, want pending", p.State)
+	}
+	if p.NextAttemptAfter != nil {
+		t.Errorf("a requeued organisation carries a backoff (%v); it should be "+
+			"claimable now, since nothing about it failed", p.NextAttemptAfter)
+	}
+	// attempts is deliberately kept: a row rebuilt four times is telling you
+	// something, and clearing it hides that.
+	if p.Attempts == 0 {
+		t.Error("requeue reset the attempt count, hiding how often this organisation has been rebuilt")
+	}
+
+	// And it is claimable again, which is the whole point.
+	c, err := db.ClaimForProvisioning(ctx, "t2", time.Minute)
+	if err != nil {
+		t.Fatalf("a requeued organisation could not be claimed: %v", err)
+	}
+	if c.Org != "recon-a" {
+		t.Errorf("claimed %q, want recon-a", c.Org)
+	}
+}
+
+// Requeue only moves a row that is still ready.
+//
+// Reconciliation reads a list, checks the cluster, then writes. In between, an
+// operator may have reset the row by hand and a provisioner may have claimed
+// it. Without the guard this would stamp pending over an active claim and two
+// provisioners would build the same organisation.
+func TestRequeueRefusesARowThatIsNoLongerReady(t *testing.T) {
+	db := newTestStore(t)
+	ctx := context.Background()
+	owner := ownerFor(t, db, "requeue-guard@example.com")
+
+	if err := db.CreateOrgWithOwner(ctx, "guard-org", "", owner, identity.RoleAdmin); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Still pending, never provisioned.
+	if err := db.Requeue(ctx, "guard-org", "absent"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Requeue on a pending row = %v, want ErrNotFound so a concurrent "+
+			"claim is not overwritten", err)
+	}
+
+	if _, err := db.ClaimForProvisioning(ctx, "t", time.Minute); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	// Now claimed and provisioning — still not ready.
+	if err := db.Requeue(ctx, "guard-org", "absent"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Requeue on a claimed row = %v, want ErrNotFound", err)
+	}
+	p, err := db.ProvisioningFor(ctx, "guard-org")
+	if err != nil {
+		t.Fatalf("ProvisioningFor: %v", err)
+	}
+	if p.State != StateProvisioning {
+		t.Errorf("state = %q, want provisioning — requeue overwrote an active claim", p.State)
+	}
+}

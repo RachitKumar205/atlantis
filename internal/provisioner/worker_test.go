@@ -3,6 +3,7 @@ package provisioner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -55,6 +56,12 @@ type fakeQueue struct {
 	failed      []failedMark
 	consoleURLs map[string]string
 	audits      []auditRow
+
+	// ready is what the queue believes is serving; requeued records what
+	// reconciliation put back.
+	ready    []string
+	readyErr error
+	requeued []string
 
 	// events records the order of the writes that must not be reordered.
 	events []string
@@ -157,6 +164,38 @@ func (f *fakeQueue) LogAction(ctx context.Context, org, actor, actorEmail, actio
 	f.audits = append(f.audits, auditRow{org: org, actor: actor, email: actorEmail, action: action})
 }
 
+func (f *fakeQueue) ReadyOrgs(ctx context.Context) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctxErr(ctx); err != nil {
+		return nil, err
+	}
+	if f.readyErr != nil {
+		return nil, f.readyErr
+	}
+	return append([]string(nil), f.ready...), nil
+}
+
+func (f *fakeQueue) Requeue(ctx context.Context, org, reason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	// The real update is guarded on state = 'ready', so an organisation that is
+	// no longer ready is a no-op reporting ErrNotFound. Modelled, because the
+	// reconciler is expected to tolerate exactly that.
+	for i, o := range f.ready {
+		if o == org {
+			f.ready = append(f.ready[:i:i], f.ready[i+1:]...)
+			f.requeued = append(f.requeued, org)
+			f.events = append(f.events, "requeue")
+			return nil
+		}
+	}
+	return fmt.Errorf("%s: %w", org, store.ErrNotFound)
+}
+
 func (f *fakeQueue) snapshot() ([]string, []failedMark, []string, []auditRow, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -178,6 +217,12 @@ type fakeCluster struct {
 	ensureErr error
 	waitErr   error
 	waitFor   time.Duration
+
+	// absent names organisations the cluster no longer has; nil means every
+	// organisation exists.
+	absent      map[string]bool
+	existsErr   error
+	existsCalls int
 
 	ensures int
 	waits   int
@@ -218,6 +263,22 @@ func (f *fakeCluster) WaitReady(ctx context.Context, _ string) error {
 	return err
 }
 
+func (f *fakeCluster) Exists(ctx context.Context, org string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctxErr(ctx); err != nil {
+		return false, err
+	}
+	if f.existsErr != nil {
+		return false, f.existsErr
+	}
+	f.existsCalls++
+	if f.absent == nil {
+		return true, nil
+	}
+	return !f.absent[org], nil
+}
+
 func (f *fakeCluster) counts() (int, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -228,17 +289,18 @@ func (f *fakeCluster) counts() (int, int) {
 
 func testConfig() Config {
 	return Config{
-		CloudPGURL:     "postgres://cloud/x",
-		ConsolePGURL:   "postgres://console/x",
-		ConsoleDataKey: "a-keyset",
-		ConsoleURL:     "http://localhost:3000",
-		ClaimedBy:      "test-provisioner",
-		PollInterval:   time.Millisecond,
-		Lease:          time.Second,
-		Heartbeat:      5 * time.Millisecond,
-		RetryBase:      time.Second,
-		RetryMax:       time.Minute,
-		HealthAddr:     "127.0.0.1:0",
+		CloudPGURL:        "postgres://cloud/x",
+		ConsolePGURL:      "postgres://console/x",
+		ConsoleDataKey:    "a-keyset",
+		ConsoleURL:        "http://localhost:3000",
+		ClaimedBy:         "test-provisioner",
+		PollInterval:      time.Millisecond,
+		ReconcileInterval: time.Hour,
+		Lease:             time.Second,
+		Heartbeat:         5 * time.Millisecond,
+		RetryBase:         time.Second,
+		RetryMax:          time.Minute,
+		HealthAddr:        "127.0.0.1:0",
 		Provision: provision.Config{
 			ExternalHost:  "atl-dev.test",
 			ServerImage:   "atlantis-server:local",
@@ -272,9 +334,46 @@ func unallocated() provision.Status {
 	return provision.Status{Ready: false}
 }
 
+// fakeFactory hands out clusters in order; the last one repeats.
+//
+// It exists so a test can say "the connection this process holds stops working,
+// and rebuilding it produces a working one" — which is what a rotated authority
+// looks like from inside the provisioner.
+type fakeFactory struct {
+	mu       sync.Mutex
+	clusters []Cluster
+	err      error // when set, rebuilding fails
+	calls    int
+}
+
+func (f *fakeFactory) next() (Cluster, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.err != nil && f.calls > 1 {
+		return nil, f.err
+	}
+	i := f.calls - 1
+	if i >= len(f.clusters) {
+		i = len(f.clusters) - 1
+	}
+	return f.clusters[i], nil
+}
+
+func (f *fakeFactory) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
 func newTestWorker(t *testing.T, cfg Config, q Queue, c Cluster, reg RegisterFunc) *Worker {
 	t.Helper()
-	w, err := New(cfg, q, c, reg, nil)
+	return newTestWorkerF(t, cfg, q, &fakeFactory{clusters: []Cluster{c}}, reg)
+}
+
+func newTestWorkerF(t *testing.T, cfg Config, q Queue, f *fakeFactory, reg RegisterFunc) *Worker {
+	t.Helper()
+	w, err := New(cfg, q, f.next, reg, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -621,6 +720,261 @@ func TestAStaleQueueRowIsNotRecordedAsAFailure(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(attemptsTotal.WithLabelValues("provisioned")); got != okBefore+1 {
 		t.Errorf("the provisioned counter went %v -> %v, want +1", okBefore, got)
+	}
+}
+
+// ------------------------------------------------------------- reconciliation
+
+// An organisation the queue calls ready but the cluster has lost is requeued.
+//
+// The case that produced this: the local cluster was destroyed and rebuilt, and
+// three organisations stayed 'ready' with no namespace. Nothing looks at a ready
+// row — the claim predicate covers pending, failed and expired-provisioning and
+// deliberately not ready — so recovering them meant hand-written SQL.
+func TestAnAbsentOrganisationIsRequeued(t *testing.T) {
+	q := newFakeQueue()
+	q.ready = []string{"gone", "here"}
+	c := &fakeCluster{absent: map[string]bool{"gone": true}}
+
+	w := newTestWorker(t, testConfig(), q, c, nil)
+	w.reconcile(context.Background())
+
+	q.mu.Lock()
+	requeued, stillReady := append([]string(nil), q.requeued...), append([]string(nil), q.ready...)
+	q.mu.Unlock()
+
+	if len(requeued) != 1 || requeued[0] != "gone" {
+		t.Errorf("requeued = %v, want [gone]", requeued)
+	}
+	if len(stillReady) != 1 || stillReady[0] != "here" {
+		t.Errorf("still ready = %v, want [here] — an organisation that exists must "+
+			"not be rebuilt, which would mint a new authority and invalidate every "+
+			"caller certificate under the old one", stillReady)
+	}
+
+	_, _, _, audits, _ := q.snapshot()
+	if len(audits) != 1 || audits[0].action != "org.requeued" || audits[0].org != "gone" {
+		t.Errorf("audit = %+v, want one org.requeued row for gone", audits)
+	}
+}
+
+// A cluster that refuses our credentials must not requeue the whole fleet.
+//
+// The dangerous shape: Exists fails for every organisation, and a reconciler
+// that treated an error as absence would rebuild every customer at once —
+// destroying every certificate authority in the process, because this process
+// could not authenticate.
+func TestACredentialFailureDoesNotRequeueEverything(t *testing.T) {
+	q := newFakeQueue()
+	q.ready = []string{"one", "two", "three"}
+	c := &fakeCluster{existsErr: staleCredsErr}
+	f := &fakeFactory{clusters: []Cluster{c}, err: errors.New("no kubeconfig")}
+
+	w := newTestWorkerF(t, testConfig(), q, f, nil)
+	w.reconcile(context.Background())
+
+	q.mu.Lock()
+	requeued := append([]string(nil), q.requeued...)
+	q.mu.Unlock()
+	if len(requeued) != 0 {
+		t.Errorf("requeued %v while the cluster was refusing our credentials — "+
+			"every one of those organisations was fine", requeued)
+	}
+	if w.Healthy() {
+		t.Error("the worker did not degrade after the cluster refused it during reconciliation")
+	}
+}
+
+// An ordinary lookup failure skips that organisation and carries on.
+func TestAnUncheckableOrganisationIsSkippedNotRequeued(t *testing.T) {
+	q := newFakeQueue()
+	q.ready = []string{"one"}
+	c := &fakeCluster{existsErr: errors.New("etcdserver: request timed out")}
+
+	w := newTestWorker(t, testConfig(), q, c, nil)
+	w.reconcile(context.Background())
+
+	q.mu.Lock()
+	requeued := append([]string(nil), q.requeued...)
+	q.mu.Unlock()
+	if len(requeued) != 0 {
+		t.Errorf("requeued %v on a lookup error — 'I could not tell' is not 'it is gone'", requeued)
+	}
+	if !w.Healthy() {
+		t.Error("a transient lookup error degraded the worker; only credential failures should")
+	}
+}
+
+// Reconciliation does nothing while degraded.
+func TestReconcileDoesNothingWhileDegraded(t *testing.T) {
+	q := newFakeQueue()
+	q.ready = []string{"one"}
+	c := &fakeCluster{absent: map[string]bool{"one": true}}
+
+	w := newTestWorker(t, testConfig(), q, c, nil)
+	w.degraded.Store(true)
+	w.reconcile(context.Background())
+
+	q.mu.Lock()
+	requeued := append([]string(nil), q.requeued...)
+	q.mu.Unlock()
+	if len(requeued) != 0 {
+		t.Errorf("a degraded worker requeued %v; it cannot know anything about the cluster", requeued)
+	}
+}
+
+// ---------------------------------------------------- stale cluster credentials
+
+// staleCredsErr is the error the walkthrough actually produced, verbatim.
+//
+// It arrived when the local cluster was destroyed and rebuilt underneath a
+// running provisioner: the new cluster has a new certificate authority, and the
+// client this process built at startup still presents the old one. Nothing in
+// the message mentions credentials, so it reads as a broken organisation.
+var staleCredsErr = errors.New(`Patch "https://atl-dev.test:6443/api/v1/namespaces/org-acme?fieldManager=atlantis-provisioner&force=true": tls: failed to verify certificate: x509: certificate signed by unknown authority`)
+
+func TestCredentialErrorsAreRecognised(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"the walkthrough's own error", staleCredsErr, true},
+		{"unknown authority", errors.New("x509: certificate signed by unknown authority"), true},
+		{"asked for credentials", errors.New("the server has asked for the client to provide credentials"), true},
+		{"wrapped", fmt.Errorf("apply: %w", staleCredsErr), true},
+		{"nil", nil, false},
+		{"an ordinary failure", errors.New("no such image atlantis-pg:17.11"), false},
+		{"a timeout", context.DeadlineExceeded, false},
+	} {
+		if got := credentialError(tc.err); got != tc.want {
+			t.Errorf("%s: credentialError = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// Stale credentials are rebuilt and the organisation provisions anyway.
+//
+// The failure this prevents: every organisation in the queue marked failed, one
+// per tick, with an x509 error that names none of them and no way to recover
+// short of somebody noticing and restarting the process.
+func TestStaleCredentialsAreRebuiltAndTheOrganisationSucceeds(t *testing.T) {
+	q := newFakeQueue(store.Claimed{Org: "acme", Attempts: 1})
+	broken := &fakeCluster{ensureErr: staleCredsErr}
+	working := &fakeCluster{statuses: []provision.Status{unallocated(), readyStatus()}}
+	f := &fakeFactory{clusters: []Cluster{broken, working}}
+
+	w := newTestWorkerF(t, testConfig(), q, f, func(context.Context, string, string, console.OrgRegistration) error {
+		return nil
+	})
+	w.drain(context.Background())
+
+	if f.count() != 2 {
+		t.Errorf("the cluster connection was rebuilt %d times, want 2 (one at New, one on the refusal)", f.count())
+	}
+	provisioned, failed, _, _, _ := q.snapshot()
+	if len(provisioned) != 1 {
+		t.Errorf("provisioned = %v, want [acme] — a rebuilt connection should carry the attempt through", provisioned)
+	}
+	if len(failed) != 0 {
+		t.Errorf("the organisation was marked failed despite a working retry: %+v", failed)
+	}
+	if !w.Healthy() {
+		t.Error("the worker stayed degraded after a successful rebuild")
+	}
+}
+
+// When the rebuild also fails, the worker degrades rather than blaming
+// organisations.
+func TestCredentialsThatCannotBeRebuiltDegradeTheWorker(t *testing.T) {
+	q := newFakeQueue(store.Claimed{Org: "acme", Attempts: 5})
+	broken := &fakeCluster{ensureErr: staleCredsErr}
+	f := &fakeFactory{clusters: []Cluster{broken}, err: errors.New("no kubeconfig")}
+
+	cfg := testConfig()
+	w := newTestWorkerF(t, cfg, q, f, nil)
+	w.drain(context.Background())
+
+	if w.Healthy() {
+		t.Error("the worker reports healthy after the cluster refused it and the rebuild failed")
+	}
+
+	_, failed, _, _, _ := q.snapshot()
+	if len(failed) != 1 {
+		t.Fatalf("failures = %+v, want one", failed)
+	}
+	// Attempt five would otherwise back off sixteen times the base. The
+	// organisation did nothing wrong and must not be punished for a fault in
+	// this process.
+	if failed[0].retryIn != cfg.RetryBase {
+		t.Errorf("retryIn = %s, want the base %s — a credential fault is not the "+
+			"organisation's fault and must not escalate its backoff",
+			failed[0].retryIn, cfg.RetryBase)
+	}
+	if !strings.Contains(failed[0].reason, "credentials") {
+		t.Errorf("the recorded reason does not name credentials, so whoever reads "+
+			"the row will look at the organisation: %q", failed[0].reason)
+	}
+}
+
+// A degraded worker claims nothing until its credentials work again.
+func TestADegradedWorkerStopsClaiming(t *testing.T) {
+	q := newFakeQueue(
+		store.Claimed{Org: "one", Attempts: 1},
+		store.Claimed{Org: "two", Attempts: 1},
+		store.Claimed{Org: "three", Attempts: 1},
+	)
+	broken := &fakeCluster{ensureErr: staleCredsErr}
+	f := &fakeFactory{clusters: []Cluster{broken}, err: errors.New("no kubeconfig")}
+
+	w := newTestWorkerF(t, testConfig(), q, f, nil)
+	w.drain(context.Background()) // fails "one", degrades
+	w.drain(context.Background()) // must not touch "two"
+	w.drain(context.Background())
+
+	_, failed, _, _, _ := q.snapshot()
+	if len(failed) != 1 {
+		t.Errorf("marked %d organisations failed, want 1 — a provisioner that cannot "+
+			"reach the cluster should stop, not work through the queue burying the "+
+			"one fact that matters", len(failed))
+	}
+}
+
+// And it recovers on its own once the credentials work.
+func TestADegradedWorkerRecovers(t *testing.T) {
+	q := newFakeQueue(store.Claimed{Org: "acme", Attempts: 1})
+	broken := &fakeCluster{ensureErr: staleCredsErr}
+	working := &fakeCluster{statuses: []provision.Status{unallocated(), readyStatus()}}
+	f := &fakeFactory{clusters: []Cluster{broken, broken}, err: errors.New("no kubeconfig")}
+
+	w := newTestWorkerF(t, testConfig(), q, f, func(context.Context, string, string, console.OrgRegistration) error {
+		return nil
+	})
+	w.drain(context.Background())
+	if w.Healthy() {
+		t.Fatal("the worker did not degrade, so this test proves nothing")
+	}
+
+	// The cluster comes back, and the organisation's backoff elapses so it is
+	// claimable again — which the real predicate does on next_attempt_after and
+	// this fake has no clock for.
+	f.mu.Lock()
+	f.err = nil
+	f.clusters = []Cluster{working}
+	f.calls = 0
+	f.mu.Unlock()
+	q.mu.Lock()
+	q.queued = append(q.queued, store.Claimed{Org: "acme", Attempts: 2})
+	q.mu.Unlock()
+
+	w.drain(context.Background())
+
+	if !w.Healthy() {
+		t.Error("the worker never recovered, so it needs a restart it should not need")
+	}
+	provisioned, _, _, _, _ := q.snapshot()
+	if len(provisioned) != 1 {
+		t.Errorf("provisioned = %v after recovery, want [acme]", provisioned)
 	}
 }
 

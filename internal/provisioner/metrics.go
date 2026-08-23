@@ -74,6 +74,21 @@ var (
 		Help:      "Failures querying the provisioning queue.",
 	})
 
+	// reconciledTotal counts organisations put back in the queue because the
+	// cluster no longer had them.
+	//
+	// Expected to be zero. A non-zero value means something removed a
+	// customer's namespace outside this system — or that the cluster was
+	// rebuilt — and every caller certificate in those organisations is about to
+	// be invalidated, because the authority went with the namespace. That is
+	// worth alerting on rather than reading about afterwards.
+	reconciledTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "atlantis",
+		Subsystem: "provisioning",
+		Name:      "reconciled_total",
+		Help:      "Ready organisations found absent from the cluster and requeued.",
+	})
+
 	// leaseExtensionFailuresTotal counts heartbeats that did not land.
 	//
 	// A failure here means this process no longer owns the row it is working

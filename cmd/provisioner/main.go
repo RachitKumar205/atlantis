@@ -72,17 +72,30 @@ func run(log *slog.Logger) error {
 	}
 	defer db.Close()
 
-	kube, err := openCluster(cfg.Provision, log)
+	// A factory, not a client: it is called again whenever the cluster refuses
+	// this process's credentials, and GetConfig re-reads the kubeconfig or the
+	// service account token at that moment. A client built once survives
+	// neither a rotated authority nor a development cluster that was rebuilt.
+	newCluster := func() (provisioner.Cluster, error) { return openCluster(cfg.Provision, log) }
+
+	w, err := provisioner.New(cfg, db, newCluster, nil, log)
 	if err != nil {
 		return err
 	}
 
-	w, err := provisioner.New(cfg, db, kube, nil, log)
-	if err != nil {
-		return err
+	// Readiness is both dependencies, not just the database. A provisioner that
+	// can read its queue and cannot reach Kubernetes provisions nothing, and
+	// without this it would report itself ready while doing so.
+	ready := func(ctx context.Context) error {
+		if err := db.Pool().Ping(ctx); err != nil {
+			return err
+		}
+		if !w.Healthy() {
+			return errors.New("the cluster has refused this provisioner's credentials")
+		}
+		return nil
 	}
-
-	health := provisioner.NewHealthServer(cfg.HealthAddr, db.Pool().Ping, ctx)
+	health := provisioner.NewHealthServer(cfg.HealthAddr, ready, ctx)
 	go func() {
 		log.Info("health http listening", "addr", cfg.HealthAddr)
 		if err := health.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
