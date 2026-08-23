@@ -9,6 +9,8 @@
 //
 //	cloud serve          publish the key set, and serve the account routes
 //	cloud mint           sign one assertion and print it
+//	cloud org create     create an organisation and queue it for provisioning
+//	cloud org status     show how far provisioning has got
 //	cloud org register   record an organisation's atlantis and credentials
 //	cloud data-key       print a keyset for a console's CONSOLE_DATA_KEY
 //
@@ -121,11 +123,12 @@ usage:
   cloud mint  [flags]          sign one assertion and print it
 
   cloud user create [flags]    create an account
-  cloud org create [flags]     record that an organisation exists
+  cloud org create [flags]     create an organisation and queue it for provisioning
+  cloud org status [flags]     show how far provisioning has got
   cloud member add [flags]     grant an account a role in an organisation
   cloud member remove [flags]  revoke it
 
-  cloud org register [flags]   point an organisation at its atlantis
+  cloud org register [flags]   point an organisation at an atlantis built by hand
   cloud data-key               print a keyset for a console's CONSOLE_DATA_KEY
 
 run any command with -h for its flags
@@ -545,11 +548,13 @@ func memberChange(args []string, add bool, log *slog.Logger) error {
 // while before it is provisioned.
 func org(args []string, log *slog.Logger) error {
 	if len(args) == 0 {
-		return errors.New(`cloud org: expected a subcommand (create, register)`)
+		return errors.New(`cloud org: expected a subcommand (create, status, register)`)
 	}
 	switch args[0] {
 	case "create":
 		return orgCreate(args[1:], log)
+	case "status":
+		return orgStatus(args[1:], log)
 	case "register":
 		return orgRegister(args[1:], log)
 	default:
@@ -580,6 +585,8 @@ func orgCreate(args []string, log *slog.Logger) error {
 	name := fs.String("org", "", "organisation name: lowercase, alphanumeric and hyphens, max 63")
 	display := fs.String("display-name", "", "human-readable name (optional)")
 	owner := fs.String("owner", "", "email address of the first admin; the account must already exist")
+	wait := fs.Bool("wait", false, "block until the organisation is serving, or until provisioning fails")
+	waitFor := fs.Duration("wait-timeout", 10*time.Minute, "how long -wait waits before giving up")
 	dbURL := cloudDBFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -593,7 +600,14 @@ func orgCreate(args []string, log *slog.Logger) error {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// The context has to outlive the wait, not the create. Sized from the flag
+	// with room for the writes either side, so -wait-timeout is what decides
+	// when this gives up rather than a constant somebody has to find.
+	timeout := 30 * time.Second
+	if *wait {
+		timeout = *waitFor + 30*time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	db, err := openCloud(ctx, *dbURL, log)
@@ -616,8 +630,136 @@ func orgCreate(args []string, log *slog.Logger) error {
 	}
 
 	fmt.Printf("organisation %s exists, owned by %s\n", *name, *owner)
-	fmt.Fprintln(os.Stderr, "cloud: queued for provisioning — `cloud org register` is "+
-		"only needed for an atlantis the provisioner did not build")
+
+	if !*wait {
+		fmt.Fprintf(os.Stderr, "cloud: queued for provisioning — `cloud org status -org %s` "+
+			"follows it, and `cloud org register` is only needed for an atlantis the "+
+			"provisioner did not build\n", *name)
+		return nil
+	}
+	return waitForProvisioning(ctx, db, *name, *waitFor)
+}
+
+// waitForProvisioning blocks until the organisation is serving, or reports why
+// it is not.
+//
+// # Why this exits non-zero
+//
+// Because a wait that reports success for an organisation that never came up is
+// the exact failure this flag exists to detect, reproduced inside the tool built
+// to detect it. A Makefile target or a walkthrough step would carry straight on
+// and fail later, somewhere less informative.
+//
+// # Why a `failed` state stops the wait
+//
+// `failed` is not terminal — the provisioner retries it after a backoff — so
+// this could keep waiting. It does not, because the failures that reach this
+// state locally are the ones a retry does not fix: a bad image reference, a
+// cluster that is not running, a setting nobody has filled in. Reporting the
+// reason now beats reporting a timeout in ten minutes, and the message says the
+// retry is still coming.
+func waitForProvisioning(ctx context.Context, db *store.Store, org string, limit time.Duration) error {
+	const poll = 2 * time.Second
+	deadline := time.Now().Add(limit)
+
+	var last store.ProvisioningState
+	for {
+		p, err := db.ProvisioningFor(ctx, org)
+		if err != nil {
+			return fmt.Errorf("read the provisioning state of %s: %w", org, err)
+		}
+		if p.State != last {
+			// Only on change, so a ten-minute wait is a handful of lines rather
+			// than three hundred identical ones.
+			fmt.Fprintf(os.Stderr, "cloud: %s is %s\n", org, p.State)
+			last = p.State
+		}
+
+		switch p.State {
+		case store.StateReady:
+			fmt.Printf("%s is serving", org)
+			if u, err := db.ConsoleURL(ctx, org); err == nil && u != "" {
+				fmt.Printf(" — sign in at %s", u)
+			}
+			fmt.Println()
+			return nil
+		case store.StateFailed:
+			return fmt.Errorf("provisioning %s failed after %d attempt(s): %s\n"+
+				"it will be retried automatically; `cloud org status -org %s` shows the current state",
+				org, p.Attempts, p.LastError, org)
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s was not provisioned within %s (state %q, %d attempt(s)) — "+
+				"it is still queued, so this is a timeout on waiting rather than a failure; "+
+				"`cloud org status -org %s` follows it",
+				org, limit, p.State, p.Attempts, org)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(poll):
+		}
+	}
+}
+
+// orgStatus prints where an organisation has got to.
+//
+// The queue row is otherwise readable only with psql, which makes a failed
+// organisation diagnosable by whoever has database access and nobody else.
+// attempts and last_error are the two fields that distinguish "still coming up"
+// from "has been failing since Tuesday" — the same pair the organisations
+// screen will read.
+func orgStatus(args []string, log *slog.Logger) error {
+	fs := flag.NewFlagSet("org status", flag.ExitOnError)
+	name := fs.String("org", "", "organisation name")
+	dbURL := cloudDBFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *name == "" {
+		return errors.New("-org is required")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	db, err := openCloud(ctx, *dbURL, log)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	p, err := db.ProvisioningFor(ctx, *name)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("%s is not queued for provisioning — either it does not exist, "+
+			"or it was registered by hand with `cloud org register`", *name)
+	}
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("org         %s\n", p.Org)
+	fmt.Printf("state       %s\n", p.State)
+	fmt.Printf("attempts    %d\n", p.Attempts)
+	if p.ClaimedBy != "" {
+		fmt.Printf("claimed by  %s\n", p.ClaimedBy)
+	}
+	if p.ClaimedUntil != nil {
+		fmt.Printf("lease until %s\n", p.ClaimedUntil.Format(time.RFC3339))
+	}
+	if p.NextAttemptAfter != nil {
+		fmt.Printf("next try    %s\n", p.NextAttemptAfter.Format(time.RFC3339))
+	}
+	if u, err := db.ConsoleURL(ctx, *name); err == nil && u != "" {
+		fmt.Printf("console     %s\n", u)
+	}
+	if p.LastError != "" {
+		// Kept after a later success rather than cleared, so this is printed
+		// whatever the state — "this took four goes and here is what was wrong"
+		// is worth more than a tidy row.
+		fmt.Printf("last error  %s\n", p.LastError)
+	}
 	return nil
 }
 

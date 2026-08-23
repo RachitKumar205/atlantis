@@ -590,6 +590,38 @@ dev-k8s: ## Create the local Kubernetes cluster with storage and CloudNativePG
 dev-k8s-load: build-provision-images ## Rebuild the images and push them into the cluster
 	CLUSTER=$(K8S_CLUSTER) CONTAINER=$(CONTAINER) FORCE_LOAD=1 ./deploy/k8s-dev.sh
 
+# The provisioner, run on the host against the cluster's kubeconfig.
+#
+# Host-side like every other dev target, and for the same reason dev-signer is:
+# the console and Cloud run here too, and an in-cluster provisioner would need
+# an image, a ServiceAccount and a scoped ClusterRole before it could do
+# anything the kubeconfig already allows. Those belong with GKE.
+#
+# CLOUD_AUDIENCE is the console URL twice over: it is what Cloud mints
+# assertions for and what cloud.orgs.console_url is set to, and the two must be
+# byte-identical — which is why this passes the same variable dev-org-register
+# passes as -console-url rather than introducing a second name for one value.
+#
+# The images are the ones dev-k8s-load pushes into the cluster. A reference the
+# cluster does not have is a pod that never starts, and these nodes have no
+# route to a registry to fall back on.
+K8S_EXTERNAL_HOST ?= $(K8S_CLUSTER).test
+K8S_MEMCACHED_ADDR ?= memcached.atlantis-system.svc.cluster.local:11211
+
+.PHONY: dev-provisioner
+dev-provisioner: dev-cloud-role dev-console-role dev-data-key ## Provision queued organisations into the local cluster
+	CLOUD_PG_URL="$(CLOUD_PG_URL)" \
+		CONSOLE_PG_URL="$(CONSOLE_PG_URL)" \
+		CONSOLE_DATA_KEY="$$(cat $(DEV_DATA_KEY_FILE))" \
+		CLOUD_AUDIENCE="$(CLOUD_AUDIENCE)" \
+		PROVISIONER_EXTERNAL_HOST="$(K8S_EXTERNAL_HOST)" \
+		PROVISIONER_SERVER_IMAGE="atlantis-server:local" \
+		PROVISIONER_SIGNER_IMAGE="atlantis-signer:local" \
+		PROVISIONER_POSTGRES_IMAGE="atlantis-pg:$(PG_IMAGE_TAG)" \
+		PROVISIONER_MEMCACHED_ADDR="$(K8S_MEMCACHED_ADDR)" \
+		PROVISIONER_HEALTH_LISTEN=127.0.0.1:8082 \
+		$(GO) run ./cmd/provisioner
+
 .PHONY: dev-k8s-destroy
 dev-k8s-destroy: ## Delete the cluster entirely (every provisioned organisation goes with it)
 	-$(CONTAINER) k8s delete --name $(K8S_CLUSTER) 2>/dev/null
@@ -714,7 +746,20 @@ dev-cloud-seed: dev-cloud-role build-cloud ## Put an existing account in an org:
 		-org "$(ORG)" -owner "$(EMAIL)"
 	@echo
 	@echo "==> $(EMAIL) owns $(ORG), which is queued for provisioning."
-	@echo "    Next: make dev-org-register ORG=$(ORG), then sign in at $(CLOUD_PUBLIC_URL)/signin"
+	@#
+	@# This used to say "Next: make dev-org-register". It stopped being true
+	@# when the provisioner landed: creating an organisation queues it, and a
+	@# running `make dev-provisioner` builds it without anybody typing
+	@# anything. A target that sends an operator at a command they no longer
+	@# need is the same defect as /authorize's 503 naming a CLI.
+	@echo "    Next: make dev-provisioner (in another terminal) builds it."
+	@echo "          make dev-org-status ORG=$(ORG) follows it; then sign in at $(CLOUD_PUBLIC_URL)/signin"
+	@echo "          make dev-org-register ORG=$(ORG) is only for an atlantis you built by hand."
+
+.PHONY: dev-org-status
+dev-org-status: build-cloud ## Show how far provisioning has got: make dev-org-status ORG=<name>
+	@if [ -z "$(ORG)" ]; then echo "ORG is required: make dev-org-status ORG=<name>" >&2; exit 1; fi
+	CLOUD_PG_URL="$(CLOUD_PG_URL)" $(BIN_DIR)/atlantis-cloud org status -org "$(ORG)"
 
 .PHONY: dev-org-register
 dev-org-register: dev-certs dev-data-key dev-cloud-role build-cloud ## Point an org at the local atlantis: make dev-org-register ORG=<name>

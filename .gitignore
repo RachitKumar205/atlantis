@@ -8,6 +8,7 @@
 # One per cmd/, because `go build ./cmd/<x>/` drops the binary here rather than
 # in bin/. /cloud was missing and a 38 MB executable very nearly went in with it.
 /cloud
+/provisioner
 /-.o
 /bin/
 /dist/

@@ -552,6 +552,63 @@ The common-name allowlist is a second, independent answer to the same question.
 unset, which meant the deployment with the least configuration had the fewest
 checks.
 
+#### The provisioner
+
+Turns queued organisations into running ones. It claims from the provisioning
+queue, builds the organisation in Kubernetes, registers it with the console, and
+points Cloud at that console — so that creating an organisation is the only
+step a person takes.
+
+It runs as its own process rather than inside `cloud serve`, because it holds
+Kubernetes credentials and `cloud serve` holds every password, every second
+factor and the assertion signing key.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLOUD_PG_URL` | (unset; **required**) | The queue, the organisations, and the audit log. |
+| `CONSOLE_PG_URL` | (unset; **required**) | Where a provisioned organisation is registered. |
+| `CONSOLE_DATA_KEY` | (unset; **required**) | The keyset that seals each organisation's private key. Must be the one the console serves with. |
+| `CLOUD_AUDIENCE` | (unset; **required**) | The console's URL. Written to `cloud.orgs.console_url`, and must be an absolute `http(s)` URL. |
+| `PROVISIONER_EXTERNAL_HOST` | (unset; **required**) | The name organisations are reached at. A name, never an address — it goes in every certificate's SAN. |
+| `PROVISIONER_SERVER_IMAGE` | (unset; **required**) | The atlantis image. |
+| `PROVISIONER_SIGNER_IMAGE` | (unset; **required**) | The signer image. |
+| `PROVISIONER_POSTGRES_IMAGE` | (unset; **required**) | The Postgres image. Its tag must read as a Postgres version — see `Dockerfile.pg`. |
+| `PROVISIONER_MEMCACHED_ADDR` | (unset; **required**) | The shared cache. Not defaulted deliberately; see below. |
+| `PROVISIONER_HEALTH_LISTEN` | `:8082` | Plaintext `/healthz`, `/readyz` and `/metrics`. |
+| `PROVISIONER_READY_TIMEOUT` | `5m` | How long to wait for an organisation to serve. Exceeding it is retryable, not terminal. |
+| `PROVISIONER_LEASE` | 3 × ready timeout | How long a claim is held. Must exceed the ready timeout. |
+| `PROVISIONER_LEASE_HEARTBEAT` | `30s` | How often the lease is extended during a wait. |
+| `PROVISIONER_POLL_INTERVAL` | `10s` | How often an idle queue is checked. |
+| `PROVISIONER_RETRY_BASE` / `_MAX` | `30s` / `30m` | Backoff after a failed attempt: doubling, capped. |
+| `PROVISIONER_NAME` | the hostname | Names this process in the queue. In Kubernetes the hostname is the pod name. |
+
+Kubernetes credentials are not a setting. The provisioner uses the pod's service
+account in-cluster and the ambient `KUBECONFIG` otherwise, so the same binary
+works in both places.
+
+**`PROVISIONER_LEASE` must outlive `PROVISIONER_READY_TIMEOUT`, and the process
+refuses to start otherwise.** A readiness wait can burn the whole timeout, and a
+lease that expires during it lets a second provisioner claim an organisation the
+first is still building — which then finishes and writes its result over the
+row. The default is computed from the timeout rather than being a constant, so
+raising one raises the other.
+
+**`PROVISIONER_MEMCACHED_ADDR` has no default on purpose.** `cmd/server` defaults
+`MEMCACHED_ADDR` to `localhost:11211`, which inside a pod is the one value
+guaranteed to be wrong — and atlantis's readiness probe performs a real cache
+operation, so a wrong address means the organisation never becomes Ready rather
+than merely being slow.
+
+Seven further settings — namespace prefix, storage class, pull policy, pod CIDR,
+operator namespace, and the Postgres instance count and volume size — are read
+but have their defaults inside the provisioning package. Leave them unset unless
+you are overriding one deliberately.
+
+**Running more than one is safe.** Claims are taken with `FOR UPDATE SKIP
+LOCKED` under a lease, so two provisioners never take the same organisation, and
+one that dies mid-work frees its organisation when the lease expires. There is no
+sweeper to run.
+
 ### Confirming a destructive action
 
 The console's danger-zone actions need step-up, and step-up means presenting a
