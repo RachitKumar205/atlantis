@@ -98,7 +98,7 @@ useful, and not what a person does. To go through the product:
 ```bash
 make dev-auth-app        # serves the sign-in pages
 make dev-cloud-seed EMAIL=you@example.com ORG=acme
-make dev-org-register ORG=acme
+make dev-provisioner     # builds it; see 0d for the hand-built alternative
 ```
 
 Then open `http://localhost:9500/signin`, create an account, and enrol an
@@ -122,7 +122,26 @@ It prints a URL with the assertion in the fragment. Open it. The assertion is
 run the target again for each sign-in, and again when the console asks you to
 confirm a destructive action.
 
-## 0d. Register your organisation
+## 0d. Give your organisation an atlantis
+
+There are two ways, and the first is the normal one.
+
+### Let the provisioner build it
+
+```bash
+make dev-cloud-seed EMAIL=you@example.com ORG=acme
+make dev-provisioner    # in another terminal, if it is not already running
+```
+
+Creating an organisation queues it. The provisioner builds it into the local
+Kubernetes cluster — its own namespace, its own two certificate authorities, its
+own Postgres, atlantis and signer — and registers it with the console. It takes
+about a minute. `make dev-org-status ORG=acme` shows how far it has got.
+
+This needs the cluster: see [Getting started](../getting-started/) for bringing
+it up.
+
+### Point it at an atlantis you built by hand
 
 ```bash
 make dev-org-register ORG=acme
@@ -144,11 +163,16 @@ console's own migrations, so start `make dev-console` once first.
 Two things about the local setup differ from a deployment, and both are worth
 knowing before you read a working `make dev` as proof of anything:
 
-- **One CA, not one per organisation.** There is a single local atlantis, so
-  every organisation registers against the same CA and the same certificate. The
-  handshake-level refusal of a cross-organisation certificate is therefore *not*
-  exercised locally. `internal/console/org_client_pg_test.go` stands up two CAs
+- **One CA, but only on this path.** `dev-org-register` points every
+  organisation at the one host-side atlantis, so they share a certificate
+  authority and the handshake-level refusal of a cross-organisation certificate
+  is *not* exercised. `internal/console/org_client_pg_test.go` stands up two CAs
   and two servers to exercise it.
+
+  **Provisioned organisations do not share anything.** Each gets its own
+  authority, and a certificate from one is refused by another — which is the
+  property the product depends on, so prefer the provisioner when you are
+  testing anything that touches identity.
 - **The keyset is a file.** `make dev-data-key` writes one to
   `./certs/console-data-key` on first use and reuses it thereafter. Deleting it
   does not break the console — it starts fine — but every organisation
@@ -231,7 +255,7 @@ The two manifests can coexist in the same atlantis deployment repo. Commit `atla
 - `invalid assertion` on sign-in — most often a reused link. Assertions are single use; run `make dev-token` again. Otherwise `make dev-auth` is signing with a different key than the one it publishes: delete `./certs/cloud-signing-key.pem` and restart both.
 - `cannot reach the identity provider` — `make dev-auth` is not running. The console answers 503 rather than 401 here, because nothing is known to be wrong with the credential.
 - `CONSOLE_DATA_KEY is required` from the console — run `make dev-data-key`, or use `make dev-console`, which passes it.
-- `no atlantis is registered for "acme"` — run `make dev-org-register ORG=acme`. The name has to match the `ORG` you minted the token with; signing in creates the organisation but does not provision it.
+- `no atlantis is registered for "acme"` — the organisation exists but nothing serves it. Check `make dev-org-status ORG=acme`: if it is `pending`, no provisioner is running; if `failed`, the same output says why. For an atlantis you built by hand, `make dev-org-register ORG=acme` instead. The name has to match the `ORG` you minted the token with.
 - `console.orgs does not exist yet` from `cloud org register` — the console creates its own schema at startup. Run `make dev-console` once, then register.
 - `decrypt credentials for acme (wrong CONSOLE_DATA_KEY, or the row was tampered with)` — the row was registered under a different keyset than the console is serving with. Most often `./certs/console-data-key` was deleted and regenerated; re-run `make dev-org-register`.
 - `no client certificate configured` from `tide` or `tidectl` — run `make dev-caller-cert CALLER=<name>` and export what it prints.
