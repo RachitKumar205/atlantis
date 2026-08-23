@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -382,12 +384,308 @@ func TestK8sTenantsCannotReachEachOthersDatabase(t *testing.T) {
 	}
 }
 
+// Every exposed port refuses a foreign pod with no network policy in the way.
+//
+// This is the test the isolation story rests on, and it is deliberately the
+// opposite shape of TestK8sTenantsCannotReachEachOthersDatabase. That one proves
+// the policy works. This one deletes the policy and proves the credentials do —
+// so that a cloud where the policy means something else is not a security
+// question.
+//
+// It has to be that way because NetworkPolicy is not portable. `ipBlock` covers
+// pod traffic under Calico, never covers it under GKE Dataplane V2, and on EKS
+// pods take VPC addresses so the pod-CIDR exclusion matches nothing and the rule
+// fails open. The same manifest, three meanings. Nothing in the object says
+// which one is in force.
+//
+// So the property worth owning is not "the policy blocks tenants". It is "every
+// port is safe with no policy at all". Then the policy is a second layer, and a
+// cloud where it is inert costs defence in depth rather than the boundary.
+func TestK8sEveryExposedPortRefusesAForeignPodWithNoNetworkPolicy(t *testing.T) {
+	if os.Getenv("ATLANTIS_TEST_K8S") == "" {
+		t.Skip("set ATLANTIS_TEST_K8S to exercise the exposed ports against a real cluster")
+	}
+
+	cfg, err := ctrlconfig.GetConfig()
+	if err != nil {
+		t.Fatalf("no cluster configuration: %v", err)
+	}
+	scheme, err := NewScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := ctrlclient.New(cfg, ctrlclient.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pcfg := testConfig()
+	pcfg.ReadyTimeout = 6 * time.Minute
+	pcfg.MemcachedAddr = "memcached.atlantis-system.svc.cluster.local:11211"
+	k, err := NewKube(pcfg, c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Its own organisation, because this test destroys that organisation's
+	// network policies. Sharing one with the other tests would leave them
+	// passing or failing depending on the order they ran in.
+	const org = "unguarded"
+	const probeNS = "port-probe"
+	ctx := context.Background()
+	t.Cleanup(func() {
+		_ = k.Destroy(context.Background(), org)
+		_ = c.Delete(context.Background(), &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{Name: probeNS},
+		})
+	})
+
+	if _, err := k.Ensure(ctx, Spec{Org: org}); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.WaitReady(ctx, org); err != nil {
+		t.Log(describe(ctx, t, k, org))
+		t.Fatalf("WaitReady: %v", err)
+	}
+	status, err := k.Ensure(ctx, Spec{Org: org})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := k.cfg.Namespace(org)
+
+	// Delete every policy, by listing rather than by name. Naming `baseline` and
+	// `external-access` would still compile and still pass on the day a fourth
+	// policy is added, while quietly testing less than it says.
+	var policies networkingv1.NetworkPolicyList
+	if err := c.List(ctx, &policies, ctrlclient.InNamespace(ns)); err != nil {
+		t.Fatal(err)
+	}
+	if len(policies.Items) == 0 {
+		t.Fatalf("%s has no network policies to remove; provisioning did not apply any, "+
+			"so this test would prove nothing about removing them", ns)
+	}
+	for i := range policies.Items {
+		if err := c.Delete(ctx, &policies.Items[i]); err != nil {
+			t.Fatalf("delete network policy %s: %v", policies.Items[i].Name, err)
+		}
+	}
+	var left networkingv1.NetworkPolicyList
+	if err := c.List(ctx, &left, ctrlclient.InNamespace(ns)); err != nil {
+		t.Fatal(err)
+	}
+	if len(left.Items) != 0 {
+		t.Fatalf("%d network policies survived deletion in %s; the rest of this test "+
+			"would credit the certificate for work the policy is still doing", len(left.Items), ns)
+	}
+	t.Logf("removed %d network policies from %s", len(policies.Items), ns)
+
+	if err := c.Create(ctx, &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: probeNS},
+	}); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatal(err)
+	}
+
+	atlantisHost := fmt.Sprintf("%s.%s.svc.cluster.local", nameAtlantis, ns)
+	signerHost := fmt.Sprintf("%s.%s.svc.cluster.local", nameSigner, ns)
+
+	// The control, and it runs first for two reasons.
+	//
+	// The obvious one: it proves a pod in another namespace now reaches this
+	// organisation, so a refusal below is the certificate and not the network.
+	//
+	// The one that is easy to miss: it is the only probe here that expects a
+	// *successful* HTTPS response. If the probe image could not speak HTTPS at
+	// all, every request would come back probeNoReply — which reads as the
+	// expected refusal on 9090 and 7070, and both would pass having tested
+	// nothing. This failing first is what stops that.
+	readyz := fmt.Sprintf("https://%s:%d/readyz", atlantisHost, portHealth)
+	if code := probeHTTPS(ctx, t, c, probeNS, "control-readyz", readyz); code != probeGot200 {
+		t.Fatalf("inconclusive: the control probe got %d from %s, want %d (200). "+
+			"Either the pod never arrived or the probe cannot speak HTTPS; "+
+			"in both cases nothing below would mean anything", code, readyz, probeGot200)
+	}
+
+	// Port 8081. It answers a client with no certificate and refuses per route,
+	// because the kubelet holds no certificate and still has to reach /healthz
+	// and /readyz. Both gated routes are checked: requireClientCert guards two,
+	// and testing one of them is how the other quietly loses its guard.
+	for _, path := range []string{"/metrics", "/status"} {
+		url := fmt.Sprintf("https://%s:%d%s", atlantisHost, portHealth, path)
+		name := "gated" + strings.ReplaceAll(path, "/", "-")
+		switch code := probeHTTPS(ctx, t, c, probeNS, name, url); code {
+		case probeGot401:
+			// The property.
+		case probeGot200:
+			t.Errorf("a pod in %s read %s with no client certificate; "+
+				"this port is protected by the network policy alone", probeNS, url)
+		default:
+			t.Errorf("inconclusive: %s returned %d, which is neither 200 nor 401, "+
+				"even though the control reached this same host and port", url, code)
+		}
+	}
+
+	// Ports 9090 and 7070 use RequireAndVerifyClientCert, so TLS refuses before
+	// any request is made and there is no status code to read. Both are checked
+	// twice, from two places, because neither check is sufficient alone.
+	//
+	// From a pod: that the port is reachable now that no policy stands in the
+	// way. This is the half that says a refusal is not the network.
+	//
+	// A pod cannot say more than that. busybox reports a refused handshake as
+	// `error getting response: Connection reset by peer` — and a server that had
+	// *stopped* asking for a certificate would produce the same words, because a
+	// gRPC server rejects an HTTP/1.1 request just as abruptly. Asserting "not
+	// 200" from a pod would therefore hold whether or not mTLS was still on: a
+	// check that cannot fail for the reason it names.
+	for _, tc := range []struct {
+		what string
+		host string
+		port int32
+	}{
+		{"the admin plane", atlantisHost, portGRPC},
+		{"the signer", signerHost, portSigner},
+	} {
+		if code := probeTCP(ctx, t, c, probeNS, fmt.Sprintf("tcp-%d", tc.port), tc.host, tc.port); code != 0 {
+			t.Errorf("inconclusive: %s on %s:%d did not accept a connection from %s (exit %d), "+
+				"so nothing about that port has been established",
+				tc.what, tc.host, tc.port, probeNS, code)
+		}
+	}
+
+	// The other half, from the test process, where a real TLS client can say
+	// what actually happened rather than guess from wget's wording.
+	//
+	// The host is outside the pod network, so the policy never applied to it and
+	// deleting the policy changes nothing here. That is the point: this asks a
+	// different question — *what* refuses — while the probes above establish
+	// that the network is no longer the thing doing it. Together they say the
+	// certificate is carrying the port. Separately neither does.
+	for _, tc := range []struct {
+		what string
+		addr string
+	}{
+		{"the admin plane", status.Endpoint},
+		{"the signer", strings.TrimPrefix(status.SignerAddr, "https://")},
+	} {
+		assertRefusesWithoutAClientCertificate(t, tc.what, tc.addr)
+	}
+}
+
+// assertRefusesWithoutAClientCertificate requires that TLS itself — not the
+// protocol layered on top of it — turns away a client holding no certificate.
+//
+// # Why "the connection failed" is not the assertion
+//
+// The obvious version of this check is "open a connection, try to use it, and
+// require an error". It passes on a server that has stopped requiring client
+// certificates altogether, and it was measured doing exactly that. With mTLS
+// removed from the admin plane, a plain TLS client is admitted, sends an
+// HTTP/1.1 request, and gRPC hangs up on it for speaking the wrong protocol:
+//
+//	mTLS on   →  remote error: tls: certificate required
+//	mTLS off  →  EOF
+//
+// Both are errors. Only the first is this port's boundary doing anything. A
+// check that accepted either would have reported a protected port on a build
+// where the protection had been deleted — which is the failure this whole test
+// exists to rule out, reproduced inside the test itself.
+//
+// So the error has to name a certificate. EOF, connection reset and timeout all
+// fail, and they fail with a message that says why the result is not evidence.
+//
+// # Why the handshake is not enough on its own
+//
+// Under TLS 1.3 the client finishes its side before the server has judged it,
+// so `tls.Dial` returns a usable connection and the alert arrives on the first
+// read. The exchange below is what surfaces it. A TLS 1.2 server refuses during
+// the handshake instead, so both paths lead to the same check.
+func assertRefusesWithoutAClientCertificate(t *testing.T, what, addr string) {
+	t.Helper()
+
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	conn, err := tls.DialWithDialer(dialer, "tcp", addr,
+		&tls.Config{InsecureSkipVerify: true}) //nolint:gosec // the server's identity is not what is under test
+	if err == nil {
+		defer func() { _ = conn.Close() }()
+		_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+		if _, werr := conn.Write([]byte("GET / HTTP/1.1\r\nHost: probe\r\nConnection: close\r\n\r\n")); werr != nil {
+			err = werr
+		} else {
+			buf := make([]byte, 64)
+			n, rerr := conn.Read(buf)
+			if rerr == nil {
+				t.Errorf("%s at %s answered a client holding no certificate with %d bytes (%q); "+
+					"this port does not require a client certificate",
+					what, addr, n, strings.TrimSpace(string(buf[:n])))
+				return
+			}
+			err = rerr
+		}
+	}
+
+	// Observed shapes: "remote error: tls: certificate required" under TLS 1.3,
+	// and "remote error: tls: bad certificate" from a 1.2 server rejecting an
+	// empty one. Matching the word rather than the whole sentence keeps this
+	// from depending on which version was negotiated.
+	if !strings.Contains(err.Error(), "certificate") {
+		t.Errorf("%s at %s refused with %q, which does not mention a certificate. "+
+			"That is what a port with no client-certificate requirement looks like: "+
+			"TLS admits the connection and the protocol above it hangs up. "+
+			"Nothing here shows the certificate did the refusing", what, addr, err)
+	}
+}
+
 // probeTCP runs one TCP connect from a pod in ns and returns its exit code.
+func probeTCP(ctx context.Context, t *testing.T, c ctrlclient.Client, ns, name, host string, port int32) int32 {
+	t.Helper()
+	return runProbe(ctx, t, c, ns, name, fmt.Sprintf("nc -z -w 5 %s %d", host, port))
+}
+
+// What probeHTTPS reports. The numbers are arbitrary; what matters is that they
+// are distinct from the exit codes wget itself uses, so a result is never
+// confused with a failure to run.
+const (
+	probeGot200  int32 = 20
+	probeGot401  int32 = 21
+	probeNoReply int32 = 22
+)
+
+// probeHTTPS makes one unauthenticated HTTPS request from a pod in ns.
+//
+// The certificate is deliberately not verified. This asks what the *server*
+// does with a client that holds no certificate, and verifying the server's own
+// certificate would need the organisation's authority distributed to a probe
+// that is standing in for an attacker — who would not have it either.
+//
+// probeNoReply is the answer that needs care. It means the request produced
+// neither 200 nor 401: the port was unreachable, or TLS refused the connection,
+// or it timed out. Which of those it was cannot be told from here, so every
+// caller needs a separate control that establishes the pod arrived at all.
+func probeHTTPS(ctx context.Context, t *testing.T, c ctrlclient.Client, ns, name, url string) int32 {
+	t.Helper()
+
+	// wget exits 0 only on a 2xx, so the success path needs no parsing. A 401
+	// arrives as `wget: server returned error: HTTP/1.1 401 Unauthorized` on
+	// stderr, which is why stderr is folded into the captured output.
+	//
+	// No -S and no temporary file: busybox does not carry GNU wget's -S in every
+	// build, and a probe should not assume a writable filesystem it was never
+	// promised.
+	script := fmt.Sprintf(
+		`out=$(wget -q -O /dev/null -T 10 --no-check-certificate %s 2>&1) && exit %d
+case "$out" in *401*) exit %d ;; esac
+exit %d`, url, probeGot200, probeGot401, probeNoReply)
+
+	return runProbe(ctx, t, c, ns, name, script)
+}
+
+// runProbe runs one shell command in a throwaway pod and returns its exit code.
 //
 // busybox, because it is already loaded into the cluster — a probe that needs
 // an image the node cannot pull would fail for reasons that look exactly like
 // the policy working.
-func probeTCP(ctx context.Context, t *testing.T, c ctrlclient.Client, ns, name, host string, port int32) int32 {
+func runProbe(ctx context.Context, t *testing.T, c ctrlclient.Client, ns, name, script string) int32 {
 	t.Helper()
 
 	// The security context is not incidental. Tenant namespaces enforce Pod
@@ -420,10 +718,7 @@ func probeTCP(ctx context.Context, t *testing.T, c ctrlclient.Client, ns, name, 
 					AllowPrivilegeEscalation: &no,
 					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 				},
-				Command: []string{
-					"sh", "-c",
-					fmt.Sprintf("nc -z -w 5 %s %d", host, port),
-				},
+				Command: []string{"sh", "-c", script},
 			}},
 		},
 	}
