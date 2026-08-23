@@ -81,7 +81,13 @@ COPY --from=build /out/atlantis /app/atlantis
 # never runs as root.
 RUN mkdir -p /app/schema && chown -R atlantis:atlantis /app
 
-USER atlantis
+# Numeric, not `USER atlantis`. The kubelet enforces `runAsNonRoot: true` from
+# image metadata alone, before the container runs, so it cannot resolve a name to
+# a uid and refuses the image: "container has runAsNonRoot and image has
+# non-numeric user". The pod stays in CreateContainerConfigError. The name still
+# exists — adduser above created it, and the chown uses it — this line just says
+# the same thing in the form the kubelet can check.
+USER 10001
 
 # 9090 gRPC; 8081 health/metrics (/healthz, /readyz, /metrics).
 EXPOSE 9090 8081

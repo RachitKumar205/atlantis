@@ -17,8 +17,21 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/atlantis-signer ./cmd/si
 # ── runtime ────────────────────────────────────────────────────────────────────
 FROM alpine:3.20
 
-RUN addgroup -S signer && adduser -S signer -G signer
-USER signer
+# The uid is pinned and USER is the number rather than the name, and both halves
+# are load-bearing.
+#
+# `adduser -S` picks the next free system uid, so the number moves if the base
+# image ever adds a user before this line. Nothing here breaks when it moves —
+# but a Kubernetes manifest that named the old number would then run the process
+# as a uid that owns none of its files.
+#
+# USER must be numeric because the kubelet enforces `runAsNonRoot: true` before
+# the container starts, and at that point it has only the image metadata. It
+# cannot resolve "signer" to a uid without running the image, so a named USER is
+# refused outright: "container has runAsNonRoot and image has non-numeric user".
+# The pod sits in CreateContainerConfigError, which reads like a bad env var.
+RUN addgroup -S -g 10001 signer && adduser -S -u 10001 -G signer signer
+USER 10001
 
 COPY --from=builder /out/atlantis-signer /usr/local/bin/atlantis-signer
 

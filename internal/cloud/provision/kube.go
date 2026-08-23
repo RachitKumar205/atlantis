@@ -128,6 +128,12 @@ func (k *Kube) Ensure(ctx context.Context, spec Spec) (Status, error) {
 			return Status{}, fmt.Errorf("network policy %s: %w", p.GetName(), err)
 		}
 	}
+	// Before the workloads: a pod naming a service account that does not exist
+	// is admitted and then never starts, and the event says only "error looking
+	// up service account", which reads like a permissions problem.
+	if err := k.apply(ctx, k.serviceAccount(ns)); err != nil {
+		return Status{}, fmt.Errorf("service account: %w", err)
+	}
 
 	bundle, err := k.ensureCerts(ctx, ns, spec.Org)
 	if err != nil {

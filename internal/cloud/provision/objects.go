@@ -38,6 +38,25 @@ func (k *Kube) meta(ns, name, component string) metav1.ObjectMeta {
 	}
 }
 
+// The three Pod Security Admission labels. Setting the security context on our
+// own pods hardens the pods we write; the label is what makes the namespace
+// refuse a pod that lacks it — including one nothing here wrote.
+//
+// enforce is what actually rejects. warn and audit are set to the same level
+// because otherwise a rejection is a bare admission error with no record of it;
+// audit puts the reason in the API server's log, and warn returns it to whoever
+// applied the object.
+//
+// "restricted" rather than "baseline": baseline permits running as root, and
+// the whole point of the pod-level context here is that this namespace runs a
+// stranger's queries.
+const (
+	psaEnforce = "pod-security.kubernetes.io/enforce"
+	psaAudit   = "pod-security.kubernetes.io/audit"
+	psaWarn    = "pod-security.kubernetes.io/warn"
+	psaLevel   = "restricted"
+)
+
 func (k *Kube) namespace(ns, org string) ctrlclient.Object {
 	return &corev1.Namespace{
 		TypeMeta: typeMeta("v1", "Namespace"),
@@ -46,8 +65,29 @@ func (k *Kube) namespace(ns, org string) ctrlclient.Object {
 			Labels: map[string]string{
 				labelOrg:                       org,
 				"app.kubernetes.io/managed-by": "atlantis-provisioner",
+				psaEnforce:                     psaLevel,
+				psaAudit:                       psaLevel,
+				psaWarn:                        psaLevel,
 			},
 		},
+	}
+}
+
+// serviceAccount exists so the workloads have something to run as other than
+// `default`.
+//
+// It is granted nothing — no Role, no RoleBinding — and that is the whole
+// design. Kubernetes mounts a token for the default account into every pod that
+// does not say otherwise, so before this the atlantis pod, which runs a
+// customer's SQL, held a live API credential it had no use for. The account
+// separates "this pod's identity" from "the namespace's identity" so that
+// granting the second later does not silently grant the first.
+func (k *Kube) serviceAccount(ns string) ctrlclient.Object {
+	no := false
+	return &corev1.ServiceAccount{
+		TypeMeta:                     typeMeta("v1", "ServiceAccount"),
+		ObjectMeta:                   k.meta(ns, saName, saName),
+		AutomountServiceAccountToken: &no,
 	}
 }
 

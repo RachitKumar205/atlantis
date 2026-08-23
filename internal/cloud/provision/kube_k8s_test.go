@@ -2,10 +2,12 @@ package provision
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,10 +103,23 @@ func TestK8sProvisionsAWorkingOrganisation(t *testing.T) {
 	// passing means the pool opened, which means the extensions were created in
 	// the database PG_URL points at, and that memcached is reachable — /readyz
 	// probes it and 503s otherwise.
+	//
+	// https, and the certificate deliberately unverified. The health listener
+	// terminates TLS so that /status and /metrics can demand a client
+	// certificate; /readyz needs none, but it shares the listener, so the scheme
+	// moved with it. This test holds no copy of the organisation's authority and
+	// should not need one — it is asking "is this process serving", not "is this
+	// the right process".
 	t.Run("readyz from the host", func(t *testing.T) {
-		url := fmt.Sprintf("http://%s/readyz", status.HealthAddr)
+		url := fmt.Sprintf("https://%s/readyz", status.HealthAddr)
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+		client := &http.Client{
+			Timeout: 10 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // see above
+			},
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			t.Fatalf("GET %s: %v", url, err)
 		}
@@ -112,6 +127,143 @@ func TestK8sProvisionsAWorkingOrganisation(t *testing.T) {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("GET %s = %d: %s", url, resp.StatusCode, body)
+		}
+	})
+
+	// Every assertion here reads the *running pod*, not the Deployment and not
+	// the structs in workloads.go.
+	//
+	// The distinction is the whole reason this subtest exists. A security
+	// context is easy to write and easy to have no effect: `runAsNonRoot: true`
+	// against an image with a named USER is refused by the kubelet at container
+	// creation, so the field is present, correct, and the workload never starts —
+	// and the Deployment still reads exactly right. Reading it back from the API
+	// server after the pod is Running is the only form of this check that can
+	// fail for the reasons it is meant to catch.
+	//
+	// The service-account token is the sharpest of them: nothing we write says
+	// "no token volume". Admission adds a `kube-api-access-*` projected volume to
+	// every pod that does not refuse it, so its *absence* is evidence about what
+	// the cluster did, and it cannot be established anywhere but here.
+	t.Run("the workload pods are hardened in the cluster", func(t *testing.T) {
+		ns := k.cfg.Namespace(org)
+
+		var ps corev1.PodList
+		if err := c.List(ctx, &ps, ctrlclient.InNamespace(ns)); err != nil {
+			t.Fatal(err)
+		}
+		seen := 0
+		for i := range ps.Items {
+			p := &ps.Items[i]
+			name := p.Labels["app.kubernetes.io/name"]
+			if name != nameAtlantis && name != nameSigner {
+				continue // CloudNativePG's pods are its own to harden.
+			}
+			seen++
+			if p.Status.Phase != corev1.PodRunning {
+				t.Errorf("%s: phase %s, so nothing below is evidence", p.Name, p.Status.Phase)
+			}
+
+			sc := p.Spec.SecurityContext
+			switch {
+			case sc == nil:
+				t.Errorf("%s: no pod security context", p.Name)
+			default:
+				if sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
+					t.Errorf("%s: runAsNonRoot is not set", p.Name)
+				}
+				if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+					t.Errorf("%s: seccomp is %v, want RuntimeDefault", p.Name, sc.SeccompProfile)
+				}
+			}
+
+			for _, ctr := range p.Spec.Containers {
+				csc := ctr.SecurityContext
+				if csc == nil {
+					t.Errorf("%s/%s: no container security context", p.Name, ctr.Name)
+					continue
+				}
+				if csc.AllowPrivilegeEscalation == nil || *csc.AllowPrivilegeEscalation {
+					t.Errorf("%s/%s: privilege escalation is not denied", p.Name, ctr.Name)
+				}
+				if csc.Capabilities == nil || len(csc.Capabilities.Drop) != 1 || csc.Capabilities.Drop[0] != "ALL" {
+					t.Errorf("%s/%s: capabilities are %v, want drop ALL", p.Name, ctr.Name, csc.Capabilities)
+				}
+				if csc.ReadOnlyRootFilesystem == nil || !*csc.ReadOnlyRootFilesystem {
+					t.Errorf("%s/%s: the root filesystem is writable", p.Name, ctr.Name)
+				}
+				// The mount is half of that setting, not a detail of it: a
+				// read-only root with no writable /tmp is a container that boots
+				// and then fails the first time anything reaches for os.TempDir.
+				// The failure is late, load-dependent, and looks nothing like this
+				// setting, so it is asserted here rather than left to be met.
+				var tmp bool
+				for _, m := range ctr.VolumeMounts {
+					if m.MountPath == "/tmp" {
+						tmp = true
+					}
+				}
+				if !tmp {
+					t.Errorf("%s/%s: root is read-only with no writable /tmp", p.Name, ctr.Name)
+				}
+			}
+
+			if p.Spec.ServiceAccountName != saName {
+				t.Errorf("%s: runs as service account %q, want %q", p.Name, p.Spec.ServiceAccountName, saName)
+			}
+			for _, v := range p.Spec.Volumes {
+				if strings.HasPrefix(v.Name, "kube-api-access") {
+					t.Errorf("%s: mounts an API token at %s", p.Name, v.Name)
+				}
+			}
+
+			if g := p.Spec.TerminationGracePeriodSeconds; g == nil || *g < 35 {
+				t.Errorf("%s: grace period %v, want more than the 30s shutdown takes", p.Name, g)
+			}
+
+			// atlantis migrates before it binds the health port, so its boot
+			// budget has to be larger than its steady-state one. The comparison
+			// is between the two budgets rather than against fixed numbers,
+			// because the thing that must stay true is the ordering: whatever the
+			// liveness settings become, a first boot must have longer than a
+			// single stall does.
+			if name == nameAtlantis {
+				for _, ctr := range p.Spec.Containers {
+					sp, lp := ctr.StartupProbe, ctr.LivenessProbe
+					if sp == nil {
+						t.Errorf("%s/%s: no startup probe, so liveness times the migrations", p.Name, ctr.Name)
+						continue
+					}
+					if lp == nil {
+						continue
+					}
+					boot := sp.InitialDelaySeconds + sp.PeriodSeconds*sp.FailureThreshold
+					steady := lp.InitialDelaySeconds + lp.PeriodSeconds*lp.FailureThreshold
+					if boot <= steady {
+						t.Errorf("%s/%s: boot budget %ds does not exceed the liveness budget %ds",
+							p.Name, ctr.Name, boot, steady)
+					}
+				}
+			}
+		}
+		if seen != 2 {
+			t.Fatalf("found %d atlantis/signer pods, want 2", seen)
+		}
+	})
+
+	// The namespace label is what refuses a pod nothing here wrote — a debug
+	// container, a Job, anything applied by hand. Enforcement is the field that
+	// rejects; warn and audit only report, so checking `enforce` alone would pass
+	// on a namespace that merely complains.
+	t.Run("the namespace enforces restricted pod security", func(t *testing.T) {
+		var got corev1.Namespace
+		if err := c.Get(ctx, types.NamespacedName{Name: k.cfg.Namespace(org)}, &got); err != nil {
+			t.Fatal(err)
+		}
+		for _, label := range []string{psaEnforce, psaAudit, psaWarn} {
+			if v := got.Labels[label]; v != psaLevel {
+				t.Errorf("%s = %q, want %q", label, v, psaLevel)
+			}
 		}
 	})
 
@@ -238,14 +390,36 @@ func TestK8sTenantsCannotReachEachOthersDatabase(t *testing.T) {
 func probeTCP(ctx context.Context, t *testing.T, c ctrlclient.Client, ns, name, host string, port int32) int32 {
 	t.Helper()
 
+	// The security context is not incidental. Tenant namespaces enforce Pod
+	// Security "restricted", so a bare pod is refused at admission — and the
+	// refusal surfaces here as `create probe pod: ... violates PodSecurity`,
+	// which is a test that cannot run rather than a policy that failed. The uid
+	// is named explicitly because busybox declares no USER and therefore defaults
+	// to root, which runAsNonRoot rejects.
+	//
+	// This probe has to satisfy the same policy the workloads do. If that ever
+	// becomes hard, that is worth knowing: it means the policy is stricter than
+	// the thing it is protecting can tolerate.
+	nobody := int64(65534)
+	no, yes := false, true
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 		Spec: corev1.PodSpec{
-			RestartPolicy: corev1.RestartPolicyNever,
+			RestartPolicy:                corev1.RestartPolicyNever,
+			AutomountServiceAccountToken: &no,
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot:   &yes,
+				RunAsUser:      &nobody,
+				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+			},
 			Containers: []corev1.Container{{
 				Name:            "probe",
 				Image:           "docker.io/library/busybox:1.36",
 				ImagePullPolicy: corev1.PullIfNotPresent,
+				SecurityContext: &corev1.SecurityContext{
+					AllowPrivilegeEscalation: &no,
+					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+				},
 				Command: []string{
 					"sh", "-c",
 					fmt.Sprintf("nc -z -w 5 %s %d", host, port),
