@@ -48,6 +48,51 @@ POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
 LPP_VERSION="${LPP_VERSION:-v0.0.37}"
 CONTAINER="${CONTAINER:-container}"
 
+# ---------- 0. disk ----------
+#
+# Checked first, because a full disk is the failure this workflow actually hits
+# and the one that never says so. Observed twice: the apiserver stops serving
+# with nothing in its log, `container` reports the node as running, and an
+# unrelated command answers `internalError: "mount"`. Every symptom points
+# somewhere other than disk.
+#
+# The numbers come from measurement, not taste. One provisioned organisation
+# costs roughly 400 MiB once its Postgres volume and three pods exist, and the
+# cluster itself is about 6.5 GiB with images loaded. Three organisations took
+# this machine from 5.5 GiB free to zero and killed the cluster mid-walkthrough.
+#
+# A warning rather than a refusal above the floor: it is legitimate to bring up
+# a cluster on a tight disk and provision nothing.
+DISK_WARN_GIB="${DISK_WARN_GIB:-15}"
+DISK_FLOOR_GIB="${DISK_FLOOR_GIB:-5}"
+
+free_gib() {
+    # -P for POSIX output (one line per filesystem, no wrapping), -k for
+    # kibibytes, which every df agrees on. $4 is available.
+    df -Pk . 2>/dev/null | awk 'NR==2 {printf "%d", $4/1024/1024}'
+}
+
+avail="$(free_gib)"
+if [ -n "$avail" ] && [ "$avail" -lt "$DISK_FLOOR_GIB" ]; then
+    echo "refusing to start: ${avail} GiB free, below the ${DISK_FLOOR_GIB} GiB floor." >&2
+    echo >&2
+    echo "  A full disk kills this cluster in a way that looks like something" >&2
+    echo "  else — the apiserver stops with no error and the node still reports" >&2
+    echo "  as running. Free space first." >&2
+    echo >&2
+    echo "  Biggest reclaimable things, usually in this order:" >&2
+    echo "    go clean -modcache                 # often several GiB" >&2
+    echo "    make dev-k8s-destroy               # the cluster itself, ~6.5 GiB" >&2
+    echo "    $CONTAINER image prune             # unreferenced layers" >&2
+    echo >&2
+    echo "  Override with DISK_FLOOR_GIB=0 if you know what you are doing." >&2
+    exit 1
+fi
+if [ -n "$avail" ] && [ "$avail" -lt "$DISK_WARN_GIB" ]; then
+    echo "warning: ${avail} GiB free. Each provisioned organisation costs about" >&2
+    echo "         400 MiB, and a full disk stops this cluster without saying so." >&2
+fi
+
 # Images the cluster needs that must come from the host. Local builds are
 # handled separately, below, because they must not be pulled.
 REMOTE_IMAGES=(
@@ -186,6 +231,20 @@ for ref in "${LOCAL_IMAGES[@]}"; do
 
     "$CONTAINER" image tag "$ref" "$qualified" >/dev/null 2>&1 || true
     "$CONTAINER" k8s load-image --name "$CLUSTER" "$qualified" >/dev/null
+    # Only the extra tag is dropped, never the image.
+    #
+    # The pulled images above are deleted from the host store because they can
+    # be pulled again. These cannot: they are built here, and atlantis-pg takes
+    # several minutes and a network round trip to the TimescaleDB apt
+    # repository to reproduce. Deleting the host copy of something whose only
+    # other copy is inside a cluster means destroying the cluster destroys the
+    # image — which is exactly what happened, and it turned a five-minute
+    # cluster rebuild into a twenty-minute one.
+    #
+    # `image rm "$ref"` is deliberately NOT here. If the two names resolve to
+    # one image, dropping the qualified tag is a no-op and the build survives;
+    # if they are separate, the unqualified build survives. Either way there is
+    # still a copy on the host.
     "$CONTAINER" image rm "$qualified" >/dev/null 2>&1 || true
     echo "loaded $qualified"
 done

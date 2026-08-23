@@ -631,6 +631,17 @@ dev-k8s-destroy: ## Delete the cluster entirely (every provisioned organisation 
 	-$(CONTAINER) k8s delete --name $(K8S_CLUSTER) 2>/dev/null
 	-$(CONTAINER) rm $(K8S_CLUSTER) 2>/dev/null
 	@echo "==> cluster removed. 'make dev-k8s' builds a fresh one."
+	@echo
+	@echo "    Every provisioned organisation went with it, and the queue does"
+	@echo "    not know: rows still say 'ready'. A running provisioner notices"
+	@echo "    within PROVISIONER_RECONCILE_INTERVAL and rebuilds them, which"
+	@echo "    mints new certificate authorities — enrolled callers must run"
+	@echo "    'tide login' again."
+	@echo
+	@echo "    Check the images survived before rebuilding:"
+	@echo "      $(CONTAINER) image list | grep atlantis"
+	@echo "    A missing one needs 'make build-provision-images' first;"
+	@echo "    atlantis-pg needs network and takes a few minutes."
 
 .PHONY: container-builder
 container-builder: ## Restart the image builder with a resolver that works
@@ -884,6 +895,26 @@ build-cloud: ## Build the Cloud identity service for development (no SPA embedde
 	@# installed. `make build-cloud-embedded` is the one that ships.
 	$(GO) build $(GOFLAGS) -o $(BIN_DIR)/atlantis-cloud ./cmd/cloud
 
+# Every role target takes this lock before touching roles or grants.
+#
+# `GRANT ... ON DATABASE atlantis` updates one row in pg_database, and two
+# sessions doing it at the same moment get "ERROR: tuple concurrently updated"
+# — Postgres does not serialise catalog updates the way it serialises rows.
+# That is not hypothetical: `make dev-auth`, `make dev-console` and
+# `make dev-provisioner` each depend on a role target, so starting the three
+# services together (which is how anybody runs them) failed about half the time.
+#
+# A session-level advisory lock, taken as the first statement of the psql
+# invocation and released when psql exits. The constant is arbitrary but must
+# never change: two Makefiles disagreeing about it would serialise nothing.
+DEV_ROLE_LOCK ?= 8410311
+#
+# The dollar quotes are written `\$$\$$` because they pass through two levels:
+# make turns `\$$` into `\$`, and the shell turns `\$` into a literal `$`.
+# Writing `$$$$` instead yields a bare `$$`, which the shell expands to its own
+# PID — producing `DO $5841 BEGIN` and a syntax error naming a number.
+DEV_ROLE_LOCK_SQL = DO \$$\$$ BEGIN PERFORM pg_advisory_lock($(DEV_ROLE_LOCK)); END \$$\$$;
+
 .PHONY: dev-console-role
 dev-console-role: ## Create the local console database role (NOSUPERUSER NOBYPASSRLS)
 	@# Idempotent: creates the role only when absent, and re-grants either way.
@@ -896,7 +927,7 @@ dev-console-role: ## Create the local console database role (NOSUPERUSER NOBYPAS
 	@# CREATE on the database because the console runs its own migrations: it
 	@# creates the console schema and therefore owns it, which is what FORCE ROW
 	@# LEVEL SECURITY binds against.
-	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "\
+	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "$(DEV_ROLE_LOCK_SQL)" -c "\
 	  DO \$$\$$ BEGIN \
 	    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$(CONSOLE_PG_ROLE)') THEN \
 	      CREATE ROLE $(CONSOLE_PG_ROLE) LOGIN PASSWORD '$(CONSOLE_PG_PASSWORD)' \
@@ -916,7 +947,7 @@ dev-console-role: ## Create the local console database role (NOSUPERUSER NOBYPAS
 	@# Tables only, no sequences: Postgres refuses ALTER SEQUENCE OWNER on a
 	@# sequence owned by a serial column, and does not need it — reowning the
 	@# table carries its dependent sequences along.
-	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "\
+	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "$(DEV_ROLE_LOCK_SQL)" -c "\
 	  DO \$$\$$ DECLARE r record; BEGIN \
 	    IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'console') THEN \
 	      EXECUTE 'ALTER SCHEMA console OWNER TO $(CONSOLE_PG_ROLE)'; \
@@ -928,7 +959,7 @@ dev-console-role: ## Create the local console database role (NOSUPERUSER NOBYPAS
 	    END IF; \
 	  END \$$\$$;"
 	@# The migration history lives in public and is written by whoever migrates.
-	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "\
+	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "$(DEV_ROLE_LOCK_SQL)" -c "\
 	  DO \$$\$$ BEGIN \
 	    IF to_regclass('public.console_schema_migrations') IS NOT NULL THEN \
 	      EXECUTE 'ALTER TABLE public.console_schema_migrations OWNER TO $(CONSOLE_PG_ROLE)'; \
@@ -950,7 +981,7 @@ dev-cloud-role: ## Create the local Cloud database role (NOSUPERUSER NOBYPASSRLS
 	@# CREATE on the database because Cloud runs its own migrations: it creates
 	@# schema cloud and therefore owns it, which is what FORCE ROW LEVEL
 	@# SECURITY binds against.
-	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "\
+	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "$(DEV_ROLE_LOCK_SQL)" -c "\
 	  DO \$$\$$ BEGIN \
 	    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '$(CLOUD_PG_ROLE)') THEN \
 	      CREATE ROLE $(CLOUD_PG_ROLE) LOGIN PASSWORD '$(CLOUD_PG_PASSWORD)' \
@@ -976,7 +1007,7 @@ dev-cloud-role: ## Create the local Cloud database role (NOSUPERUSER NOBYPASSRLS
 	@# sequence owned by a serial column, and does not need it — reowning the
 	@# table carries its dependent sequences along, which cloud.backup_codes
 	@# relies on.
-	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "\
+	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "$(DEV_ROLE_LOCK_SQL)" -c "\
 	  DO \$$\$$ DECLARE r record; BEGIN \
 	    IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'cloud') THEN \
 	      EXECUTE 'ALTER SCHEMA cloud OWNER TO $(CLOUD_PG_ROLE)'; \
@@ -988,7 +1019,7 @@ dev-cloud-role: ## Create the local Cloud database role (NOSUPERUSER NOBYPASSRLS
 	    END IF; \
 	  END \$$\$$;"
 	@# The migration history lives in public and is written by whoever migrates.
-	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "\
+	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "$(DEV_ROLE_LOCK_SQL)" -c "\
 	  DO \$$\$$ BEGIN \
 	    IF to_regclass('public.cloud_schema_migrations') IS NOT NULL THEN \
 	      EXECUTE 'ALTER TABLE public.cloud_schema_migrations OWNER TO $(CLOUD_PG_ROLE)'; \
@@ -996,7 +1027,7 @@ dev-cloud-role: ## Create the local Cloud database role (NOSUPERUSER NOBYPASSRLS
 	  END \$$\$$;"
 	@# The functions the policies call. Owned by the migrator on a fresh
 	@# install; transferred here for a database that predates 0003.
-	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "\
+	@psql "$(PG_URL)" -v ON_ERROR_STOP=1 -q -c "$(DEV_ROLE_LOCK_SQL)" -c "\
 	  DO \$$\$$ DECLARE r record; BEGIN \
 	    FOR r IN SELECT p.oid::regprocedure AS sig FROM pg_proc p \
 	               JOIN pg_namespace n ON n.oid = p.pronamespace \
@@ -1037,16 +1068,17 @@ dev-caller-cert: dev-certs ## Issue a local caller cert signed by the dev CA: ma
 	@echo "      This pair is for inspecting a handshake, not for running tide."
 
 # dev-isolated ran the whole stack, including atlantis itself, from
-# docker-compose. It does not work, for two independent reasons:
+# docker-compose. It does not work, and the reason has changed.
 #
-#  1. It builds the atlantis image, and that build fails at the proto stage.
-#     See build-console-image for the detail. This is true under Docker as well.
-#  2. Apple's `container` has no compose command, so `docker compose` needs
-#     Docker Desktop, which this repo's local flow no longer uses.
+# It used to have two: the atlantis image did not build, and Apple's `container`
+# has no compose command. **The first is fixed** — the proto stage now installs
+# its own plugins, and `make build-server-image` works. Only the second remains,
+# so rebuilding this target means hand-rolling what compose was doing: the certs
+# service, the shared named volumes, and the ordering between them.
 #
-# Reason 1 came first: the target was already broken before the runtime moved.
-# Rebuilding it means hand-rolling the certs service, the shared named volumes
-# and the ordering compose was doing — worth doing only once the image builds.
+# Leaving the old reason in place cost real time: a walkthrough hit this target,
+# read that the image build was broken, and went looking at a build that works.
+# A refusal that names a fixed problem is worse than no refusal at all.
 #
 # `make dev` covers the everyday case: Postgres and memcached in containers,
 # atlantis on the host where a debugger can reach it.
@@ -1054,13 +1086,15 @@ dev-caller-cert: dev-certs ## Issue a local caller cert signed by the dev CA: ma
 dev-isolated: ## UNAVAILABLE — see the comment above this target
 	@echo "dev-isolated is unavailable."; \
 	echo; \
-	echo "  It needs the atlantis image, and that build fails at the proto"; \
-	echo "  stage: buf.gen.yaml declares local plugins (protoc-gen-go,"; \
-	echo "  protoc-gen-go-grpc) that bufbuild/buf:1.41.0 does not ship."; \
-	echo "  This fails under Docker too — it is not the runtime."; \
+	echo "  It ran the whole stack from docker-compose, and Apple's"; \
+	echo "  \`container\` has no compose command. The image builds fine now —"; \
+	echo "  that was the other reason, and it is fixed."; \
 	echo; \
 	echo "  Use 'make dev' instead: Postgres and memcached in containers,"; \
-	echo "  atlantis on the host."; \
+	echo "  atlantis on the host, where a debugger can reach it."; \
+	echo; \
+	echo "  For the full product locally — Cloud, the console, provisioned"; \
+	echo "  organisations in Kubernetes — see docs/getting-started/."; \
 	exit 1
 
 .PHONY: dev-down
