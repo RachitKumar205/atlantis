@@ -80,7 +80,14 @@ jobs:
         # for the same reason and no longer needs to be: it imports the
         # runtime IR dispatcher (internal/server/entity), not gen/go/server,
         # so `go list -deps ./cmd/server` names no gen package.
-        run: go vet ./cmd/server ./cmd/tide ./cmd/tidectl ./cmd/cloud ./cmd/console ./internal/... ./jobs/...
+        #
+        # cmd/signer and cmd/provisioner are listed here and in every step
+        # below. The signer was in none of them for its entire life: three test
+        # files — including the one guarding a CA key encoding that stopped
+        # every signer pod booting — had never run in CI, and `make codegen`
+        # does not reach it either. Adding the new binary without adding the
+        # old one would leave the same hole one instance narrower.
+        run: go vet ./cmd/server ./cmd/tide ./cmd/tidectl ./cmd/cloud ./cmd/console ./cmd/signer ./cmd/provisioner ./internal/... ./jobs/...
 
       - name: apply infra migrations
         # The pg-gated tests need atlantis.current_partition() and the rest of
@@ -133,7 +140,7 @@ jobs:
           # locally and could never have passed in CI — and the cheapest repair
           # would have been deleting this check, which is the one part of the
           # database work that keeps CI honest as tests are added.
-          go test ./cmd/server ./cmd/tide ./cmd/tidectl ./cmd/cloud ./cmd/console ./internal/... ./jobs/... -count=1 -v 2>&1 | tee /tmp/all.txt
+          go test ./cmd/server ./cmd/tide ./cmd/tidectl ./cmd/cloud ./cmd/console ./cmd/signer ./cmd/provisioner ./internal/... ./jobs/... -count=1 -v 2>&1 | tee /tmp/all.txt
           if grep -A2 -- "--- SKIP:" /tmp/all.txt | grep -q "ATLANTIS_TEST_PG"; then
             echo "::error::a test skipped for want of the database, with the database available"
             grep -B1 -A2 -- "--- SKIP:" /tmp/all.txt | grep -B2 "ATLANTIS_TEST_PG"
@@ -158,7 +165,7 @@ jobs:
         # package this close to a limit does not fail reproducibly.
         # Raised rather than tuned to the current number, since the suite
         # only grows.
-        run: go test -race -timeout=25m ./cmd/server ./cmd/tide ./cmd/tidectl ./cmd/cloud ./cmd/console ./internal/... ./jobs/...
+        run: go test -race -timeout=25m ./cmd/server ./cmd/tide ./cmd/tidectl ./cmd/cloud ./cmd/console ./cmd/signer ./cmd/provisioner ./internal/... ./jobs/...
 
       - name: codegen freshness
         # Catches "edited .atl but forgot to regenerate" — in a tree that has
@@ -217,7 +224,7 @@ jobs:
           # Explicit package list skips gen/, which only exists once codegen
           # has run against real caller .atl files (this repo ships none by
           # design). Same scoping the go-vet and go-test steps use.
-          args: ./cmd/server/... ./cmd/tide/... ./cmd/tidectl/... ./cmd/cloud/... ./cmd/console/... ./internal/...
+          args: ./cmd/server/... ./cmd/tide/... ./cmd/tidectl/... ./cmd/cloud/... ./cmd/console/... ./cmd/signer/... ./cmd/provisioner/... ./internal/...
 
   migration-safety:
     name: migrate up/down/up
