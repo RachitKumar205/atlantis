@@ -97,7 +97,11 @@ VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo dev)
 
 .PHONY: help
 help:
-	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-22s %s\n", $$1, $$2}'
+	@# Digits are in the character class because they were not, and the three
+	@# dev-k8s targets — the ones that create the cluster this product is
+	@# provisioned into — have been documented and invisible for their whole
+	@# life. A target `make help` does not list is a target nobody finds.
+	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-22s %s\n", $$1, $$2}'
 
 # ---------- build ----------
 
