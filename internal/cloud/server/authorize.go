@@ -92,9 +92,12 @@ func (s *Server) grantFor(w http.ResponseWriter, r *http.Request, user *store.Us
 
 	consoleURL, err := s.db.ConsoleURL(ctx, org)
 	if errors.Is(err, store.ErrNoConsole) {
-		page(w, http.StatusServiceUnavailable,
-			"That organisation has no console registered yet.\n\n"+
-				"An operator finishes this with `cloud org register`.")
+		// This used to say an operator finishes it with `cloud org register`,
+		// which was true when an organisation only became usable because
+		// somebody typed that. It provisions itself now, so the honest answer
+		// is what it is waiting on — and for a failure, that somebody is
+		// looking rather than that the reader has a command to run.
+		page(w, http.StatusServiceUnavailable, s.notReadyMessage(ctx, org))
 		return issuer.Grant{}, false
 	}
 	if err != nil {

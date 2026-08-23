@@ -350,3 +350,62 @@ func TestCreatingAnOrganisationIsAudited(t *testing.T) {
 		t.Errorf("no org.created row: %+v", entries)
 	}
 }
+
+// /authorize no longer tells anybody to run a CLI command.
+//
+// It said "An operator finishes this with `cloud org register`" for the whole
+// time that was true. It stopped being true when organisations began
+// provisioning themselves, and a message naming a command the reader has no way
+// to run — and no longer needs — is worse than no message.
+func TestAuthorizeDoesNotNameACLICommand(t *testing.T) {
+	f := newFixture(t)
+	session := f.signedIn(t, "waiting@example.com")
+
+	rec := f.postJSON(t, "/api/orgs", session, f.srvOrigin(), `{"name":"waiting-org"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	got := f.authorize(t, session, "org=waiting-org")
+	if got.Code != http.StatusServiceUnavailable {
+		t.Fatalf("/authorize on an unprovisioned organisation = %d, want 503", got.Code)
+	}
+	body := got.Body.String()
+
+	for _, banned := range []string{"cloud org register", "operator", "`"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("the message still points at a command line (%q):\n%s", banned, body)
+		}
+	}
+	// And it says what is actually happening.
+	if !strings.Contains(body, "still being set up") {
+		t.Errorf("the message does not say the organisation is coming: %s", body)
+	}
+}
+
+// A failed organisation says so, without publishing why.
+func TestAuthorizeReportsAFailureWithoutTheDetail(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	session := f.member(t, "failed@example.com", "failed-org", "", identity.RoleAdmin)
+
+	const leak = `no such image "atlantis-pg:17.11" on node atl-dev.test:6443`
+	if _, err := f.db.Pool().Exec(ctx, `
+		INSERT INTO cloud.org_provisioning (org, state, last_error)
+		VALUES ($1, 'failed', $2)
+		ON CONFLICT (org) DO UPDATE SET state = 'failed', last_error = EXCLUDED.last_error
+	`, "failed-org", leak); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rec := f.authorize(t, session, "org=failed-org")
+	body := rec.Body.String()
+	if !strings.Contains(body, "could not be set up") {
+		t.Errorf("a failed organisation does not say so: %s", body)
+	}
+	for _, secret := range []string{"atlantis-pg", "atl-dev.test", "6443"} {
+		if strings.Contains(body, secret) {
+			t.Errorf("the page leaks %q from the operator-facing error:\n%s", secret, body)
+		}
+	}
+}

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/url"
@@ -282,4 +283,35 @@ func (s *Server) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, s.orgResponse(*o))
+}
+
+// notReadyMessage explains why an organisation cannot be entered yet.
+//
+// Reads the queue rather than saying one thing for every case, because the four
+// states want four different answers and only one of them is "wait".
+//
+// Deliberately says nothing about *why* a failure failed. The reason is in
+// last_error, which is written for an operator — see orgResponse. Somebody
+// locked out of their organisation is the last person who should be handed a
+// Kubernetes API path.
+func (s *Server) notReadyMessage(ctx context.Context, org string) string {
+	p, err := s.db.ProvisioningFor(ctx, org)
+	if err != nil {
+		// No queue row at all: registered by hand, or created before any of
+		// this existed. Nothing is coming to finish it.
+		return "That organisation is not ready yet.\n\n" +
+			"If this does not resolve, ask whoever set it up."
+	}
+	switch p.State {
+	case store.StatePending, store.StateProvisioning:
+		return "That organisation is still being set up.\n\n" +
+			"This usually takes about a minute. Try again shortly."
+	case store.StateFailed:
+		return "That organisation could not be set up.\n\n" +
+			"It will be retried automatically. If it stays this way, contact support."
+	default:
+		// ready, but no console URL — the two writes registration makes, caught
+		// between them. It resolves on its own.
+		return "That organisation is nearly ready. Try again shortly."
+	}
 }
