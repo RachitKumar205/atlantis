@@ -209,11 +209,32 @@ JSON is the default log format. All levels except `debug` emit structured JSON t
 
 The server exposes both an HTTP and a gRPC health surface.
 
-**HTTP** — on `HEALTH_LISTEN` (default `:8081`), with no mTLS, so it's the simplest probe for orchestrators and the Docker `HEALTHCHECK`:
+**HTTPS** — on `HEALTH_LISTEN` (default `:8081`), using the same certificate and
+client-CA as the gRPC port. It carries two trust levels:
 
-- `/healthz` — liveness; returns 200 whenever the process is up.
-- `/readyz` — readiness; 200 only when Postgres, memcached, and the outbox worker are all healthy, 503 otherwise. It returns 503 immediately once shutdown begins, so a load balancer drains the instance before the server stops.
-- `/metrics` — Prometheus.
+| Route | Needs a client certificate? | |
+|---|---|---|
+| `/healthz` | No | Liveness. 200 whenever the process is up |
+| `/readyz` | No | Readiness. 200 only when Postgres, memcached and the outbox worker are all healthy. It returns 503 immediately once shutdown begins, so a load balancer drains the instance before the server stops |
+| `/status` | **Yes** | Uptime, server version, applied schema version |
+| `/metrics` | **Yes** | Prometheus |
+
+The first two are open because an orchestrator's probe holds no certificate.
+Configure probes with an HTTPS scheme; Kubernetes does not verify the server
+certificate on a probe, so the CA needs no distribution to the kubelet.
+
+The last two describe the system to whoever reads them — the schema version, the
+build version, and per-caller RPC counts. They take a client certificate from
+the same CA as the admin plane, which is the credential the console already
+holds.
+
+They used to be open, on the reasoning that this port sits behind whatever the
+platform exposes. That holds for a single-tenant deployment. It does not hold
+where several customers share a cluster, and it does not survive a change of
+CNI: a `NetworkPolicy` using `ipBlock` covers pod traffic under Calico, never
+covers it under GKE Dataplane V2, and on EKS excludes nothing at all. Keep the
+network policy — it limits how far a compromise spreads — but it is no longer
+what stops a neighbour reading these two routes.
 
 **gRPC** — the standard [gRPC Health Checking protocol](https://grpc.io/docs/guides/health-checking/) on the gRPC port. Because mTLS is enforced on every RPC (no health-check exemption), [grpc_health_probe](https://github.com/grpc-ecosystem/grpc-health-probe) needs a client cert:
 

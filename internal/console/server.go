@@ -928,8 +928,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	healthAddr := e.health
+	// HTTPS with this organisation's client certificate. The listener demands
+	// one on /status and /metrics; /healthz and /readyz would answer without,
+	// but presenting it on all four keeps one client and one failure mode.
+	hc := e.healthClient
 	probe := func(path string) (int, string) {
-		resp, err := http.Get("http://" + healthAddr + path) //nolint:noctx
+		resp, err := hc.Get("https://" + healthAddr + path) //nolint:noctx
 		if err != nil {
 			return 0, err.Error()
 		}
@@ -967,7 +971,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// the SPA renders an em-dash.
 	var startedAt, serverVer string
 	var schemaVer int64
-	if resp, err := http.Get("http://" + healthAddr + "/status"); err == nil { //nolint:noctx
+	if resp, err := hc.Get("https://" + healthAddr + "/status"); err == nil { //nolint:noctx
 		var body struct {
 			StartedAt     string `json:"started_at"`
 			Version       string `json:"version"`
@@ -985,7 +989,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// the Prometheus text format is one series. We don't need an exact
 	// count, just a stable "N series" surface that moves with reality.
 	metricsSeries := 0
-	if resp, err := http.Get("http://" + healthAddr + "/metrics"); err == nil { //nolint:noctx
+	if resp, err := hc.Get("https://" + healthAddr + "/metrics"); err == nil { //nolint:noctx
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
 		for _, line := range strings.Split(string(body), "\n") {
 			line = strings.TrimSpace(line)

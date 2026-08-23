@@ -221,3 +221,35 @@ func recoveryStreamInterceptor(log *slog.Logger) grpc.StreamServerInterceptor {
 		return handler(srv, ss)
 	}
 }
+
+// healthTLS builds the health listener's TLS configuration.
+//
+// The same certificate and the same client-CA pool the admin plane uses, so an
+// organisation's console reaches both with one credential and there is no
+// second trust root to keep in step.
+//
+// VerifyClientCertIfGiven, not RequireAndVerifyClientCert: the kubelet probes
+// /healthz and /readyz and presents nothing. Requiring a certificate here would
+// make every pod fail its liveness probe and never become ready — a failure
+// that reads as a broken image rather than as a TLS decision. The routes that
+// must not be open are closed individually, by requireClientCert.
+//
+// TLS 1.2 rather than the admin plane's 1.3. The floor exists for probe
+// clients, which are not ours to upgrade; the admin plane keeps 1.3 because
+// every client on it is.
+func healthTLS(cfg config) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load server cert for the health listener: %w", err)
+	}
+	pool, err := loadClientCAPool(cfg.TLSCAFile)
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientCAs:    pool,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
+		MinVersion:   tls.VersionTLS12,
+	}, nil
+}

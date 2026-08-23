@@ -261,6 +261,10 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	}()
 
 	log.Debug("init: health http server")
+	healthTLSCfg, err := healthTLS(cfg)
+	if err != nil {
+		return err
+	}
 	healthHTTP := newHealthServer(cfg.HealthAddr, healthDeps{
 		Pool:               pool.Raw(),
 		MC:                 mc,
@@ -269,11 +273,13 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		ProbeTimeout:       cfg.HealthProbeTimeout,
 		StartedAt:          time.Now(),
 		Version:            version,
-	}, ctx)
+	}, healthTLSCfg, ctx)
 	go func() {
-		log.Info("health http listening", "addr", cfg.HealthAddr)
-		if err := healthHTTP.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Error("health http server", "err", err)
+		log.Info("health https listening", "addr", cfg.HealthAddr)
+		// The certificate and key are already in TLSConfig, so both arguments
+		// are empty — ListenAndServeTLS only reads files when they are not.
+		if err := healthHTTP.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("health https server", "err", err)
 		}
 	}()
 

@@ -714,7 +714,7 @@ would succeed, because the credentials would be genuine.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | (unset) | OTLP gRPC collector endpoint (e.g. `otel-collector:4317`). Empty disables OTel export; Prometheus metrics on `:8081/metrics` and structured logs are unaffected. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | (unset) | OTLP gRPC collector endpoint (e.g. `otel-collector:4317`). Empty disables OTel export; Prometheus metrics on `:8081/metrics` (which needs a client certificate) and structured logs are unaffected. |
 
 ## Logging
 

@@ -91,7 +91,15 @@ EXPOSE 9090 8081
 # covers boot + AUTO_MIGRATE. Orchestrators should still wire the dedicated
 # /healthz (liveness) and /readyz (readiness) probes directly rather than rely
 # on this single signal. busybox wget exits non-zero on a 503, so no jq needed.
+# https, and --no-check-certificate deliberately.
+#
+# The health listener terminates TLS so that /status and /metrics can demand a
+# client certificate. /readyz does not, but it is on the same listener, so the
+# scheme changed with it. The container has no copy of the organisation's CA and
+# should not need one to check on itself — this probe asks "is this process
+# serving", not "is this the right process", and it dials 127.0.0.1 where there
+# is nothing to impersonate.
 HEALTHCHECK --start-period=20s --interval=15s --timeout=5s --retries=3 \
-    CMD wget -q -O - http://127.0.0.1:8081/readyz >/dev/null 2>&1 || exit 1
+    CMD wget -q -O - --no-check-certificate https://127.0.0.1:8081/readyz >/dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["/app/atlantis"]

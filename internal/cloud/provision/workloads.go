@@ -108,6 +108,16 @@ func (k *Kube) atlantisDeployment(ns string) ctrlclient.Object {
 								HTTPGet: &corev1.HTTPGetAction{
 									Path: "/readyz",
 									Port: intstr.FromInt32(portHealth),
+									// The health listener terminates TLS, so that
+									// /status and /metrics can demand a client
+									// certificate. The kubelet holds none, which is
+									// why those two routes are gated individually
+									// and these two are not.
+									//
+									// The kubelet does not verify the server
+									// certificate on a probe, so the organisation's
+									// own authority needs no distribution here.
+									Scheme: corev1.URISchemeHTTPS,
 								},
 							},
 							InitialDelaySeconds: 5,
@@ -122,8 +132,9 @@ func (k *Kube) atlantisDeployment(ns string) ctrlclient.Object {
 						LivenessProbe: &corev1.Probe{
 							ProbeHandler: corev1.ProbeHandler{
 								HTTPGet: &corev1.HTTPGetAction{
-									Path: "/healthz",
-									Port: intstr.FromInt32(portHealth),
+									Path:   "/healthz",
+									Port:   intstr.FromInt32(portHealth),
+									Scheme: corev1.URISchemeHTTPS,
 								},
 							},
 							InitialDelaySeconds: 10,

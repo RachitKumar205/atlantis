@@ -2,6 +2,8 @@ package console
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net/http"
@@ -74,6 +76,11 @@ type orgClientEntry struct {
 	signer     *http.Client
 	signerAddr string
 
+	// healthClient reads the health listener, which now terminates TLS and
+	// demands a client certificate on /status and /metrics. Built from the same
+	// credentials as the admin channel, so one rotation moves both.
+	healthClient *http.Client
+
 	// updatedAt is the row's value when this client was built. A rotation
 	// moves it, and the refresh below rebuilds rather than serving a channel
 	// whose certificate has been replaced.
@@ -89,13 +96,17 @@ func newOrgClients(db *store) *orgClients {
 	return &orgClients{db: db, now: time.Now, by: map[string]*orgClientEntry{}}
 }
 
-// closeEntry tears down both clients an entry holds.
+// closeEntry tears down every client an entry holds.
 //
 // One place rather than three, because the signer arrived after the channel and
 // the three existing teardown paths would each have had to remember it. An
 // *http.Client has no Close, so its transport's idle connections are what there
 // is to release — leaking those is not fatal, which is exactly why it would go
 // unnoticed.
+//
+// The health client is the third, and it proved the point: it arrived when the
+// health listener started demanding a certificate, and this function is the
+// only place that had to change to release it.
 func closeEntry(e *orgClientEntry) {
 	if e == nil {
 		return
@@ -105,6 +116,9 @@ func closeEntry(e *orgClientEntry) {
 	}
 	if e.signer != nil {
 		e.signer.CloseIdleConnections()
+	}
+	if e.healthClient != nil {
+		e.healthClient.CloseIdleConnections()
 	}
 }
 
@@ -191,14 +205,21 @@ func (p *orgClients) get(ctx context.Context, org string) (*orgClientEntry, erro
 		}
 	}
 
+	healthClient, err := orgHealthClient(creds)
+	if err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("build %s's health client: %w", org, err)
+	}
+
 	fresh := &orgClientEntry{
-		client:     client,
-		endpoint:   creds.Endpoint,
-		health:     creds.HealthAddr,
-		signer:     signer,
-		signerAddr: creds.SignerAddr,
-		updatedAt:  creds.UpdatedAt,
-		checkedAt:  p.now(),
+		client:       client,
+		healthClient: healthClient,
+		endpoint:     creds.Endpoint,
+		health:       creds.HealthAddr,
+		signer:       signer,
+		signerAddr:   creds.SignerAddr,
+		updatedAt:    creds.UpdatedAt,
+		checkedAt:    p.now(),
 	}
 
 	p.mu.Lock()
@@ -326,4 +347,50 @@ func (s *Server) orgATL(w http.ResponseWriter, r *http.Request) *adminClient {
 		jsonError(w, "cannot reach this organisation's atlantis", http.StatusServiceUnavailable)
 		return nil
 	}
+}
+
+// healthTimeout bounds one scrape of an organisation's health listener.
+//
+// Short. The Health page makes four of these in sequence, and a page that hangs
+// for a minute because one organisation is wedged is worse than a page that
+// reports the organisation as unreachable.
+const healthTimeout = 5 * time.Second
+
+// orgHealthClient builds the client that reads an organisation's health
+// listener.
+//
+// # Why this needs a certificate now
+//
+// That listener used to be plain HTTP, and /status and /metrics were open on
+// it. The only thing keeping another tenant's pod away was a NetworkPolicy, and
+// that policy is not portable — `ipBlock` covers pod traffic under Calico,
+// never covers it under GKE Dataplane V2, and on EKS excludes nothing at all.
+// So the routes that describe an organisation's system now demand a client
+// certificate, and this is what presents it.
+//
+// The organisation's own atlantis credentials, not the signer's: it is the same
+// authority the admin channel authenticates against, so one rotation moves
+// both. Mirrors orgSignerClient deliberately — same shape, different roots, and
+// the two would be a single function if they shared a trust root, which is
+// exactly what they must not do.
+func orgHealthClient(creds *orgCredentials) (*http.Client, error) {
+	cert, err := tls.X509KeyPair([]byte(creds.CertPEM), creds.KeyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("client certificate for %s does not match its key: %w",
+			creds.Org, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM([]byte(creds.CAPEM)) {
+		return nil, fmt.Errorf("CA for %s contains no usable certificates", creds.Org)
+	}
+	return &http.Client{
+		Timeout: healthTimeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion:   tls.VersionTLS12,
+				Certificates: []tls.Certificate{cert},
+				RootCAs:      pool,
+			},
+		},
+	}, nil
 }
