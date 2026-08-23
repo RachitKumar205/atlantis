@@ -55,13 +55,13 @@ import (
 // upstream terminator, ingress limits or WAF the main listener sits behind.
 // Two routes, registered here, and nothing else can be added by accident.
 //
-// # VerifyClientCertIfGiven, not Require
+// # Requested, never required
 //
 // Enrolment arrives with no certificate — that is what enrolment is. Renewal
-// (K7b) arrives with one. The listener therefore cannot demand one, and each
-// handler asserts what it needs: handleEnroll wants a token, and renewal will
-// want a peer certificate and must check for it itself rather than assume the
-// listener did.
+// arrives with one. The listener therefore cannot demand one, and each handler
+// asserts what it needs: handleEnroll wants a token, and handleRenew wants a
+// peer certificate and checks for it itself rather than assuming the listener
+// did.
 //
 // No browser reaches this port, so the certificate-selection prompt that
 // requesting a client certificate causes in a browser is not a concern here —
@@ -71,37 +71,48 @@ func (s *Server) buildEnrollListener() error {
 	mux.HandleFunc("POST /enroll", s.handleEnroll)
 	mux.HandleFunc("POST /renew", s.handleRenew)
 
+	// RequestClientCert, and the certificate is verified in handleRenew.
+	//
+	// # Why the check moved out of the handshake
+	//
+	// This listener used to hold VerifyClientCertIfGiven against ONE pool of
+	// client CAs, read from CONSOLE_ENROLL_CLIENT_CA. That works while every
+	// caller in the deployment chains to one authority, and stops working the
+	// moment each organisation has its own — which is what migration 0005 made
+	// true and 0009 finished. One pool cannot verify every organisation's
+	// callers, and the failure is the worst shape available: caller
+	// certificates live seven days and `tide` renews at two thirds of that, so
+	// every organisation but one would silently stop renewing around day five,
+	// on a machine nobody is watching, with the refusal delivered as a
+	// handshake reset that no handler ever sees and a client-side warning on
+	// stderr that is not an error.
+	//
+	// handleRenew already resolves the organisation from the certificate's
+	// fingerprint, so the right authority to verify against is known there and
+	// nowhere earlier. Verifying at that point costs nothing and turns the
+	// refusal into a 403 with a reason, on the server, beside the organisation
+	// it concerns.
+	//
+	// # What this gives up, and what it does not
+	//
+	// It gives up a check that fails closed automatically. handleRenew MUST now
+	// verify, and a route added to this listener that reads r.TLS without
+	// verifying would be trusting an unverified certificate. There are two
+	// routes here and there is no catch-all, which is why that is acceptable —
+	// and the property is asserted directly by
+	// TestACertificateFromAnotherAuthorityCannotRenew rather than left implied
+	// by the configuration.
+	//
+	// It does NOT give up proof of possession. A client that sends a
+	// certificate must also send CertificateVerify, and Go checks that
+	// signature against the presented public key whatever ClientAuth is set to
+	// — see crypto/tls, where the check sits inside "the client sent a
+	// certificate" and not inside "we are verifying it". So a copied
+	// certificate, which is public, still does not let anybody renew.
 	tlsCfg := &tls.Config{
 		MinVersion: tls.VersionTLS12,
-		ClientAuth: tls.VerifyClientCertIfGiven,
+		ClientAuth: tls.RequestClientCert,
 	}
-	// Required, not conditional.
-	//
-	// This used to be `if s.cfg.EnrollClientCA != ""`, and the empty case was the
-	// one every deployment was in. A nil ClientCAs does not disable client
-	// verification — Go's VerifyClientCertIfGiven falls back to the SYSTEM root
-	// pool, where no caller certificate chains — so the listener came up looking
-	// healthy and refused every renewal inside the handshake, before handleRenew
-	// could log anything.
-	//
-	// Checked here as well as in validateEnrollment because Config is also built
-	// directly, by tests and by anything embedding this package. A gate that only
-	// covers the environment path is a gate with a way around it.
-	if s.cfg.EnrollClientCA == "" {
-		return errors.New("CONSOLE_ENROLL_CLIENT_CA is required when the enrolment " +
-			"listener is enabled: without it a renewing machine is verified against " +
-			"the system roots, which no caller certificate chains to")
-	}
-	caPEM, err := os.ReadFile(s.cfg.EnrollClientCA)
-	if err != nil {
-		return fmt.Errorf("read CONSOLE_ENROLL_CLIENT_CA: %w", err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPEM) {
-		return fmt.Errorf("CONSOLE_ENROLL_CLIENT_CA %s contains no certificate",
-			s.cfg.EnrollClientCA)
-	}
-	tlsCfg.ClientCAs = pool
 
 	s.enrollSrv = &http.Server{
 		Addr:              s.cfg.EnrollListen,
@@ -465,10 +476,15 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The listener is VerifyClientCertIfGiven, because enrolment arrives with
-	// no certificate. So this handler asserts what it needs rather than assuming
-	// the listener did — and that assertion is the whole of renewal's
-	// authentication.
+	// The listener only REQUESTS a certificate, because enrolment arrives with
+	// none. So this handler asserts what it needs rather than assuming the
+	// listener did.
+	//
+	// This is presence, not validity. What the certificate proves at this point
+	// is possession of its private key, which the handshake established; whose
+	// it is and whether this organisation trusts it are settled below, in that
+	// order, because the second question cannot be asked until the first is
+	// answered.
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		jsonError(w, "renewal requires the certificate you are replacing",
 			http.StatusUnauthorized)
@@ -499,6 +515,56 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.log.Error("look up the presented certificate", "err", err)
 		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// Now that the organisation is known, check the certificate actually chains
+	// to ITS authority.
+	//
+	// This is the check the TLS handshake used to do, moved here because it
+	// could not be done there: the listener is shared and each organisation has
+	// its own root, so the pool to verify against is not known until the
+	// fingerprint above has said whose certificate this is.
+	//
+	// What this catches, stated accurately rather than generously.
+	//
+	// It is NOT what stops a foreign certificate: one has a fingerprint this
+	// console never recorded, so the lookup above refuses it first. Nor is it
+	// what stops a copied certificate — a certificate is public, and what stops
+	// a copy is the handshake signature proving the sender holds the key.
+	//
+	// What it catches is a certificate this console really did issue, for this
+	// organisation, that its atlantis would no longer accept: the case where
+	// the organisation's authority has been rotated since. Renewing it would
+	// mint a successor from the new authority and supersede a working
+	// identity — a certificate that authenticates nowhere, produced by a
+	// request that looked entirely reasonable.
+	creds, err := s.db.orgCredentials(r.Context(), rec.Org)
+	if err != nil {
+		s.log.Error("read credentials while renewing", "org", rec.Org, "err", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if err := verifyLeafForOrg(rec.Org, creds, peerLeaf); err != nil {
+		s.log.Info("renewal refused: the certificate does not chain to the organisation",
+			"org", rec.Org, "caller", rec.Caller,
+			"cn", peerLeaf.Subject.CommonName, "remote", r.RemoteAddr, "err", err)
+		jsonError(w, "the certificate you presented is not one this organisation's "+
+			"atlantis trusts", http.StatusForbidden)
+		return
+	}
+
+	// Expiry, which the handshake also used to answer.
+	//
+	// A machine whose certificate has already lapsed has to enrol again rather
+	// than renew: renewal proves identity with the credential being replaced,
+	// and an expired one has stopped being a credential.
+	if now := time.Now(); now.After(peerLeaf.NotAfter) {
+		s.log.Info("renewal refused: the presented certificate has expired",
+			"org", rec.Org, "caller", rec.Caller, "expired", peerLeaf.NotAfter)
+		jsonError(w, "the certificate you presented expired on "+
+			peerLeaf.NotAfter.UTC().Format(time.RFC3339)+
+			" — enrol again rather than renewing", http.StatusForbidden)
 		return
 	}
 

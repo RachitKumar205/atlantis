@@ -66,10 +66,21 @@ type Config struct {
 	//
 	// It carries two routes and never the console's API or SPA. Every machine
 	// that enrols can reach this port.
-	EnrollListen   string // CONSOLE_ENROLL_LISTEN
-	EnrollTLSCert  string // CONSOLE_ENROLL_TLS_CERT
-	EnrollTLSKey   string // CONSOLE_ENROLL_TLS_KEY
-	EnrollClientCA string // CONSOLE_ENROLL_CLIENT_CA — verifies a renewing machine
+	// There is deliberately no client-CA setting here any more.
+	//
+	// CONSOLE_ENROLL_CLIENT_CA named one pool for the listener to verify every
+	// renewing machine against, which worked while every caller in the
+	// deployment chained to one authority. Each organisation now has its own,
+	// and one pool cannot verify them all — so the check moved into handleRenew,
+	// which knows whose certificate it is holding and can therefore ask the
+	// right authority. See buildEnrollListener.
+	//
+	// Removed rather than left set and ignored. A required setting that nothing
+	// reads is worse than an absent one: it tells an operator a rule is in force
+	// that no longer exists.
+	EnrollListen  string // CONSOLE_ENROLL_LISTEN
+	EnrollTLSCert string // CONSOLE_ENROLL_TLS_CERT
+	EnrollTLSKey  string // CONSOLE_ENROLL_TLS_KEY
 
 	// EnrollPublicURL is the address a machine reaches the enrolment listener
 	// at, which is not EnrollListen: that is a bind address, often `:3443` or a
@@ -131,7 +142,6 @@ func ConfigFromEnv() (Config, error) {
 		EnrollListen:    os.Getenv("CONSOLE_ENROLL_LISTEN"),
 		EnrollTLSCert:   os.Getenv("CONSOLE_ENROLL_TLS_CERT"),
 		EnrollTLSKey:    os.Getenv("CONSOLE_ENROLL_TLS_KEY"),
-		EnrollClientCA:  os.Getenv("CONSOLE_ENROLL_CLIENT_CA"),
 		EnrollPublicURL: os.Getenv("CONSOLE_ENROLL_PUBLIC_URL"),
 
 		CloudIssuer:   os.Getenv("CLOUD_ISSUER"),
@@ -157,6 +167,9 @@ func ConfigFromEnv() (Config, error) {
 			return Config{}, fmt.Errorf("%s is required: the console has no local accounts and "+
 				"verifies every sign-in against Atlantis Cloud", v.name)
 		}
+	}
+	if err := rejectRetiredEnrolmentEnv(); err != nil {
+		return Config{}, err
 	}
 	if err := c.validateEnrollment(); err != nil {
 		return Config{}, err
@@ -252,6 +265,29 @@ func (c Config) EnrollmentEnabled() bool { return c.SignerAddr != "" }
 // certificate produces a handshake failure the signer logs and the console
 // reports as "signer unreachable"; an enrolment listener with no key does not
 // listen at all. Both are silent until used.
+// rejectRetiredEnrolmentEnv refuses to start when a removed setting is still
+// set, rather than booting with it inert.
+//
+// Same shape and same reasoning as cmd/server's rejectRetiredAuthzEnv, and the
+// reasoning transfers exactly. An operator who wrote
+// CONSOLE_ENROLL_CLIENT_CA=./certs/ca.crt did it to say which authority may
+// renew. Starting with the variable present and unread would leave them
+// believing a restriction is in force that this console no longer applies —
+// and unlike a missing setting, nothing would ever prompt them to look.
+func rejectRetiredEnrolmentEnv() error {
+	const name = "CONSOLE_ENROLL_CLIENT_CA"
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return nil
+	}
+	return fmt.Errorf(
+		"%s is set to %q but is no longer read. Renewal now verifies a presented "+
+			"certificate against the organisation's own CA, taken from console.orgs — "+
+			"one pool could not verify callers from many authorities once each "+
+			"organisation had its own. Unset the variable; nothing replaces it.",
+		name, v)
+}
+
 func (c Config) validateEnrollment() error {
 	set := map[string]string{
 		"ATL_SIGNER_ADDR":         c.SignerAddr,
@@ -262,21 +298,25 @@ func (c Config) validateEnrollment() error {
 		"CONSOLE_ENROLL_TLS_CERT": c.EnrollTLSCert,
 		"CONSOLE_ENROLL_TLS_KEY":  c.EnrollTLSKey,
 
-		// Both of these were outside this set, and both were broken by it.
+		// CONSOLE_ENROLL_CLIENT_CA used to be here, and the comment it carried
+		// is worth keeping because the failure it describes is the reason the
+		// setting is now gone rather than merely optional.
 		//
-		// CONSOLE_ENROLL_CLIENT_CA: buildEnrollListener sets ClientCAs only when
-		// it is non-empty, and Go's VerifyClientCertIfGiven with a nil ClientCAs
-		// verifies a presented certificate against the SYSTEM roots. A caller's
-		// certificate never chains there. So a console configured exactly as the
-		// Makefile and the documentation described advertised enrolment as fully
-		// working and rejected every renewal inside the TLS handshake, before
-		// handleRenew ran at all.
+		// It named one pool for the listener to verify every renewing machine
+		// against. buildEnrollListener set ClientCAs only when it was non-empty,
+		// and Go's VerifyClientCertIfGiven with a nil ClientCAs verifies against
+		// the SYSTEM roots, where no caller certificate chains — so a console
+		// configured exactly as the Makefile and the documentation described
+		// advertised enrolment as working and rejected every renewal inside the
+		// handshake. The suite stayed green because the fixture set it
+		// explicitly, and a setting only the fixture supplies is not
+		// configuration but a test passing for the wrong reason.
 		//
-		// The test suite was green throughout, because the fixture set it
-		// explicitly. A setting that only the fixture supplies is not
-		// configuration, it is a test passing for the wrong reason.
-		"CONSOLE_ENROLL_CLIENT_CA": c.EnrollClientCA,
-
+		// Adding it to this set fixed that. What it could never fix is one pool
+		// against many authorities, which is what per-organisation signers made
+		// unavoidable — so the verification moved to handleRenew, where the
+		// organisation is known, and this setting has nothing left to name.
+		//
 		// CONSOLE_ENROLL_PUBLIC_URL: without it the console can enrol but cannot
 		// print a command anybody can run, because the address a machine reaches
 		// the enrolment listener at is not something it can derive. It must not

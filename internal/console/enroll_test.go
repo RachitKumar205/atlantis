@@ -28,12 +28,10 @@ var enrolmentEnv = map[string]string{
 	"CONSOLE_ENROLL_TLS_CERT": "/certs/enroll.crt",
 	"CONSOLE_ENROLL_TLS_KEY":  "/certs/enroll.key",
 
-	// These two were outside the required set and both were silently broken by
-	// it. See validateEnrollment for what each one's absence did; the short
-	// version is that a console configured exactly as the Makefile described
-	// rejected every renewal inside the TLS handshake, and the fixture was the
-	// only thing anywhere that set the variable which would have prevented it.
-	"CONSOLE_ENROLL_CLIENT_CA":  "/certs/ca.crt",
+	// This was outside the required set once, and silently broken by it: a
+	// console could enrol perfectly and print an instruction naming an address
+	// nobody could reach. Its companion in that mistake,
+	// CONSOLE_ENROLL_CLIENT_CA, no longer exists — see the test below.
 	"CONSOLE_ENROLL_PUBLIC_URL": "https://console.internal:3443",
 }
 
@@ -130,39 +128,60 @@ func TestTheRefusalNamesEveryMissingSetting(t *testing.T) {
 	}
 }
 
-// CONSOLE_ENROLL_CLIENT_CA is not part of the all-or-nothing set.
+// CONSOLE_ENROLL_CLIENT_CA is gone, and a console starts without it.
 //
-// It is only needed for renewal, which is K7b. Demanding it now would make
-// K7a's own configuration impossible to satisfy.
-// TestEnrolmentRequiresTheRenewalClientCA.
+// # The history, because the shape is worth remembering
 //
-// This test previously asserted the opposite — that the client CA was "not yet
-// required", on the reasoning that renewal was a later step. Renewal shipped
-// and the setting stayed optional, which is how the following arrangement
-// survived a green suite:
+// It named one pool for the enrolment listener to verify every renewing machine
+// against, and it was optional. buildEnrollListener set ClientCAs only when it
+// was non-empty, and Go's VerifyClientCertIfGiven with a nil ClientCAs verifies
+// against the SYSTEM roots, where no caller certificate chains. So a console
+// started from the Makefile's own CONSOLE_ENROLL_ENV — which did not set it —
+// advertised enrolment as fully configured and refused every renewal inside the
+// handshake, before handleRenew ran.
 //
-// buildEnrollListener sets ClientCAs only when CONSOLE_ENROLL_CLIENT_CA is
-// non-empty. Go's VerifyClientCertIfGiven with a nil ClientCAs verifies a
-// presented certificate against the SYSTEM root pool, where no caller
-// certificate chains. So a console started from CONSOLE_ENROLL_ENV in the
-// Makefile — which did not set it either — advertised enrolment as fully
-// configured and refused every renewal inside the TLS handshake, before
-// handleRenew was reached.
-//
-// Every renewal test passed throughout, because the fixture set the variable
-// the product did not require. That is the shape to watch for: a setting only
+// **Every renewal test passed throughout, because the fixture set the variable
+// the product did not require.** That is the shape to watch for: a setting only
 // the test supplies is not configuration.
-func TestEnrolmentRequiresTheRenewalClientCA(t *testing.T) {
+//
+// Making it required fixed that. What it could never fix is one pool against
+// many authorities, which per-organisation signers made the ordinary case — so
+// the verification moved into handleRenew, where the organisation is known, and
+// the setting had nothing left to name.
+func TestEnrolmentDoesNotNeedAClientCASetting(t *testing.T) {
 	setConsoleEnv(t)
 	setEnrolmentEnv(t)
 	t.Setenv("CONSOLE_ENROLL_CLIENT_CA", "")
 
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("a console was refused for want of a setting nothing reads: %v", err)
+	}
+	if !cfg.EnrollmentEnabled() {
+		t.Error("enrolment is off without a setting it no longer uses")
+	}
+}
+
+// And a console that still has it set refuses to start.
+//
+// Booting with it present and unread is the failure worth avoiding: whoever set
+// it did so to say which authority may renew, and an inert variable leaves them
+// believing a restriction is in force that nothing applies. cmd/server takes
+// the same position on its retired authorization settings.
+func TestAConsoleStillCarryingTheRetiredClientCASettingIsRefused(t *testing.T) {
+	setConsoleEnv(t)
+	setEnrolmentEnv(t)
+	t.Setenv("CONSOLE_ENROLL_CLIENT_CA", "/certs/ca.crt")
+
 	_, err := ConfigFromEnv()
 	if err == nil {
-		t.Fatal("a console that cannot verify a renewing machine started anyway")
+		t.Fatal("a console started with a retired setting still in its environment")
 	}
 	if !strings.Contains(err.Error(), "CONSOLE_ENROLL_CLIENT_CA") {
-		t.Errorf("the error does not name the missing setting: %v", err)
+		t.Errorf("the error does not name the retired setting: %v", err)
+	}
+	if !strings.Contains(err.Error(), "no longer read") {
+		t.Errorf("the error does not say the setting is retired: %v", err)
 	}
 }
 
@@ -199,9 +218,5 @@ func TestThePublicURLIsReadFromTheEnvironment(t *testing.T) {
 	if cfg.EnrollPublicURL != enrolmentEnv["CONSOLE_ENROLL_PUBLIC_URL"] {
 		t.Errorf("EnrollPublicURL = %q, want %q — the field is not being read",
 			cfg.EnrollPublicURL, enrolmentEnv["CONSOLE_ENROLL_PUBLIC_URL"])
-	}
-	if cfg.EnrollClientCA != enrolmentEnv["CONSOLE_ENROLL_CLIENT_CA"] {
-		t.Errorf("EnrollClientCA = %q, want %q",
-			cfg.EnrollClientCA, enrolmentEnv["CONSOLE_ENROLL_CLIENT_CA"])
 	}
 }

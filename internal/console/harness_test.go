@@ -216,7 +216,9 @@ func newFixture(t *testing.T, enrolment bool) *consoleFixture {
 		// certificate the listener can verify.
 		cfg.EnrollListen = "127.0.0.1:0"
 		cfg.EnrollTLSCert, cfg.EnrollTLSKey = stack.pki.CertFile, stack.pki.KeyFile
-		cfg.EnrollClientCA = stack.pki.CAFile
+		// No client CA: the listener asks for a certificate and handleRenew
+		// verifies it against the organisation's own authority, which is the
+		// only thing that can work once each organisation has one.
 
 		// The address a machine is told to come back to. The listener binds
 		// :0 here, so this is not derived from it — which is the same reason
