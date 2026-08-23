@@ -50,6 +50,21 @@ type Config struct {
 	// be worse, because the Host header is attacker-controlled.
 	PublicURL string // CLOUD_PUBLIC_URL — required
 
+	// ExtraOrigins are additional origins accepted on state-changing /api/*
+	// routes, beyond PublicURL and the request's own Host.
+	//
+	// This exists for one situation and should not be set outside it. Running
+	// the frontend with `vite dev` serves the page from localhost:5173 and
+	// proxies /api to Cloud with changeOrigin, which rewrites Host to Cloud's
+	// address while the browser still sends the page's origin — so neither the
+	// public URL nor the Host matches, and every write is refused.
+	//
+	// Explicit rather than inferred. The alternative considered was to allow any
+	// loopback origin, which would mean a deployment reachable at a loopback
+	// address silently accepts cross-site writes from anything else on the box.
+	// A setting somebody has to type is a setting somebody has to justify.
+	ExtraOrigins []string // CLOUD_EXTRA_ORIGINS — development only
+
 	// SMTP. All optional: with no address, Cloud logs messages instead of
 	// sending them and warns on every one. See internal/cloud/mail.
 	SMTPAddr     string // CLOUD_SMTP_ADDR
@@ -121,6 +136,7 @@ func ConfigFromEnv() (Config, error) {
 		Issuer:        os.Getenv("CLOUD_ISSUER"),
 		SigningKey:    envOr("CLOUD_SIGNING_KEY", "./certs/cloud-signing-key.pem"),
 		PublicURL:     strings.TrimRight(os.Getenv("CLOUD_PUBLIC_URL"), "/"),
+		ExtraOrigins:  splitOrigins(os.Getenv("CLOUD_EXTRA_ORIGINS")),
 		SMTPAddr:      os.Getenv("CLOUD_SMTP_ADDR"),
 		SMTPFrom:      os.Getenv("CLOUD_SMTP_FROM"),
 		SMTPUser:      os.Getenv("CLOUD_SMTP_USER"),
@@ -203,4 +219,21 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// splitOrigins parses CLOUD_EXTRA_ORIGINS.
+//
+// Comma-separated, trailing slashes trimmed so a value copied from a browser's
+// address bar works. Empty entries are dropped rather than becoming an origin
+// that matches the empty string — sameOrigin already refuses a missing header,
+// and a config typo must not turn that refusal off.
+func splitOrigins(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimRight(strings.TrimSpace(part), "/")
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }

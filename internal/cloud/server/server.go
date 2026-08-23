@@ -183,6 +183,21 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/account/identities", s.handleListIdentities)
 	s.mux.HandleFunc("POST /api/account/identities/{provider}/unlink", s.handleUnlinkIdentity)
 
+	// The signed-in account and its organisations.
+	//
+	// The first routes Cloud has ever served that answer for an established
+	// session rather than a pre-session state, which is why the sign-in
+	// application has never had a signed-in mode: there was nothing to ask.
+	s.mux.HandleFunc("GET /api/account/me", s.handleMe)
+	s.mux.HandleFunc("GET /api/orgs/{org}", s.handleGetOrg)
+
+	// The route that ends `cloud org create`.
+	//
+	// The first state-changing thing in Cloud a script could reach, which is
+	// why sameOrigin exists and why it is required here rather than on the two
+	// form posts — see its comment.
+	s.mux.HandleFunc("POST /api/orgs", s.handleCreateOrg)
+
 	// Handing a signed-in user to an organisation's console.
 	//
 	// Reached by a browser rather than a script — from a link, or from the

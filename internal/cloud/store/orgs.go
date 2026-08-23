@@ -208,3 +208,21 @@ func (s *Store) OrgForUser(ctx context.Context, userID, org string) (*OrgSummary
 	}
 	return &o, nil
 }
+
+// OrgLimitFor reports how many organisations this account may create.
+//
+// Read separately from the create path, which reads it under a lock in the same
+// statement. This one is for a screen deciding whether to offer a create form
+// at all, rather than offering one that refuses every time.
+func (s *Store) OrgLimitFor(ctx context.Context, userID string) (int, error) {
+	var limit int
+	err := s.pool.QueryRow(ctx,
+		`SELECT org_limit FROM cloud.users WHERE id = $1`, userID).Scan(&limit)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("%s: %w", userID, ErrNotFound)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return limit, nil
+}
