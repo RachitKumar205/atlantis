@@ -98,6 +98,8 @@ func main() {
 		err = user(os.Args[2:], log)
 	case "member":
 		err = member(os.Args[2:], log)
+	case "signing-key":
+		err = signingKey(os.Args[2:])
 	case "data-key":
 		err = dataKey(os.Args[2:])
 	case "-h", "--help", "help":
@@ -129,6 +131,7 @@ usage:
   cloud member remove [flags]  revoke it
 
   cloud org register [flags]   point an organisation at an atlantis built by hand
+  cloud signing-key -path P    create the assertion signing key, if absent
   cloud data-key               print a keyset for a console's CONSOLE_DATA_KEY
 
 run any command with -h for its flags
@@ -926,6 +929,54 @@ func dataKey(args []string) error {
 	fmt.Println(k)
 	fmt.Fprintln(os.Stderr, "cloud: store this where the deployment's other secrets live. "+
 		"Every organisation's private key is sealed under it, and there is no way to recover them without it.")
+	return nil
+}
+
+// signingKey creates the key Cloud mints assertions with, if it does not exist.
+//
+// # Why this exists as a command
+//
+// The key was created lazily by `cloud serve`, on the theory that a development
+// stack has one and it appears the first time anybody runs it. That held while
+// Cloud only ever ran on the machine that owned the file.
+//
+// It stopped holding when Cloud moved into the cluster. The Deployment gets the
+// key from a Secret, and the Secret is filled from this file at deploy time —
+// so on a machine that has never run `cloud serve`, the file is absent, the
+// Secret cannot be written, and `make dev-k8s-load` skips Cloud entirely. From
+// a clean checkout that is a dead end: the thing that would create the key is
+// the thing that will not start without it.
+//
+// So the creation is its own step, ahead of the deploy, exactly as the data key
+// already is.
+//
+// Idempotent, because LoadOrCreateKey is. Running it twice keeps the first key
+// — which matters more than it sounds: replacing it invalidates every assertion
+// in flight and every session, and the failure presents as everybody being
+// signed out at once with nothing in the logs about a key.
+func signingKey(args []string) error {
+	fs := flag.NewFlagSet("signing-key", flag.ExitOnError)
+	path := fs.String("path", "", "where to write the key (required)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *path == "" {
+		return errors.New("-path is required: this writes a private key, and " +
+			"choosing where is not something to default")
+	}
+
+	k, created, err := issuer.LoadOrCreateKey(*path)
+	if err != nil {
+		return err
+	}
+	if created {
+		fmt.Printf("wrote a new signing key to %s (kid %s)\n", *path, k.ID)
+		fmt.Fprintln(os.Stderr, "cloud: back this up with the deployment's other secrets. "+
+			"Anyone holding it can mint an assertion for any account in any "+
+			"organisation, and losing it signs everybody out at once.")
+		return nil
+	}
+	fmt.Printf("%s already exists (kid %s); keeping it\n", *path, k.ID)
 	return nil
 }
 

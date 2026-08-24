@@ -95,14 +95,31 @@ fi
 
 # Images the cluster needs that must come from the host. Local builds are
 # handled separately, below, because they must not be pulled.
+# Each entry is a reference, or `pull-from|load-as` when the two differ.
+#
+# They differ for Calico, and only because of where the bytes come from.
+#
+# quay.io serves these at about 20 KB/s from here: a 53 MB image reached 28% in
+# twenty minutes and then stopped moving, while github.com managed 1.7 MB/s in
+# the same minute. Docker Hub has the identical tags and pulled the same image
+# in forty seconds.
+#
+# The load-as name still has to say quay.io. The Calico manifest applied below
+# references quay.io/calico/*, and containerd stores an image under the exact
+# reference it was imported with — so one loaded as docker.io/calico/node is one
+# the kubelet cannot find, and it would try to pull from quay.io on a node with
+# no route to the internet. Pulling from the fast mirror and importing under the
+# name the manifest expects is what makes both true at once.
+#
+# If Docker Hub is ever the slow one, this is a one-line edit per image.
 REMOTE_IMAGES=(
     "ghcr.io/cloudnative-pg/cloudnative-pg:${CNPG_VERSION}"
     "docker.io/rancher/local-path-provisioner:${LPP_VERSION}"
     "docker.io/library/busybox:1.36"
     "docker.io/library/memcached:${MEMCACHED_VERSION:-1.6.29-alpine}"
-    "quay.io/calico/node:${CALICO_VERSION:-v3.32.1}"
-    "quay.io/calico/cni:${CALICO_VERSION:-v3.32.1}"
-    "quay.io/calico/kube-controllers:${CALICO_VERSION:-v3.32.1}"
+    "docker.io/calico/node:${CALICO_VERSION:-v3.32.1}|quay.io/calico/node:${CALICO_VERSION:-v3.32.1}"
+    "docker.io/calico/cni:${CALICO_VERSION:-v3.32.1}|quay.io/calico/cni:${CALICO_VERSION:-v3.32.1}"
+    "docker.io/calico/kube-controllers:${CALICO_VERSION:-v3.32.1}|quay.io/calico/kube-controllers:${CALICO_VERSION:-v3.32.1}"
     "registry.k8s.io/metrics-server/metrics-server:${METRICS_SERVER_VERSION:-v0.9.0}"
 )
 
@@ -174,19 +191,34 @@ kubectl --context "$CLUSTER" get --raw /readyz >/dev/null 2>&1 || {
 
 # ---------- 3. images ----------
 say "images"
-for ref in "${REMOTE_IMAGES[@]}"; do
+for entry in "${REMOTE_IMAGES[@]}"; do
+    # `pull|load` splits into two names; a bare reference is both.
+    src="${entry%%|*}"
+    dst="${entry##*|}"
+
     if "$CONTAINER" exec "$CLUSTER" crictl images 2>/dev/null |
-        awk '{print $1":"$2}' | grep -qx "$ref"; then
-        echo "in cluster: $ref"
+        awk '{print $1":"$2}' | grep -qx "$dst"; then
+        echo "in cluster: $dst"
         continue
     fi
-    echo "pulling $ref"
-    "$CONTAINER" image pull --platform linux/arm64 "$ref" >/dev/null
-    "$CONTAINER" k8s load-image --name "$CLUSTER" "$ref" >/dev/null
-    # Host copy is dead weight once containerd has it, and this is the single
-    # largest source of disk growth in this workflow.
-    "$CONTAINER" image rm "$ref" >/dev/null 2>&1 || true
-    echo "loaded $ref"
+    if [ "$src" = "$dst" ]; then
+        echo "pulling $src"
+    else
+        echo "pulling $src (loading as $dst)"
+    fi
+    "$CONTAINER" image pull --platform linux/arm64 "$src" >/dev/null
+    if [ "$src" != "$dst" ]; then
+        "$CONTAINER" image tag "$src" "$dst" >/dev/null
+    fi
+    "$CONTAINER" k8s load-image --name "$CLUSTER" "$dst" >/dev/null
+    # Host copies are dead weight once containerd has them, and this is the
+    # single largest source of disk growth in this workflow. Both names when the
+    # image was mirrored, or the saving is halved.
+    "$CONTAINER" image rm "$dst" >/dev/null 2>&1 || true
+    if [ "$src" != "$dst" ]; then
+        "$CONTAINER" image rm "$src" >/dev/null 2>&1 || true
+    fi
+    echo "loaded $dst"
 done
 
 # Local images are tagged into docker.io/library/ before they are loaded, and
@@ -642,8 +674,17 @@ say "cloud"
 if ! "$CONTAINER" exec "$CLUSTER" crictl inspecti \
     docker.io/library/atlantis-cloud:local >/dev/null 2>&1 ||
     [ -z "${CLOUD_SIGNING_KEY_DATA:-}" ] || [ -z "${CLOUD_DATA_KEY:-}" ]; then
-    echo "  skipping Cloud: run 'make dev-k8s-load', which builds the image and"
-    echo "  passes the signing key."
+    # Says which of the two is missing. The earlier version told you to run
+    # `make dev-k8s-load` — which is what you had just run, if the signing key
+    # was the thing absent.
+    if ! "$CONTAINER" exec "$CLUSTER" crictl inspecti \
+        docker.io/library/atlantis-cloud:local >/dev/null 2>&1; then
+        echo "  skipping Cloud: atlantis-cloud:local is not in the cluster."
+        echo "  Run 'make dev-k8s-load', which builds it and loads it."
+    else
+        echo "  skipping Cloud: no signing key or data key was passed."
+        echo "  'make dev-k8s-load' creates both — see dev-cloud-signing-key."
+    fi
     say "ready"
     kubectl --context "$CLUSTER" get nodes
     exit 0

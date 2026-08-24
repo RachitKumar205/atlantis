@@ -644,7 +644,7 @@ dev-k8s: ## Create the local Kubernetes cluster with storage and CloudNativePG
 # the role and skips the Deployment rather than failing — `make dev-k8s` builds a
 # cluster and is not expected to have database passwords to hand.
 .PHONY: dev-k8s-load
-dev-k8s-load: build-provision-images dev-cloud-role dev-console-role dev-data-key dev-cloud-data-key ## Rebuild the images and push them into the cluster
+dev-k8s-load: build-provision-images dev-cloud-role dev-console-role dev-data-key dev-cloud-data-key dev-cloud-signing-key ## Rebuild the images and push them into the cluster
 	CLUSTER=$(K8S_CLUSTER) CONTAINER=$(CONTAINER) FORCE_LOAD=1 \
 		PG_HOST="$(PG_HOST)" \
 		PG_IMAGE_TAG="$(PG_IMAGE_TAG)" \
@@ -888,6 +888,25 @@ dev-org-register: dev-certs dev-data-key dev-cloud-role build-cloud ## Point an 
 # The console has no local accounts and no development bypass: it verifies
 # every sign-in against a JWKS URL in every environment. So running it locally
 # means running the issuer locally, which is the same code Cloud runs.
+
+# The key Cloud signs assertions with.
+#
+# A target of its own because Cloud now runs in the cluster, and the Deployment
+# takes this key from a Secret filled at deploy time. It used to be created
+# lazily by `cloud serve` on this machine, which worked while Cloud only ever
+# ran here — and left `make dev-k8s-load` on a clean checkout skipping Cloud
+# entirely, because the file it reads the Secret from did not exist yet.
+#
+# Idempotent. Re-running keeps the existing key, and that matters: a new key
+# invalidates every assertion in flight and every session, which presents as
+# everybody being signed out at once.
+.PHONY: dev-cloud-signing-key
+dev-cloud-signing-key: ## Create (once) the key Cloud signs assertions with
+	@if [ ! -f "$(CLOUD_SIGNING_KEY)" ]; then \
+	  mkdir -p "$$(dirname $(CLOUD_SIGNING_KEY))"; \
+	  $(GO) run ./cmd/cloud signing-key -path "$(CLOUD_SIGNING_KEY)" >/dev/null; \
+	  echo "==> wrote a new signing key to $(CLOUD_SIGNING_KEY)"; \
+	fi
 
 .PHONY: dev-cloud-data-key
 dev-cloud-data-key: ## Create (once) the keyset Cloud seals second-factor secrets with
