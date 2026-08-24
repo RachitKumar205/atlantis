@@ -15,9 +15,11 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 )
@@ -634,6 +636,145 @@ func assertRefusesWithoutAClientCertificate(t *testing.T, what, addr string) {
 			"TLS admits the connection and the protocol above it hangs up. "+
 			"Nothing here shows the certificate did the refusing", what, addr, err)
 	}
+}
+
+// provisionerSubject is the subject deploy/provisioner-rbac.yaml binds its
+// ClusterRole to. Spelled out rather than composed, because it is the exact
+// string the API server matches and a composed one would still be wrong quietly.
+const provisionerSubject = "system:serviceaccount:atlantis-system:atlantis-provisioner"
+
+// The provisioner's role is enough to do its job and not enough to do anything
+// else.
+//
+// Both halves are needed and neither is interesting alone. A role of `*` on `*`
+// passes the first half perfectly, which is what makes a test that only
+// provisions an organisation worthless as a statement about privilege. A role
+// of nothing at all passes the second.
+//
+// # Why impersonation rather than a token
+//
+// The API server evaluates RBAC for the impersonated subject exactly as it
+// would for the process itself, so this needs no TokenRequest call, no
+// service-account Secret, and nothing mounted. What it does not prove is that
+// the token reaches the process — that GetConfig prefers in-cluster credentials
+// and that the pod has them mounted. Only the running Deployment shows that,
+// which is what the test in internal/provisioner covers.
+//
+// # Why this can fail without the code changing
+//
+// It reads deploy/provisioner-rbac.yaml's effect, not the Go source. Adding an
+// API call to kube.go without adding its verb here leaves the production code
+// compiling, the unit tests green, and the provisioner refused at run time. This
+// is the test that turns that into a failure now.
+func TestK8sTheProvisionerRoleIsSufficientAndConfined(t *testing.T) {
+	if os.Getenv("ATLANTIS_TEST_K8S") == "" {
+		t.Skip("set ATLANTIS_TEST_K8S to exercise the provisioner's role against a real cluster")
+	}
+
+	admin, err := ctrlconfig.GetConfig()
+	if err != nil {
+		t.Fatalf("no cluster configuration: %v", err)
+	}
+	scheme, err := NewScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Copied, not mutated in place: GetConfig may hand back shared state, and a
+	// stray impersonation left on it would silently re-scope every other test in
+	// this package that runs afterwards.
+	scoped := rest.CopyConfig(admin)
+	scoped.Impersonate = rest.ImpersonationConfig{UserName: provisionerSubject}
+	c, err := ctrlclient.New(scoped, ctrlclient.Options{Scheme: scheme})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+
+	t.Run("it can provision an organisation", func(t *testing.T) {
+		pcfg := testConfig()
+		pcfg.ReadyTimeout = 6 * time.Minute
+		pcfg.MemcachedAddr = "memcached.atlantis-system.svc.cluster.local:11211"
+		k, err := NewKube(pcfg, c, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		const org = "scoped"
+		t.Cleanup(func() { _ = k.Destroy(context.Background(), org) })
+
+		if _, err := k.Ensure(ctx, Spec{Org: org}); err != nil {
+			t.Fatalf("Ensure with only the provisioner's role: %v\n\n"+
+				"A Forbidden here names the verb and resource the role is missing. "+
+				"Add exactly that to deploy/provisioner-rbac.yaml — not the whole "+
+				"verb set for the resource", err)
+		}
+		if err := k.WaitReady(ctx, org); err != nil {
+			t.Log(describe(ctx, t, k, org))
+			t.Fatalf("WaitReady: %v", err)
+		}
+		// Asserted rather than left to cleanup, because a cleanup that fails is
+		// swallowed — and `delete` on namespaces is the single most destructive
+		// verb the role holds, so it is worth showing it is both present and used.
+		if err := k.Destroy(ctx, org); err != nil {
+			t.Fatalf("Destroy with only the provisioner's role: %v", err)
+		}
+	})
+
+	t.Run("and is refused everything adjacent", func(t *testing.T) {
+		// If any of these unexpectedly succeeds the object is real, so it is
+		// cleaned up with the admin client — the scoped one cannot delete it.
+		const escalationProbe = "atlantis-provisioner-escalation-probe"
+		t.Cleanup(func() {
+			if a, err := ctrlclient.New(admin, ctrlclient.Options{Scheme: scheme}); err == nil {
+				_ = a.Delete(context.Background(), &rbacv1.ClusterRole{
+					ObjectMeta: metav1.ObjectMeta{Name: escalationProbe},
+				})
+			}
+		})
+
+		for _, probe := range []struct {
+			what string
+			why  string
+			do   func() error
+		}{
+			{
+				"list pods in every namespace",
+				"the provisioner never reads a pod; this is the shape of a general reader",
+				func() error { return c.List(ctx, &corev1.PodList{}) },
+			},
+			{
+				"list secrets in every namespace",
+				"it may fetch an authority by name, which it knows; it may not enumerate them",
+				func() error { return c.List(ctx, &corev1.SecretList{}) },
+			},
+			{
+				"read a node",
+				"nothing it does concerns the machines underneath",
+				func() error {
+					return c.Get(ctx, types.NamespacedName{Name: "any-node"}, &corev1.Node{})
+				},
+			},
+			{
+				"create a ClusterRole",
+				"a process that can grant permissions can grant itself permissions",
+				func() error {
+					return c.Create(ctx, &rbacv1.ClusterRole{
+						ObjectMeta: metav1.ObjectMeta{Name: escalationProbe},
+					})
+				},
+			},
+		} {
+			// Forbidden specifically, not "an error". A NotFound would mean the
+			// request was authorised and merely found nothing, which is the
+			// opposite result wearing the same shape.
+			if err := probe.do(); !apierrors.IsForbidden(err) {
+				t.Errorf("the provisioner could %s — %s. Got %v, want Forbidden",
+					probe.what, probe.why, err)
+			}
+		}
+	})
 }
 
 // probeTCP runs one TCP connect from a pod in ns and returns its exit code.

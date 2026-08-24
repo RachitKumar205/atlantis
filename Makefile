@@ -262,9 +262,37 @@ build-console-spa: ## Build the console React SPA and write output to cmd/consol
 build-console-image: ## Build the atlantis-console image
 	$(CONTAINER) build --file Dockerfile.console -t atlantis-console:local .
 
+# If a build dies in the `proto` stage with
+#
+#   lookup proxy.golang.org on 192.168.64.1:53: read: connection refused
+#
+# the builder has no working resolver. Apple `container` gives it a DNS server
+# that answers for the local `.test` domain and refuses everything else, and the
+# proto stage has to `go install` three plugins from the internet.
+#
+# It usually looks fine, which is what makes it confusing: the stage's results
+# live in a buildkit cache mount, so once those plugins are downloaded nothing
+# reaches the network again. The failure appears the first time that cache is
+# cold — a new machine, or after `container builder delete`.
+#
+# Fix it once, on the builder rather than in this file:
+#
+#   container builder stop && container builder delete --force
+#   container builder start --cpus 2 --memory 2048MB --dns 1.1.1.1
+#
+# Nothing here does it automatically. Restarting somebody's builder as a side
+# effect of `make` would throw away every cached layer they have.
 .PHONY: build-server-image
 build-server-image: ## Build the atlantis server image for the local cluster
-	$(CONTAINER) build --file Dockerfile -t atlantis-server:local .
+	$(CONTAINER) build --file Dockerfile --target server -t atlantis-server:local .
+
+# --target is not optional on either of these. Dockerfile now ends with the
+# provisioner stage, and a build with no target takes the last one — so omitting
+# it here would tag the provisioner as atlantis-server:local, which starts, fails
+# on missing configuration, and looks like a broken server image.
+.PHONY: build-provisioner-image
+build-provisioner-image: ## Build the provisioner image (shares Dockerfile's proto and build stages)
+	$(CONTAINER) build --file Dockerfile --target provisioner -t atlantis-provisioner:local .
 
 # CloudNativePG's image plus Apache-2 TimescaleDB. The stock CNPG image already
 # carries pgvector and citext — pgvector being the one atlantis cannot open a
@@ -283,7 +311,7 @@ build-pg-image: ## Build the Postgres image provisioned organisations run
 	$(CONTAINER) build --file Dockerfile.pg -t atlantis-pg:$(PG_IMAGE_TAG) .
 
 .PHONY: build-provision-images
-build-provision-images: build-server-image build-signer-image build-pg-image ## Build every image the local cluster runs
+build-provision-images: build-server-image build-signer-image build-pg-image build-provisioner-image ## Build every image the local cluster runs
 
 .PHONY: build-signer-image
 build-signer-image: ## Build the atlantis-signer image (cert signing service)
@@ -590,16 +618,39 @@ dev-k8s: ## Create the local Kubernetes cluster with storage and CloudNativePG
 # FORCE_LOAD, because a rebuilt image keeps its tag: without it the script sees
 # the tag already in the cluster and skips, leaving the old binary running.
 # Pods still have to be restarted afterwards to pick the new image up.
+#
+# The credentials are passed because this target also deploys the provisioner
+# into the cluster, under its own ServiceAccount. Without them the script applies
+# the role and skips the Deployment rather than failing — `make dev-k8s` builds a
+# cluster and is not expected to have database passwords to hand.
 .PHONY: dev-k8s-load
-dev-k8s-load: build-provision-images ## Rebuild the images and push them into the cluster
-	CLUSTER=$(K8S_CLUSTER) CONTAINER=$(CONTAINER) FORCE_LOAD=1 ./deploy/k8s-dev.sh
+dev-k8s-load: build-provision-images dev-cloud-role dev-console-role dev-data-key ## Rebuild the images and push them into the cluster
+	CLUSTER=$(K8S_CLUSTER) CONTAINER=$(CONTAINER) FORCE_LOAD=1 \
+		PG_HOST="$(PG_HOST)" \
+		PG_IMAGE_TAG="$(PG_IMAGE_TAG)" \
+		CLOUD_PG_URL="$(CLOUD_PG_URL)" \
+		CONSOLE_PG_URL="$(CONSOLE_PG_URL)" \
+		CONSOLE_DATA_KEY="$$(cat $(DEV_DATA_KEY_FILE))" \
+		CLOUD_AUDIENCE="$(CLOUD_AUDIENCE)" \
+		EXTERNAL_HOST="$(K8S_EXTERNAL_HOST)" \
+		./deploy/k8s-dev.sh
 
 # The provisioner, run on the host against the cluster's kubeconfig.
 #
-# Host-side like every other dev target, and for the same reason dev-signer is:
-# the console and Cloud run here too, and an in-cluster provisioner would need
-# an image, a ServiceAccount and a scoped ClusterRole before it could do
-# anything the kubeconfig already allows. Those belong with GKE.
+# This is now the second way to run it, not the only one. `make dev-k8s-load`
+# deploys it into the cluster under a ServiceAccount whose ClusterRole grants
+# the seven resources it actually touches — which is what a real cluster will
+# do, and what deploy/provisioner-rbac.yaml exists for.
+#
+# This target survives because it is the faster loop: `go run` against a
+# rebuilt binary, with no image to build and no rollout to wait for. The
+# difference worth remembering is privilege. Here it inherits your kubeconfig,
+# which is cluster-admin, so a missing verb in the ClusterRole cannot show up.
+# The impersonation test in kube_k8s_test.go is what catches that instead.
+#
+# Run one or the other. Two provisioners on one queue is not broken — the lease
+# is FOR UPDATE SKIP LOCKED and they will not collide — but it makes "which one
+# did that" unanswerable from the logs.
 #
 # CLOUD_AUDIENCE is the console URL twice over: it is what Cloud mints
 # assertions for and what cloud.orgs.console_url is set to, and the two must be

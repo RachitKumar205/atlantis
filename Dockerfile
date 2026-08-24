@@ -61,8 +61,30 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     go build -ldflags="-s -w -extldflags=-static -X main.version=${VERSION}" \
     -o /out/atlantis ./cmd/server
 
-# ---------- runtime ----------
-FROM alpine:3.21
+# The provisioner is built here rather than in a file of its own, and that is
+# not to save a file.
+#
+# cmd/provisioner reaches internal/cloud/store, and through it both the
+# generated protobuf package and pg_query_go — so it needs the proto stage above
+# AND CGO, which makes its build identical to the server's in every respect that
+# matters. A Dockerfile.provisioner would have to repeat the proto stage
+# verbatim, including the plugin versions whose comment already says they are
+# duplicated from the Makefile by hand. A third copy of a pin that nothing
+# enforces is worse than a second binary in one stage.
+#
+# No -X: cmd/provisioner declares no version symbol, and the linker discards a
+# -X for a symbol that does not exist without saying so.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=1 \
+    go build -ldflags="-s -w -extldflags=-static" \
+    -o /out/provisioner ./cmd/provisioner
+
+# ---------- runtime: server ----------
+# Named, because this file now produces two images. `make build-server-image`
+# passes --target server. Without a target a build takes the LAST stage, which
+# would silently produce the provisioner under the server's tag.
+FROM alpine:3.21 AS server
 
 RUN adduser -D -u 10001 atlantis && \
     apk --no-cache add ca-certificates tzdata
@@ -109,3 +131,27 @@ HEALTHCHECK --start-period=20s --interval=15s --timeout=5s --retries=3 \
     CMD wget -q -O - --no-check-certificate https://127.0.0.1:8081/readyz >/dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["/app/atlantis"]
+
+# ---------- runtime: provisioner ----------
+# Build with --target provisioner. See the note on the server stage above about
+# what happens without a target.
+FROM alpine:3.21 AS provisioner
+
+# The same uid as the server, and numeric for the same reason: the kubelet
+# enforces `runAsNonRoot` from image metadata before the container starts, so it
+# cannot resolve a name to a uid and refuses the image outright. See
+# nonRootPodSecurity in internal/cloud/provision/workloads.go.
+RUN adduser -D -u 10001 provisioner && \
+    apk --no-cache add ca-certificates tzdata
+
+WORKDIR /app
+COPY --from=build /out/provisioner /app/provisioner
+USER 10001
+
+# No EXPOSE and no HEALTHCHECK.
+#
+# The provisioner serves one HTTP listener for /healthz and /readyz, on an
+# address that is configuration rather than a constant, so a port baked in here
+# would be a second answer that can disagree with the first. Its Deployment
+# names the port it actually binds, and the probes go there.
+ENTRYPOINT ["/app/provisioner"]

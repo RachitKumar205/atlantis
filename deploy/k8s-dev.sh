@@ -116,6 +116,7 @@ LOCAL_IMAGES=(
     "atlantis-pg:${PG_IMAGE_TAG}"
     "atlantis-server:local"
     "atlantis-signer:local"
+    "atlantis-provisioner:local"
 )
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -416,6 +417,144 @@ spec:
       targetPort: 11211
 EOF
 kubectl --context "$CLUSTER" -n atlantis-system rollout status deployment/memcached --timeout=120s
+
+# ---------------------------------------------------------------------------
+# The provisioner, running under its own service account.
+#
+# Its role is a file — deploy/provisioner-rbac.yaml — because it is static, it
+# is identical on every cluster, and it is the security artifact this is all
+# about. The Deployment is inline here instead, because every value in it is
+# local: image tags that exist only on this node, a hostname that resolves only
+# on this machine, and a database address discovered at run time. A file with
+# those baked in would read like a deployment manifest and be usable on exactly
+# one laptop.
+# ---------------------------------------------------------------------------
+say "provisioner"
+
+# The role goes on whether or not the workload does. It is static, it grants
+# nothing to nobody until something is bound to it, and having it present means
+# the impersonation test in kube_k8s_test.go can run against a cluster built by
+# plain `make dev-k8s`.
+kubectl --context "$CLUSTER" apply -f "$(dirname "$0")/provisioner-rbac.yaml" >/dev/null
+
+# The Deployment needs three credentials and an image, and `make dev-k8s` has
+# neither — it builds a cluster, not the product. Skipping is the right answer
+# rather than failing: a pod referring to an image the node does not have never
+# starts, and these nodes cannot reach a registry to find out otherwise.
+#
+# `crictl inspecti` on the qualified name, for the reason spelled out at the
+# side-loading loop above: `crictl images` shows the normalised reference even
+# when the lookup would fail, so the listing looks right while the pull does not.
+if ! "$CONTAINER" exec "$CLUSTER" crictl inspecti \
+    docker.io/library/atlantis-provisioner:local >/dev/null 2>&1 ||
+    [ -z "${CLOUD_PG_URL:-}" ] || [ -z "${CONSOLE_PG_URL:-}" ] || [ -z "${CONSOLE_DATA_KEY:-}" ]; then
+    echo "  skipping the provisioner Deployment: run 'make dev-k8s-load', which"
+    echo "  builds the image and passes the database credentials."
+    say "ready"
+    kubectl --context "$CLUSTER" get nodes
+    exit 0
+fi
+
+# The Cloud database runs outside the cluster, in a sibling container. CoreDNS
+# does not resolve .test, so the pod is given the address directly through
+# hostAliases and CLOUD_PG_URL stays byte-identical to the one in .env — one
+# connection string, not two that can drift apart.
+#
+# The node and the database container share a /24 and pod egress is SNATed
+# through the node, so this is reachable; deploy-time discovery is only because
+# the address is assigned, not fixed.
+PG_HOST_NAME="${PG_HOST:-atlantis-pg.test}"
+PG_HOST_IP="$(ping -c1 -W1 "$PG_HOST_NAME" 2>/dev/null | head -1 | sed -E 's/.*\(([0-9.]+)\).*/\1/')"
+if [ -z "$PG_HOST_IP" ]; then
+    echo "cannot resolve $PG_HOST_NAME; is the atlantis-pg container running?" >&2
+    exit 1
+fi
+echo "  $PG_HOST_NAME -> $PG_HOST_IP"
+
+# Credentials go in a Secret rather than the pod spec: `kubectl get deployment`
+# is something you run in front of other people.
+kubectl --context "$CLUSTER" -n atlantis-system \
+    create secret generic atlantis-provisioner \
+    --from-literal=CLOUD_PG_URL="${CLOUD_PG_URL:?set CLOUD_PG_URL}" \
+    --from-literal=CONSOLE_PG_URL="${CONSOLE_PG_URL:?set CONSOLE_PG_URL}" \
+    --from-literal=CONSOLE_DATA_KEY="${CONSOLE_DATA_KEY:?set CONSOLE_DATA_KEY}" \
+    --dry-run=client -o yaml | kubectl --context "$CLUSTER" apply -f - >/dev/null
+
+kubectl --context "$CLUSTER" apply -f - >/dev/null <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: atlantis-provisioner
+  namespace: atlantis-system
+  labels:
+    app.kubernetes.io/name: atlantis-provisioner
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: atlantis-provisioner }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: atlantis-provisioner }
+    spec:
+      serviceAccountName: atlantis-provisioner
+      # true, and stated rather than left to the default — which is the opposite
+      # of every other pod this system creates. The tenant workloads refuse the
+      # token because they have no business calling the API. This process IS the
+      # API caller: the token is the whole reason it has an identity. Beside
+      # three manifests that say false, an omitted field would read like one
+      # somebody forgot.
+      automountServiceAccountToken: true
+      hostAliases:
+        - ip: "${PG_HOST_IP}"
+          hostnames: ["${PG_HOST_NAME}"]
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: provisioner
+          image: atlantis-provisioner:local
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+          envFrom:
+            - secretRef: { name: atlantis-provisioner }
+          env:
+            - { name: CLOUD_AUDIENCE, value: "${CLOUD_AUDIENCE:-http://localhost:3000}" }
+            - { name: PROVISIONER_EXTERNAL_HOST, value: "${EXTERNAL_HOST:-atl-dev.test}" }
+            - { name: PROVISIONER_SERVER_IMAGE, value: "atlantis-server:local" }
+            - { name: PROVISIONER_SIGNER_IMAGE, value: "atlantis-signer:local" }
+            - { name: PROVISIONER_POSTGRES_IMAGE, value: "atlantis-pg:${PG_IMAGE_TAG}" }
+            - { name: PROVISIONER_MEMCACHED_ADDR, value: "memcached.atlantis-system.svc.cluster.local:11211" }
+            - { name: PROVISIONER_PULL_POLICY, value: "IfNotPresent" }
+          ports:
+            - name: health
+              containerPort: 8082
+          # Plain HTTP: this listener terminates no TLS. See the note in
+          # internal/provisioner/health.go about what that means for /metrics,
+          # which shares the port and is unauthenticated.
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8082 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8082 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 50m
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+EOF
+kubectl --context "$CLUSTER" -n atlantis-system rollout status deployment/atlantis-provisioner --timeout=180s
 
 say "ready"
 kubectl --context "$CLUSTER" get nodes

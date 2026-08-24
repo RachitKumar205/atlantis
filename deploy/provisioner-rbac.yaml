@@ -1,0 +1,98 @@
+# The provisioner's identity in the cluster.
+#
+# Until this existed the provisioner authenticated with whatever kubeconfig it
+# found, which on every developer machine is cluster-admin. Nothing constrained
+# it, and nothing described what it actually needed.
+#
+# This file is applied by an administrator, not by the provisioner: a process
+# cannot create the role that limits it, and one that could would not be
+# limited. deploy/k8s-dev.sh applies it locally; a real cluster applies it once
+# at install time, before the Deployment that references it.
+#
+# The rules below are derived from internal/cloud/provision/kube.go rather than
+# guessed from what a provisioner "probably" needs. If that file grows an
+# operation, this one has to grow with it, and the impersonation test in
+# kube_k8s_test.go is what catches the day it does not.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: atlantis-provisioner
+  namespace: atlantis-system
+  labels:
+    app.kubernetes.io/name: atlantis-provisioner
+---
+# A ClusterRole rather than a Role, and not by preference.
+#
+# The provisioner creates a namespace for each organisation, on demand, named
+# from the organisation. A Role has to name its namespace, and these namespaces
+# do not exist when this file is applied.
+#
+# That has a consequence worth being plain about: every rule here is cluster-wide,
+# including `get` on secrets. A compromised provisioner could read any Secret in
+# the cluster, CloudNativePG's operator credentials included. RBAC has no
+# namespace prefix or pattern that would narrow it, and an admission policy does
+# not help because it runs on writes while the sensitive verb here is a read.
+#
+# What this does buy is everything that is now absent: no nodes, no pods, no
+# exec, no RBAC objects, no custom resource definitions, no webhooks, and no
+# `list` on anything at all — names must be known, not discovered.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: atlantis-provisioner
+  labels:
+    app.kubernetes.io/name: atlantis-provisioner
+rules:
+  # `patch` is server-side apply. k.apply is
+  # Patch(obj, client.Apply, fieldOwner, ForceOwnership), so every object the
+  # provisioner writes — new or existing — arrives as a PATCH request.
+  #
+  # `create` is beside it on every rule, which is not obvious and was not
+  # assumed. This role was first written without it, on the theory that a patch
+  # authorises as `patch`. The first run refused:
+  #
+  #   namespaces "org-scoped" is forbidden: User
+  #   "system:serviceaccount:atlantis-system:atlantis-provisioner"
+  #   cannot create resource "namespaces" in API group ""
+  #
+  # A server-side apply that brings an object into existence is authorised as a
+  # create as well as a patch. Every object here is created by the first Ensure
+  # for an organisation, so every rule needs both. `get` appears only where the
+  # code reads something back, and `delete` only on namespaces.
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, create, patch, delete] # delete is Destroy; it takes the whole namespace
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, create, patch] # get is ensureCerts reading back an existing authority
+  - apiGroups: [""]
+    resources: [serviceaccounts]
+    verbs: [create, patch]
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, create, patch] # get reads the allocated NodePort back
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, create, patch] # get is WaitReady polling availability
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [create, patch]
+  - apiGroups: [postgresql.cnpg.io]
+    resources: [clusters]
+    verbs: [get, create, patch] # get is WaitReady reading Status.Phase
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: atlantis-provisioner
+  labels:
+    app.kubernetes.io/name: atlantis-provisioner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: atlantis-provisioner
+subjects:
+  - kind: ServiceAccount
+    name: atlantis-provisioner
+    namespace: atlantis-system
