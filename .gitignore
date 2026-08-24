@@ -124,6 +124,16 @@ atlantis.dev.yaml
 
 # migrations/tidectl/ is also derived — populated by operators running
 # tidectl plan/approve against their own workspace. (See note above on .dev/.)
+#
+# This used to be the comment above and nothing else: an explanation of why the
+# path is derived, with no rule under it. So `tidectl plan` in this repo wrote
+# migrations/tidectl/_staged/NNNN_tidectl_staged.{up,down}.sql and git offered
+# them for commit — a staged migration for whatever schema happened to be in
+# ./schema at the time, which is itself ignored scratch.
+#
+# Anchored, and only the tidectl subdirectory: migrations/cloud/ and
+# migrations/infra/ are the real thing and stay tracked.
+/migrations/tidectl/
 
 # Release artifacts. `make release-tide` / `make release-clis-native` write
 # tarballs here; they are uploaded by the release workflow, never committed.
