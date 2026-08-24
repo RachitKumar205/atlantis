@@ -205,6 +205,18 @@ func (s *Server) routes() {
 	// form posts — see its comment.
 	s.mux.HandleFunc("POST /api/orgs", s.handleCreateOrg)
 
+	// Deletion, in two halves that are deliberately not symmetrical.
+	//
+	// Delete requires the organisation's own name in the body; restore requires
+	// nothing beyond membership. The guard belongs on the destructive direction,
+	// and putting one on the recovery direction would make undoing a mistake
+	// harder than making it.
+	//
+	// Neither destroys anything. Both write a row; the provisioner is the only
+	// process that touches the cluster.
+	s.mux.HandleFunc("POST /api/orgs/{org}/delete", s.handleDeleteOrg)
+	s.mux.HandleFunc("POST /api/orgs/{org}/restore", s.handleRestoreOrg)
+
 	// Handing a signed-in user to an organisation's console.
 	//
 	// Reached by a browser rather than a script — from a link, or from the

@@ -7,7 +7,9 @@ import {
   fetchPending,
   finishEnrolment,
   createOrg,
+  deleteOrg,
   fetchMe,
+  restoreOrg,
   requestPasswordReset,
   signIn,
   signOut,
@@ -154,6 +156,24 @@ export function App() {
     [run, refresh],
   )
 
+  const deleteOrganisation = useCallback(
+    (name: string, confirm: string) =>
+      run(async () => {
+        await deleteOrg(name, confirm)
+        await refresh()
+      }),
+    [run, refresh],
+  )
+
+  const restoreOrganisation = useCallback(
+    (name: string) =>
+      run(async () => {
+        await restoreOrg(name)
+        await refresh()
+      }),
+    [run, refresh],
+  )
+
   const endSession = useCallback(
     () =>
       run(async () => {
@@ -206,6 +226,8 @@ export function App() {
           error={error}
           busy={busy}
           onCreate={createOrganisation}
+          onDelete={deleteOrganisation}
+          onRestore={restoreOrganisation}
           onSignOut={endSession}
         />
       )

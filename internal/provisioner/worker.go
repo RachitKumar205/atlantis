@@ -39,6 +39,13 @@ type Queue interface {
 	LogAction(ctx context.Context, org, actor, actorEmail, action string, detail map[string]any)
 	ReadyOrgs(ctx context.Context) ([]string, error)
 	Requeue(ctx context.Context, org, reason string) error
+
+	// The teardown half. Separate from ClaimForProvisioning for the reason
+	// store.ClaimForPurge records: one predicate covering both would be the one
+	// query nobody can afford to misread.
+	ClaimForPurge(ctx context.Context, claimedBy string, lease time.Duration) (*store.Claimed, error)
+	MarkPurged(ctx context.Context, org string) error
+	MarkPurgeFailed(ctx context.Context, org, reason string) error
 }
 
 // Cluster is where organisations are built.
@@ -51,6 +58,13 @@ type Cluster interface {
 	Ensure(ctx context.Context, spec provision.Spec) (provision.Status, error)
 	WaitReady(ctx context.Context, org string) error
 	Exists(ctx context.Context, org string) (bool, error)
+
+	// Destroy removes an organisation's namespace and everything in it.
+	//
+	// Added when deletion was wired up. Until then this method existed on
+	// *provision.Kube and nothing outside a test had ever called it — the
+	// destructive half of provisioning, written and unreachable.
+	Destroy(ctx context.Context, org string) error
 }
 
 // RegisterFunc records a provisioned organisation with the console.
@@ -223,6 +237,11 @@ func (w *Worker) Run(ctx context.Context) error {
 		case <-r.C:
 			w.reconcile(ctx)
 			w.drain(ctx)
+			// After the drain, not before. reap destroys namespaces, and
+			// running it while the drain still has claimable work would put the
+			// slowest, most destructive pass in front of organisations waiting
+			// to be created.
+			w.reap(ctx)
 		}
 	}
 }
@@ -617,4 +636,107 @@ func (w *Worker) fail(ctx context.Context, c store.Claimed, cause error) {
 // silently discarded either.
 func (w *Worker) audit(ctx context.Context, org, action string, detail map[string]any) {
 	w.q.LogAction(ctx, org, store.ProvisionerActor, "", action, detail)
+}
+
+// reap destroys the organisations whose retention window has run out.
+//
+// # Why this runs on the reconcile tick and not the poll tick
+//
+// Deletion is not urgent. An organisation deleted thirty days ago can wait
+// another five minutes, and running this every ten seconds would mean a query
+// against the whole queue table at that rate for work that appears a handful of
+// times a month.
+//
+// # The most dangerous loop in the system
+//
+// It destroys customer data on a timer with no human in it. Everything that
+// makes that safe is in store.ClaimForPurge's predicate rather than here: a row
+// is only claimable when its state is `deleted` and its purge_after has passed,
+// or when it is already `purging` under a lease that expired. This function
+// trusts that entirely and does not second-guess it — a second opinion here
+// would be a second place for the rule to be wrong.
+func (w *Worker) reap(ctx context.Context) {
+	// The same degraded check drain does. A provisioner that cannot reach the
+	// cluster must not claim a purge: it would fail, release, and be reclaimed
+	// on the next pass, burning through the backlog marking each one failed
+	// with an error about credentials rather than about the organisation.
+	if !w.Healthy() {
+		if !w.reconnect() {
+			return
+		}
+	}
+	for {
+		if ctx.Err() != nil || !w.Healthy() {
+			return
+		}
+		claimed, err := w.q.ClaimForPurge(ctx, w.cfg.ClaimedBy, w.cfg.Lease)
+		switch {
+		case errors.Is(err, store.ErrNothingToPurge):
+			return
+		case err != nil:
+			claimFailuresTotal.Inc()
+			if ctx.Err() == nil {
+				w.log.Error("could not claim from the purge queue", "err", err)
+			}
+			return
+		}
+		w.purgeOne(ctx, claimed.Org)
+	}
+}
+
+// purgeOne tears down one organisation and removes its rows.
+//
+// The order is the whole design: the cluster first, the database second. A
+// crash between them leaves the namespace gone and the row still reading
+// `purging`, which the next pass reclaims and retries — and Destroy on an
+// absent namespace succeeds, so the retry converges.
+//
+// The other order would delete the row that says which namespace to destroy,
+// stranding a live namespace with a customer's data in it and nothing left
+// pointing at it.
+func (w *Worker) purgeOne(ctx context.Context, org string) {
+	start := time.Now()
+	outcome := "failed"
+	defer func() {
+		purgesTotal.WithLabelValues(outcome).Inc()
+	}()
+
+	log := w.log.With("org", org)
+	log.Info("purging", "note", "the retention window has passed")
+
+	// The lease covers a claim; a teardown that outlives it would be reclaimed
+	// by a second provisioner while this one is still working. Same machinery
+	// the provision path uses.
+	stop := w.heartbeat(ctx, org)
+	defer stop()
+
+	if err := w.currentCluster().Destroy(ctx, org); err != nil {
+		// Released rather than marked terminally failed. A customer who asked
+		// to be deleted and quietly was not is the worst outcome here, so this
+		// keeps being retried rather than backing off into silence.
+		log.Error("could not destroy the organisation", "err", err)
+		if mErr := w.q.MarkPurgeFailed(ctx, org, err.Error()); mErr != nil {
+			log.Error("could not release the purge claim", "err", mErr)
+		}
+		return
+	}
+
+	if err := w.q.MarkPurged(ctx, org); err != nil {
+		// The namespace is gone and the rows are not. The next pass reclaims
+		// the row, Destroy succeeds against an absent namespace, and it
+		// converges — which is why this is a log and not a failure mark.
+		log.Error("the organisation was destroyed but its rows remain", "err", err)
+		return
+	}
+
+	outcome = "purged"
+	log.Info("purged", "took", time.Since(start).Round(time.Second))
+
+	// Audited before the rows go, or rather: audited knowing they have. The
+	// audit log references the organisation by name and outlives it, which is
+	// the point — "what happened to acme" must still have an answer after acme
+	// stops existing.
+	w.audit(ctx, org, "org.purged", map[string]any{
+		"took_ms": time.Since(start).Milliseconds(),
+	})
 }

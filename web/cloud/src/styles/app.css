@@ -340,10 +340,41 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /*
+    Wrapping, because a row gained things after it was written: a delete
+    control, a restore control, and a confirmation field that takes the full
+    width. Without this the confirm field is squeezed into whatever the name and
+    the Open link leave behind, which on a narrow window is nothing.
+  */
+  flex-wrap: wrap;
   gap: 0.75rem;
   padding: 0.7rem 0.85rem;
   border: 1px solid var(--line);
   border-radius: 8px;
+}
+
+/*
+  The confirmation, on its own line.
+  
+  flex-basis: 100% rather than width, so it claims a whole row inside the
+  wrapping flex container above rather than overflowing it.
+*/
+.orglist__confirm {
+  flex-basis: 100%;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--line-soft);
+}
+
+/*
+  The hint under a deleted organisation also takes its own line. Same reason,
+  and it has to come after .hint in the cascade to win on flex-basis — the
+  selector is more specific, so ordering is not load-bearing here, but the
+  comment is cheaper than rediscovering that.
+*/
+.orglist__item .hint {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--ink-3);
 }
 
 .orglist__name {

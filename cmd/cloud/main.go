@@ -548,7 +548,7 @@ func memberChange(args []string, add bool, log *slog.Logger) error {
 // while before it is provisioned.
 func org(args []string, log *slog.Logger) error {
 	if len(args) == 0 {
-		return errors.New(`cloud org: expected a subcommand (create, status, register)`)
+		return errors.New(`cloud org: expected a subcommand (create, status, register, purge)`)
 	}
 	switch args[0] {
 	case "create":
@@ -557,6 +557,8 @@ func org(args []string, log *slog.Logger) error {
 		return orgStatus(args[1:], log)
 	case "register":
 		return orgRegister(args[1:], log)
+	case "purge":
+		return orgPurge(args[1:], log)
 	default:
 		return fmt.Errorf("cloud org: unknown subcommand %q", args[0])
 	}
@@ -932,4 +934,90 @@ func envOr(name, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// orgPurge brings an organisation's destruction forward to immediately.
+//
+// # Why this exists
+//
+// Deleting from the browser is deliberately reversible: it stops the
+// organisation serving, starts a thirty-day clock, and leaves the namespace
+// alone. That window is the only safety net the system has while there are no
+// database backups.
+//
+// It also means the row survives for thirty days, holding the name and counting
+// against its creator's limit. So "delete it and make a fresh one with the same
+// name" is otherwise a month's wait. This is the operator's answer to that, and
+// to a customer who asks to be erased now rather than eventually.
+//
+// # What it does not do
+//
+// It does not destroy anything itself. It sets purge_after to now; the
+// provisioner tears the namespace down on its next reconcile pass, because the
+// provisioner is the only process in this system that holds Kubernetes
+// credentials — see internal/provisioner's package comment for why that
+// separation is not negotiable.
+//
+// So this needs a database URL and no kubeconfig, and the destruction is
+// visible in the provisioner's log rather than this one.
+//
+// # The guard
+//
+// -yes, and the name as -org. Two deliberate acts, because there is no
+// confirmation prompt: this is expected to run in a terminal where a
+// half-remembered shell history entry is one arrow key away.
+func orgPurge(args []string, log *slog.Logger) error {
+	fs := flag.NewFlagSet("org purge", flag.ExitOnError)
+	name := fs.String("org", "", "organisation name")
+	yes := fs.Bool("yes", false, "required: confirm that this destroys the organisation permanently")
+	dbURL := cloudDBFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *name == "" {
+		return errors.New("-org is required")
+	}
+	if !*yes {
+		return fmt.Errorf("refusing to purge %s without -yes: this destroys its "+
+			"database, its certificate authority and every schema in it, and there "+
+			"are no backups to restore from", *name)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	db, err := openCloud(ctx, *dbURL, log)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Read first, so the operator is told what they are about to destroy rather
+	// than only that something happened. A name typed from memory that matches
+	// nothing should say so before anything is written.
+	p, err := db.ProvisioningFor(ctx, *name)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("%s is not queued for provisioning — either it does not "+
+			"exist, or it was registered by hand with `cloud org register` and has "+
+			"no row for the provisioner to act on", *name)
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Printf("purging %s (currently %s)\n", p.Org, p.State)
+
+	if err := db.PurgeNow(ctx, *name); err != nil {
+		return err
+	}
+
+	fmt.Printf("%s is queued for destruction.\n", *name)
+	fmt.Println()
+	fmt.Println("    The provisioner destroys it on its next reconcile pass, which is")
+	fmt.Println("    PROVISIONER_RECONCILE_INTERVAL away — five minutes by default. Watch")
+	fmt.Println("    the provisioner's log, not this one.")
+	fmt.Println()
+	fmt.Println("    Until then it can still be brought back with:")
+	fmt.Printf("      UPDATE cloud.org_provisioning SET state = 'ready',\n")
+	fmt.Printf("             deleted_at = NULL, purge_after = NULL WHERE org = '%s';\n", *name)
+	return nil
 }

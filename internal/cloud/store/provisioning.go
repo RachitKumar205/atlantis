@@ -43,7 +43,32 @@ const (
 	// StateFailed is an attempt that did not finish. Not terminal: it is
 	// claimable again once next_attempt_after passes.
 	StateFailed ProvisioningState = "failed"
+
+	// StateDeleted is soft-deleted: not serving, hidden from the organisation
+	// list, and restorable until purge_after passes.
+	//
+	// The namespace is UNTOUCHED in this state. That is the whole point — there
+	// are no database backups yet, so destroying on the button press would be
+	// unrecoverable in the strongest sense, and this window is the only safety
+	// net the system has.
+	StateDeleted ProvisioningState = "deleted"
+
+	// StatePurging is claimed by a provisioner that is tearing the organisation
+	// down. Beyond here nothing is recoverable.
+	StatePurging ProvisioningState = "purging"
 )
+
+// Two guards fall out of these states rather than being written, and both are
+// load-bearing enough to say out loud.
+//
+// ReadyOrgs and Requeue below both filter on state = 'ready'. So a soft-deleted
+// organisation is invisible to the reconcile loop, which would otherwise
+// re-Ensure the namespace it is about to destroy — a bug that would present as
+// "the data came back", which is worse than either deleting or not deleting —
+// and invisible to Requeue, which would otherwise resurrect it.
+//
+// Neither needed a new condition. Both are asserted in the tests anyway,
+// precisely because nothing in either query mentions deletion.
 
 // Provisioning is one organisation's queue row.
 type Provisioning struct {

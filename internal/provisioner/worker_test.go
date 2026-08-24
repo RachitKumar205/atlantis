@@ -65,6 +65,14 @@ type fakeQueue struct {
 
 	// events records the order of the writes that must not be reordered.
 	events []string
+
+	// The teardown side. purgeQueue is what ClaimForPurge hands out; purged and
+	// purgeFailed record where each one ended up.
+	purgeQueue  []store.Claimed
+	purgeClaims int
+	purgeErr    error
+	purged      []string
+	purgeFailed []failedMark
 }
 
 func newFakeQueue(orgs ...store.Claimed) *fakeQueue {
@@ -223,6 +231,12 @@ type fakeCluster struct {
 	absent      map[string]bool
 	existsErr   error
 	existsCalls int
+
+	destroyed  []string
+	destroyErr error
+	// onDestroy, when set, runs inside Destroy so a test can order it against
+	// the queue's writes.
+	onDestroy func(org string)
 
 	ensures int
 	waits   int
@@ -997,5 +1011,183 @@ func TestRunStopsOnCancellation(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return when its context was cancelled")
+	}
+}
+
+// The teardown half of the fakes.
+//
+// Every method honours ctxErr for the reason the comment on it gives: a fake
+// more forgiving than a real query turns a shutdown test into a formality. The
+// purge path is where that matters most — a reaper that kept destroying after
+// its context was cancelled would be tearing down namespaces during a shutdown.
+
+func (f *fakeQueue) ClaimForPurge(ctx context.Context, claimedBy string, _ time.Duration) (*store.Claimed, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctxErr(ctx); err != nil {
+		return nil, err
+	}
+	f.purgeClaims++
+	if f.purgeErr != nil {
+		return nil, f.purgeErr
+	}
+	if len(f.purgeQueue) == 0 {
+		return nil, store.ErrNothingToPurge
+	}
+	c := f.purgeQueue[0]
+	f.purgeQueue = f.purgeQueue[1:]
+	return &c, nil
+}
+
+func (f *fakeQueue) MarkPurged(ctx context.Context, org string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	f.purged = append(f.purged, org)
+	f.events = append(f.events, "purged:"+org)
+	return nil
+}
+
+func (f *fakeQueue) MarkPurgeFailed(ctx context.Context, org, reason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	f.purgeFailed = append(f.purgeFailed, failedMark{org: org, reason: reason})
+	return nil
+}
+
+func (c *fakeCluster) Destroy(ctx context.Context, org string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.destroyErr != nil {
+		return c.destroyErr
+	}
+	c.destroyed = append(c.destroyed, org)
+	if c.onDestroy != nil {
+		c.onDestroy(org)
+	}
+	return nil
+}
+
+// ------------------------------------------------------------------- reaping
+
+func TestReapDestroysTheNamespaceThenTheRows(t *testing.T) {
+	q := newFakeQueue()
+	q.purgeQueue = []store.Claimed{{Org: "gone"}}
+	c := &fakeCluster{}
+	w := newTestWorker(t, testConfig(), q, c, nil)
+
+	w.reap(context.Background())
+
+	if len(c.destroyed) != 1 || c.destroyed[0] != "gone" {
+		t.Fatalf("cluster destroyed %v, want [gone]", c.destroyed)
+	}
+	if len(q.purged) != 1 || q.purged[0] != "gone" {
+		t.Fatalf("queue purged %v, want [gone]", q.purged)
+	}
+}
+
+// The order is the design, so it is asserted rather than assumed.
+//
+// Cluster first, rows second. The other order deletes the row that says which
+// namespace to destroy, stranding a live namespace holding a customer's data
+// with nothing left pointing at it — and no later pass can find it, because
+// finding it is what the row was for.
+func TestReapDestroysBeforeItForgets(t *testing.T) {
+	q := newFakeQueue()
+	q.purgeQueue = []store.Claimed{{Org: "ordered"}}
+	c := &fakeCluster{}
+	// Recorded through the shared events slice so the two writes are ordered
+	// against each other rather than each against itself.
+	c.onDestroy = func(org string) {
+		q.mu.Lock()
+		q.events = append(q.events, "destroyed:"+org)
+		q.mu.Unlock()
+	}
+	w := newTestWorker(t, testConfig(), q, c, nil)
+
+	w.reap(context.Background())
+
+	want := []string{"destroyed:ordered", "purged:ordered"}
+	if len(q.events) != len(want) {
+		t.Fatalf("events %v, want %v", q.events, want)
+	}
+	for i := range want {
+		if q.events[i] != want[i] {
+			t.Fatalf("events %v, want %v — the rows were removed before the "+
+				"namespace, which strands it", q.events, want)
+		}
+	}
+}
+
+// A failed teardown must be retried, not buried.
+//
+// There is deliberately no backoff and no attempt cap on this path: an
+// organisation whose owner asked for deletion and quietly was not deleted is
+// the worst outcome the feature has. So a failure releases the claim and the
+// next pass takes it again.
+func TestAFailedTeardownReleasesTheClaimForAnotherTry(t *testing.T) {
+	q := newFakeQueue()
+	q.purgeQueue = []store.Claimed{{Org: "stubborn"}}
+	c := &fakeCluster{destroyErr: errors.New("the API server said no")}
+	w := newTestWorker(t, testConfig(), q, c, nil)
+
+	w.reap(context.Background())
+
+	if len(q.purged) != 0 {
+		t.Fatalf("the rows were removed despite the teardown failing: %v", q.purged)
+	}
+	if len(q.purgeFailed) != 1 || q.purgeFailed[0].org != "stubborn" {
+		t.Fatalf("purgeFailed %v, want one entry for stubborn", q.purgeFailed)
+	}
+	if q.purgeFailed[0].reason == "" {
+		t.Error("the failure was released with no reason recorded, so an operator " +
+			"has nothing to read")
+	}
+}
+
+// A reaper that cannot reach the cluster must claim nothing.
+//
+// Claiming while degraded would walk the whole backlog marking each
+// organisation failed with an error about credentials rather than about the
+// organisation — the same reason drain checks this.
+func TestADegradedWorkerReapsNothing(t *testing.T) {
+	q := newFakeQueue()
+	q.purgeQueue = []store.Claimed{{Org: "untouched"}}
+	// A factory with nothing left to hand out: reconnect cannot succeed.
+	f := &fakeFactory{clusters: []Cluster{&fakeCluster{}}, err: errors.New("no credentials")}
+	w := newTestWorkerF(t, testConfig(), q, f, nil)
+	w.degraded.Store(true)
+
+	w.reap(context.Background())
+
+	if q.purgeClaims != 0 {
+		t.Errorf("a degraded worker claimed %d organisations for destruction", q.purgeClaims)
+	}
+}
+
+// Shutdown must stop the reaper where it is.
+//
+// Nothing here is more important than not destroying a namespace on the way
+// out. The fake honours ctxErr, so this fails if reap keeps going.
+func TestReapStopsOnceTheContextIsCancelled(t *testing.T) {
+	q := newFakeQueue()
+	q.purgeQueue = []store.Claimed{{Org: "a"}, {Org: "b"}, {Org: "c"}}
+	c := &fakeCluster{}
+	w := newTestWorker(t, testConfig(), q, c, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w.reap(ctx)
+
+	if len(c.destroyed) != 0 {
+		t.Errorf("a cancelled reaper destroyed %v", c.destroyed)
 	}
 }

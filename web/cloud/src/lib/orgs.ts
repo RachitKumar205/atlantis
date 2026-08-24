@@ -7,7 +7,14 @@
 // decision nothing can check.
 
 /** The provisioning states the server reports. Empty means no queue row. */
-export type OrgState = 'pending' | 'provisioning' | 'ready' | 'failed' | ''
+export type OrgState =
+  | 'pending'
+  | 'provisioning'
+  | 'ready'
+  | 'failed'
+  | 'deleted'
+  | 'purging'
+  | ''
 
 export type Org = {
   name: string
@@ -18,6 +25,15 @@ export type Org = {
   /** Cloud's /authorize link. Empty until there is a console to reach. */
   url: string
   createdByMe: boolean
+  /**
+   * When a deleted organisation stops being restorable, RFC3339, or empty.
+   *
+   * Sent by the server rather than computed here. The window is a property of
+   * the row — set when the delete happened, under whatever promise was made
+   * then — so a client that added thirty days to "now" would show a date the
+   * server does not agree with.
+   */
+  purgeAfter: string
 }
 
 export type Me = {
@@ -49,6 +65,12 @@ export function stateLabel(state: OrgState): string {
       return 'Ready'
     case 'failed':
       return 'Setup failed'
+    case 'deleted':
+      return 'Deleted'
+    case 'purging':
+      // Being torn down right now. Distinct from 'deleted' because there is no
+      // longer anything to restore, and offering the button would be a lie.
+      return 'Being destroyed'
     default:
       return 'Unknown'
   }
@@ -80,7 +102,43 @@ export function anySettling(orgs: Org[]): boolean {
  * answer.
  */
 export function canEnter(org: Org): boolean {
-  return org.url !== ''
+  return org.url !== '' && org.state !== 'deleted' && org.state !== 'purging'
+}
+
+/**
+ * canDelete reports whether to offer the delete control.
+ *
+ * Admin only, matching the server — store.SoftDeleteOrg refuses a viewer — and
+ * only for an organisation that is actually serving. Deleting something
+ * mid-provision is refused there too, so offering it here would produce a
+ * button whose only outcome is an error.
+ *
+ * This is a hint, not a gate. The server checks the same two things, and it is
+ * the one that decides.
+ */
+export function canDelete(org: Org): boolean {
+  return org.role === 'admin' && (org.state === 'ready' || org.state === '')
+}
+
+/** canRestore reports whether a deleted organisation can still be brought back. */
+export function canRestore(org: Org): boolean {
+  return org.role === 'admin' && org.state === 'deleted'
+}
+
+/**
+ * deletedMessage says how long is left, not when it happened.
+ *
+ * "Deleted on Tuesday" is a fact; "restorable until 3 April" is the one somebody
+ * can act on. An unparseable or absent date degrades to the shorter sentence
+ * rather than rendering "Invalid Date", which is what `new Date('')` produces.
+ */
+export function deletedMessage(org: Org): string {
+  if (org.purgeAfter === '') return 'Deleted. It will be destroyed after a retention period.'
+  const until = new Date(org.purgeAfter)
+  if (Number.isNaN(until.getTime())) {
+    return 'Deleted. It will be destroyed after a retention period.'
+  }
+  return `Deleted. Restorable until ${until.toLocaleDateString()}, then destroyed permanently.`
 }
 
 /** How many more organisations this account may create. */
@@ -129,6 +187,7 @@ export function normaliseOrg(raw: Record<string, unknown>): Org {
     attempts: typeof raw.attempts === 'number' ? raw.attempts : 0,
     url: typeof raw.url === 'string' ? raw.url : '',
     createdByMe: raw.created_by_me === true,
+    purgeAfter: typeof raw.purge_after === 'string' ? raw.purge_after : '',
   }
 }
 

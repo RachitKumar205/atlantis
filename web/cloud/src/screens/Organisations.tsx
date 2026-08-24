@@ -3,7 +3,10 @@ import { useState, type FormEvent } from 'react'
 import { Button, Card, Field, LinkButton, Notice } from '@/components/ui'
 import {
   canCreate,
+  canDelete,
   canEnter,
+  canRestore,
+  deletedMessage,
   limitMessage,
   stateLabel,
   type Me,
@@ -30,12 +33,16 @@ export function Organisations({
   error,
   busy,
   onCreate,
+  onDelete,
+  onRestore,
   onSignOut,
 }: {
   me: Me
   error: string | null
   busy: boolean
   onCreate: (name: string, displayName: string) => void
+  onDelete: (name: string, confirm: string) => void
+  onRestore: (name: string) => void
   onSignOut: () => void
 }) {
   const [name, setName] = useState('')
@@ -62,7 +69,7 @@ export function Organisations({
       {me.orgs.length > 0 ? (
         <ul className="orglist">
           {me.orgs.map(o => (
-            <OrgRow key={o.name} org={o} />
+            <OrgRow key={o.name} org={o} busy={busy} onDelete={onDelete} onRestore={onRestore} />
           ))}
         </ul>
       ) : null}
@@ -110,22 +117,94 @@ export function Organisations({
 }
 
 /**
- * One organisation.
+ * One organisation, and what may be done to it.
  *
  * A link only when there is somewhere to go. An organisation still being set up
  * renders its state as text rather than a link that would answer 503 — a
  * control that reliably does nothing teaches people the page is broken.
+ *
+ * The delete control is a two-step: pressing Delete opens a field, and the
+ * organisation's own name has to be typed into it. That is not decoration over
+ * a confirm dialog — the server requires the same string in the request body
+ * and refuses without it. Doing it here as well means the refusal is a hint
+ * beside the field rather than a round trip.
  */
-function OrgRow({ org }: { org: Org }) {
+function OrgRow({
+  org,
+  busy,
+  onDelete,
+  onRestore,
+}: {
+  org: Org
+  busy: boolean
+  onDelete: (name: string, confirm: string) => void
+  onRestore: (name: string) => void
+}) {
+  const [confirming, setConfirming] = useState(false)
+  const [confirm, setConfirm] = useState('')
   const label = stateLabel(org.state)
+  const matches = confirm.trim() === org.name
+
   return (
     <li className="orglist__item">
       <span className="orglist__name">{org.displayName || org.name}</span>
+
       {canEnter(org) ? (
         <a className="orglist__enter" href={org.url}>Open</a>
       ) : (
         <span className="orglist__state">{label}</span>
       )}
+
+      {canDelete(org) && !confirming ? (
+        <LinkButton onClick={() => setConfirming(true)}>Delete</LinkButton>
+      ) : null}
+
+      {canRestore(org) ? (
+        <LinkButton onClick={() => onRestore(org.name)}>Restore</LinkButton>
+      ) : null}
+
+      {/*
+        Said where the decision is made. A deleted organisation is not gone, and
+        the only useful fact about it is how long that stays true.
+      */}
+      {org.state === 'deleted' ? (
+        <p className="hint">{deletedMessage(org)}</p>
+      ) : null}
+
+      {confirming ? (
+        <div className="orglist__confirm">
+          <Field
+            label={`Type ${org.name} to confirm`}
+            name={`confirm-${org.name}`}
+            inputMode="text"
+            autoComplete="off"
+            value={confirm}
+            onChange={e => setConfirm(e.target.value)}
+            autoFocus
+          />
+          <p className="hint">
+            The organisation stops serving immediately. Its database and
+            certificate authority are kept for a retention period, and it can be
+            restored until then — after that it is destroyed permanently.
+          </p>
+          <Button
+            type="button"
+            busy={busy}
+            disabled={!matches}
+            onClick={() => onDelete(org.name, confirm.trim())}
+          >
+            Delete organisation
+          </Button>
+          <LinkButton
+            onClick={() => {
+              setConfirming(false)
+              setConfirm('')
+            }}
+          >
+            Cancel
+          </LinkButton>
+        </div>
+      ) : null}
     </li>
   )
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -53,9 +54,23 @@ type OrgSummary struct {
 	ConsoleURL string
 
 	// CreatedByMe is whether this account created the organisation, which is
-	// what the limit counts and what deletion will be gated on. False for the
-	// organisations that predate created_by.
+	// what the limit counts. False for the organisations that predate
+	// created_by.
+	//
+	// Deletion is NOT gated on this, though an earlier version of this comment
+	// said it would be. created_by is nullable — ON DELETE SET NULL — so an
+	// organisation whose creator closed their account would have nobody able to
+	// delete it. SoftDeleteOrg checks for an admin membership instead.
 	CreatedByMe bool
+
+	// PurgeAfter is when a deleted organisation stops being restorable. Nil in
+	// every other state.
+	//
+	// Surfaced rather than left in the database because it is the one fact
+	// somebody looking at a deleted organisation needs: "restorable" and
+	// "restorable until Tuesday" are different messages, and only the second is
+	// actionable.
+	PurgeAfter *time.Time
 }
 
 // CreateOrgForOwner creates an organisation nobody has taken.
@@ -159,7 +174,8 @@ func (s *Store) OrgsForUser(ctx context.Context, userID string) ([]OrgSummary, e
 		       COALESCE(p.state, ''),
 		       COALESCE(p.attempts, 0),
 		       o.console_url,
-		       (o.created_by IS NOT NULL AND o.created_by = $1)
+		       (o.created_by IS NOT NULL AND o.created_by = $1),
+		       p.purge_after
 		  FROM cloud.memberships m
 		  JOIN cloud.orgs o ON o.name = m.org
 		  LEFT JOIN cloud.org_provisioning p ON p.org = o.name
@@ -175,7 +191,7 @@ func (s *Store) OrgsForUser(ctx context.Context, userID string) ([]OrgSummary, e
 	for rows.Next() {
 		var o OrgSummary
 		if err := rows.Scan(&o.Name, &o.DisplayName, &o.Role, &o.State,
-			&o.Attempts, &o.ConsoleURL, &o.CreatedByMe); err != nil {
+			&o.Attempts, &o.ConsoleURL, &o.CreatedByMe, &o.PurgeAfter); err != nil {
 			return nil, err
 		}
 		out = append(out, o)
@@ -193,13 +209,14 @@ func (s *Store) OrgForUser(ctx context.Context, userID, org string) (*OrgSummary
 	err := s.pool.QueryRow(ctx, `
 		SELECT o.name, o.display_name, m.role,
 		       COALESCE(p.state, ''), COALESCE(p.attempts, 0), o.console_url,
-		       (o.created_by IS NOT NULL AND o.created_by = $1)
+		       (o.created_by IS NOT NULL AND o.created_by = $1),
+		       p.purge_after
 		  FROM cloud.memberships m
 		  JOIN cloud.orgs o ON o.name = m.org
 		  LEFT JOIN cloud.org_provisioning p ON p.org = o.name
 		 WHERE m.user_id = $1 AND m.org = $2
 	`, userID, org).Scan(&o.Name, &o.DisplayName, &o.Role, &o.State,
-		&o.Attempts, &o.ConsoleURL, &o.CreatedByMe)
+		&o.Attempts, &o.ConsoleURL, &o.CreatedByMe, &o.PurgeAfter)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("%s: %w", org, ErrNotFound)
 	}

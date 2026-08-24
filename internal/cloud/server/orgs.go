@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 	"github.com/rachitkumar205/atlantis/internal/cloud/store"
@@ -66,10 +67,22 @@ type orgResponse struct {
 	// renders as "still coming up" rather than a dead link.
 	URL string `json:"url,omitempty"`
 
-	// CreatedByMe gates what this account may do to it later. Deletion is P4b;
-	// this is here now because the screen has to know whose organisation it is
-	// to say so.
+	// CreatedByMe is whose organisation it is, which the screen says out loud.
+	//
+	// It does NOT gate deletion, though an earlier version of this comment said
+	// it would. cloud.orgs.created_by is nullable, so an organisation whose
+	// creator closed their account would have nobody able to delete it; the
+	// guard is an admin membership instead. See store.SoftDeleteOrg.
 	CreatedByMe bool `json:"created_by_me"`
+
+	// PurgeAfter is when a deleted organisation stops being restorable, RFC3339,
+	// and empty in every other state.
+	//
+	// Sent because "deleted" and "deleted, restorable until Tuesday" are
+	// different messages and only the second tells somebody what to do. The
+	// screen renders the date; it does not compute it, because the window is a
+	// property of the row rather than of whatever the client believes it to be.
+	PurgeAfter string `json:"purge_after,omitempty"`
 }
 
 // handleMe reports the signed-in account and its organisations.
@@ -142,6 +155,9 @@ func (s *Server) orgResponse(o store.OrgSummary) orgResponse {
 		State:       string(o.State),
 		Attempts:    o.Attempts,
 		CreatedByMe: o.CreatedByMe,
+	}
+	if o.PurgeAfter != nil {
+		out.PurgeAfter = o.PurgeAfter.UTC().Format(time.RFC3339)
 	}
 	// Only once there is a console to reach. /authorize would answer its own
 	// 503 otherwise, and a link that reliably fails is worse than no link.
@@ -314,4 +330,141 @@ func (s *Server) notReadyMessage(ctx context.Context, org string) string {
 		// between them. It resolves on its own.
 		return "That organisation is nearly ready. Try again shortly."
 	}
+}
+
+// deleteWindow is how long a deleted organisation stays restorable.
+//
+// A constant rather than configuration, and that is a decision worth defending:
+// it is a promise made to somebody at the moment they press delete, and a value
+// an operator can change per deployment is one where two customers get
+// different promises from the same product.
+//
+// It is passed to SoftDeleteOrg rather than read there, and the resulting date
+// is stored on the row. So changing this number affects organisations deleted
+// afterwards and never the ones already counting down.
+const deleteWindow = 30 * 24 * time.Hour
+
+// handleDeleteOrg soft-deletes an organisation.
+//
+// # What this does not do
+//
+// It does not destroy anything. It writes a row; the provisioner tears the
+// namespace down once the window runs out. Cloud holds every password, every
+// TOTP secret and the assertion signing key, and internal/provisioner's package
+// comment is explicit that the risk of script on this origin was accepted on
+// the understanding it could reach /api/account/* — not that it could schedule
+// pods, or delete them.
+//
+// # The confirmation is checked here, not in a dialog
+//
+// A dialog defends against a misclick and nothing else: this request is four
+// lines of JavaScript to issue directly. Requiring the organisation's own name
+// in the body, compared server-side, is what makes "I meant a different tab" a
+// 400 rather than a destroyed organisation.
+func (s *Server) handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
+	if !s.rateLimited(w, r) {
+		return
+	}
+	user, ok := s.requireSession(w, r)
+	if !ok {
+		return
+	}
+	if !s.sameOrigin(w, r) {
+		return
+	}
+	org := r.PathValue("org")
+
+	var body struct {
+		Confirm string `json:"confirm"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	if strings.TrimSpace(body.Confirm) != org {
+		jsonError(w, "type the organisation's name to confirm", http.StatusBadRequest)
+		return
+	}
+
+	err := s.db.SoftDeleteOrg(r.Context(), org, user.ID, deleteWindow)
+	switch {
+	case errors.Is(err, store.ErrNotPermitted):
+		// Distinct from the not-found below on purpose. This account is a
+		// member and already knows the organisation exists, so naming the
+		// reason discloses nothing and saves them guessing.
+		jsonError(w, "only an admin of this organisation may delete it", http.StatusForbidden)
+		return
+	case errors.Is(err, store.ErrNotFound):
+		// Covers both "no such organisation, or you are not a member" and "it
+		// is not in a state that can be deleted". Not distinguished, because
+		// the first must not confirm which organisations exist and the second
+		// is answered by re-reading the state.
+		jsonError(w, "that organisation cannot be deleted", http.StatusNotFound)
+		return
+	case err != nil:
+		s.log.Error("delete organisation", "org", org, "user", user.ID, "err", err)
+		jsonError(w, "could not delete that organisation", http.StatusInternalServerError)
+		return
+	}
+
+	s.db.LogAction(r.Context(), org, user.ID, user.Email, "org.deleted", map[string]any{
+		"restorable_for": deleteWindow.String(),
+	})
+
+	o, err := s.db.OrgForUser(r.Context(), user.ID, org)
+	if err != nil {
+		s.log.Error("read back a deleted organisation", "org", org, "err", err)
+		writeJSON(w, http.StatusOK, orgResponse{Name: org, State: string(store.StateDeleted)})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.orgResponse(*o))
+}
+
+// handleRestoreOrg returns a soft-deleted organisation to service.
+//
+// A real restore rather than a rebuild: the namespace was never touched, so the
+// same certificate authority and the same database come back. A rebuild would
+// mint a new authority and every enrolled caller would have to run `tide login`
+// again — which is the difference between undoing a deletion and replacing an
+// organisation with one that shares its name.
+//
+// No confirmation. The guard on delete exists because the action is
+// destructive; this one puts something back.
+func (s *Server) handleRestoreOrg(w http.ResponseWriter, r *http.Request) {
+	if !s.rateLimited(w, r) {
+		return
+	}
+	user, ok := s.requireSession(w, r)
+	if !ok {
+		return
+	}
+	if !s.sameOrigin(w, r) {
+		return
+	}
+	org := r.PathValue("org")
+
+	err := s.db.RestoreOrg(r.Context(), org, user.ID)
+	switch {
+	case errors.Is(err, store.ErrNotPermitted):
+		jsonError(w, "only an admin of this organisation may restore it", http.StatusForbidden)
+		return
+	case errors.Is(err, store.ErrNotFound):
+		// Also the answer for an organisation the reaper already destroyed.
+		// There is nothing to say beyond this: the row is gone.
+		jsonError(w, "that organisation cannot be restored", http.StatusNotFound)
+		return
+	case err != nil:
+		s.log.Error("restore organisation", "org", org, "user", user.ID, "err", err)
+		jsonError(w, "could not restore that organisation", http.StatusInternalServerError)
+		return
+	}
+
+	s.db.LogAction(r.Context(), org, user.ID, user.Email, "org.restored", nil)
+
+	o, err := s.db.OrgForUser(r.Context(), user.ID, org)
+	if err != nil {
+		s.log.Error("read back a restored organisation", "org", org, "err", err)
+		writeJSON(w, http.StatusOK, orgResponse{Name: org, State: string(store.StateReady)})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.orgResponse(*o))
 }

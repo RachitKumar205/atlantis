@@ -44,6 +44,24 @@ var (
 		Help:      "Provisioning attempts. Labels: outcome (provisioned|failed|not_ready).",
 	}, []string{"outcome"})
 
+	// purgesTotal counts teardowns after a retention window has run out.
+	//
+	// Separate from attemptsTotal rather than another outcome on it, because
+	// the two answer different questions and mixing them would make both
+	// useless: "how much provisioning is failing" is a rate an operator watches
+	// continuously, and a purge is a rare, deliberate, irreversible act.
+	//
+	// A rising `failed` here is the alarming one on this counter. It means
+	// organisations whose owners asked for deletion are not being deleted, and
+	// there is no backoff on that path — a customer who asked to be removed and
+	// quietly was not is the failure this number exists to make visible.
+	purgesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "atlantis",
+		Subsystem: "provisioning",
+		Name:      "purges_total",
+		Help:      "Organisation teardowns after the retention window. Labels: outcome (purged|failed).",
+	}, []string{"outcome"})
+
 	// attemptSeconds is how long an attempt took, whatever the outcome.
 	//
 	// Measured around the whole claim-to-mark span rather than around Ensure,

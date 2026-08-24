@@ -5,6 +5,9 @@ import {
   canCreate,
   canEnter,
   isSettling,
+  canDelete,
+  canRestore,
+  deletedMessage,
   limitMessage,
   normaliseMe,
   normaliseOrg,
@@ -23,6 +26,7 @@ function org(over: Partial<Org> = {}): Org {
     attempts: 0,
     url: 'https://cloud.test/authorize?org=acme',
     createdByMe: true,
+    purgeAfter: '',
     ...over,
   }
 }
@@ -118,6 +122,7 @@ describe('normalising the wire shape', () => {
       attempts: 2,
       url: 'https://cloud.test/authorize?org=acme',
       created_by_me: true,
+      purge_after: '2026-09-23T00:00:00Z',
     })
     expect(o).toEqual({
       name: 'acme',
@@ -127,6 +132,7 @@ describe('normalising the wire shape', () => {
       attempts: 2,
       url: 'https://cloud.test/authorize?org=acme',
       createdByMe: true,
+      purgeAfter: '2026-09-23T00:00:00Z',
     })
   })
 
@@ -168,5 +174,68 @@ describe('normalising the wire shape', () => {
     const m = normaliseMe({ email: 'a@example.com', org_limit: 3, orgs_created: 0 })
     expect(m.orgs).toEqual([])
     expect(canCreate(m)).toBe(true)
+  })
+})
+
+describe('deletion', () => {
+  it('offers delete to an admin of a serving organisation', () => {
+    expect(canDelete(org({ role: 'admin', state: 'ready' }))).toBe(true)
+    // The organisations registered by hand have no queue row and work fine.
+    expect(canDelete(org({ role: 'admin', state: '' }))).toBe(true)
+  })
+
+  it('does not offer delete to a viewer', () => {
+    // A hint, not a gate — store.SoftDeleteOrg refuses this too. Offering the
+    // button anyway would produce a control whose only outcome is a 403.
+    expect(canDelete(org({ role: 'viewer', state: 'ready' }))).toBe(false)
+  })
+
+  it('does not offer delete mid-provision or mid-teardown', () => {
+    for (const state of ['pending', 'provisioning', 'deleted', 'purging'] as const) {
+      expect(canDelete(org({ state }))).toBe(false)
+    }
+  })
+
+  it('offers restore only while it is still deleted', () => {
+    expect(canRestore(org({ role: 'admin', state: 'deleted' }))).toBe(true)
+    // Once the reaper has it there is nothing left to bring back.
+    expect(canRestore(org({ role: 'admin', state: 'purging' }))).toBe(false)
+    expect(canRestore(org({ role: 'viewer', state: 'deleted' }))).toBe(false)
+  })
+
+  it('does not let anybody enter a deleted organisation', () => {
+    // The URL survives the delete — the server builds it from the console row,
+    // which is untouched — so a check on url alone would keep the link live.
+    const deleted = org({ state: 'deleted' })
+    expect(deleted.url).not.toBe('')
+    expect(canEnter(deleted)).toBe(false)
+    expect(canEnter(org({ state: 'purging' }))).toBe(false)
+  })
+
+  it('says when a deleted organisation stops being restorable', () => {
+    const msg = deletedMessage(org({ state: 'deleted', purgeAfter: '2026-09-23T00:00:00Z' }))
+    expect(msg).toContain('Restorable until')
+    expect(msg).not.toContain('Invalid Date')
+  })
+
+  it('degrades to a shorter sentence rather than rendering Invalid Date', () => {
+    // new Date('') is Invalid Date, and `${Invalid Date}` renders as the words
+    // "Invalid Date" on the screen.
+    for (const bad of ['', 'not-a-date']) {
+      const msg = deletedMessage(org({ state: 'deleted', purgeAfter: bad }))
+      expect(msg).not.toContain('Invalid Date')
+      expect(msg).toContain('retention period')
+    }
+  })
+
+  it('reads purge_after off the wire', () => {
+    const o = normaliseOrg({ name: 'acme', state: 'deleted', purge_after: '2026-09-23T00:00:00Z' })
+    expect(o.purgeAfter).toBe('2026-09-23T00:00:00Z')
+    expect(normaliseOrg({ name: 'acme' }).purgeAfter).toBe('')
+  })
+
+  it('labels the two new states', () => {
+    expect(stateLabel('deleted')).toBe('Deleted')
+    expect(stateLabel('purging')).toBe('Being destroyed')
   })
 })

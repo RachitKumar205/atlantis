@@ -150,6 +150,24 @@ export async function createOrg(name: string, displayName: string): Promise<Org>
   return normaliseOrg(await request('POST', '/api/orgs', { name, display_name: displayName }))
 }
 
+/**
+ * Deletes an organisation, with the retention window the server decides.
+ *
+ * confirm carries the organisation's own name and the server compares it there.
+ * Sending it is not a formality the client could skip: without a match the
+ * route answers 400 and nothing is deleted.
+ */
+export async function deleteOrg(name: string, confirm: string): Promise<Org> {
+  return normaliseOrg(
+    await request('POST', `/api/orgs/${encodeURIComponent(name)}/delete`, { confirm }),
+  )
+}
+
+/** Brings a deleted organisation back, while it still can be. */
+export async function restoreOrg(name: string): Promise<Org> {
+  return normaliseOrg(await request('POST', `/api/orgs/${encodeURIComponent(name)}/restore`))
+}
+
 /** Reads one organisation, for a screen waiting on it to come up. */
 export async function fetchOrg(name: string): Promise<Org> {
   return normaliseOrg(await request('GET', `/api/orgs/${encodeURIComponent(name)}`))
