@@ -11,7 +11,7 @@
 // took this lockfile from 25 rollup platform entries to 1.
 //
 // Nothing fails on the machine that did it — that machine has the one binary it
-// needs. It fails in CI (linux/x64) and in Dockerfile.console (linux/arm64 musl)
+// needs. It fails in CI (linux/x64) and in the Dockerfile spa stage (linux/arm64 musl)
 // as `Cannot find module @rollup/rollup-linux-*`, an error whose own text blames
 // an unrelated npm bug and tells you to delete node_modules, which does not help.
 //
@@ -32,7 +32,7 @@ import { dirname, join } from 'node:path'
 // Add a row when a new consumer appears; do not remove one to make CI pass.
 const REQUIRED = [
   { os: 'linux', cpu: 'x64', why: '.github/workflows/ci.yml runs on ubuntu-latest' },
-  { os: 'linux', cpu: 'arm64', why: 'Dockerfile.console on an arm64 host' },
+  { os: 'linux', cpu: 'arm64', why: 'the Dockerfile spa stage on an arm64 host' },
 ]
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')

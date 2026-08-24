@@ -28,6 +28,33 @@ COPY buf.yaml buf.gen.yaml ./
 COPY atlantis ./atlantis
 RUN buf generate
 
+# ---------- SPA ----------
+# The two React applications: the console's pages and Cloud's sign-in pages.
+#
+# Built in one stage because they are one npm workspace with one lockfile at the
+# root. `npm ci` installs the whole tree and fails if a member named in the
+# lockfile is missing, so every member's package.json has to be present — which
+# is why all three are copied before any source, and why a change to a component
+# does not invalidate the install layer.
+#
+# Nothing that does not embed a SPA depends on this stage. See the note on
+# build-spa below for why that is arranged the way it is.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS spa
+WORKDIR /app
+COPY package.json package-lock.json ./
+COPY web/console/package.json ./web/console/
+COPY web/cloud/package.json ./web/cloud/
+COPY web/shared/package.json ./web/shared/
+RUN npm ci --prefer-offline
+
+COPY web/shared/ ./web/shared/
+COPY web/console/ ./web/console/
+COPY web/cloud/ ./web/cloud/
+# Each vite config writes to ../../cmd/<name>/dist, so these land at
+# /app/cmd/console/dist and /app/cmd/cloud/dist inside this stage.
+RUN npm run build --workspace web/console && \
+    npm run build --workspace web/cloud
+
 # ---------- build ----------
 # Use BUILDPLATFORM so the compiler runs natively on the host (ARM64 on Apple
 # Silicon, amd64 on CI). pg_query_go's vendored C parser compiles fine on both
@@ -79,6 +106,34 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=1 \
     go build -ldflags="-s -w -extldflags=-static" \
     -o /out/provisioner ./cmd/provisioner
+
+# ---------- build: the binaries that carry a SPA ----------
+# A second build stage, deriving from the first, and the split is the reason
+# consolidating these Dockerfiles costs nothing.
+#
+# BuildKit builds only the stages a --target depends on. The server and the
+# provisioner take their binaries from `build`, which knows nothing about
+# `spa` — so `--target server` never starts Node, never runs npm ci, and builds
+# exactly what it did before these two arrived.
+#
+# Putting the dist COPYs into `build` instead would have made every image in
+# this file wait on a React build to produce a gRPC server.
+FROM build AS build-spa
+COPY --from=spa /app/cmd/console/dist ./cmd/console/dist/
+COPY --from=spa /app/cmd/cloud/dist ./cmd/cloud/dist/
+
+# -tags embedspa bakes the pages in, and it is deliberately not the default: an
+# untagged build has no //go:embed directive at all, which is what lets a clean
+# checkout compile with no Node installed. These are shipped binaries, so they
+# opt in. Built without it they answer 404 on the SPA routes, naming the make
+# target — see cmd/cloud/spa_none.go.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=1 \
+    go build -tags embedspa -ldflags="-s -w -extldflags=-static" \
+    -o /out/atlantis-console ./cmd/console && \
+    go build -tags embedspa -ldflags="-s -w -extldflags=-static" \
+    -o /out/atlantis-cloud ./cmd/cloud
 
 # ---------- runtime: server ----------
 # Named, because this file now produces two images. `make build-server-image`
@@ -155,3 +210,47 @@ USER 10001
 # would be a second answer that can disagree with the first. Its Deployment
 # names the port it actually binds, and the probes go there.
 ENTRYPOINT ["/app/provisioner"]
+
+# ---------- runtime: console ----------
+# Build with --target console.
+#
+# This stage used to live in Dockerfile.console, which carried its own copy of
+# the proto stage above — a second set of the plugin version pins that the
+# comment at the top of this file already says are duplicated from the Makefile
+# by hand. Adding Cloud would have made three. They are one stage now.
+FROM alpine:3.21 AS console
+
+# The uid was `USER app` when this stage lived in its own file: a NAME, which
+# the kubelet cannot resolve from image metadata and therefore refuses under
+# `runAsNonRoot` with CreateContainerConfigError. It never fired because the
+# console is not deployed anywhere yet. Corrected here rather than carried
+# across, because moving a latent fault is not the same as moving a stage.
+RUN adduser -D -u 10001 console && \
+    apk --no-cache add ca-certificates tzdata
+
+COPY --from=build-spa /out/atlantis-console /usr/local/bin/atlantis-console
+USER 10001
+
+EXPOSE 3000
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
+    CMD wget -q -O - http://127.0.0.1:3000/api/setup/status >/dev/null 2>&1 || exit 1
+
+ENTRYPOINT ["/usr/local/bin/atlantis-console"]
+
+# ---------- runtime: cloud ----------
+# Build with --target cloud.
+FROM alpine:3.21 AS cloud
+
+RUN adduser -D -u 10001 cloud && \
+    apk --no-cache add ca-certificates tzdata
+
+COPY --from=build-spa /out/atlantis-cloud /usr/local/bin/atlantis-cloud
+USER 10001
+
+# No HEALTHCHECK. Cloud's /healthz is a bare 200 and its readiness is better
+# expressed by the JWKS route, but both are probes its Deployment declares
+# against the port it actually binds — CLOUD_LISTEN is configuration, and a port
+# written here would be a second answer free to disagree with it.
+EXPOSE 9500
+
+ENTRYPOINT ["/usr/local/bin/atlantis-cloud"]

@@ -118,6 +118,7 @@ LOCAL_IMAGES=(
     "atlantis-server:local"
     "atlantis-signer:local"
     "atlantis-provisioner:local"
+    "atlantis-cloud:local"
 )
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -610,6 +611,148 @@ spec:
           emptyDir: {}
 EOF
 kubectl --context "$CLUSTER" -n atlantis-system rollout status deployment/atlantis-provisioner --timeout=180s
+
+# ---------------------------------------------------------------------------
+# Cloud: the identity service.
+#
+# It mints the assertions every console verifies, so two things about it are
+# load-bearing in a way the provisioner's configuration is not.
+#
+# THE ISSUER URL. CLOUD_ISSUER is the `iss` claim baked into every assertion,
+# and CLOUD_JWKS_URL is derived from it — the address the console fetches
+# verification keys from. It has to be one stable string that resolves the same
+# way from the host, from a browser, and inside the cluster. So the Service
+# pins its NodePort at 30500 rather than taking whatever it is given.
+#
+# The per-organisation Services deliberately do the opposite; the comment on
+# atlantisService says "a port we pick is a port that collides with somebody
+# eventually". That is about a port allocated once per tenant. This is one
+# service for the whole fleet, so there is nothing for it to collide with, and
+# a stable issuer is worth more than a dynamic port.
+#
+# THE SIGNING KEY. internal/cloud/issuer/keyfile.go loads the key or creates
+# one, and its comment says losing it "would invalidate every assertion already
+# in flight, silently". An emptyDir would therefore be exactly wrong: the pod
+# would mint a fresh key on every restart, publish a different JWKS, and every
+# existing session would fail to verify with nothing pointing at the cause. It
+# comes from the host as a Secret.
+# ---------------------------------------------------------------------------
+say "cloud"
+
+if ! "$CONTAINER" exec "$CLUSTER" crictl inspecti \
+    docker.io/library/atlantis-cloud:local >/dev/null 2>&1 ||
+    [ -z "${CLOUD_SIGNING_KEY_DATA:-}" ] || [ -z "${CLOUD_DATA_KEY:-}" ]; then
+    echo "  skipping Cloud: run 'make dev-k8s-load', which builds the image and"
+    echo "  passes the signing key."
+    say "ready"
+    kubectl --context "$CLUSTER" get nodes
+    exit 0
+fi
+
+kubectl --context "$CLUSTER" -n atlantis-system \
+    create secret generic atlantis-cloud \
+    --from-literal=CLOUD_PG_URL="${CLOUD_PG_URL:?set CLOUD_PG_URL}" \
+    --from-literal=CLOUD_DATA_KEY="${CLOUD_DATA_KEY:?set CLOUD_DATA_KEY}" \
+    --from-literal=signing-key.pem="${CLOUD_SIGNING_KEY_DATA}" \
+    --dry-run=client -o yaml | kubectl --context "$CLUSTER" apply -f - >/dev/null
+
+kubectl --context "$CLUSTER" apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: atlantis-cloud
+  namespace: atlantis-system
+  labels:
+    app.kubernetes.io/name: atlantis-cloud
+spec:
+  type: NodePort
+  selector: { app.kubernetes.io/name: atlantis-cloud }
+  ports:
+    - name: http
+      port: 9500
+      targetPort: 9500
+      # Pinned. See the note above — this number is half of CLOUD_ISSUER.
+      nodePort: ${CLOUD_NODE_PORT:-30500}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: atlantis-cloud
+  namespace: atlantis-system
+  labels:
+    app.kubernetes.io/name: atlantis-cloud
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: atlantis-cloud }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: atlantis-cloud }
+    spec:
+      # false, unlike the provisioner: Cloud never calls the Kubernetes API.
+      automountServiceAccountToken: false
+      hostAliases:
+        - ip: "${PG_HOST_IP}"
+          hostnames: ["${PG_HOST_NAME}"]
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+        # The signing key is mounted 0400 and owned by root, so a non-root
+        # process cannot read it without being placed in its group — the same
+        # reason fsGroup exists on the tenant pods.
+        fsGroup: 65532
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: cloud
+          image: atlantis-cloud:local
+          imagePullPolicy: IfNotPresent
+          args: ["serve", "-key", "/keys/signing-key.pem", "-listen", ":9500"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+          envFrom:
+            - secretRef: { name: atlantis-cloud }
+          env:
+            - { name: CLOUD_ISSUER, value: "${CLOUD_ISSUER}" }
+            - { name: CLOUD_PUBLIC_URL, value: "${CLOUD_PUBLIC_URL:-${CLOUD_ISSUER}}" }
+          ports:
+            - name: http
+              containerPort: 9500
+          livenessProbe:
+            httpGet: { path: /healthz, port: 9500 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          # Readiness on the JWKS route rather than /healthz, which is a bare
+          # 200 that answers before the signing key is loaded. This proves the
+          # key is loaded AND being published — which is the only thing a
+          # console cares about. Neither route reaches the database; Cloud will
+          # report ready with Postgres unreachable, and that is a real gap.
+          readinessProbe:
+            httpGet: { path: /.well-known/jwks.json, port: 9500 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: 128Mi
+              cpu: 50m
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - { name: keys, mountPath: /keys, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: keys
+          secret:
+            secretName: atlantis-cloud
+            items:
+              - { key: signing-key.pem, path: signing-key.pem }
+            defaultMode: 0440
+        - name: tmp
+          emptyDir: {}
+EOF
+kubectl --context "$CLUSTER" -n atlantis-system rollout status deployment/atlantis-cloud --timeout=180s
 
 say "ready"
 kubectl --context "$CLUSTER" get nodes

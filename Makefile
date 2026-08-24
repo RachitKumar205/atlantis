@@ -46,10 +46,26 @@ CONSOLE_PG_URL      ?= postgres://$(CONSOLE_PG_ROLE):$(CONSOLE_PG_PASSWORD)@$(PG
 # local accounts and no development bypass, so these are required to start it —
 # `make dev-auth` runs the issuer these values point at.
 CLOUD_LISTEN       ?= :9500
-CLOUD_ISSUER       ?= http://localhost:9500
 CLOUD_AUDIENCE     ?= http://localhost:3000
 CLOUD_JWKS_URL     ?= $(CLOUD_ISSUER)/.well-known/jwks.json
 CLOUD_SIGNING_KEY  ?= $(DEV_CERT_DIR)/cloud-signing-key.pem
+
+# CLOUD_ISSUER points at the cluster, because that is where Cloud runs.
+#
+# It is not merely an address. It is the `iss` claim written into every
+# assertion, and CLOUD_JWKS_URL above is derived from it — so this one string
+# decides both what Cloud stamps and where the console looks for the keys to
+# check it. The two cannot disagree, which is why there is one variable and not
+# two.
+#
+# The NodePort is pinned rather than allocated, because a value Kubernetes
+# chooses is a value that changes, and an issuer that changes invalidates every
+# assertion already in flight.
+#
+# `make dev-auth` and `dev-auth-app` override this back to localhost — see the
+# note on those targets. Run one or the other, not both.
+CLOUD_NODE_PORT    ?= 30500
+CLOUD_ISSUER       ?= http://$(K8S_EXTERNAL_HOST):$(CLOUD_NODE_PORT)
 
 # Cloud's own database: accounts, organisations, membership and second factors.
 #
@@ -68,7 +84,7 @@ CLOUD_PG_URL       ?= postgres://$(CLOUD_PG_ROLE):$(CLOUD_PG_PASSWORD)@$(PG_HOST
 # The base every emailed link is built from. Required, with no default in the
 # product — a wrong value does not fail, it sends every user a working link to
 # the wrong host. Locally it is wherever `make dev-auth` is listening.
-CLOUD_PUBLIC_URL   ?= http://localhost:9500
+CLOUD_PUBLIC_URL   ?= $(CLOUD_ISSUER)
 
 # The keyset Cloud seals each account's TOTP secret with. Same shape and same
 # package as the console's CONSOLE_DATA_KEY, and stable for the same reason:
@@ -260,7 +276,11 @@ build-console-spa: ## Build the console React SPA and write output to cmd/consol
 # true and is the reason to run them by hand after touching a Dockerfile.
 .PHONY: build-console-image
 build-console-image: ## Build the atlantis-console image
-	$(CONTAINER) build --file Dockerfile.console -t atlantis-console:local .
+	$(CONTAINER) build --file Dockerfile --target console -t atlantis-console:local .
+
+.PHONY: build-cloud-image
+build-cloud-image: ## Build the Cloud identity service image
+	$(CONTAINER) build --file Dockerfile --target cloud -t atlantis-cloud:local .
 
 # If a build dies in the `proto` stage with
 #
@@ -311,7 +331,7 @@ build-pg-image: ## Build the Postgres image provisioned organisations run
 	$(CONTAINER) build --file Dockerfile.pg -t atlantis-pg:$(PG_IMAGE_TAG) .
 
 .PHONY: build-provision-images
-build-provision-images: build-server-image build-signer-image build-pg-image build-provisioner-image ## Build every image the local cluster runs
+build-provision-images: build-server-image build-signer-image build-pg-image build-provisioner-image build-cloud-image ## Build every image the local cluster runs
 
 .PHONY: build-signer-image
 build-signer-image: ## Build the atlantis-signer image (cert signing service)
@@ -624,7 +644,7 @@ dev-k8s: ## Create the local Kubernetes cluster with storage and CloudNativePG
 # the role and skips the Deployment rather than failing — `make dev-k8s` builds a
 # cluster and is not expected to have database passwords to hand.
 .PHONY: dev-k8s-load
-dev-k8s-load: build-provision-images dev-cloud-role dev-console-role dev-data-key ## Rebuild the images and push them into the cluster
+dev-k8s-load: build-provision-images dev-cloud-role dev-console-role dev-data-key dev-cloud-data-key ## Rebuild the images and push them into the cluster
 	CLUSTER=$(K8S_CLUSTER) CONTAINER=$(CONTAINER) FORCE_LOAD=1 \
 		PG_HOST="$(PG_HOST)" \
 		PG_IMAGE_TAG="$(PG_IMAGE_TAG)" \
@@ -633,6 +653,11 @@ dev-k8s-load: build-provision-images dev-cloud-role dev-console-role dev-data-ke
 		CONSOLE_DATA_KEY="$$(cat $(DEV_DATA_KEY_FILE))" \
 		CLOUD_AUDIENCE="$(CLOUD_AUDIENCE)" \
 		EXTERNAL_HOST="$(K8S_EXTERNAL_HOST)" \
+		CLOUD_ISSUER="$(CLOUD_ISSUER)" \
+		CLOUD_PUBLIC_URL="$(CLOUD_PUBLIC_URL)" \
+		CLOUD_NODE_PORT="$(CLOUD_NODE_PORT)" \
+		CLOUD_DATA_KEY="$$(cat $(CLOUD_DATA_KEY_FILE))" \
+		CLOUD_SIGNING_KEY_DATA="$$(cat $(CLOUD_SIGNING_KEY))" \
 		./deploy/k8s-dev.sh
 
 # The provisioner, run on the host against the cluster's kubeconfig.
@@ -880,10 +905,23 @@ dev-cloud-data-key: ## Create (once) the keyset Cloud seals second-factor secret
 	@echo "$$(cat $(CLOUD_DATA_KEY_FILE))"
 
 # Cloud's development environment, in one place. See CONSOLE_DEV_ENV.
+#
+# The issuer is overridden back to localhost here, and that override is the
+# whole reason this variable exists separately from the default.
+#
+# CLOUD_ISSUER defaults to the cluster, because that is where Cloud runs. These
+# two targets run it on this machine instead. Inheriting the default would make
+# a host-side Cloud stamp assertions claiming to come from the cluster and
+# publish its keys at an address it is not listening on — the console would then
+# fetch JWKS from a pod, verify a token minted here against it, and fail on a
+# signature mismatch that says nothing about why.
+#
+# Run one or the other, as with dev-provisioner.
+CLOUD_HOST_ISSUER ?= http://localhost:9500
 CLOUD_DEV_ENV = \
-	CLOUD_ISSUER="$(CLOUD_ISSUER)" \
+	CLOUD_ISSUER="$(CLOUD_HOST_ISSUER)" \
 	CLOUD_PG_URL="$(CLOUD_PG_URL)" \
-	CLOUD_PUBLIC_URL="$(CLOUD_PUBLIC_URL)" \
+	CLOUD_PUBLIC_URL="$(CLOUD_HOST_ISSUER)" \
 	CLOUD_DATA_KEY="$$(cat $(CLOUD_DATA_KEY_FILE))"
 
 .PHONY: dev-auth
