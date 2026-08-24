@@ -103,6 +103,7 @@ REMOTE_IMAGES=(
     "quay.io/calico/node:${CALICO_VERSION:-v3.32.1}"
     "quay.io/calico/cni:${CALICO_VERSION:-v3.32.1}"
     "quay.io/calico/kube-controllers:${CALICO_VERSION:-v3.32.1}"
+    "registry.k8s.io/metrics-server/metrics-server:${METRICS_SERVER_VERSION:-v0.9.0}"
 )
 
 # Built by `make build-server-image` / `build-signer-image` / `build-pg-image`.
@@ -429,6 +430,54 @@ kubectl --context "$CLUSTER" -n atlantis-system rollout status deployment/memcac
 # those baked in would read like a deployment manifest and be usable on exactly
 # one laptop.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# metrics-server, so `kubectl top` answers.
+#
+# Not required by anything the cluster runs — it exists so resource limits can
+# be set from observation rather than from a number somebody liked. Without it
+# `kubectl top` fails with `Metrics API not available` and every request in this
+# repository is a guess.
+#
+# It is the corroborating instrument rather than the primary one. It samples at
+# --metric-resolution (15s by default), so it cannot see a spike shorter than
+# that — and a spike shorter than that is exactly what OOMKills a pod. The true
+# high-water mark is the container's own cgroup:
+#
+#   kubectl exec -n <ns> <pod> -- cat /sys/fs/cgroup/memory.peak
+#
+# Use that to size a limit. Use this for steady state and for CPU rates.
+# ---------------------------------------------------------------------------
+say "metrics-server (${METRICS_SERVER_VERSION:-v0.9.0})"
+if kubectl --context "$CLUSTER" get deployment -n kube-system metrics-server >/dev/null 2>&1; then
+    echo "metrics-server present"
+else
+    kubectl --context "$CLUSTER" apply -f \
+        "https://github.com/kubernetes-sigs/metrics-server/releases/download/${METRICS_SERVER_VERSION:-v0.9.0}/components.yaml" >/dev/null
+fi
+
+# --kubelet-insecure-tls, added rather than shipped in the manifest.
+#
+# metrics-server verifies the kubelet's serving certificate against the cluster
+# CA. kind does not sign kubelet certificates with it, so every scrape fails
+# with an x509 error and `kubectl top` reports no metrics — which reads like the
+# install not having worked.
+#
+# THIS FLAG IS LOCAL-ONLY. The upstream documentation calls it useful for
+# testing and not recommended for production, and it must not travel to a real
+# cluster: it turns off the check that the thing reporting a node's memory is
+# that node. It is applied here, to this kind cluster, and is deliberately not
+# part of any manifest in this repository.
+#
+# Appended only when absent. A second copy of the flag is not obviously
+# harmless, and this script is expected to be re-run.
+if ! kubectl --context "$CLUSTER" -n kube-system get deployment metrics-server \
+    -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null |
+    grep -q -- '--kubelet-insecure-tls'; then
+    kubectl --context "$CLUSTER" -n kube-system patch deployment metrics-server --type=json \
+        -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]' >/dev/null
+fi
+kubectl --context "$CLUSTER" -n kube-system rollout status deployment/metrics-server --timeout=120s
+
 say "provisioner"
 
 # The role goes on whether or not the workload does. It is static, it grants
@@ -544,10 +593,16 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 6
+          # Memory limited, CPU not — see appResources in
+          # internal/cloud/provision/workloads.go for why the two differ.
+          # Measured anon while provisioning three organisations at once: 15.9Mi
+          # against this 128Mi, with a cgroup peak of 27.1Mi.
           resources:
             requests:
               memory: 128Mi
               cpu: 50m
+            limits:
+              memory: 128Mi
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
       volumes:

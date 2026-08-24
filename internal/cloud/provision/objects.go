@@ -333,15 +333,45 @@ func (k *Kube) postgres(ns string) ctrlclient.Object {
 				StorageClass: scPtr,
 			},
 
+			// Memory is limited, CPU is not. See appResources in workloads.go
+			// for why the two are treated differently.
+			//
+			// # Why 256Mi is a safe ceiling despite a measured 697Mi peak
+			//
+			// The cgroup high-water mark on an organisation running for
+			// eighteen hours reads about 697Mi, which looks like this limit is
+			// less than a third of what Postgres needs. Setting it from that
+			// number would mean 700Mi per tenant and a third of the density.
+			// Reading it as a requirement would be wrong:
+			//
+			//	anon   54.1Mi     file  372.4Mi     slab 12.5Mi   (18 hours old)
+			//	anon   55.4Mi     file   30.6Mi     slab  3.2Mi   (one minute old)
+			//
+			// Anonymous memory — the part that cannot be reclaimed and the part
+			// an OOM kill is decided on — is 55Mi, and it is the *same* on a
+			// fresh pod as on an old one. The rest is page cache, which Postgres
+			// lets grow to fill whatever it is given and which the kernel
+			// reclaims before killing anything. The peak measures how much room
+			// the cgroup had, not how much the database needs.
+			//
+			// So this caps the cache rather than starving the server: 55Mi of
+			// working set stays resident, roughly 190Mi remains for cache, and
+			// pressure reclaims instead of killing.
+			//
+			// 69 MiB was the figure the request was originally sized from, and
+			// it matches the 55Mi anon plus 12Mi slab measured here — the
+			// original estimate was right, and it is now checked rather than
+			// remembered.
 			Resources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
 					// The load-bearing number for density: Kubernetes schedules
 					// on requests, not usage, so this decides how many
-					// organisations fit on a node. An idle CloudNativePG pod
-					// measures about 69 MiB; this leaves room to work in
-					// without reserving a whole node per tenant.
+					// organisations fit on a node.
 					corev1.ResourceMemory: resource.MustParse("256Mi"),
 					corev1.ResourceCPU:    resource.MustParse("100m"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceMemory: resource.MustParse("256Mi"),
 				},
 			},
 		},

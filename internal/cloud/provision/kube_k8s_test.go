@@ -225,6 +225,36 @@ func TestK8sProvisionsAWorkingOrganisation(t *testing.T) {
 				t.Errorf("%s: grace period %v, want more than the 30s shutdown takes", p.Name, g)
 			}
 
+			// A memory limit equal to the request, and no CPU limit.
+			//
+			// Both halves are asserted because both are decisions. The memory
+			// limit is what stops one organisation's runaway taking the node and
+			// killing a different tenant's database. The *absence* of a CPU limit
+			// is equally deliberate: a CPU limit throttles even on an idle node,
+			// buying isolation that requests already provide, and it is the kind
+			// of field somebody adds later for symmetry.
+			//
+			// Equality is the part that matters. A limit above the request
+			// overcommits the node — every tenant inside its request, the limits
+			// summing past what exists, and the first simultaneous spike killing
+			// a pod that did nothing wrong.
+			for _, ctr := range p.Spec.Containers {
+				req, lim := ctr.Resources.Requests, ctr.Resources.Limits
+				memReq, memLim := req[corev1.ResourceMemory], lim[corev1.ResourceMemory]
+				switch {
+				case memLim.IsZero():
+					t.Errorf("%s/%s: no memory limit, so this container can take the node down with it",
+						p.Name, ctr.Name)
+				case !memLim.Equal(memReq):
+					t.Errorf("%s/%s: memory limit %s does not equal request %s; the difference is overcommit",
+						p.Name, ctr.Name, memLim.String(), memReq.String())
+				}
+				if cpuLim, ok := lim[corev1.ResourceCPU]; ok && !cpuLim.IsZero() {
+					t.Errorf("%s/%s: has a CPU limit of %s, which throttles even on an idle node",
+						p.Name, ctr.Name, cpuLim.String())
+				}
+			}
+
 			// atlantis migrates before it binds the health port, so its boot
 			// budget has to be larger than its steady-state one. The comparison
 			// is between the two budgets rather than against fixed numbers,

@@ -142,17 +142,72 @@ func writableTmp() corev1.Volume {
 // secretMode is 0440: readable by the owner and the fsGroup, nobody else.
 func secretMode() *int32 { v := int32(0o440); return &v }
 
-// appResources keeps both application pods out of the BestEffort class.
+// appResources keeps both application pods out of the BestEffort class and
+// bounds what either can take.
 //
 // Without requests they are the first thing evicted under node pressure, which
 // means an organisation's atlantis dies before its database notices anything is
 // wrong — and on a shared node pool that is a tenant losing service because a
 // different tenant got busy.
+//
+// # Why memory is limited and CPU is not
+//
+// The two resources fail differently and the asymmetry is deliberate.
+//
+// Memory is incompressible. A pod with no limit that climbs drives the node out
+// of memory, and the kernel then picks a victim by OOM score — which may be a
+// different organisation's Postgres. One tenant's runaway becomes another
+// tenant's outage, with nothing in either manifest to explain it. A limit
+// contains that to the pod that caused it.
+//
+// CPU is compressible. Under contention the scheduler already shares it in
+// proportion to requests, so a limit adds nothing to isolation — it only
+// throttles, and it throttles even when the node is idle. A container capped at
+// 500m is held there with three cores free. That is latency paid at exactly the
+// moments that matter, for a guarantee requests already give.
+//
+// The cost of leaving CPU unlimited is that a busy tenant can take spare
+// capacity and make its neighbours slower. It cannot push them below their
+// requests, so this is degradation, not starvation.
+//
+// # Why the limit equals the request
+//
+// Request below limit overcommits the node: several tenants each sit inside
+// their request while their limits sum past what exists, and the first
+// simultaneous spike kills a pod that did nothing wrong. Equal means the
+// scheduler has actually reserved everything the pod is allowed to use.
+//
+// QoS stays Burstable — Guaranteed would require CPU limits too. That is no
+// loss: eviction ranks Burstable pods by how far they exceed their requests,
+// and a pod whose memory limit equals its request cannot exceed it.
+//
+// # The numbers these clear
+//
+// Measured from each container's own cgroup, which is a true high-water mark
+// rather than a 15-second sample:
+//
+//	atlantis   anon 12.0Mi   against 256Mi
+//	signer     anon  6.9Mi   against  64Mi
+//
+// Anonymous memory is what a limit has to clear; page cache is reclaimed before
+// anything is killed. Both figures were the same on a pod eighteen hours old as
+// on one a minute old, so this is the working set and not a warm-up.
+//
+// The requests are deliberately NOT reduced to match. These numbers cover idle,
+// boot with migrations, and provisioning — not atlantis under concurrent RPC
+// load or a large apply, which is the case that would justify the headroom.
+// Cutting the request on evidence that does not cover the peak is the guess this
+// measurement existed to replace.
 func appResources(memory string) corev1.ResourceRequirements {
+	q := resource.MustParse(memory)
 	return corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
-			corev1.ResourceMemory: resource.MustParse(memory),
+			corev1.ResourceMemory: q,
 			corev1.ResourceCPU:    resource.MustParse("50m"),
+		},
+		// Memory only. Adding corev1.ResourceCPU here would throttle; see above.
+		Limits: corev1.ResourceList{
+			corev1.ResourceMemory: q,
 		},
 	}
 }
