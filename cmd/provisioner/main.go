@@ -107,6 +107,23 @@ func run(log *slog.Logger) error {
 		}
 	}()
 
+	// Metrics on their own listener, which is the whole point rather than tidy
+	// separation: the health listener has to accept connections from anywhere
+	// so the kubelet can probe it, and this one does not.
+	//
+	// A failure here does NOT stop the process, which is the opposite of the
+	// decision above and deliberate. Kubernetes cannot restart a provisioner
+	// whose probes never came up, so that failure has to be fatal. Nothing
+	// scrapes this one — losing it costs observability, and killing a working
+	// provisioner over it would trade the job for the telemetry about the job.
+	metrics := provisioner.NewMetricsServer(cfg.MetricsAddr)
+	go func() {
+		log.Info("metrics http listening", "addr", cfg.MetricsAddr)
+		if err := metrics.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("metrics http server", "err", err)
+		}
+	}()
+
 	runErr := w.Run(ctx)
 
 	// Detached from ctx deliberately: ctx is already cancelled by the time this
@@ -115,6 +132,7 @@ func run(log *slog.Logger) error {
 	shutCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 	defer cancel()
 	_ = health.Shutdown(shutCtx)
+	_ = metrics.Shutdown(shutCtx)
 
 	return runErr
 }

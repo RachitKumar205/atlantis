@@ -353,7 +353,7 @@ Read by `cmd/cloud`, which publishes the keys consoles verify against.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `CLOUD_LISTEN` | `:9500` | Bind address for the JWKS document, served at `/.well-known/jwks.json`. |
+| `CLOUD_LISTEN` | `:9500` | Bind address. Serves the JWKS document at `/.well-known/jwks.json`, the sign-in routes, and two probes: `/healthz` answers without touching anything, `/readyz` reaches the database. Probe readiness with `/readyz` — every sign-in Cloud serves is a database call, so `/healthz` and the JWKS route both report success while Postgres is unreachable. |
 | `CLOUD_ISSUER` | (unset; **required**) | Becomes the `iss` claim. Must match each console's `CLOUD_ISSUER` exactly. |
 | `CLOUD_SIGNING_KEY` | `./certs/cloud-signing-key.pem` | ECDSA P-256 signing key, created on first use with mode `0600`. Persisting it matters: a key regenerated per restart changes the published key set, so every assertion issued beforehand stops verifying. |
 | `CLOUD_PG_URL` | (unset; **required**) | Cloud's own database — accounts, organisations, membership, second factors. Separate from the console's; locally the same PostgreSQL instance, schema `cloud`. **The role must be `NOSUPERUSER` / `NOBYPASSRLS` and must own the tables** — see below. |
@@ -574,7 +574,8 @@ factor and the assertion signing key.
 | `PROVISIONER_SIGNER_IMAGE` | (unset; **required**) | The signer image. |
 | `PROVISIONER_POSTGRES_IMAGE` | (unset; **required**) | The Postgres image. Its tag must read as a Postgres version — see `Dockerfile.pg`. |
 | `PROVISIONER_MEMCACHED_ADDR` | (unset; **required**) | The shared cache. Not defaulted deliberately; see below. |
-| `PROVISIONER_HEALTH_LISTEN` | `:8082` | Plaintext `/healthz`, `/readyz` and `/metrics`. |
+| `PROVISIONER_HEALTH_LISTEN` | `:8082` | Plaintext `/healthz` and `/readyz`. Binds every interface, because the orchestrator probes it. |
+| `PROVISIONER_METRICS_LISTEN` | `127.0.0.1:9102` | Plaintext `/metrics`, on its own listener. Loopback by default: it shared the health port until the per-organisation counts turned out to be readable by any pod in the cluster. Move it to a reachable address when something scrapes it, and put a credential in front at the same time. |
 | `PROVISIONER_READY_TIMEOUT` | `5m` | How long to wait for an organisation to serve. Exceeding it is retryable, not terminal. |
 | `PROVISIONER_LEASE` | 3 × ready timeout | How long a claim is held. Must exceed the ready timeout. |
 | `PROVISIONER_LEASE_HEARTBEAT` | `30s` | How often the lease is extended during a wait. |

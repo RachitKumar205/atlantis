@@ -73,8 +73,40 @@ func TestReadyzFailsOnceShutdownHasBegun(t *testing.T) {
 // with go_* and process_* and nothing about provisioning, which looks wired and
 // reports nothing. Asserting "200 and non-empty" would pass against exactly
 // that, so this asserts a named family instead.
-func TestMetricsCarriesProvisioningSeries(t *testing.T) {
+// The health listener must not serve metrics.
+//
+// It is the listener the kubelet probes, so it binds every interface and cannot
+// require a credential. Anything on it is readable by every pod in the cluster:
+// tenant namespaces restrict ingress, not egress, so a tenant workload can open
+// a connection to any address it can reach.
+//
+// This is the assertion, not a tidiness check. Moving /metrics to its own
+// address is undone by one line, and the undo looks like a merge conflict
+// resolved the obvious way.
+func TestTheHealthListenerDoesNotServeMetrics(t *testing.T) {
 	srv := NewHealthServer(":0", nil, context.Background())
+
+	rec := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code == http.StatusOK {
+		t.Errorf("/metrics answered 200 on the health listener, which is open to "+
+			"every pod in the cluster; it belongs on MetricsAddr. Body: %.120s",
+			rec.Body.String())
+	}
+
+	// The probes stay, and are checked here rather than trusted: a split that
+	// took the probes with it would leave a pod Kubernetes cannot restart.
+	for _, path := range []string{"/healthz", "/readyz"} {
+		r := httptest.NewRecorder()
+		srv.Handler.ServeHTTP(r, httptest.NewRequest(http.MethodGet, path, nil))
+		if r.Code != http.StatusOK {
+			t.Errorf("%s = %d on the health listener, want 200", path, r.Code)
+		}
+	}
+}
+
+func TestMetricsCarriesProvisioningSeries(t *testing.T) {
+	srv := NewMetricsServer(":0")
 
 	rec := httptest.NewRecorder()
 	srv.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))

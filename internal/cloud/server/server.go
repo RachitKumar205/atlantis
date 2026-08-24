@@ -20,6 +20,13 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/spafs"
 )
 
+// readyProbeTimeout bounds the database check on /readyz.
+//
+// Shorter than a probe period, so a slow answer is reported as not-ready rather
+// than arriving after the kubelet has already given up and counted a timeout —
+// which looks the same from outside and says nothing about the database.
+const readyProbeTimeout = 3 * time.Second
+
 // Server is Cloud's HTTP surface.
 type Server struct {
 	cfg    Config
@@ -214,7 +221,34 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /reset", s.handleResetForm)
 	s.mux.HandleFunc("POST /reset", s.handleResetSubmit)
 
+	// Liveness. Deliberately answers without touching anything: a liveness probe
+	// that failed when the database hiccupped would restart a healthy process
+	// and turn a recoverable outage into a crash loop.
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	// Readiness, which is a different question and used to have no answer.
+	//
+	// Cloud's Deployment had to probe either /healthz — a bare 200 that reports
+	// success while Postgres is unreachable — or the JWKS route, which proves
+	// only that the signing key loaded. Under both, this process reports itself
+	// ready to serve sign-ins it cannot complete: every account lookup, every
+	// membership check and every session write is a database call.
+	//
+	// So the load balancer sends it traffic and each request fails
+	// individually, which is the outage this route exists to convert into "this
+	// replica is not ready".
+	s.mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		// Bounded, so a wedged database cannot hold a probe open for the whole
+		// request and make readiness itself the thing that hangs.
+		ctx, cancel := context.WithTimeout(r.Context(), readyProbeTimeout)
+		defer cancel()
+		if err := s.db.Pool().Ping(ctx); err != nil {
+			http.Error(w, "cloud db: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})

@@ -724,13 +724,13 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 6
-          # Readiness on the JWKS route rather than /healthz, which is a bare
-          # 200 that answers before the signing key is loaded. This proves the
-          # key is loaded AND being published — which is the only thing a
-          # console cares about. Neither route reaches the database; Cloud will
-          # report ready with Postgres unreachable, and that is a real gap.
+          # Readiness reaches the database. /healthz is a bare 200 by design —
+          # liveness must not restart a healthy process over a database hiccup —
+          # and the JWKS route proves only that the signing key loaded. Every
+          # sign-in Cloud serves is a database call, so neither answers the
+          # question a load balancer is asking.
           readinessProbe:
-            httpGet: { path: /.well-known/jwks.json, port: 9500 }
+            httpGet: { path: /readyz, port: 9500 }
             initialDelaySeconds: 3
             periodSeconds: 5
           resources:

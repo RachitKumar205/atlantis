@@ -48,6 +48,21 @@ const (
 	DefaultRetryMax          = 30 * time.Minute
 	DefaultHealthAddr        = ":8082"
 
+	// DefaultMetricsAddr is loopback, and the 127.0.0.1 is the point rather
+	// than the port.
+	//
+	// /metrics used to share DefaultHealthAddr, which binds every interface
+	// because the kubelet has to reach the probes on it. That made per-caller
+	// counts readable by any pod in the cluster: tenant namespaces restrict
+	// ingress, not egress, so a tenant workload can open a connection to
+	// anything it can address.
+	//
+	// Nothing scrapes this process today, so binding it where only this pod can
+	// reach costs nothing and closes that. A scraper arriving later is a reason
+	// to give this listener a credential — not a reason to have left it open in
+	// the meantime.
+	DefaultMetricsAddr = "127.0.0.1:9102"
+
 	// leaseFactor sizes the default lease from ReadyTimeout. Three times leaves
 	// room for the two Ensure calls either side of the wait, both of which do
 	// real work, without making a crashed provisioner's organisation
@@ -114,8 +129,14 @@ type Config struct {
 	RetryBase time.Duration
 	RetryMax  time.Duration
 
-	// HealthAddr serves /healthz, /readyz and /metrics.
+	// HealthAddr serves /healthz and /readyz. It binds every interface,
+	// because the kubelet probes it.
 	HealthAddr string
+
+	// MetricsAddr serves /metrics, and only that. Separate from HealthAddr so
+	// the two trust levels are two listeners rather than one that has to be
+	// open for the kubelet's sake. See DefaultMetricsAddr.
+	MetricsAddr string
 
 	// Provision is the deployment-shaped half, passed to provision.NewKube.
 	Provision provision.Config
@@ -144,6 +165,7 @@ func ConfigFromEnv() (Config, error) {
 		RetryBase:         envDuration("PROVISIONER_RETRY_BASE", DefaultRetryBase),
 		RetryMax:          envDuration("PROVISIONER_RETRY_MAX", DefaultRetryMax),
 		HealthAddr:        envOr("PROVISIONER_HEALTH_LISTEN", DefaultHealthAddr),
+		MetricsAddr:       envOr("PROVISIONER_METRICS_LISTEN", DefaultMetricsAddr),
 
 		Provision: provision.Config{
 			// Set here, deliberately, because the lease is sized from it.
