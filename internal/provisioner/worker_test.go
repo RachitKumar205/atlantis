@@ -263,6 +263,13 @@ type fakeCluster struct {
 	rotateCalls  []rotateCall
 	rotateErr    error
 	rotateStatus provision.Status
+
+	// rotateExpiry is what the cluster reports for an organisation that was NOT
+	// rotated, and rotatedExpiry what it reports for one that was. Separate so a
+	// test can hold a credential near expiry and watch the gauge, then rotate it
+	// and watch the gauge recover.
+	rotateExpiry  map[string]time.Time
+	rotatedExpiry time.Time
 }
 
 func (f *fakeCluster) Ensure(_ context.Context, spec provision.Spec) (provision.Status, error) {
@@ -1127,25 +1134,45 @@ type rotateCall struct {
 
 func (c *fakeCluster) RotateConsoleCredentials(
 	ctx context.Context, org string, renewWithin time.Duration, force bool,
-) (provision.Status, bool, error) {
+) (provision.ConsoleRotation, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := ctxErr(ctx); err != nil {
-		return provision.Status{}, false, err
+		return provision.ConsoleRotation{}, err
 	}
 	c.rotateCalls = append(c.rotateCalls, rotateCall{
 		org: org, renewWithin: renewWithin, force: force,
 	})
 	if c.rotateErr != nil {
-		return provision.Status{}, false, c.rotateErr
+		// Carries the expiry alongside the error, as the real one does for every
+		// failure that got far enough to read a certificate. A fake that returned
+		// nothing here would make the fleet gauge look correct in tests and go
+		// blind in production on exactly the organisations that are failing.
+		return provision.ConsoleRotation{ExpiresAt: c.rotateExpiry[org]}, c.rotateErr
 	}
 	// Rotates when asked to, or when the test has said this organisation is
 	// due. A fake that always rotated would make "only rotates what is due"
 	// untestable.
 	if force || c.rotateDue[org] {
-		return c.rotateStatus, true, nil
+		return provision.ConsoleRotation{
+			Status: c.rotateStatus, Rotated: true,
+			ExpiresAt:         c.rotateFreshExpiry(),
+			PreviousExpiresAt: c.rotateExpiry[org],
+		}, nil
 	}
-	return provision.Status{}, false, nil
+	return provision.ConsoleRotation{ExpiresAt: c.rotateExpiry[org]}, nil
+}
+
+// rotateFreshExpiry is what the fake reports after a rotation.
+//
+// A real rotation resets the clock, so this has to as well — otherwise the
+// fleet gauge could not tell a rotated credential from one about to expire, and
+// the test asserting the gauge recovers would be asserting nothing.
+func (c *fakeCluster) rotateFreshExpiry() time.Time {
+	if !c.rotatedExpiry.IsZero() {
+		return c.rotatedExpiry
+	}
+	return time.Now().Add(30 * 24 * time.Hour)
 }
 
 func (c *fakeCluster) Destroy(ctx context.Context, org string) error {
@@ -1557,5 +1584,201 @@ func TestARotationThatWasNeverRegisteredCountsAsAFailure(t *testing.T) {
 	}
 	if got := testutil.ToFloat64(consoleRotationFailures); got != failBefore+1 {
 		t.Errorf("the failure counter is %v, want %v", got, failBefore+1)
+	}
+}
+
+// The fleet countdown reports the soonest expiry, not just any expiry.
+//
+// It is a minimum across organisations because the question it answers is "is
+// anything about to expire", and one tenant is enough to need answering. A
+// gauge that reported the last organisation inspected would be correct on a
+// fleet of one and silently useless on a fleet of many.
+func TestTheFleetGaugeReportsTheSoonestExpiry(t *testing.T) {
+	soon := time.Now().Add(48 * time.Hour)
+	far := time.Now().Add(300 * 24 * time.Hour)
+
+	q := newFakeQueue()
+	q.ready = []string{"far", "soon"}
+	c := &fakeCluster{rotateExpiry: map[string]time.Time{"far": far, "soon": soon}}
+
+	w := newTestWorker(t, testConfig(), q, c, nil)
+	w.reconcile(context.Background())
+
+	got := testutil.ToFloat64(consoleCertSecondsLeft)
+	want := time.Until(soon).Seconds()
+	if diff := got - want; diff > 60 || diff < -60 {
+		t.Errorf("the gauge reads %.0fs, want about %.0fs — it is not reporting the "+
+			"soonest-expiring credential in the fleet", got, want)
+	}
+}
+
+// Rotating recovers the countdown.
+//
+// The saw-tooth is the whole signal: it falls as certificates age and jumps
+// back when they are renewed. A gauge that stayed low after a successful
+// rotation would page somebody about a system that had just fixed itself.
+func TestRotatingRaisesTheFleetGauge(t *testing.T) {
+	nearlyOut := time.Now().Add(2 * time.Hour)
+
+	q := newFakeQueue()
+	q.ready = []string{"one"}
+	c := &fakeCluster{
+		rotateExpiry:  map[string]time.Time{"one": nearlyOut},
+		rotatedExpiry: time.Now().Add(30 * 24 * time.Hour),
+	}
+
+	// A register function that works, because the gauge is only refreshed once
+	// the console has actually been told — passing nil here would fall back to
+	// the real console.RegisterOrg, fail against a console database that is not
+	// running, and make this test fail for a reason it is not about.
+	w := newTestWorker(t, testConfig(), q, c,
+		func(context.Context, string, string, console.OrgRegistration) error { return nil })
+
+	// First pass: not due, so the gauge shows the credential running down.
+	w.reconcile(context.Background())
+	before := testutil.ToFloat64(consoleCertSecondsLeft)
+	if before > (3 * time.Hour).Seconds() {
+		t.Fatalf("the gauge reads %.0fs for a credential with two hours left", before)
+	}
+
+	// Second pass with the organisation now due: it rotates, and the countdown
+	// resets to the new certificate's life.
+	c.mu.Lock()
+	c.rotateDue = map[string]bool{"one": true}
+	c.mu.Unlock()
+	w.reconcile(context.Background())
+
+	after := testutil.ToFloat64(consoleCertSecondsLeft)
+	if after <= before {
+		t.Errorf("the gauge is %.0fs after a rotation and was %.0fs before; a "+
+			"successful renewal did not clear the alarm", after, before)
+	}
+}
+
+// A pass that learned nothing leaves the gauge alone.
+//
+// Writing zero would read as "a credential expires now" and page somebody about
+// a cluster that is merely unreachable — a different fault, with a different
+// fix, and one Prometheus already reports through the scrape target. Staleness
+// is the honest answer when nothing was inspected.
+func TestAPassThatLearnedNothingLeavesTheGaugeAlone(t *testing.T) {
+	q := newFakeQueue()
+	q.ready = []string{"one"}
+	c := &fakeCluster{rotateExpiry: map[string]time.Time{"one": time.Now().Add(200 * time.Hour)}}
+
+	w := newTestWorker(t, testConfig(), q, c, nil)
+	w.reconcile(context.Background())
+	seeded := testutil.ToFloat64(consoleCertSecondsLeft)
+	if seeded == 0 {
+		t.Fatal("the gauge was never set, so this test cannot tell stale from zero")
+	}
+
+	// Now every call fails *before reading a certificate* — the Secret is gone,
+	// or the API server is not answering. That is what "learned nothing" means
+	// now: a failure that got far enough to read the expiry reports it, which is
+	// what TestAFailingRotationStillReportsTheCredentialRunningDown covers.
+	c.mu.Lock()
+	c.rotateErr = errors.New("the cluster is unreachable")
+	c.rotateExpiry = nil
+	c.mu.Unlock()
+	w.reconcile(context.Background())
+
+	if got := testutil.ToFloat64(consoleCertSecondsLeft); got != seeded {
+		t.Errorf("the gauge moved to %.0f when the pass learned nothing (was %.0f); "+
+			"an unreachable cluster now reads as an imminent expiry", got, seeded)
+	}
+}
+
+// A rotation that could not be registered does not report the new expiry.
+//
+// The console is still presenting the previous certificate, so the new one's
+// expiry describes something nobody is using. Reporting it would show the fleet
+// as freshly renewed at the exact moment renewal stopped taking effect — the
+// gauge lying in the one direction that matters.
+func TestAnUnregisteredRotationDoesNotRefreshTheGauge(t *testing.T) {
+	q := newFakeQueue()
+	q.ready = []string{"one"}
+	c := &fakeCluster{
+		rotateDue:     map[string]bool{"one": true},
+		rotatedExpiry: time.Now().Add(300 * 24 * time.Hour),
+	}
+
+	// Seed the gauge with a low value from a different worker, so a failure to
+	// update is distinguishable from an update to something large.
+	consoleCertSecondsLeft.Set(1234)
+
+	w := newTestWorker(t, testConfig(), q, c,
+		func(context.Context, string, string, console.OrgRegistration) error {
+			return errors.New("console database is down")
+		})
+	w.reconcile(context.Background())
+
+	if got := testutil.ToFloat64(consoleCertSecondsLeft); got != 1234 {
+		t.Errorf("the gauge moved to %.0f after a rotation the console was never "+
+			"told about; it reports a certificate nothing is presenting", got)
+	}
+}
+
+// A failing rotation still moves the countdown.
+//
+// This is the case the gauge exists for, and the one it is easiest to get
+// wrong: the natural implementation drops everything on the error path, which
+// freezes the gauge at the last healthy reading. The fleet then looks steady
+// while the credential it is meant to be watching runs out — the metric
+// reporting health precisely because the thing it measures has stopped working.
+func TestAFailingRotationStillReportsTheCredentialRunningDown(t *testing.T) {
+	nearlyOut := time.Now().Add(3 * time.Hour)
+
+	q := newFakeQueue()
+	q.ready = []string{"one"}
+	c := &fakeCluster{
+		rotateExpiry: map[string]time.Time{"one": nearlyOut},
+		rotateErr:    errors.New("the secret could not be written"),
+	}
+
+	// Seeded high, so a gauge that simply never updated would be obvious.
+	consoleCertSecondsLeft.Set(9_000_000)
+
+	w := newTestWorker(t, testConfig(), q, c, nil)
+	w.reconcile(context.Background())
+
+	got := testutil.ToFloat64(consoleCertSecondsLeft)
+	want := time.Until(nearlyOut).Seconds()
+	if diff := got - want; diff > 60 || diff < -60 {
+		t.Errorf("the gauge reads %.0fs after a failed rotation, want about %.0fs — "+
+			"a rotation that keeps failing would be invisible until the credential "+
+			"expired", got, want)
+	}
+}
+
+// When registration fails, the countdown follows the certificate still in use.
+//
+// The new one is in the cluster and the console has never heard of it, so it is
+// still presenting the old one. Reporting the new expiry would show the
+// credential as freshly renewed at the exact moment renewal stopped taking
+// effect — the gauge lying in the only direction that matters.
+func TestAnUnregisteredRotationReportsThePreviousExpiry(t *testing.T) {
+	nearlyOut := time.Now().Add(4 * time.Hour)
+
+	q := newFakeQueue()
+	q.ready = []string{"one"}
+	c := &fakeCluster{
+		rotateDue:     map[string]bool{"one": true},
+		rotateExpiry:  map[string]time.Time{"one": nearlyOut},
+		rotatedExpiry: time.Now().Add(30 * 24 * time.Hour),
+	}
+
+	w := newTestWorker(t, testConfig(), q, c,
+		func(context.Context, string, string, console.OrgRegistration) error {
+			return errors.New("console database is down")
+		})
+	w.reconcile(context.Background())
+
+	got := testutil.ToFloat64(consoleCertSecondsLeft)
+	want := time.Until(nearlyOut).Seconds()
+	if diff := got - want; diff > 60 || diff < -60 {
+		t.Errorf("the gauge reads %.0fs, want about %.0fs — it is reporting the "+
+			"certificate that was written rather than the one the console is "+
+			"actually presenting", got, want)
 	}
 }

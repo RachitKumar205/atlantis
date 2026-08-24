@@ -57,11 +57,12 @@ const (
 	// tight to the renewal cadence would make the provisioner a component whose
 	// weekend outage is a fleet-wide one.
 	//
-	// It does nothing yet. certs.ClientLifetime is still ten years, so no leaf
-	// is ever within ten days of expiring and the automatic path never fires —
-	// deliberately. The mechanism lands first and is exercised by `cloud org
-	// rotate-console`; shortening the lifetime is what switches this on, and is
-	// not a change to make until rotation has been seen working.
+	// Paired with certs.ClientLifetime, which is thirty days: a credential is
+	// replaced with a third of its life left, so two consecutive passes can be
+	// missed entirely and nothing breaks. Changing either number without the
+	// other is what turns the margin into an outage — a renewal window wider
+	// than the lifetime rotates on every pass, and one much narrower removes the
+	// slack this is here to provide.
 	DefaultConsoleCertRenewWithin = 10 * 24 * time.Hour
 
 	// DefaultMetricsAddr is loopback, and the 127.0.0.1 is the point rather

@@ -76,12 +76,12 @@ type Cluster interface {
 	//
 	// The window and the force flag are passed in rather than decided by the
 	// cluster because the caller knows which of the two reasons applies — an
-	// approaching expiry, or an operator who has asked. The bool reports
-	// whether it rotated, so a caller can tell a real rotation from a pass that
-	// found nothing due.
+	// approaching expiry, or an operator who has asked. The result reports
+	// whether it rotated and when the credential now expires, which is what
+	// lets this process watch the fleet without a second read per organisation.
 	RotateConsoleCredentials(
 		ctx context.Context, org string, renewWithin time.Duration, force bool,
-	) (provision.Status, bool, error)
+	) (provision.ConsoleRotation, error)
 }
 
 // RegisterFunc records a provisioned organisation with the console.
@@ -327,6 +327,9 @@ func (w *Worker) reconcile(ctx context.Context) {
 		requests = nil
 	}
 
+	// The soonest console credential expiry seen this pass, for the gauge below.
+	var soonest time.Time
+
 	c := w.currentCluster()
 	for _, org := range orgs {
 		if ctx.Err() != nil {
@@ -352,7 +355,11 @@ func (w *Worker) reconcile(ctx context.Context) {
 			// are worth looking at. Doing it before the existence check would
 			// mean rotating certificates for an organisation that has gone.
 			requested, wasRequested := requests[org]
-			w.rotateConsole(ctx, c, org, requested, wasRequested)
+			if exp := w.rotateConsole(ctx, c, org, requested, wasRequested); !exp.IsZero() {
+				if soonest.IsZero() || exp.Before(soonest) {
+					soonest = exp
+				}
+			}
 			continue
 		}
 
@@ -370,6 +377,18 @@ func (w *Worker) reconcile(ctx context.Context) {
 		w.audit(ctx, org, "org.requeued", map[string]any{
 			"reason": "absent from the cluster",
 		})
+	}
+
+	// Published only when this pass actually learned an expiry.
+	//
+	// Leaving the previous value standing is deliberate. A pass that inspected
+	// nothing — an empty fleet, or a cluster that refused every call — knows
+	// nothing new, and writing zero there would read as "a credential expires
+	// now" and page somebody about a fault that is somewhere else entirely.
+	// Staleness is the honest failure here, and Prometheus already reports a
+	// scrape target that has stopped answering.
+	if !soonest.IsZero() {
+		consoleCertSecondsLeft.Set(time.Until(soonest).Seconds())
 	}
 }
 
@@ -715,38 +734,55 @@ func (w *Worker) audit(ctx context.Context, org, action string, detail map[strin
 // is only true once the console has been told about it — a rotation written to
 // the cluster and never registered leaves the console presenting the old
 // credential, which still works, so nothing would look wrong.
+// It returns when this organisation's console credential expires, or the zero
+// time when the pass could not find out. The caller aggregates those into the
+// fleet-wide gauge; see reconcile.
 func (w *Worker) rotateConsole(
 	ctx context.Context, c Cluster, org string, requestedAt time.Time, requested bool,
-) {
-	status, rotated, err := c.RotateConsoleCredentials(
+) time.Time {
+	r, err := c.RotateConsoleCredentials(
 		ctx, org, w.cfg.ConsoleCertRenewWithin, requested)
 	if err != nil {
 		if ctx.Err() != nil {
-			return
+			return time.Time{}
 		}
+		// The expiry is carried out of every failure that got far enough to read
+		// a certificate, and it is reported here rather than dropped. A rotation
+		// that keeps failing is the one case this whole mechanism exists to make
+		// visible, and discarding what it learned would leave the fleet gauge
+		// frozen at the last healthy reading while the credential ran out.
+		w.warnIfExpiringSoon(org, r.ExpiresAt)
 		if credentialError(err) {
 			w.log.Warn("cannot rotate console credentials: the cluster refused "+
 				"this provisioner's credentials", "org", org, "err", err)
 			w.reconnect()
-			return
+			return r.ExpiresAt
 		}
 		consoleRotationFailures.Inc()
 		w.log.Error("could not rotate an organisation's console credentials",
 			"org", org, "requested", requested, "err", err)
-		return
+		return r.ExpiresAt
 	}
-	if !rotated {
-		return
+	if !r.Rotated {
+		// Nothing was due, so this credential is comfortably in date by
+		// definition. No warning: reaching the window is what makes one due, so
+		// a healthy pass cannot produce one worth warning about.
+		return r.ExpiresAt
 	}
 
 	// Re-registering is what puts the new certificate into use. The console
 	// notices within orgClientRefresh because the row's updated_at moves.
-	if err := w.record(ctx, org, status); err != nil {
+	if err := w.record(ctx, org, r.Status); err != nil {
 		consoleRotationFailures.Inc()
 		w.log.Error("rotated an organisation's console credentials but could not "+
 			"register them; the console keeps using the previous certificate "+
 			"until this succeeds", "org", org, "err", err)
-		return
+		// The previous certificate is the one still in use, so that is the expiry
+		// that describes this organisation — not the new one, which nothing is
+		// presenting yet. Reporting the new one here would show the credential as
+		// renewed at the exact moment renewal stopped taking effect.
+		w.warnIfExpiringSoon(org, r.PreviousExpiresAt)
+		return r.PreviousExpiresAt
 	}
 
 	consoleRotationsTotal.Inc()
@@ -763,6 +799,40 @@ func (w *Worker) rotateConsole(
 				"org", org, "err", err)
 		}
 	}
+	return r.ExpiresAt
+}
+
+// warnIfExpiringSoon says so in the log when a credential that is still in use
+// is inside the renewal window.
+//
+// The metric is the thing to alert on, but a log line is what the person who
+// gets paged reads next, and "which organisation" is the question they will
+// have. The gauge is a fleet minimum and cannot answer it.
+//
+// # Where this is called from, and where it deliberately is not
+//
+// Only the failure paths: a rotation that errored, and one written to the
+// cluster that the console was never told about. Those are the two ways a
+// credential inside the window survives a pass.
+//
+// It was first called on the not-rotated path instead, where it could never
+// fire — reaching the window is what makes a credential due, so a pass that
+// rotated nothing had nothing to warn about by construction. A warning that
+// cannot fire is worse than none, because the silence reads as evidence.
+func (w *Worker) warnIfExpiringSoon(org string, expires time.Time) {
+	if expires.IsZero() {
+		return
+	}
+	left := time.Until(expires)
+	if left > w.cfg.ConsoleCertRenewWithin {
+		return
+	}
+	w.log.Warn("an organisation's console credential is inside the renewal window "+
+		"and was not rotated; when it expires, nobody can open this organisation "+
+		"in a browser",
+		"org", org,
+		"expires", expires.Format(time.RFC3339),
+		"remaining", left.Round(time.Hour).String())
 }
 
 // # The most dangerous loop in the system

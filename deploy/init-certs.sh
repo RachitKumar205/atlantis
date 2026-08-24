@@ -50,6 +50,14 @@ ATLANTIS_DOMAIN="${ATLANTIS_DOMAIN:-}"
 # Client certificates take the same lifetime. Nothing caps how long a client
 # certificate may live — the limit below is a rule about TLS *server*
 # certificates — and rotating them means re-issuing to every holder.
+#
+# This deliberately no longer matches internal/cloud/provision/certs, where the
+# console's client certificates last thirty days. The difference is not drift:
+# there, the provisioner reissues them on its reconcile pass, and a short life is
+# safe precisely because something renews it. Nothing renews what this script
+# writes — a stack built from these files runs against them until somebody
+# re-runs it by hand — so shortening the number here would schedule the outage
+# the paragraph above is warning about.
 DAYS=3650
 
 # TLS server certificates: 820 days.

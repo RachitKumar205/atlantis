@@ -581,6 +581,7 @@ factor and the assertion signing key.
 | `PROVISIONER_LEASE_HEARTBEAT` | `30s` | How often the lease is extended during a wait. |
 | `PROVISIONER_POLL_INTERVAL` | `10s` | How often an idle queue is checked. |
 | `PROVISIONER_RECONCILE_INTERVAL` | `5m` | How often ready organisations are checked against the cluster and requeued if absent. |
+| `PROVISIONER_CONSOLE_CERT_RENEW_WITHIN` | `240h` (10 days) | How much life the console's certificate for an organisation must have left before a reconcile pass replaces it. Paired with the 30-day certificate lifetime, so a credential is replaced with a third of its life to spare. |
 | `PROVISIONER_RETRY_BASE` / `_MAX` | `30s` / `30m` | Backoff after a failed attempt: doubling, capped. |
 | `PROVISIONER_NAME` | the hostname | Names this process in the queue. In Kubernetes the hostname is the pod name. |
 
@@ -617,6 +618,23 @@ ones that do not. It does **not** detect drift inside a namespace — a Deployme
 scaled to zero, a NetworkPolicy removed, a Secret edited — because a partial
 version of that would report an organisation as reconciled while leaving whole
 classes of drift unchecked.
+
+**The one exception is the console's certificate**, which the same pass replaces
+when it is within `PROVISIONER_CONSOLE_CERT_RENEW_WITHIN` of expiring. That is
+not drift — nothing changed it — but it needs the same fleet-wide sweep, and
+this is the only loop that makes one. Both certificate authorities are kept, so
+no caller certificate is affected and nothing in the organisation restarts; the
+console picks up the replacement within its refresh interval.
+
+**Watch `atlantis_provisioning_console_cert_seconds_left`.** It counts down to
+the soonest-expiring console credential in the fleet and should saw-tooth as
+credentials renew. Falling steadily means rotation has stopped, and every way it
+can stop looks the same from outside — a wedged provisioner, expired Kubernetes
+credentials, an unreachable console database. None of them raise an error anyone
+sees, and the first visible symptom without this metric is an organisation
+nobody can open in a browser. Alert well above the renewal window; reaching the
+window already means a pass was missed. The metric reads `NaN` until the first
+pass measures something, so a freshly started provisioner does not trip the rule.
 
 Rebuilding an organisation mints a **new certificate authority**, because the old
 one lived in a Secret that went with the namespace. Every caller certificate

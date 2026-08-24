@@ -556,42 +556,60 @@ var _ Target = (*Kube)(nil)
 // a different certificate.
 func (k *Kube) RotateConsoleCredentials(
 	ctx context.Context, org string, renewWithin time.Duration, force bool,
-) (Status, bool, error) {
+) (ConsoleRotation, error) {
 	ns := k.cfg.Namespace(org)
 	log := k.log.With("org", org, "namespace", ns)
 
 	var stored corev1.Secret
 	if err := k.c.Get(ctx, types.NamespacedName{Namespace: ns, Name: secretPKI}, &stored); err != nil {
 		if apierrors.IsNotFound(err) {
-			return Status{}, false, fmt.Errorf(
+			return ConsoleRotation{}, fmt.Errorf(
 				"%s has no certificates to rotate: secret %s/%s does not exist",
 				org, ns, secretPKI)
 		}
-		return Status{}, false, err
+		return ConsoleRotation{}, err
 	}
 	// The same parse-and-check ensureCerts does, and for the same reason: the
 	// material can be present and unusable, and rotating from a bundle that
 	// cannot be verified would write a second unusable one over it.
 	bundle, err := bundleFromSecret(&stored)
 	if err != nil {
-		return Status{}, false, fmt.Errorf("the stored certificates for %q are unusable: %w", org, err)
+		return ConsoleRotation{}, fmt.Errorf("the stored certificates for %q are unusable: %w", org, err)
 	}
 
 	expires, err := consoleLeafExpiry(bundle)
 	if err != nil {
-		return Status{}, false, fmt.Errorf("%s: %w", org, err)
+		return ConsoleRotation{}, fmt.Errorf("%s: %w", org, err)
 	}
-	due := force || time.Until(expires) <= renewWithin
+	due, why := consoleRotationDue(expires, renewWithin, time.Now())
+	if force {
+		due, why = true, "an operator asked"
+	}
 	if !due {
 		// Still current. The addresses are read anyway so that a caller which
 		// re-registers on every pass gets a Status describing what is actually
-		// deployed rather than an empty one.
+		// deployed rather than an empty one — and ExpiresAt is reported so the
+		// caller can watch the fleet's credentials without a second read.
 		status, aerr := k.addresses(ctx, ns, bundle)
-		return status, false, aerr
+		return ConsoleRotation{Status: status, ExpiresAt: expires}, aerr
 	}
 
+	// From here on every failure carries the expiry of the certificate that is
+	// still in place. The rotation has not happened yet, so that is what the
+	// organisation is running on — and a fleet watcher that lost it here would
+	// go blind on precisely the organisations whose rotations keep failing.
+	stillInPlace := ConsoleRotation{ExpiresAt: expires}
+
 	if err := certs.ReissueConsoleLeaves(bundle, time.Time{}); err != nil {
-		return Status{}, false, fmt.Errorf("%s: %w", org, err)
+		return stillInPlace, fmt.Errorf("%s: %w", org, err)
+	}
+	// Read back from the bundle rather than computed as now+ClientLifetime.
+	// The certificate is the authority on when it expires, and deriving it here
+	// would be a second copy of the lifetime rule that agrees until one of them
+	// changes.
+	renewed, err := consoleLeafExpiry(bundle)
+	if err != nil {
+		return stillInPlace, fmt.Errorf("%s: %w", org, err)
 	}
 
 	// The PKI Secret first, because it is the one ensureCerts reads back. If the
@@ -600,21 +618,66 @@ func (k *Kube) RotateConsoleCredentials(
 	// whereas the other order would leave the reconstruction source holding
 	// credentials nothing had registered.
 	if err := k.apply(ctx, k.pkiSecret(ns, bundle)); err != nil {
-		return Status{}, false, fmt.Errorf("write the rotated certificates for %q: %w", org, err)
+		return stillInPlace, fmt.Errorf("write the rotated certificates for %q: %w", org, err)
 	}
 	for _, s := range k.derivedSecrets(ns, bundle) {
 		if err := k.apply(ctx, s); err != nil {
-			return Status{}, false, fmt.Errorf("secret %s: %w", s.GetName(), err)
+			return stillInPlace, fmt.Errorf("secret %s: %w", s.GetName(), err)
 		}
 	}
 
 	status, err := k.addresses(ctx, ns, bundle)
 	if err != nil {
-		return Status{}, false, err
+		return stillInPlace, err
 	}
 	log.Info("rotated the console's credentials",
-		"previous_expiry", expires.Format(time.RFC3339), "forced", force)
-	return status, true, nil
+		"why", why,
+		"previous_expiry", expires.Format(time.RFC3339),
+		"expires", renewed.Format(time.RFC3339), "forced", force)
+	return ConsoleRotation{
+		Status: status, Rotated: true,
+		ExpiresAt: renewed, PreviousExpiresAt: expires,
+	}, nil
+}
+
+// policyDriftTolerance separates "issued under a longer policy" from clock
+// jitter.
+//
+// A leaf minted a moment ago has almost exactly ClientLifetime left, so the
+// comparison below needs slack or every fresh certificate would look
+// over-long and rotate itself on the next pass — a loop that works, costs
+// nothing visible, and reissues the fleet every reconcile interval. An hour is
+// far larger than any skew and far smaller than any deliberate policy change.
+const policyDriftTolerance = time.Hour
+
+// consoleRotationDue decides whether a credential should be replaced, and says
+// why.
+//
+// # The second reason, which is easy to leave out
+//
+// The obvious trigger is an approaching expiry. On its own it would have made
+// shortening ClientLifetime a change that applied to nothing: every organisation
+// provisioned before it holds a ten-year certificate, so none is ever within ten
+// days of expiring, and the fleet would keep the long credentials the shortened
+// lifetime was meant to retire — while the code, the config and the metric all
+// read as though the policy had taken effect.
+//
+// So a certificate with more life left than the policy allows is also due. It
+// fires once per organisation, on the first pass after the lifetime changes, and
+// then never again because what replaces it has exactly the new lifetime.
+//
+// The reason is returned rather than logged here because this has no logger, and
+// because "why did every organisation rotate at once" is the question an
+// operator asks the morning after a lifetime change.
+func consoleRotationDue(expires time.Time, renewWithin time.Duration, now time.Time) (bool, string) {
+	left := expires.Sub(now)
+	if left <= renewWithin {
+		return true, "the certificate is inside the renewal window"
+	}
+	if left > certs.ClientLifetime+policyDriftTolerance {
+		return true, "the certificate outlives the current lifetime policy"
+	}
+	return false, ""
 }
 
 // consoleLeafExpiry reports when the console's certificate for atlantis runs

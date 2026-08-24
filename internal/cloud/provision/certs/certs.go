@@ -85,15 +85,44 @@ const (
 // Apple's rules and says nothing about trust, which is exactly the kind of
 // error that costs an afternoon.
 //
-// Client certificates and roots are long because nothing here rotates them yet.
-// Shortening them without an online rotation path does not make the system
-// safer; it schedules an outage. The renewal story that does exist is for
-// caller certificates, which the signer issues with a seven-day life and `tide`
-// renews at two thirds of it.
+// The roots stay long because nothing rotates them, and that is not an
+// oversight. Replacing an authority invalidates every caller certificate issued
+// under it, so the fix for a compromised root is a rebuild with a re-enrolment,
+// not a shorter life — ensureCerts refuses to regenerate one for this reason.
+//
+// # Why ClientLifetime is thirty days and used to be ten years
+//
+// It was long, with a comment arguing that shortening it "without an online
+// rotation path does not make the system safer; it schedules an outage". That
+// was correct, and it stopped being true when the provisioner learned to reissue
+// these leaves on its reconcile pass — see RotateConsoleCredentials. Thirty days
+// is the same reasoning migration 0032 used when it dropped certificate pinning:
+// smallstep puts service certificates at "one month or less" and relies on
+// expiry rather than revocation, and this is now a certificate that renews
+// itself.
+//
+// The number is not chosen to be as short as possible. Rotation begins at ten
+// days remaining, and those ten days are the margin: how long the provisioner
+// can be wedged, restarted badly, or simply not deployed before an organisation
+// loses console access. A shorter life would spend that margin to reduce a
+// window that is already bounded.
+//
+// This covers only the two certificates the console presents. It is the whole
+// of what rotation replaces, and nothing else reads it — so shortening it
+// cannot reach a caller's certificate, which the signer issues with a life of
+// its own.
+//
+// # What a short life here does and does not buy
+//
+// It bounds a credential that leaked once and was not noticed. It does not
+// contain a console that is still compromised: that process holds
+// CONSOLE_DATA_KEY and can unseal whatever the current credential is, however
+// often it changes. Cutting one off deliberately is `cloud org revoke-console`,
+// which takes effect in five seconds rather than thirty days.
 const (
 	CALifetime     = 3650 * 24 * time.Hour
 	ServerLifetime = 820 * 24 * time.Hour
-	ClientLifetime = 3650 * 24 * time.Hour
+	ClientLifetime = 30 * 24 * time.Hour
 )
 
 // Authority is a self-signed root and its private key.

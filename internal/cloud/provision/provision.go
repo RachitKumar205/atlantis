@@ -92,6 +92,50 @@ type Status struct {
 	SignerClientKeyPEM  []byte
 }
 
+// ConsoleRotation is what one pass over an organisation's console credentials
+// found, and what it did about it.
+//
+// A struct rather than three return values because the third — ExpiresAt — is
+// the one a caller is most likely to drop, and it is the one that carries the
+// warning. Rotated and an error between them describe what happened; ExpiresAt
+// describes what is about to.
+type ConsoleRotation struct {
+	// Status describes the organisation as deployed, whether or not anything
+	// rotated, so a caller can re-register from it either way.
+	Status Status
+
+	// Rotated reports whether new certificates were actually issued. False with
+	// no error means the existing ones were still comfortably in date.
+	Rotated bool
+
+	// ExpiresAt is when the certificate now stored for this organisation runs
+	// out: the new one when a rotation happened, otherwise the one that was
+	// already there.
+	//
+	// Reported even alongside an error, whenever the certificate was read before
+	// the failure. That is deliberate and it is the whole value of this field: a
+	// rotation that keeps failing is exactly the case where somebody needs to see
+	// the credential counting down, and returning nothing would leave the fleet
+	// looking unchanged while it ran out.
+	//
+	// Zero means the call failed before reading any certificate. A caller
+	// watching the fleet must treat zero as "unknown" rather than "expired":
+	// the credential is probably fine and the cluster is not answering, which is
+	// a different alarm and is what the rotation failure count is for.
+	ExpiresAt time.Time
+
+	// PreviousExpiresAt is when the superseded certificate runs out. Zero unless
+	// this call rotated.
+	//
+	// It exists because writing the new certificate is not the last step —
+	// registering it is, and that is the caller's. Until registration succeeds
+	// the console is still presenting the old one, so the old one's expiry is
+	// what describes the organisation's actual exposure. Reporting the new
+	// expiry there would show a credential as renewed at the exact moment
+	// renewal stopped taking effect.
+	PreviousExpiresAt time.Time
+}
+
 // Target is somewhere an organisation can be provisioned.
 //
 // One implementation today, against Kubernetes. The interface exists because

@@ -20,9 +20,29 @@
 package provisioner
 
 import (
+	"math"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
+
+// markConsoleCertUnmeasured puts the fleet countdown into its "no reading yet"
+// state.
+//
+// A named function rather than an inline Set so the property can be tested
+// without depending on which test file happens to run first — every other test
+// in this package writes that gauge.
+//
+// See consoleCertSecondsLeft: zero seconds left means "expiring now", so the
+// zero a gauge defaults to would page on every start of this process. NaN means
+// "no reading", which is what is actually true until the first reconcile pass.
+func markConsoleCertUnmeasured() {
+	consoleCertSecondsLeft.Set(math.NaN())
+}
+
+func init() {
+	markConsoleCertUnmeasured()
+}
 
 var (
 	// attemptsTotal counts provisioning attempts by how they ended.
@@ -119,6 +139,45 @@ var (
 		Subsystem: "provisioning",
 		Name:      "console_rotations_total",
 		Help:      "Console credentials reissued and re-registered.",
+	})
+
+	// consoleCertSecondsLeft is how long the soonest-expiring console credential
+	// in the fleet has left.
+	//
+	// This is the alarm that fires before the outage rather than with it, and it
+	// is deliberately a countdown rather than a count of overdue organisations.
+	// A count only leaves zero once something is already wrong; a countdown is
+	// visibly falling for weeks first, and one threshold covers every way
+	// rotation can stop — the provisioner wedged, its Kubernetes credentials
+	// expired, the console database unreachable, a bug in the renewal test.
+	// None of those raise an error anybody sees, and all of them look identical
+	// from here: the number stops going back up.
+	//
+	// The minimum across the fleet rather than a series per organisation,
+	// because the question is "is anything about to expire" and one tenant is
+	// enough to need answering. Which one is in the log line beside it.
+	//
+	// Expect it to sit near the certificate lifetime and saw-tooth as
+	// credentials renew. Alert well above the renewal window — the window is
+	// when rotation should HAVE happened, so reaching it already means a pass
+	// was missed.
+	//
+	// It starts as NaN rather than zero, which init below does. A Prometheus
+	// gauge defaults to zero, and zero here reads as "a credential expires this
+	// instant" — so every `console_cert_seconds_left < threshold` rule would
+	// fire the moment this process started and keep firing until the first
+	// reconcile pass, up to a reconcile interval later. An alert that goes off
+	// on every deploy is one that gets silenced, and this is a metric nobody can
+	// afford to have silenced.
+	//
+	// NaN is the honest value for "not measured yet": comparisons against it are
+	// false, so no threshold rule fires, and it renders as a gap rather than a
+	// cliff. The first pass replaces it with a real reading.
+	consoleCertSecondsLeft = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "atlantis",
+		Subsystem: "provisioning",
+		Name:      "console_cert_seconds_left",
+		Help:      "Seconds until the soonest-expiring console credential in the fleet expires. NaN before the first reconcile pass.",
 	})
 
 	// consoleRotationFailures counts rotations that did not complete.

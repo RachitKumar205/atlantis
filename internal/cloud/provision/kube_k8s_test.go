@@ -148,17 +148,29 @@ func TestK8sProvisionsAWorkingOrganisation(t *testing.T) {
 		// Not due — the leaf was minted moments ago — so an unforced call must
 		// leave it alone. Without this, a rotation that fired every pass would
 		// pass the forced check below and go unnoticed.
-		if _, rotated, err := k.RotateConsoleCredentials(ctx, org, time.Hour, false); err != nil {
+		if r, err := k.RotateConsoleCredentials(ctx, org, time.Hour, false); err != nil {
 			t.Fatalf("unforced rotate: %v", err)
-		} else if rotated {
+		} else if r.Rotated {
 			t.Error("a certificate minted moments ago was treated as due for renewal; " +
 				"every reconcile pass would reissue every organisation")
+		} else if r.ExpiresAt.IsZero() {
+			t.Error("a pass that rotated nothing reported no expiry, so the fleet " +
+				"gauge would learn nothing from the organisations that are healthy")
 		}
 
-		if _, rotated, err := k.RotateConsoleCredentials(ctx, org, time.Hour, true); err != nil {
+		forced, err := k.RotateConsoleCredentials(ctx, org, time.Hour, true)
+		if err != nil {
 			t.Fatalf("forced rotate: %v", err)
-		} else if !rotated {
+		}
+		if !forced.Rotated {
 			t.Fatal("a forced rotation reported that it did nothing")
+		}
+		// The reported expiry has to be the new certificate's, not the old one's
+		// — it is what the gauge is built from, and reporting the superseded one
+		// would show the fleet counting down while it was in fact being renewed.
+		if forced.ExpiresAt.Before(time.Now()) {
+			t.Errorf("the rotation reports an expiry of %s, which is in the past",
+				forced.ExpiresAt)
 		}
 
 		// Re-read through bundleFromSecret, which re-checks every pair and every
