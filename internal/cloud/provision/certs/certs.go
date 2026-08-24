@@ -226,16 +226,6 @@ func Generate(opts Options) (*Bundle, error) {
 		return nil, fmt.Errorf("certs: atlantis server leaf: %w", err)
 	}
 
-	b.Console, err = newLeaf(leafOptions{
-		CN:          ConsoleCN,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		NotBefore:   notBefore,
-		NotAfter:    now.Add(ClientLifetime),
-	}, caCert, caKey)
-	if err != nil {
-		return nil, fmt.Errorf("certs: console client leaf: %w", err)
-	}
-
 	b.SignerServer, err = newLeaf(leafOptions{
 		CN:          SignerServerCN,
 		DNSNames:    opts.SignerDNSNames,
@@ -248,14 +238,12 @@ func Generate(opts Options) (*Bundle, error) {
 		return nil, fmt.Errorf("certs: signer server leaf: %w", err)
 	}
 
-	b.SignerClient, err = newLeaf(leafOptions{
-		CN:          SignerClientCN,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		NotBefore:   notBefore,
-		NotAfter:    now.Add(ClientLifetime),
-	}, signerCACert, signerCAKey)
-	if err != nil {
-		return nil, fmt.Errorf("certs: signer client leaf: %w", err)
+	// The console's two leaves, minted by the same function a rotation uses so
+	// that a certificate this produces and one ReissueConsoleLeaves produces
+	// cannot differ. See rotate.go.
+	if err := mintConsoleLeaves(b, caCert, caKey, signerCACert, signerCAKey,
+		notBefore, now.Add(ClientLifetime)); err != nil {
+		return nil, err
 	}
 
 	return b, nil

@@ -1,6 +1,7 @@
 package provision
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -22,6 +23,8 @@ import (
 	"k8s.io/client-go/rest"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
+
+	"github.com/rachitkumar205/atlantis/internal/cloud/provision/certs"
 )
 
 // Provisioning against a real cluster.
@@ -114,6 +117,83 @@ func TestK8sProvisionsAWorkingOrganisation(t *testing.T) {
 	// moved with it. This test holds no copy of the organisation's authority and
 	// should not need one — it is asking "is this process serving", not "is this
 	// the right process".
+	// Rotation, against the organisation this test has already built.
+	//
+	// Everything the unit tests prove about ReissueConsoleLeaves is about the
+	// certificates. What only a real API server can answer is whether the
+	// read-modify-write actually lands: whether the stored bundle round-trips
+	// through bundleFromSecret's checks after being rewritten, and whether both
+	// Secrets are updated rather than one.
+	//
+	// It runs before the pod assertions below on purpose. If a rotation were to
+	// disturb something a running workload depends on, the checks that follow
+	// are what would notice.
+	t.Run("rotating the console credentials", func(t *testing.T) {
+		ns := k.cfg.Namespace(org)
+		read := func() *certs.Bundle {
+			t.Helper()
+			var s corev1.Secret
+			if err := c.Get(ctx, ctrlclient.ObjectKey{Namespace: ns, Name: secretPKI}, &s); err != nil {
+				t.Fatalf("read %s/%s: %v", ns, secretPKI, err)
+			}
+			b, err := bundleFromSecret(&s)
+			if err != nil {
+				t.Fatalf("the stored bundle is unusable: %v", err)
+			}
+			return b
+		}
+
+		before := read()
+
+		// Not due — the leaf was minted moments ago — so an unforced call must
+		// leave it alone. Without this, a rotation that fired every pass would
+		// pass the forced check below and go unnoticed.
+		if _, rotated, err := k.RotateConsoleCredentials(ctx, org, time.Hour, false); err != nil {
+			t.Fatalf("unforced rotate: %v", err)
+		} else if rotated {
+			t.Error("a certificate minted moments ago was treated as due for renewal; " +
+				"every reconcile pass would reissue every organisation")
+		}
+
+		if _, rotated, err := k.RotateConsoleCredentials(ctx, org, time.Hour, true); err != nil {
+			t.Fatalf("forced rotate: %v", err)
+		} else if !rotated {
+			t.Fatal("a forced rotation reported that it did nothing")
+		}
+
+		// Re-read through bundleFromSecret, which re-checks every pair and every
+		// chain. That is the assertion: what was written back is still a bundle
+		// this system would accept.
+		after := read()
+
+		if bytes.Equal(before.Console.CertPEM, after.Console.CertPEM) {
+			t.Error("the stored console certificate is unchanged after a forced rotation")
+		}
+		if !bytes.Equal(before.CA.CertPEM, after.CA.CertPEM) {
+			t.Error("the issuing CA changed; every caller certificate in this " +
+				"organisation has been orphaned")
+		}
+		if !bytes.Equal(before.SignerCA.CertPEM, after.SignerCA.CertPEM) {
+			t.Error("the signer client CA changed")
+		}
+		if !bytes.Equal(before.Server.CertPEM, after.Server.CertPEM) {
+			t.Error("the atlantis server leaf changed, so a rotation now needs a restart")
+		}
+
+		// The second Secret, the one registration reads. Updating the PKI Secret
+		// and not this one leaves the console being handed the previous
+		// certificate for as long as nothing re-provisions — a rotation that
+		// reports success and changes nothing the console ever sees.
+		var creds corev1.Secret
+		if err := c.Get(ctx, ctrlclient.ObjectKey{Namespace: ns, Name: secretConsoleCreds}, &creds); err != nil {
+			t.Fatalf("read %s/%s: %v", ns, secretConsoleCreds, err)
+		}
+		if !bytes.Equal(creds.Data["tls.crt"], after.Console.CertPEM) {
+			t.Error("the console credentials Secret still carries the previous " +
+				"certificate; registration would hand the console the old one")
+		}
+	})
+
 	t.Run("readyz from the host", func(t *testing.T) {
 		url := fmt.Sprintf("https://%s/readyz", status.HealthAddr)
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

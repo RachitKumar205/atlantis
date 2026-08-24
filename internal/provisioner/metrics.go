@@ -107,6 +107,40 @@ var (
 		Help:      "Ready organisations found absent from the cluster and requeued.",
 	})
 
+	// consoleRotationsTotal counts console credentials actually replaced.
+	//
+	// Expected to be quiet, and to move in step with the renewal window rather
+	// than with the reconcile interval. A rate close to one per organisation per
+	// pass means the "is it due" test is answering yes every time — a rotation
+	// loop, which is harmless to customers and burns through certificates while
+	// looking like the feature working.
+	consoleRotationsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "atlantis",
+		Subsystem: "provisioning",
+		Name:      "console_rotations_total",
+		Help:      "Console credentials reissued and re-registered.",
+	})
+
+	// consoleRotationFailures counts rotations that did not complete.
+	//
+	// This is the one that has to be alerted on, and the reason it exists at all.
+	// A failing rotation changes nothing an operator or a customer can see: the
+	// organisation stays ready, its pods stay up, its callers keep working, and
+	// the console keeps using a certificate that is running down. The failure is
+	// silent right up to the moment the credential expires and every browser
+	// loses that organisation at once.
+	//
+	// So the alarm has to come from here rather than from the outage. With a
+	// renewal window of ten days, a sustained non-zero value is a warning with
+	// more than a week of margin on it; ignored, it becomes a fleet-wide
+	// incident with no proximate cause.
+	consoleRotationFailures = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "atlantis",
+		Subsystem: "provisioning",
+		Name:      "console_rotation_failures_total",
+		Help:      "Console credential rotations that failed; sustained non-zero means an expiry is coming.",
+	})
+
 	// leaseExtensionFailuresTotal counts heartbeats that did not land.
 	//
 	// A failure here means this process no longer owns the row it is working

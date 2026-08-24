@@ -532,3 +532,106 @@ func (k *Kube) nodePort(ctx context.Context, ns, name, portName string) (int32, 
 }
 
 var _ Target = (*Kube)(nil)
+
+// RotateConsoleCredentials reissues the two certificates the console presents
+// to this organisation, keeping both authorities.
+//
+// It rotates when the console's leaf expires within renewWithin, or when force
+// is set. The bool reports whether it actually did; a Status is returned either
+// way so the caller can re-register regardless.
+//
+// # Why the decision is made here rather than by the caller
+//
+// The expiry lives in the stored bundle, so a caller deciding for itself would
+// read the Secret, decide, and then this would read it again — two reads that
+// can disagree, and a window in which an organisation is rotated twice or not
+// at all. One read, one decision, one write.
+//
+// # What does not have to happen afterwards
+//
+// Nothing restarts. secretConsoleCreds is read once, by registration, and
+// mounted by no pod; the PKI Secret is the reconstruction source and is not
+// mounted either. atlantis and the signer trust the two authorities, which this
+// leaves exactly as they were, so neither notices that the console is presenting
+// a different certificate.
+func (k *Kube) RotateConsoleCredentials(
+	ctx context.Context, org string, renewWithin time.Duration, force bool,
+) (Status, bool, error) {
+	ns := k.cfg.Namespace(org)
+	log := k.log.With("org", org, "namespace", ns)
+
+	var stored corev1.Secret
+	if err := k.c.Get(ctx, types.NamespacedName{Namespace: ns, Name: secretPKI}, &stored); err != nil {
+		if apierrors.IsNotFound(err) {
+			return Status{}, false, fmt.Errorf(
+				"%s has no certificates to rotate: secret %s/%s does not exist",
+				org, ns, secretPKI)
+		}
+		return Status{}, false, err
+	}
+	// The same parse-and-check ensureCerts does, and for the same reason: the
+	// material can be present and unusable, and rotating from a bundle that
+	// cannot be verified would write a second unusable one over it.
+	bundle, err := bundleFromSecret(&stored)
+	if err != nil {
+		return Status{}, false, fmt.Errorf("the stored certificates for %q are unusable: %w", org, err)
+	}
+
+	expires, err := consoleLeafExpiry(bundle)
+	if err != nil {
+		return Status{}, false, fmt.Errorf("%s: %w", org, err)
+	}
+	due := force || time.Until(expires) <= renewWithin
+	if !due {
+		// Still current. The addresses are read anyway so that a caller which
+		// re-registers on every pass gets a Status describing what is actually
+		// deployed rather than an empty one.
+		status, aerr := k.addresses(ctx, ns, bundle)
+		return status, false, aerr
+	}
+
+	if err := certs.ReissueConsoleLeaves(bundle, time.Time{}); err != nil {
+		return Status{}, false, fmt.Errorf("%s: %w", org, err)
+	}
+
+	// The PKI Secret first, because it is the one ensureCerts reads back. If the
+	// process stops between these two writes, the next pass reconstructs from a
+	// bundle that already holds the new leaves and rewrites the derived copy —
+	// whereas the other order would leave the reconstruction source holding
+	// credentials nothing had registered.
+	if err := k.apply(ctx, k.pkiSecret(ns, bundle)); err != nil {
+		return Status{}, false, fmt.Errorf("write the rotated certificates for %q: %w", org, err)
+	}
+	for _, s := range k.derivedSecrets(ns, bundle) {
+		if err := k.apply(ctx, s); err != nil {
+			return Status{}, false, fmt.Errorf("secret %s: %w", s.GetName(), err)
+		}
+	}
+
+	status, err := k.addresses(ctx, ns, bundle)
+	if err != nil {
+		return Status{}, false, err
+	}
+	log.Info("rotated the console's credentials",
+		"previous_expiry", expires.Format(time.RFC3339), "forced", force)
+	return status, true, nil
+}
+
+// consoleLeafExpiry reports when the console's certificate for atlantis runs
+// out.
+//
+// Only that one, though the rotation replaces two. Both are minted together with
+// the same lifetime by mintConsoleLeaves, so they expire together; reading one
+// and acting on both is accurate as long as that stays true, and it is the same
+// function that guarantees it.
+func consoleLeafExpiry(b *certs.Bundle) (time.Time, error) {
+	blk, _ := pem.Decode(b.Console.CertPEM)
+	if blk == nil {
+		return time.Time{}, errors.New("the console certificate is not PEM")
+	}
+	leaf, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse the console certificate: %w", err)
+	}
+	return leaf.NotAfter, nil
+}

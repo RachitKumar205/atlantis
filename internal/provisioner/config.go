@@ -48,6 +48,22 @@ const (
 	DefaultRetryMax          = 30 * time.Minute
 	DefaultHealthAddr        = ":8082"
 
+	// DefaultConsoleCertRenewWithin is how much life the console's certificate
+	// must have left before a reconcile pass replaces it.
+	//
+	// Ten days, sized against the outage it prevents rather than against the
+	// certificate: it is how long this provisioner can be wedged, or simply not
+	// running, before an organisation loses console access altogether. A window
+	// tight to the renewal cadence would make the provisioner a component whose
+	// weekend outage is a fleet-wide one.
+	//
+	// It does nothing yet. certs.ClientLifetime is still ten years, so no leaf
+	// is ever within ten days of expiring and the automatic path never fires —
+	// deliberately. The mechanism lands first and is exercised by `cloud org
+	// rotate-console`; shortening the lifetime is what switches this on, and is
+	// not a change to make until rotation has been seen working.
+	DefaultConsoleCertRenewWithin = 10 * 24 * time.Hour
+
 	// DefaultMetricsAddr is loopback, and the 127.0.0.1 is the point rather
 	// than the port.
 	//
@@ -117,6 +133,12 @@ type Config struct {
 	// whose cost grows with the number of customers.
 	ReconcileInterval time.Duration
 
+	// ConsoleCertRenewWithin is how close to expiry the console's credential
+	// for an organisation may get before a reconcile pass reissues it. See
+	// DefaultConsoleCertRenewWithin for how the number is chosen, and why it
+	// currently never fires.
+	ConsoleCertRenewWithin time.Duration
+
 	// Lease is how long a claim is held before another provisioner may take it.
 	// Heartbeat extends it while a wait is in progress.
 	Lease     time.Duration
@@ -161,11 +183,13 @@ func ConfigFromEnv() (Config, error) {
 		ClaimedBy:         strings.TrimSpace(envOr("PROVISIONER_NAME", defaultName())),
 		PollInterval:      envDuration("PROVISIONER_POLL_INTERVAL", DefaultPollInterval),
 		ReconcileInterval: envDuration("PROVISIONER_RECONCILE_INTERVAL", DefaultReconcileInterval),
-		Heartbeat:         envDuration("PROVISIONER_LEASE_HEARTBEAT", DefaultHeartbeat),
-		RetryBase:         envDuration("PROVISIONER_RETRY_BASE", DefaultRetryBase),
-		RetryMax:          envDuration("PROVISIONER_RETRY_MAX", DefaultRetryMax),
-		HealthAddr:        envOr("PROVISIONER_HEALTH_LISTEN", DefaultHealthAddr),
-		MetricsAddr:       envOr("PROVISIONER_METRICS_LISTEN", DefaultMetricsAddr),
+		ConsoleCertRenewWithin: envDuration("PROVISIONER_CONSOLE_CERT_RENEW_WITHIN",
+			DefaultConsoleCertRenewWithin),
+		Heartbeat:   envDuration("PROVISIONER_LEASE_HEARTBEAT", DefaultHeartbeat),
+		RetryBase:   envDuration("PROVISIONER_RETRY_BASE", DefaultRetryBase),
+		RetryMax:    envDuration("PROVISIONER_RETRY_MAX", DefaultRetryMax),
+		HealthAddr:  envOr("PROVISIONER_HEALTH_LISTEN", DefaultHealthAddr),
+		MetricsAddr: envOr("PROVISIONER_METRICS_LISTEN", DefaultMetricsAddr),
 
 		Provision: provision.Config{
 			// Set here, deliberately, because the lease is sized from it.
@@ -281,6 +305,11 @@ func (c Config) validate() error {
 	}
 	if c.ReconcileInterval <= 0 {
 		return errors.New("PROVISIONER_RECONCILE_INTERVAL must be positive")
+	}
+	// Zero would read as "only rotate a certificate that has already expired",
+	// which is a renewal window that guarantees the outage it exists to avoid.
+	if c.ConsoleCertRenewWithin <= 0 {
+		return errors.New("PROVISIONER_CONSOLE_CERT_RENEW_WITHIN must be positive")
 	}
 	if c.ClaimedBy == "" {
 		return errors.New("PROVISIONER_NAME must not be empty")

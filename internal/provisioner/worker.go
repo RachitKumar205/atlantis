@@ -46,6 +46,11 @@ type Queue interface {
 	ClaimForPurge(ctx context.Context, claimedBy string, lease time.Duration) (*store.Claimed, error)
 	MarkPurged(ctx context.Context, org string) error
 	MarkPurgeFailed(ctx context.Context, org, reason string) error
+
+	// Operator-requested console credential rotation. Cloud cannot write the
+	// Secret these live in, so it marks the row and this process does the work.
+	ConsoleRotationRequests(ctx context.Context) (map[string]time.Time, error)
+	ClearConsoleRotationRequest(ctx context.Context, org string, seen time.Time) error
 }
 
 // Cluster is where organisations are built.
@@ -65,6 +70,18 @@ type Cluster interface {
 	// *provision.Kube and nothing outside a test had ever called it — the
 	// destructive half of provisioning, written and unreachable.
 	Destroy(ctx context.Context, org string) error
+
+	// RotateConsoleCredentials reissues the two certificates the console
+	// presents to one organisation, keeping both certificate authorities.
+	//
+	// The window and the force flag are passed in rather than decided by the
+	// cluster because the caller knows which of the two reasons applies — an
+	// approaching expiry, or an operator who has asked. The bool reports
+	// whether it rotated, so a caller can tell a real rotation from a pass that
+	// found nothing due.
+	RotateConsoleCredentials(
+		ctx context.Context, org string, renewWithin time.Duration, force bool,
+	) (provision.Status, bool, error)
 }
 
 // RegisterFunc records a provisioned organisation with the console.
@@ -259,13 +276,19 @@ func (w *Worker) Run(ctx context.Context) error {
 //
 // # What it deliberately does not do
 //
-// It compares existence, not shape. A Deployment scaled to zero by hand, a
-// Secret edited, a NetworkPolicy removed — none of that is noticed. Detecting
-// drift inside a namespace means diffing every object this package applies
-// against what is there, and a partial version of that is worse than none: it
-// would report an organisation as reconciled while leaving whole classes of
-// drift unchecked. Absence is the case that matters and the case that can be
-// answered honestly.
+// It compares existence, not shape, with one exception. A Deployment scaled to
+// zero by hand, a Secret edited, a NetworkPolicy removed — none of that is
+// noticed. Detecting drift inside a namespace means diffing every object this
+// package applies against what is there, and a partial version of that is worse
+// than none: it would report an organisation as reconciled while leaving whole
+// classes of drift unchecked. Absence is the case that matters and the case that
+// can be answered honestly.
+//
+// The exception is the console's certificate, which is checked for how much life
+// it has left. That is not drift — nothing changed it — it is a clock running
+// down, and there is no other loop that visits every ready organisation on a
+// schedule. Keeping it here means the fleet's credentials are renewed by the
+// same pass that already proves each organisation is still there.
 //
 // # Why requeue rather than repair in place
 //
@@ -284,6 +307,24 @@ func (w *Worker) reconcile(ctx context.Context) {
 			w.log.Error("could not list organisations to reconcile", "err", err)
 		}
 		return
+	}
+
+	// Read once for the whole pass rather than per organisation. Almost every
+	// row has no request, and the alternative is a query per tenant per
+	// interval for a column that is nearly always NULL.
+	//
+	// A failure here is not fatal to the pass: the expiry-driven half of
+	// rotation and the existence check below both still work, and an operator's
+	// request is honoured on the next interval instead. Skipping the whole
+	// reconcile because one query failed would stop the fleet being checked at
+	// all.
+	requests, err := w.q.ConsoleRotationRequests(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			w.log.Error("could not read console rotation requests; "+
+				"reconciling without them this pass", "err", err)
+		}
+		requests = nil
 	}
 
 	c := w.currentCluster()
@@ -307,6 +348,11 @@ func (w *Worker) reconcile(ctx context.Context) {
 			continue
 		}
 		if ok {
+			// The organisation is there, so this is the moment its credentials
+			// are worth looking at. Doing it before the existence check would
+			// mean rotating certificates for an organisation that has gone.
+			requested, wasRequested := requests[org]
+			w.rotateConsole(ctx, c, org, requested, wasRequested)
 			continue
 		}
 
@@ -647,6 +693,78 @@ func (w *Worker) audit(ctx context.Context, org, action string, detail map[strin
 // against the whole queue table at that rate for work that appears a handful of
 // times a month.
 //
+// rotateConsole replaces one organisation's console credentials when they are
+// near expiry, or when an operator has asked.
+//
+// # Why a failure here is logged and not escalated
+//
+// Nothing about the organisation is wrong. Its pods are running, its callers are
+// authenticating, and the only thing that has not happened is a credential
+// replacement that will be retried on the next pass. Requeueing would rebuild a
+// healthy organisation — and rebuilding mints a new authority, which is exactly
+// the outage this whole mechanism exists to avoid. Marking it failed would take
+// a serving organisation out of `ready` for a reason its customers cannot see.
+//
+// What does need to be loud is the credential running out while these failures
+// repeat, and that is what the metric below is for: a rotation that has been
+// failing for days is invisible in logs nobody reads and obvious in a gauge.
+//
+// # Why the request is cleared only after the registration succeeds
+//
+// The operator asked for the console to be using a different certificate. That
+// is only true once the console has been told about it — a rotation written to
+// the cluster and never registered leaves the console presenting the old
+// credential, which still works, so nothing would look wrong.
+func (w *Worker) rotateConsole(
+	ctx context.Context, c Cluster, org string, requestedAt time.Time, requested bool,
+) {
+	status, rotated, err := c.RotateConsoleCredentials(
+		ctx, org, w.cfg.ConsoleCertRenewWithin, requested)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		if credentialError(err) {
+			w.log.Warn("cannot rotate console credentials: the cluster refused "+
+				"this provisioner's credentials", "org", org, "err", err)
+			w.reconnect()
+			return
+		}
+		consoleRotationFailures.Inc()
+		w.log.Error("could not rotate an organisation's console credentials",
+			"org", org, "requested", requested, "err", err)
+		return
+	}
+	if !rotated {
+		return
+	}
+
+	// Re-registering is what puts the new certificate into use. The console
+	// notices within orgClientRefresh because the row's updated_at moves.
+	if err := w.record(ctx, org, status); err != nil {
+		consoleRotationFailures.Inc()
+		w.log.Error("rotated an organisation's console credentials but could not "+
+			"register them; the console keeps using the previous certificate "+
+			"until this succeeds", "org", org, "err", err)
+		return
+	}
+
+	consoleRotationsTotal.Inc()
+	w.audit(ctx, org, "org.console_credentials_rotated", map[string]any{
+		"requested_by_operator": requested,
+	})
+
+	if requested {
+		// Bounded by the timestamp this pass saw, so a request made while the
+		// rotation was running is not thrown away with the one it satisfied.
+		if err := w.q.ClearConsoleRotationRequest(ctx, org, requestedAt); err != nil {
+			w.log.Error("rotated an organisation's console credentials but could "+
+				"not clear the request; it will rotate again next pass",
+				"org", org, "err", err)
+		}
+	}
+}
+
 // # The most dangerous loop in the system
 //
 // It destroys customer data on a timer with no human in it. Everything that

@@ -73,6 +73,20 @@ type fakeQueue struct {
 	purgeErr    error
 	purged      []string
 	purgeFailed []failedMark
+
+	// Console credential rotation requests. rotateRequests is what the queue
+	// reports outstanding; rotateCleared records what was cleared and against
+	// which observed timestamp, which is the part that must not lose a request
+	// made while a rotation was running.
+	rotateRequests    map[string]time.Time
+	rotateRequestsErr error
+	rotateCleared     []clearedRotation
+	rotateClearErr    error
+}
+
+type clearedRotation struct {
+	org  string
+	seen time.Time
 }
 
 func newFakeQueue(orgs ...store.Claimed) *fakeQueue {
@@ -240,6 +254,15 @@ type fakeCluster struct {
 
 	ensures int
 	waits   int
+
+	// Console credential rotation. rotateDue names the organisations whose
+	// credentials the cluster considers near expiry; rotateCalls records every
+	// request so a test can assert the window and the force flag the worker
+	// passed, not merely the outcome.
+	rotateDue    map[string]bool
+	rotateCalls  []rotateCall
+	rotateErr    error
+	rotateStatus provision.Status
 }
 
 func (f *fakeCluster) Ensure(_ context.Context, spec provision.Spec) (provision.Status, error) {
@@ -310,11 +333,16 @@ func testConfig() Config {
 		ClaimedBy:         "test-provisioner",
 		PollInterval:      time.Millisecond,
 		ReconcileInterval: time.Hour,
-		Lease:             time.Second,
-		Heartbeat:         5 * time.Millisecond,
-		RetryBase:         time.Second,
-		RetryMax:          time.Minute,
-		HealthAddr:        "127.0.0.1:0",
+		// Whatever a test asserts about rotation comes from fakeCluster's
+		// rotateDue, not from this. It is here because validate refuses a
+		// non-positive window — a rotation that only fires once the certificate
+		// has expired is the outage it exists to prevent.
+		ConsoleCertRenewWithin: 10 * 24 * time.Hour,
+		Lease:                  time.Second,
+		Heartbeat:              5 * time.Millisecond,
+		RetryBase:              time.Second,
+		RetryMax:               time.Minute,
+		HealthAddr:             "127.0.0.1:0",
 		Provision: provision.Config{
 			ExternalHost:  "atl-dev.test",
 			ServerImage:   "atlantis-server:local",
@@ -1060,6 +1088,66 @@ func (f *fakeQueue) MarkPurgeFailed(ctx context.Context, org, reason string) err
 	return nil
 }
 
+func (f *fakeQueue) ConsoleRotationRequests(ctx context.Context) (map[string]time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctxErr(ctx); err != nil {
+		return nil, err
+	}
+	if f.rotateRequestsErr != nil {
+		return nil, f.rotateRequestsErr
+	}
+	out := map[string]time.Time{}
+	for k, v := range f.rotateRequests {
+		out[k] = v
+	}
+	return out, nil
+}
+
+func (f *fakeQueue) ClearConsoleRotationRequest(ctx context.Context, org string, seen time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	if f.rotateClearErr != nil {
+		return f.rotateClearErr
+	}
+	f.rotateCleared = append(f.rotateCleared, clearedRotation{org: org, seen: seen})
+	return nil
+}
+
+// rotateCall records one RotateConsoleCredentials call, so a test can assert
+// what the worker asked for rather than only what it did with the answer.
+type rotateCall struct {
+	org         string
+	renewWithin time.Duration
+	force       bool
+}
+
+func (c *fakeCluster) RotateConsoleCredentials(
+	ctx context.Context, org string, renewWithin time.Duration, force bool,
+) (provision.Status, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := ctxErr(ctx); err != nil {
+		return provision.Status{}, false, err
+	}
+	c.rotateCalls = append(c.rotateCalls, rotateCall{
+		org: org, renewWithin: renewWithin, force: force,
+	})
+	if c.rotateErr != nil {
+		return provision.Status{}, false, c.rotateErr
+	}
+	// Rotates when asked to, or when the test has said this organisation is
+	// due. A fake that always rotated would make "only rotates what is due"
+	// untestable.
+	if force || c.rotateDue[org] {
+		return c.rotateStatus, true, nil
+	}
+	return provision.Status{}, false, nil
+}
+
 func (c *fakeCluster) Destroy(ctx context.Context, org string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -1189,5 +1277,285 @@ func TestReapStopsOnceTheContextIsCancelled(t *testing.T) {
 
 	if len(c.destroyed) != 0 {
 		t.Errorf("a cancelled reaper destroyed %v", c.destroyed)
+	}
+}
+
+// ------------------------------------------- console credential rotation
+
+// Rotation happens on the reconcile pass, for organisations that are due.
+//
+// # Why this is driven from reconcile at all
+//
+// It is the only loop that visits every ready organisation on a schedule. A
+// certificate running down is not drift — nothing changed it — but it needs the
+// same fleet-wide sweep, and a second loop doing the same walk would double the
+// per-tenant cost of the one loop whose cost already grows with the customer
+// count.
+func TestReconcileRotatesCredentialsThatAreDue(t *testing.T) {
+	q := newFakeQueue()
+	q.ready = []string{"due", "fine"}
+	c := &fakeCluster{rotateDue: map[string]bool{"due": true}}
+
+	var registered []string
+	w := newTestWorker(t, testConfig(), q, c, func(_ context.Context, _, _ string, r console.OrgRegistration) error {
+		registered = append(registered, r.Org)
+		return nil
+	})
+	w.reconcile(context.Background())
+
+	c.mu.Lock()
+	calls := append([]rotateCall(nil), c.rotateCalls...)
+	c.mu.Unlock()
+
+	// Both are asked; only one is due. Asking about every organisation is the
+	// design — the cluster holds the expiry, so it is the only thing that can
+	// answer — and a test that only checked the rotated one would not notice a
+	// worker that had stopped asking about the rest.
+	if len(calls) != 2 {
+		t.Fatalf("asked the cluster about %d organisations, want 2: %+v", len(calls), calls)
+	}
+	if len(registered) != 1 || registered[0] != "due" {
+		t.Errorf("registered %v, want only the organisation that rotated", registered)
+	}
+}
+
+// The renewal window reaches the cluster, and is not quietly zero.
+//
+// A window of zero means "rotate only what has already expired", which is the
+// outage the whole mechanism exists to avoid — and it is what a worker that
+// forgot to pass the configured value would send.
+func TestReconcilePassesTheConfiguredRenewalWindow(t *testing.T) {
+	q := newFakeQueue()
+	q.ready = []string{"one"}
+	c := &fakeCluster{}
+
+	cfg := testConfig()
+	cfg.ConsoleCertRenewWithin = 72 * time.Hour
+	w := newTestWorker(t, cfg, q, c, nil)
+	w.reconcile(context.Background())
+
+	c.mu.Lock()
+	calls := append([]rotateCall(nil), c.rotateCalls...)
+	c.mu.Unlock()
+	if len(calls) != 1 {
+		t.Fatalf("got %d rotate calls, want 1", len(calls))
+	}
+	if calls[0].renewWithin != 72*time.Hour {
+		t.Errorf("the worker asked with a window of %v, want 72h — the configured "+
+			"value is not reaching the cluster", calls[0].renewWithin)
+	}
+	if calls[0].force {
+		t.Error("an organisation nobody asked about was forced")
+	}
+}
+
+// An operator's request forces a rotation that is not otherwise due, and the
+// request is cleared afterwards.
+func TestReconcileHonoursAnOperatorsRotationRequest(t *testing.T) {
+	asked := time.Now().Add(-time.Minute)
+	q := newFakeQueue()
+	q.ready = []string{"asked"}
+	q.rotateRequests = map[string]time.Time{"asked": asked}
+	// Deliberately not due: the request is the only reason to rotate.
+	c := &fakeCluster{}
+
+	var registered []string
+	w := newTestWorker(t, testConfig(), q, c, func(_ context.Context, _, _ string, r console.OrgRegistration) error {
+		registered = append(registered, r.Org)
+		return nil
+	})
+	w.reconcile(context.Background())
+
+	c.mu.Lock()
+	calls := append([]rotateCall(nil), c.rotateCalls...)
+	c.mu.Unlock()
+	if len(calls) != 1 || !calls[0].force {
+		t.Fatalf("the request did not force a rotation: %+v", calls)
+	}
+	if len(registered) != 1 {
+		t.Errorf("a forced rotation registered %v, want the organisation", registered)
+	}
+
+	q.mu.Lock()
+	cleared := append([]clearedRotation(nil), q.rotateCleared...)
+	q.mu.Unlock()
+	if len(cleared) != 1 || cleared[0].org != "asked" {
+		t.Fatalf("the request was not cleared: %+v", cleared)
+	}
+	// Cleared against the timestamp this pass saw, which is what stops a
+	// request made while the rotation was running being thrown away with the
+	// one it satisfied.
+	if !cleared[0].seen.Equal(asked) {
+		t.Errorf("cleared against %s, want the observed request time %s — a newer "+
+			"request would be discarded", cleared[0].seen, asked)
+	}
+}
+
+// A rotation that could not be registered does not clear the request.
+//
+// The operator asked for the console to be using a different certificate, and
+// that is only true once the console has been told. Clearing here would report
+// the request satisfied while the console kept presenting the old credential —
+// which still works, so nothing would look wrong.
+func TestAnUnregisteredRotationLeavesTheRequestOutstanding(t *testing.T) {
+	q := newFakeQueue()
+	q.ready = []string{"asked"}
+	q.rotateRequests = map[string]time.Time{"asked": time.Now()}
+	c := &fakeCluster{}
+
+	w := newTestWorker(t, testConfig(), q, c, func(context.Context, string, string, console.OrgRegistration) error {
+		return errors.New("console database is down")
+	})
+	w.reconcile(context.Background())
+
+	q.mu.Lock()
+	cleared := append([]clearedRotation(nil), q.rotateCleared...)
+	q.mu.Unlock()
+	if len(cleared) != 0 {
+		t.Error("the request was cleared even though the console was never told; " +
+			"the operator would believe the credential had been replaced")
+	}
+}
+
+// A rotation that fails does not take the organisation out of service.
+//
+// Nothing about it is wrong: its pods are running and its callers are
+// authenticating. Requeueing would rebuild it, and rebuilding mints a new
+// authority — turning a failed credential refresh into the mass invalidation
+// this mechanism exists to avoid.
+func TestAFailedRotationDoesNotRequeueTheOrganisation(t *testing.T) {
+	q := newFakeQueue()
+	q.ready = []string{"one"}
+	c := &fakeCluster{rotateErr: errors.New("the secret could not be written")}
+
+	w := newTestWorker(t, testConfig(), q, c, nil)
+	w.reconcile(context.Background())
+
+	q.mu.Lock()
+	requeued := append([]string(nil), q.requeued...)
+	q.mu.Unlock()
+	if len(requeued) != 0 {
+		t.Errorf("a failed rotation requeued %v, which would mint a new authority "+
+			"and invalidate every caller certificate", requeued)
+	}
+}
+
+// The existence check still runs when the rotation request query fails.
+//
+// Reconcile has two jobs and only one of them depends on that query. Abandoning
+// the pass would stop the fleet being checked for missing organisations because
+// of an unrelated failure.
+func TestReconcileStillChecksExistenceWhenRequestsCannotBeRead(t *testing.T) {
+	q := newFakeQueue()
+	q.ready = []string{"gone"}
+	q.rotateRequestsErr = errors.New("cloud database is down")
+	c := &fakeCluster{absent: map[string]bool{"gone": true}}
+
+	w := newTestWorker(t, testConfig(), q, c, nil)
+	w.reconcile(context.Background())
+
+	q.mu.Lock()
+	requeued := append([]string(nil), q.requeued...)
+	q.mu.Unlock()
+	if len(requeued) != 1 || requeued[0] != "gone" {
+		t.Errorf("requeued %v; an unreadable rotation-request query stopped the "+
+			"existence check, which is the half that does not depend on it", requeued)
+	}
+}
+
+// An organisation that is gone is not rotated.
+//
+// Rotation writes a Secret into the organisation's namespace. Doing that for an
+// organisation the cluster no longer has would either fail noisily every pass or
+// recreate part of a namespace that is being torn down.
+func TestAnAbsentOrganisationIsNotRotated(t *testing.T) {
+	q := newFakeQueue()
+	q.ready = []string{"gone"}
+	q.rotateRequests = map[string]time.Time{"gone": time.Now()}
+	c := &fakeCluster{absent: map[string]bool{"gone": true}}
+
+	w := newTestWorker(t, testConfig(), q, c, nil)
+	w.reconcile(context.Background())
+
+	c.mu.Lock()
+	calls := append([]rotateCall(nil), c.rotateCalls...)
+	c.mu.Unlock()
+	if len(calls) != 0 {
+		t.Errorf("tried to rotate credentials for an organisation that is not in "+
+			"the cluster: %+v", calls)
+	}
+}
+
+// The failure metric actually moves.
+//
+// It is the only warning that arrives before the outage rather than with it. A
+// rotation that keeps failing changes nothing anyone can see — the organisation
+// stays ready, its pods stay up, its callers keep working — right until the
+// credential expires and every browser loses that organisation at once. So a
+// counter that never increments would be worse than no counter, because the
+// alerting rule built on it would be permanently green.
+func TestAFailedRotationIsCounted(t *testing.T) {
+	before := testutil.ToFloat64(consoleRotationFailures)
+
+	q := newFakeQueue()
+	q.ready = []string{"one"}
+	c := &fakeCluster{rotateErr: errors.New("the secret could not be written")}
+
+	w := newTestWorker(t, testConfig(), q, c, nil)
+	w.reconcile(context.Background())
+
+	if got := testutil.ToFloat64(consoleRotationFailures); got != before+1 {
+		t.Errorf("the failure counter is %v, want %v — a rotation that keeps failing "+
+			"would be silent until the credential expired", got, before+1)
+	}
+}
+
+// A rotation that happened is counted, and one that was not due is not.
+//
+// The second half is the interesting one. Counting every pass would make the
+// metric useless for spotting a rotation loop, which is the failure this
+// counter is meant to make visible from its rate.
+func TestOnlyRealRotationsAreCounted(t *testing.T) {
+	before := testutil.ToFloat64(consoleRotationsTotal)
+
+	q := newFakeQueue()
+	q.ready = []string{"due", "fine"}
+	c := &fakeCluster{rotateDue: map[string]bool{"due": true}}
+
+	w := newTestWorker(t, testConfig(), q, c,
+		func(context.Context, string, string, console.OrgRegistration) error { return nil })
+	w.reconcile(context.Background())
+
+	if got := testutil.ToFloat64(consoleRotationsTotal); got != before+1 {
+		t.Errorf("the rotation counter is %v, want %v — two organisations were "+
+			"visited and one was due", got, before+1)
+	}
+}
+
+// A rotation that could not be registered counts as a failure, not a success.
+//
+// The certificate exists in the cluster and the console has never been told
+// about it, so it is still presenting the old one. Counting that as a rotation
+// would report the fleet as healthy while credentials went unreplaced.
+func TestARotationThatWasNeverRegisteredCountsAsAFailure(t *testing.T) {
+	okBefore := testutil.ToFloat64(consoleRotationsTotal)
+	failBefore := testutil.ToFloat64(consoleRotationFailures)
+
+	q := newFakeQueue()
+	q.ready = []string{"one"}
+	c := &fakeCluster{rotateDue: map[string]bool{"one": true}}
+
+	w := newTestWorker(t, testConfig(), q, c,
+		func(context.Context, string, string, console.OrgRegistration) error {
+			return errors.New("console database is down")
+		})
+	w.reconcile(context.Background())
+
+	if got := testutil.ToFloat64(consoleRotationsTotal); got != okBefore {
+		t.Errorf("the rotation counter moved to %v; the console was never told, so "+
+			"nothing was rotated as far as it is concerned", got)
+	}
+	if got := testutil.ToFloat64(consoleRotationFailures); got != failBefore+1 {
+		t.Errorf("the failure counter is %v, want %v", got, failBefore+1)
 	}
 }

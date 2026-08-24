@@ -12,6 +12,7 @@
 //	cloud org create     create an organisation and queue it for provisioning
 //	cloud org status     show how far provisioning has got
 //	cloud org register   record an organisation's atlantis and credentials
+//	cloud org rotate-console   replace the console's credentials for one org
 //	cloud org revoke-console   cut the console off from one organisation
 //	cloud org restore-console  give it back, grants intact
 //	cloud data-key       print a keyset for a console's CONSOLE_DATA_KEY
@@ -140,6 +141,7 @@ usage:
   cloud signing-key -path P    create the assertion signing key, if absent
   cloud data-key               print a keyset for a console's CONSOLE_DATA_KEY
 
+  cloud org rotate-console     replace the console's credentials for one org
   cloud org revoke-console     cut the console off from one organisation
   cloud org restore-console    give it back; grants are kept, so nothing is rebuilt
 
@@ -560,7 +562,7 @@ func memberChange(args []string, add bool, log *slog.Logger) error {
 // while before it is provisioned.
 func org(args []string, log *slog.Logger) error {
 	if len(args) == 0 {
-		return errors.New(`cloud org: expected a subcommand (create, status, register, purge, revoke-console, restore-console)`)
+		return errors.New(`cloud org: expected a subcommand (create, status, register, purge, rotate-console, revoke-console, restore-console)`)
 	}
 	switch args[0] {
 	case "create":
@@ -575,6 +577,8 @@ func org(args []string, log *slog.Logger) error {
 		return orgRevokeConsole(args[1:], log)
 	case "restore-console":
 		return orgRestoreConsole(args[1:], log)
+	case "rotate-console":
+		return orgRotateConsole(args[1:], log)
 	default:
 		return fmt.Errorf("cloud org: unknown subcommand %q", args[0])
 	}
@@ -1285,5 +1289,85 @@ UPDATE atlantis.caller_identities SET revoked_at = NULL WHERE caller = $1`,
 	fmt.Printf("restored the console for %s, with its capability grants intact\n", *name)
 	fmt.Println()
 	fmt.Println("    The server accepts it again within five seconds.")
+	return nil
+}
+
+// orgRotateConsole asks for an organisation's console credentials to be
+// replaced.
+//
+// # Why this only records a request
+//
+// The credentials are a Secret in the organisation's namespace, and Cloud holds
+// no Kubernetes credentials — the provisioner runs under a scoped service
+// account precisely so that one component, and not this one, can write there.
+// Widening Cloud's access so this command could do the work itself would undo
+// that separation for the sake of a synchronous exit code.
+//
+// So the request is a column, the provisioner acts on its next reconcile pass,
+// and this returns immediately. The same shape `cloud org purge` uses.
+//
+// # Why there is no -yes
+//
+// Rotation is the safe half of the pair. It replaces a credential with an
+// equivalent one and re-registers it; the console picks the new one up within
+// its refresh interval and nobody is signed out. `revoke-console` is the
+// destructive one, and that is where the confirmation lives.
+func orgRotateConsole(args []string, log *slog.Logger) error {
+	fs := flag.NewFlagSet("org rotate-console", flag.ExitOnError)
+	name := fs.String("org", "", "organisation name")
+	dbURL := cloudDBFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *name == "" {
+		return errors.New("-org is required")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	db, err := openCloud(ctx, *dbURL, log)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Read first, so a name typed from memory that matches nothing says so.
+	p, err := db.ProvisioningFor(ctx, *name)
+	if errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("%s has no provisioning row, so there is no organisation "+
+			"for the provisioner to rotate", *name)
+	}
+	if err != nil {
+		return err
+	}
+	// Reported rather than refused. An organisation that is still provisioning
+	// gets its credentials minted fresh when it finishes, so a request against
+	// one is harmless — but an operator who typed this during an incident is
+	// expecting a rotation to happen soon, and "not ready yet" is the difference
+	// between waiting and looking for what went wrong.
+	if p.State != store.StateReady {
+		fmt.Printf("note: %s is %s, not ready. The provisioner only rotates "+
+			"organisations it can see in the cluster, so this request waits until "+
+			"it is serving.\n", *name, p.State)
+	}
+
+	if err := db.RequestConsoleRotation(ctx, *name); err != nil {
+		return err
+	}
+
+	fmt.Printf("queued a console credential rotation for %s\n", *name)
+	fmt.Println()
+	fmt.Println("    The provisioner does it on its next reconcile pass, which is")
+	fmt.Println("    PROVISIONER_RECONCILE_INTERVAL away — five minutes by default.")
+	fmt.Println("    Watch the provisioner's log, not this one.")
+	fmt.Println()
+	fmt.Println("    Both authorities are kept, so no caller certificate is affected")
+	fmt.Println("    and nothing in the organisation restarts. The console starts")
+	fmt.Println("    using the new certificate within five minutes of the rotation.")
+	fmt.Println()
+	fmt.Println("    This does NOT stop the old certificate working. Nothing pins it,")
+	fmt.Printf("    so it stays valid until it expires; to cut it off now, use\n")
+	fmt.Printf("      cloud org revoke-console -org %s -atl-db ... -yes\n", *name)
 	return nil
 }
