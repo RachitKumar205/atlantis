@@ -1064,6 +1064,13 @@ message CallerInfo {
   bool can_mutate = 6;
   // RFC3339; empty when no cert was issued through the console.
   string cert_expires_at = 7;
+  // RFC3339; empty unless this caller has been revoked.
+  //
+  // A revoked caller keeps its row and its capability grants (migration 0033),
+  // so it is still listed here — it simply cannot authenticate. Without this
+  // field it would be indistinguishable from a working caller, which is the
+  // one thing an operator looking at this list must not be misled about.
+  string revoked_at = 8;
 }
 
 message GetCallersRequest {}

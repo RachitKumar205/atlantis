@@ -395,17 +395,21 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		TrustedProxyMayOperate:    cfg.TrustedProxyMayOperate,
 	})
 
-	// Cert binding: bind each caller_identities row to a specific leaf
-	// fingerprint. Every authenticated RPC must present a cert whose
-	// SHA-256 matches the row's stored fingerprint; mismatch or missing
-	// row → Unauthenticated. This is what makes re-issue + revoke
-	// actually invalidate prior certs at the auth layer without a CRL.
+	// Cert binding: every authenticated RPC must belong to a caller that still
+	// has a caller_identities row. No row — never registered, or revoked — is
+	// Unauthenticated, five seconds behind a RevokeCaller.
 	//
-	// Exempt: the management-plane CN (the console BFF) doesn't have a
-	// fingerprint of its own — its auth is the session cookie + sudo
-	// layer in front of the BFF — so we skip binding for it. Operators
-	// can add more CNs via ATL_CERT_BINDING_EXEMPT_CALLERS if they have
-	// a similar bootstrap CN that authenticates by other means.
+	// It no longer compares fingerprints. This block described binding a row to
+	// one leaf's SHA-256 long after migration 0032 deleted cert_fingerprint and
+	// its two overlap columns; the lifetime dropped to seven days and the trust
+	// decision became the chain and the common name, verified by the handshake.
+	// See that migration for why short certificates and active revocation are
+	// alternatives rather than a pair.
+	//
+	// Nothing is exempt by default. The console used to be, because it had no
+	// fingerprint to bind — a reason that left with the fingerprints, and one
+	// that was costing the console its only revocation. See the ExemptCallers
+	// default in config.go.
 	// One CertBindingChecker → both interceptor flavors share one
 	// TTL cache, so a stream lookup for "vendor" and a unary lookup
 	// for "vendor" hit the same cache entry instead of duplicating

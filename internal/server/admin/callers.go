@@ -45,6 +45,12 @@ type GetCallersRequest struct{}
 // (operator-registered) and caller_registrations (anyone who has ever
 // `tide apply`'d). A caller may appear with 0 file_count if they were
 // registered through the console but have not yet pushed schema.
+//
+// Revoked callers are listed too, carrying RevokedAt. They keep their row since
+// migration 0033, so filtering them out here would leave an operator with no way
+// to see that a caller exists but is cut off — and no way to find it again in
+// order to restore it. This is the one read of caller_identities that
+// deliberately does not go through the active_* views.
 func (s *Service) GetCallers(ctx context.Context, _ *adminpb.GetCallersRequest) (*adminpb.GetCallersResponse, error) {
 	// No-PG test path, matching the other methods in this package. Without it
 	// this is the one migrated RPC that segfaults rather than returning.
@@ -65,7 +71,8 @@ SELECT
     agg.schema_version                      AS schema_version,
     ci.caller IS NOT NULL                   AS registered,
     COALESCE(ci.can_mutate, false)          AS can_mutate,
-    ci.cert_expires_at::text                AS cert_expires_at
+    ci.cert_expires_at::text                AS cert_expires_at,
+    ci.revoked_at::text                     AS revoked_at
 FROM atlantis.caller_identities ci
 FULL OUTER JOIN (
     SELECT
@@ -90,7 +97,8 @@ ORDER BY caller`)
 		var lastAt *string
 		var schemaVer *int64
 		var certExp *string
-		if err := rows.Scan(&ci.Caller, &fileCount, &lastAt, &schemaVer, &ci.Registered, &ci.CanMutate, &certExp); err != nil {
+		var revokedAt *string
+		if err := rows.Scan(&ci.Caller, &fileCount, &lastAt, &schemaVer, &ci.Registered, &ci.CanMutate, &certExp, &revokedAt); err != nil {
 			return nil, err
 		}
 		// file_count is a COUNT(*), so Postgres returns int8 while the wire
@@ -111,6 +119,9 @@ ORDER BY caller`)
 		}
 		if certExp != nil {
 			ci.CertExpiresAt = *certExp
+		}
+		if revokedAt != nil {
+			ci.RevokedAt = *revokedAt
 		}
 		out = append(out, ci)
 	}
@@ -189,6 +200,25 @@ func (s *Service) RegisterCaller(ctx context.Context, req *adminpb.RegisterCalle
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
+	// A revoked caller is not re-registered back into service.
+	//
+	// The upsert below does not clear revoked_at, so without this the command
+	// would report success while the caller stayed cut off — the operator learns
+	// otherwise from a support ticket. Refusing is also the safer of the two
+	// directions: registration is routine and revocation is deliberate, so a
+	// routine act must not quietly undo a deliberate one.
+	var revoked bool
+	if err := tx.QueryRow(ctx, `
+SELECT revoked_at IS NOT NULL FROM atlantis.caller_identities WHERE caller = $1`,
+		req.GetCaller()).Scan(&revoked); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("check whether %q is revoked: %w", req.GetCaller(), err)
+	}
+	if revoked {
+		return nil, fmt.Errorf("admin: caller %q is revoked; restore it explicitly "+
+			"rather than re-registering, which would leave it revoked and report success",
+			req.GetCaller())
+	}
+
 	if _, err := tx.Exec(ctx, `
 INSERT INTO atlantis.caller_identities (caller, can_mutate, created_by)
 VALUES ($1, $2, $3)
@@ -244,13 +274,17 @@ ON CONFLICT DO NOTHING`,
 	return nil
 }
 
-// LookupCallerCertBinding returns the cert-binding state for a caller:
-// which certificate authenticates as it, and which one it replaced.
+// LookupCallerCertBinding reports whether a caller still has an identity row.
 //
-// The previous fingerprint and its deadline exist so a renewal whose
-// response is lost does not lock the machine out — see migration 0031.
-// They are returned rather than filtered here so the decision lives in
-// one place, the interceptor, alongside the comparison it is part of.
+// That is the whole of it. It used to return which certificate authenticated as
+// the caller and which one it had replaced, with a deadline on the latter so a
+// renewal whose response was lost did not lock the machine out (migration 0031).
+// Migration 0032 removed all three columns along with pinning.
+//
+// What survives is the fastest revocation path in the system: RevokeCaller
+// deletes the row, and the interceptor's five-second cache means the caller
+// stops authenticating within five seconds — against thirty for the auth
+// allowlist's refresher.
 //
 // This is the hot path for the cert-binding interceptor; callers
 // should layer a TTL cache on top to avoid one DB read per RPC under
@@ -264,11 +298,15 @@ func (s *Service) LookupCallerCertBinding(ctx context.Context, caller string) (i
 	// until migration 0032; see it for why a seven-day certificate makes them
 	// unnecessary.
 	//
+	// Against the view, not the table: a revoked caller keeps its row now
+	// (migration 0033), so the table would answer "yes, it exists" for exactly
+	// the caller this check is meant to refuse.
+	//
 	// SELECT 1 rather than a column, so this query does not have to be revisited
 	// the next time the table's shape changes.
 	var one int
 	err := s.pool.QueryRow(ctx,
-		`SELECT 1 FROM atlantis.caller_identities WHERE caller = $1`, caller).Scan(&one)
+		`SELECT 1 FROM atlantis.active_caller_identities WHERE caller = $1`, caller).Scan(&one)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return interceptors.CertBinding{}, nil
 	}
@@ -286,12 +324,18 @@ type RecordCallerCertExpiryRequest struct {
 	Caller string `json:"caller"`
 	// ExpiresAt is RFC3339. Required.
 	ExpiresAt string `json:"expires_at"`
-	// Fingerprint is the hex-encoded SHA-256 of the signed leaf cert's
-	// DER bytes. Required for new code paths; optional during the
-	// migration window so older console binaries (which only reported
-	// expiry) keep working. Once set, every authenticated RPC from this
-	// caller must present a cert whose fingerprint matches — that's how
-	// rotation + revoke actually invalidate prior certs without a CRL.
+	// Fingerprint is the hex-encoded SHA-256 of the signed leaf cert's DER
+	// bytes.
+	//
+	// Accepted and validated for length, then discarded. Nothing stores or
+	// compares it since migration 0032 dropped the columns — it stays on the
+	// request so an older console binary that still sends one is not an error.
+	//
+	// This said it was what made "rotation + revoke actually invalidate prior
+	// certs without a CRL", which stopped being true when the columns went and
+	// is the kind of claim that gets believed during an incident. Revocation is
+	// deleting the identity row; expiry is what supersedes a particular
+	// certificate.
 	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
@@ -377,17 +421,34 @@ type RevokeCallerResponse struct {
 	FilesRemoved int `json:"files_removed"`
 }
 
-// RevokeCaller removes a caller from BOTH the identities table and the
-// registrations table. The caller will no longer appear in GetCallers,
-// can't apply schema, and can't be issued a new cert by the signer.
+// RevokeCaller stops a caller authenticating: it marks the identity row revoked
+// and removes the caller's schema registrations.
 //
-// Effect on existing certs: the cert-binding interceptor (cmd/server)
-// reads caller_identities.cert_fingerprint on every authenticated RPC
-// and rejects any caller whose row is missing. Deletion here makes the
-// caller's row missing, which means every still-crypto-valid cert
-// minted for this CN starts failing Unauthenticated within one cache
-// TTL (~5s). This is the revocation mechanism — no CRL, no OCSP, just
-// the row going away.
+// Effect on existing certs: the cert-binding interceptor reads
+// atlantis.active_caller_identities on every authenticated RPC, and that view
+// excludes revoked rows. So every still-crypto-valid certificate minted for this
+// CN starts failing Unauthenticated within one cache TTL (~5s). This is the
+// revocation mechanism — no CRL, no OCSP.
+//
+// # Why the identity row is marked rather than deleted
+//
+// caller_capabilities references it ON DELETE CASCADE, so deleting it destroyed
+// every grant the caller held — including CAPABILITY_OPERATOR and
+// CAPABILITY_LOGS_READ, which registration deliberately does not manage so that
+// re-registering cannot strip what an operator granted by hand. Revoking stripped
+// it anyway, and the loss only showed up later as a PermissionDenied on one page.
+//
+// It also made revocation one-way for a reserved CN. RegisterCaller refuses
+// 'atlantis-console', so a deleted console identity had no supported way back —
+// and the console is the caller that most needs revoking, holding an admin
+// credential for every organisation. See migration 0033.
+//
+// # Why a caller with no identity row still gets one
+//
+// The upsert writes a tombstone for a caller that only ever existed in
+// caller_registrations. Without it, deleting the registrations would cut the
+// caller off until its next `tide apply` wrote them back — revocation undone by
+// the very thing being revoked.
 func (s *Service) RevokeCaller(ctx context.Context, req *adminpb.RevokeCallerRequest) (*adminpb.RevokeCallerResponse, error) {
 	if err := s.guardOperatorTransport(ctx); err != nil {
 		return nil, err
@@ -408,7 +469,9 @@ DELETE FROM atlantis.caller_registrations WHERE caller = $1`, req.GetCaller())
 		return nil, fmt.Errorf("revoke caller_registrations: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-DELETE FROM atlantis.caller_identities WHERE caller = $1`, req.GetCaller()); err != nil {
+INSERT INTO atlantis.caller_identities (caller, can_mutate, created_by, revoked_at)
+VALUES ($1, false, '<revoked>', NOW())
+ON CONFLICT (caller) DO UPDATE SET revoked_at = NOW()`, req.GetCaller()); err != nil {
 		return nil, fmt.Errorf("revoke caller_identities: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {

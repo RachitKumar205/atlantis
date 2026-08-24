@@ -117,11 +117,14 @@ type config struct {
 	// to protect a feature it does not use. A hosted deployment sets it.
 	RequireTenantIsolation bool
 
-	// CertBindingExemptCallers are CNs that bypass the per-RPC cert
-	// fingerprint check. Reserved for management-plane services whose
-	// trust comes from a higher layer (session cookies + sudo for the
-	// console) and that therefore don't have a fingerprint to bind
-	// against. Default: the console CN.
+	// CertBindingExemptCallers are CNs that bypass the cert-binding check.
+	//
+	// Empty by default. There is no fingerprint to bind against any more —
+	// migration 0032 removed pinning — so what an exemption skips is the check
+	// that the caller still has an identity row, and that is the only revocation
+	// the system has. Exempting a caller makes it one RevokeCaller cannot cut
+	// off, which is why nothing holds this by default and why the console, which
+	// held it longest, no longer does.
 	CertBindingExemptCallers []string
 
 	// Trusted front-proxy mode. When TrustedProxyCallers is non-empty, a
@@ -245,10 +248,25 @@ func loadConfig() (config, error) {
 		AdminAllowApplyMutation: envBool("ATL_ALLOW_APPLY_MUTATION", true),
 		RequireApacheTimescale:  envBool("ATL_REQUIRE_APACHE_TIMESCALE", false),
 		RequireTenantIsolation:  envBool("ATL_REQUIRE_TENANT_ISOLATION", false),
-		// Default exempts the console CN so it can keep calling admin
-		// RPCs after the cert-binding rollout without an operator
-		// step. Add more via comma-separated env.
-		CertBindingExemptCallers: splitCSVDefault(os.Getenv("ATL_CERT_BINDING_EXEMPT_CALLERS"), "atlantis-console"),
+		// No default, deliberately.
+		//
+		// This defaulted to "atlantis-console" from the cert-binding rollout.
+		// Binding then meant a stored leaf fingerprint, the console had none of
+		// its own, and exempting it was how it kept reaching admin RPCs without
+		// an operator step.
+		//
+		// Migration 0032 removed pinning. The check an exemption now skips is
+		// only "does a caller_identities row exist", and migration 0019 seeds
+		// the console's row unconditionally on every install — so exempting it
+		// buys nothing. What it costs is the one thing 0032 kept when it dropped
+		// the fingerprints: RevokeCaller deleting a row cuts that caller off
+		// within the interceptor's five-second cache. An exempt caller has no
+		// revocation at all, and the console holds an admin credential for every
+		// organisation.
+		//
+		// The env var stays, for a bootstrap CN that genuinely authenticates by
+		// other means. It is an operator's deliberate act rather than a default.
+		CertBindingExemptCallers: splitCSV(os.Getenv("ATL_CERT_BINDING_EXEMPT_CALLERS")),
 
 		TrustedProxyCallers:    splitCSV(os.Getenv("ATL_TRUSTED_PROXY_CALLERS")),
 		TrustedProxyCertHeader: envStr("ATL_TRUSTED_PROXY_CERT_HEADER", "x-forwarded-client-cert"),
@@ -450,15 +468,12 @@ func splitCSV(s string) []string {
 	return out
 }
 
-// splitCSVDefault returns splitCSV(s) when s is non-empty, otherwise
-// the provided default list. Useful for env vars where "unset" should
-// mean "ship this baseline" rather than "no entries."
-func splitCSVDefault(s string, def ...string) []string {
-	if s == "" {
-		return def
-	}
-	return splitCSV(s)
-}
+// splitCSVDefault used to live here, for env vars where "unset" should mean
+// "ship this baseline" rather than "no entries". Its only caller was the
+// cert-binding exemption list, and that baseline is exactly what was removed:
+// nothing is exempt from revocation unless an operator says so. Restoring the
+// helper is not the way to add a default back — the reasoning is at
+// CertBindingExemptCallers, and it applies to whatever the next such list is.
 
 func parseRemoteHandlers(s string) map[string]string {
 	if s == "" {

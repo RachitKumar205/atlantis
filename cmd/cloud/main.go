@@ -12,6 +12,8 @@
 //	cloud org create     create an organisation and queue it for provisioning
 //	cloud org status     show how far provisioning has got
 //	cloud org register   record an organisation's atlantis and credentials
+//	cloud org revoke-console   cut the console off from one organisation
+//	cloud org restore-console  give it back, grants intact
 //	cloud data-key       print a keyset for a console's CONSOLE_DATA_KEY
 //
 // # What `serve` does not serve
@@ -70,8 +72,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 	"github.com/rachitkumar205/atlantis/internal/cloud/issuer"
+	"github.com/rachitkumar205/atlantis/internal/cloud/provision/certs"
 	cloudsrv "github.com/rachitkumar205/atlantis/internal/cloud/server"
 	"github.com/rachitkumar205/atlantis/internal/cloud/store"
 	"github.com/rachitkumar205/atlantis/internal/console"
@@ -133,6 +139,9 @@ usage:
   cloud org register [flags]   point an organisation at an atlantis built by hand
   cloud signing-key -path P    create the assertion signing key, if absent
   cloud data-key               print a keyset for a console's CONSOLE_DATA_KEY
+
+  cloud org revoke-console     cut the console off from one organisation
+  cloud org restore-console    give it back; grants are kept, so nothing is rebuilt
 
 run any command with -h for its flags
 `)
@@ -551,7 +560,7 @@ func memberChange(args []string, add bool, log *slog.Logger) error {
 // while before it is provisioned.
 func org(args []string, log *slog.Logger) error {
 	if len(args) == 0 {
-		return errors.New(`cloud org: expected a subcommand (create, status, register, purge)`)
+		return errors.New(`cloud org: expected a subcommand (create, status, register, purge, revoke-console, restore-console)`)
 	}
 	switch args[0] {
 	case "create":
@@ -562,6 +571,10 @@ func org(args []string, log *slog.Logger) error {
 		return orgRegister(args[1:], log)
 	case "purge":
 		return orgPurge(args[1:], log)
+	case "revoke-console":
+		return orgRevokeConsole(args[1:], log)
+	case "restore-console":
+		return orgRestoreConsole(args[1:], log)
 	default:
 		return fmt.Errorf("cloud org: unknown subcommand %q", args[0])
 	}
@@ -1070,5 +1083,207 @@ func orgPurge(args []string, log *slog.Logger) error {
 	fmt.Println("    Until then it can still be brought back with:")
 	fmt.Printf("      UPDATE cloud.org_provisioning SET state = 'ready',\n")
 	fmt.Printf("             deleted_at = NULL, purge_after = NULL WHERE org = '%s';\n", *name)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// org revoke-console / restore-console — the console's credential, cut off and
+// brought back
+// ---------------------------------------------------------------------------
+
+// atlDBFlag registers the flag naming ONE ORGANISATION'S atlantis database.
+//
+// Not Cloud's, and not the console's. Both of those are control-plane databases
+// shared across the fleet; this is the per-organisation one that holds
+// atlantis.caller_identities, and pointing this at either of the others finds no
+// such table and stops.
+//
+// There is no default and no environment variable on purpose. Cloud does not
+// know this address — the provisioner builds it from the CNPG cluster it created
+// and passes it to the workload as PG_URL, and it is never written back. A
+// default would therefore have to be wrong for every organisation but one, and
+// the failure mode of a half-right default here is revoking the console's access
+// to an organisation the operator was not looking at.
+func atlDBFlag(fs *flag.FlagSet) *string {
+	return fs.String("atl-db", "",
+		"this organisation's atlantis database URL (from its namespace's PG_URL)")
+}
+
+// openOrgAtlantis connects to one organisation's atlantis database and proves
+// the connection before returning it.
+//
+// pgxpool.New is lazy, so a pool built from an unreachable or misspelt DSN is
+// returned happily and fails at the first query — which here would report a
+// problem with caller_identities rather than with the address the operator
+// typed. The same lesson cmd/signer learned when PG_URL became required.
+func openOrgAtlantis(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open the organisation's atlantis database: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("connect to the organisation's atlantis database: %w", err)
+	}
+	return pool, nil
+}
+
+// consoleRevocationState reports whether the console has an identity row in this
+// database and whether it is currently revoked.
+func consoleRevocationState(ctx context.Context, pool *pgxpool.Pool) (exists, revoked bool, err error) {
+	err = pool.QueryRow(ctx, `
+SELECT revoked_at IS NOT NULL FROM atlantis.caller_identities WHERE caller = $1`,
+		certs.ConsoleCN).Scan(&revoked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("read the console's identity: %w", err)
+	}
+	return true, revoked, nil
+}
+
+// orgRevokeConsole cuts the console off from one organisation.
+//
+// # Why this exists as a command rather than a console button
+//
+// The console is the thing being revoked. A button would work exactly once and
+// then remove the operator's ability to press anything else in that
+// organisation, and the way back is this command's opposite — which cannot be a
+// button either, for the same reason. Both halves belong somewhere the console
+// is not.
+//
+// # What it does and does not reach
+//
+// One organisation. The console holds a separate credential per organisation,
+// so this cuts off the one whose database is named and leaves the rest serving.
+// That is usually what an incident wants; revoking the fleet means running it
+// per organisation, deliberately.
+func orgRevokeConsole(args []string, log *slog.Logger) error {
+	fs := flag.NewFlagSet("org revoke-console", flag.ExitOnError)
+	name := fs.String("org", "", "organisation name; used in the printed record")
+	yes := fs.Bool("yes", false, "required: confirm that this cuts the console off from this organisation")
+	atlDB := atlDBFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *name == "" {
+		return errors.New("-org is required")
+	}
+	if *atlDB == "" {
+		return errors.New("-atl-db is required: the organisation's atlantis database URL")
+	}
+	if !*yes {
+		return fmt.Errorf("refusing to revoke the console for %s without -yes: nobody "+
+			"can open this organisation in a browser until it is restored, and the "+
+			"restore path is a command rather than a button", *name)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pool, err := openOrgAtlantis(ctx, *atlDB)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	// Read first, so the operator is told the state they are acting on. A
+	// database that has no console row at all is a misconfigured organisation
+	// rather than a revocable one, and saying "revoked" there would be a lie.
+	exists, revoked, err := consoleRevocationState(ctx, pool)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("%s has no %q identity, so there is nothing to revoke — "+
+			"migration 0019 seeds it, so this database is either not an atlantis "+
+			"database or has not been migrated", *name, certs.ConsoleCN)
+	}
+	if revoked {
+		fmt.Printf("the console is already revoked for %s; nothing to do\n", *name)
+		return nil
+	}
+
+	if _, err := pool.Exec(ctx, `
+UPDATE atlantis.caller_identities SET revoked_at = NOW() WHERE caller = $1`,
+		certs.ConsoleCN); err != nil {
+		return fmt.Errorf("revoke the console: %w", err)
+	}
+	log.Info("revoked the console", "org", *name, "caller", certs.ConsoleCN)
+
+	fmt.Printf("revoking the console for %s\n", *name)
+	fmt.Println()
+	fmt.Println("    Its capability grants are kept, so restoring is one command and")
+	fmt.Println("    does not have to rebuild them:")
+	fmt.Printf("      cloud org restore-console -org %s -atl-db ...\n", *name)
+	fmt.Println()
+	fmt.Println("    The server stops accepting the console within five seconds — the")
+	fmt.Println("    cert-binding cache's TTL. Sessions already open start failing then.")
+	return nil
+}
+
+// orgRestoreConsole brings the console back for one organisation.
+//
+// # Why this cannot go through RegisterCaller
+//
+// RegisterCaller refuses 'atlantis-console' as a reserved name, and refuses a
+// revoked caller besides. That is deliberate in both cases, and it is exactly
+// what made revocation a one-way door before migration 0033: with the identity
+// row deleted, no supported command could recreate it. Marking the row instead
+// of deleting it is what turns the way back into clearing one column.
+func orgRestoreConsole(args []string, log *slog.Logger) error {
+	fs := flag.NewFlagSet("org restore-console", flag.ExitOnError)
+	name := fs.String("org", "", "organisation name; used in the printed record")
+	atlDB := atlDBFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *name == "" {
+		return errors.New("-org is required")
+	}
+	if *atlDB == "" {
+		return errors.New("-atl-db is required: the organisation's atlantis database URL")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pool, err := openOrgAtlantis(ctx, *atlDB)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	exists, revoked, err := consoleRevocationState(ctx, pool)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("%s has no %q identity to restore — migration 0019 seeds "+
+			"it, so this database is either not an atlantis database or has not been "+
+			"migrated", *name, certs.ConsoleCN)
+	}
+	// Reported rather than silently succeeding. An operator who runs this
+	// because the console is unreachable needs to learn that revocation was not
+	// the reason, instead of being told the problem is fixed.
+	if !revoked {
+		fmt.Printf("the console is not revoked for %s; nothing to do\n", *name)
+		fmt.Println()
+		fmt.Println("    If the console cannot reach this organisation, revocation is not")
+		fmt.Println("    why. Check its certificate and the endpoint in console.orgs.")
+		return nil
+	}
+
+	if _, err := pool.Exec(ctx, `
+UPDATE atlantis.caller_identities SET revoked_at = NULL WHERE caller = $1`,
+		certs.ConsoleCN); err != nil {
+		return fmt.Errorf("restore the console: %w", err)
+	}
+	log.Info("restored the console", "org", *name, "caller", certs.ConsoleCN)
+
+	fmt.Printf("restored the console for %s, with its capability grants intact\n", *name)
+	fmt.Println()
+	fmt.Println("    The server accepts it again within five seconds.")
 	return nil
 }

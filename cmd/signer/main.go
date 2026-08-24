@@ -104,11 +104,14 @@ var (
 	caCert *x509.Certificate
 	caKey  *ecdsa.PrivateKey
 	caPEM  []byte
-	// pgPool is non-nil iff PG_URL was set at boot. When nil the signer
-	// falls back to the reserved-CN denylist only — sufficient for dev
-	// where the bundled signer can't see atlantis's DB independently.
-	// Production must set PG_URL so issuance is gated on a registered
-	// caller_identities row.
+	// pgPool is atlantis's database, and issuance is gated on what it says.
+	//
+	// Never nil in a running signer: run() refuses to start without PG_URL. This
+	// used to describe a fallback to the reserved-CN denylist when the DSN was
+	// absent, which was the deployment with the least configuration getting the
+	// fewest checks — an unset setting must not be a way to turn a gate off.
+	//
+	// Tests set it directly, which is the only case where it varies.
 	pgPool *pgxpool.Pool
 )
 
@@ -357,6 +360,39 @@ func requireClientAuth(w http.ResponseWriter, r *http.Request, log *slog.Logger)
 	return true
 }
 
+// callerMayBeIssuedTo reports whether this caller still has a live identity.
+//
+// # Why it reads a view
+//
+// A revoked caller keeps its caller_identities row since migration 0033, so the
+// table would answer "yes, it exists" for precisely the caller this refuses.
+// atlantis.active_caller_identities is the filtered set.
+//
+// Getting this wrong is quiet in the worst way. The server would refuse the
+// revoked caller while the signer kept issuing it fresh certificates — a
+// revocation that looks complete from the console and is contradicted by the
+// component whose whole job is handing out credentials.
+//
+// # Why it is a function rather than a query inside the handler
+//
+// So that it can be tested. It was inline, and nothing exercised it: the fuzz
+// test sets pgPool to nil and says the identity check is "tested elsewhere",
+// and elsewhere did not exist. A handler test would need CA material and a
+// signed request to reach one SELECT; this needs a database and a caller.
+func callerMayBeIssuedTo(ctx context.Context, caller string) (bool, error) {
+	var registered bool
+	err := pgPool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM atlantis.active_caller_identities WHERE caller = $1)`,
+		caller).Scan(&registered)
+	// EXISTS always returns a row, so ErrNoRows here would mean something other
+	// than "not registered". Tolerated rather than treated as an error because
+	// the false it produces is the safe answer either way.
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return false, err
+	}
+	return registered, nil
+}
+
 func handleIssue(w http.ResponseWriter, r *http.Request, log *slog.Logger) {
 	var req struct {
 		Caller string `json:"caller"`
@@ -390,11 +426,8 @@ func handleIssue(w http.ResponseWriter, r *http.Request, log *slog.Logger) {
 	// the deployment with the least configuration had the fewest checks.
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
-	var registered bool
-	err := pgPool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM atlantis.caller_identities WHERE caller = $1)`,
-		caller).Scan(&registered)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	registered, err := callerMayBeIssuedTo(ctx, caller)
+	if err != nil {
 		log.Error("identity lookup", "caller", caller, "err", err)
 		jsonError(w, "identity lookup failed", http.StatusInternalServerError)
 		return

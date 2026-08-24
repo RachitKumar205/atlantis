@@ -32,16 +32,19 @@ type CertBinding struct {
 
 // CertBindingLookup returns the binding state for a caller.
 //
-// Returning a non-nil error fails open in the same way the lookup
-// would if the row truly didn't exist — the interceptor logs the
-// error and treats it as "unknown caller." Lookups MUST NOT block
-// indefinitely; the caller is on the request hot path.
+// A non-nil error fails CLOSED: the interceptor logs it and refuses the call,
+// the same answer an absent row gets. An earlier version of this comment called
+// that "fails open", which is the opposite of what the code does and the more
+// dangerous of the two to believe — a database blip refuses traffic, it does not
+// admit it.
+//
+// Lookups MUST NOT block indefinitely; the caller is on the request hot path.
 type CertBindingLookup func(ctx context.Context, caller string) (CertBinding, error)
 
 // CertBindingConfig parameterises the cert-binding interceptor.
 type CertBindingConfig struct {
-	// Lookup is the DB-backed (or test-faked) resolver for a caller's
-	// stored fingerprint. Required when Enforce is true.
+	// Lookup is the DB-backed (or test-faked) resolver for whether a caller
+	// still has an identity row. Required when Enforce is true.
 	Lookup CertBindingLookup
 
 	// Enforce gates the entire check. Set to true exactly when mTLS is
@@ -52,10 +55,14 @@ type CertBindingConfig struct {
 	// (populated by resolveCallerInterceptor).
 	CallerFromContext func(context.Context) string
 
-	// ExemptCallers is the set of CNs that always pass without a
-	// fingerprint check. Reserved for the management plane (the console
-	// CN, the signer CN) whose authentication is enforced at a higher
-	// layer (session cookies + sudo + role).
+	// ExemptCallers is the set of CNs that skip the check entirely.
+	//
+	// Empty by default, and the console is deliberately not in it any more.
+	// Exempting a caller now means exempting it from "do you still have an
+	// identity row", which is the only revocation this system has — so an
+	// exempt caller is one RevokeCaller cannot cut off. That is a serious
+	// thing to hand out and belongs to an operator who has a bootstrap CN
+	// authenticating by some other means, not to a default.
 	ExemptCallers []string
 
 	// CacheTTL is how long a lookup result is held in process before
@@ -68,8 +75,8 @@ type CertBindingConfig struct {
 }
 
 // CertBindingChecker owns the cert-binding state shared across both
-// the unary and stream interceptors: the TTL cache of CN -> stored
-// fingerprint, the exempt-CN set, and the resolver callbacks. Mount
+// the unary and stream interceptors: the TTL cache of CN -> whether an
+// identity row exists, the exempt-CN set, and the resolver callbacks. Mount
 // via .Unary() and .Stream() on their respective chains; both
 // methods consult the same cache so a stream RPC and a unary RPC for
 // the same CN share lookup state — a single DB hit per CN per TTL
@@ -129,7 +136,7 @@ func NewCertBindingStream(cfg CertBindingConfig) grpc.StreamServerInterceptor {
 	return NewCertBindingChecker(cfg).Stream()
 }
 
-// buildCertBindingCheck extracts the fingerprint comparison so both
+// buildCertBindingCheck extracts the binding check so both
 // flavors share one implementation. Returns a closure that captures
 // the cache + lookup so a single TTL bucket serves the whole gRPC
 // surface.
@@ -206,15 +213,15 @@ func buildCertBindingCheck(cfg CertBindingConfig) func(ctx context.Context, full
 }
 
 // forwardedCertKey carries the DER of a trusted-proxy-forwarded, already-
-// re-validated end-client cert. When present it is the cert the binding
-// check fingerprints — so per-caller cert binding is preserved through a
-// TLS-terminating proxy.
+// re-validated end-client cert. When present it is the cert the binding check
+// treats as the caller's — so the check is satisfied by the end client's
+// certificate rather than the proxy's through a TLS-terminating edge.
 type forwardedCertKey struct{}
 
 // WithForwardedCert stashes the re-validated forwarded client cert DER on
 // the context. Set by the server's resolve interceptor only after the cert
 // has been verified (chain + clientAuth EKU + validity); this package treats
-// its presence as authoritative for the fingerprint source.
+// its presence as authoritative for which certificate the check sees.
 func WithForwardedCert(ctx context.Context, der []byte) context.Context {
 	return context.WithValue(ctx, forwardedCertKey{}, der)
 }
@@ -227,10 +234,11 @@ func ForwardedCertFromContext(ctx context.Context) ([]byte, bool) {
 	return der, ok && len(der) > 0
 }
 
-// leafCertFromContext extracts the cert the binding check fingerprints: the
-// trusted-proxy-forwarded cert when present (so binding survives edge TLS
-// termination), otherwise the live TLS peer's leaf cert. Returns false in
-// non-TLS modes (where no cert was negotiated) so callers can react.
+// leafCertFromContext extracts the cert the binding check requires to be
+// present: the trusted-proxy-forwarded cert when there is one (so the check
+// survives edge TLS termination), otherwise the live TLS peer's leaf cert.
+// Returns false in non-TLS modes (where no cert was negotiated) so callers can
+// react.
 func leafCertFromContext(ctx context.Context) (cert leafCert, ok bool) {
 	if der, fwd := ForwardedCertFromContext(ctx); fwd {
 		return leafCert{Raw: der}, true
@@ -250,14 +258,15 @@ func leafCertFromContext(ctx context.Context) (cert leafCert, ok bool) {
 }
 
 // leafCert is a tiny shim over *x509.Certificate so the interceptor
-// only depends on the field it actually uses — the raw DER bytes the
-// fingerprint hash is computed from.
+// only depends on the field it actually uses — the raw DER bytes. Nothing
+// hashes them now; the check is that a verified certificate was presented
+// at all, which is what distinguishes a caller from a mis-configured listener.
 type leafCert struct {
 	Raw []byte
 }
 
-// bindingCache is a per-process TTL cache of (caller → fingerprint
-// state). One DB read per CN per TTL window under burst — at our QPS
+// bindingCache is a per-process TTL cache of (caller → does an identity row
+// exist). One DB read per CN per TTL window under burst — at our QPS
 // floor this is the difference between "Postgres absorbs the load"
 // and "Postgres becomes the bottleneck."
 //

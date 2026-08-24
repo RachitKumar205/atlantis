@@ -51,16 +51,18 @@ func New(pool *pgxpool.Pool, log *slog.Logger) *CallerAllowlist {
 	}
 }
 
-// Reload reads the full set of callers — caller_registrations (applied
-// schema) UNION caller_identities (operator pre-registered, including
-// read-only runtime CNs) — and swaps it in atomically. Errors propagate
-// so the caller can decide whether to abort startup or log and continue
-// with the previous snapshot.
+// Reload reads the full set of callers permitted to authenticate and swaps it
+// in atomically. Errors propagate so the caller can decide whether to abort
+// startup or log and continue with the previous snapshot.
+//
+// The set is caller_registrations (applied schema) UNION caller_identities
+// (operator pre-registered, including read-only runtime CNs), minus anything
+// revoked. That subtraction is inside atlantis.active_callers rather than
+// written here — see migration 0033. Reading the two tables directly is what
+// this used to do, and it would readmit a revoked caller on its next `tide
+// apply`, because that writes caller_registrations.
 func (a *CallerAllowlist) Reload(ctx context.Context) error {
-	rows, err := a.pool.Query(ctx, `
-		SELECT caller FROM atlantis.caller_registrations
-		UNION
-		SELECT caller FROM atlantis.caller_identities`)
+	rows, err := a.pool.Query(ctx, `SELECT caller FROM atlantis.active_callers`)
 	if err != nil {
 		return fmt.Errorf("auth: query caller allowlist: %w", err)
 	}

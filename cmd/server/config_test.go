@@ -150,3 +150,56 @@ func TestSplitCSV(t *testing.T) {
 		}
 	}
 }
+
+// Nothing is exempt from cert binding unless an operator says so.
+//
+// # Why this is pinned rather than left to the code
+//
+// This defaulted to "atlantis-console" for the whole of the cert-binding
+// rollout, and the reason it did was real at the time: binding meant a stored
+// leaf fingerprint, and the console had none. Migration 0032 deleted the
+// fingerprints, which left the default exempting the console from the only
+// question the check still asks — does this caller have an identity row.
+//
+// The consequence is not a weaker check, it is no revocation. RevokeCaller
+// deletes the row and the interceptor refuses within five seconds; an exempt
+// caller skips that, so it cannot be cut off at all. The console holds an admin
+// credential for every organisation, which makes it the worst caller to have
+// been holding that exemption.
+//
+// Restoring the default is a one-word edit that breaks nothing and is caught by
+// nothing else in the tree — there was no test here before, so removing the
+// default passed on the first run and would have passed just as well if it had
+// been left in place. That is what this exists to stop.
+func TestNoCallerIsExemptFromCertBindingByDefault(t *testing.T) {
+	setBootEnv(t)
+	c, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if len(c.CertBindingExemptCallers) != 0 {
+		t.Errorf("CertBindingExemptCallers defaults to %v, but an exempt caller is one "+
+			"RevokeCaller cannot cut off; exemptions must be an operator's deliberate act",
+			c.CertBindingExemptCallers)
+	}
+}
+
+// The exemption still works when an operator asks for it.
+//
+// The pin above is only half the property. A default of "none" that came from
+// the parse being broken — rather than from the default being removed — would
+// satisfy it while quietly retiring the escape hatch the bootstrap case needs.
+func TestCertBindingExemptionIsStillAvailableToOperators(t *testing.T) {
+	setBootEnv(t)
+	t.Setenv("ATL_CERT_BINDING_EXEMPT_CALLERS", "bootstrap-cn, other-cn")
+	c, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if len(c.CertBindingExemptCallers) != 2 ||
+		c.CertBindingExemptCallers[0] != "bootstrap-cn" ||
+		c.CertBindingExemptCallers[1] != "other-cn" {
+		t.Errorf("ATL_CERT_BINDING_EXEMPT_CALLERS parsed as %v, want the two CNs set",
+			c.CertBindingExemptCallers)
+	}
+}
