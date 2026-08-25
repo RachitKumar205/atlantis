@@ -201,7 +201,20 @@ func ConfigFromEnv() (Config, error) {
 			// certificates whose SAN matches nothing; a guessed image is a pod
 			// that cannot start; a guessed cache address is a pod that never
 			// becomes Ready.
-			ExternalHost:  os.Getenv("PROVISIONER_EXTERNAL_HOST"),
+			ExternalHost: os.Getenv("PROVISIONER_EXTERNAL_HOST"),
+
+			// Defaults TRUE, and defaults rather than being required because
+			// the console running beside the organisations is the deployed
+			// shape — a hosted console is in the cluster, and the address it
+			// dials is a Service name.
+			//
+			// Set it false for a console on somebody's machine, which is what
+			// `make dev-console-app` runs. Getting it wrong does not fail at
+			// startup: the console resolves a name that does not exist where it
+			// is running, and every page reports a DNS error naming the cluster
+			// resolver.
+			ConsoleInCluster: envBool("PROVISIONER_CONSOLE_IN_CLUSTER", true),
+
 			ServerImage:   os.Getenv("PROVISIONER_SERVER_IMAGE"),
 			SignerImage:   os.Getenv("PROVISIONER_SIGNER_IMAGE"),
 			PostgresImage: os.Getenv("PROVISIONER_POSTGRES_IMAGE"),
@@ -359,6 +372,28 @@ func envOr(name, def string) string {
 		return v
 	}
 	return def
+}
+
+// envBool reads a boolean whose default may be true.
+//
+// Only "false", "0" and "no" turn one off, and anything unrecognised keeps the
+// default rather than being read as false. A setting that defaults true must
+// not be switched off by a typo: PROVISIONER_CONSOLE_IN_CLUSTER=flase would
+// otherwise repoint every organisation's console address at a name the console
+// cannot resolve, and nothing would report a bad value.
+func envBool(name string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "":
+		return def
+	case "false", "0", "no":
+		return false
+	case "true", "1", "yes":
+		return true
+	default:
+		fmt.Fprintf(os.Stderr, "provisioner: %s=%q is not a boolean (using %v)\n",
+			name, os.Getenv(name), def)
+		return def
+	}
 }
 
 func envDuration(name string, def time.Duration) time.Duration {

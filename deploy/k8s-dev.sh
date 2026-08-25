@@ -136,6 +136,7 @@ LOCAL_IMAGES=(
     "atlantis-signer:local"
     "atlantis-provisioner:local"
     "atlantis-cloud:local"
+    "atlantis-console:local"
 )
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
@@ -606,6 +607,13 @@ spec:
           env:
             - { name: CLOUD_AUDIENCE, value: "${CLOUD_AUDIENCE:-http://localhost:3000}" }
             - { name: PROVISIONER_EXTERNAL_HOST, value: "${EXTERNAL_HOST:-atl-dev.test}" }
+            # The console runs in this cluster, so the address it is given for
+            # each organisation is a Service name and not the node. Callers are
+            # outside and still get the node — see Status.PublicEndpoint.
+            #
+            # Set this false only if you run the console on your machine with
+            # make dev-console-app, which dials from outside.
+            - { name: PROVISIONER_CONSOLE_IN_CLUSTER, value: "${PROVISIONER_CONSOLE_IN_CLUSTER:-true}" }
             - { name: PROVISIONER_SERVER_IMAGE, value: "atlantis-server:local" }
             - { name: PROVISIONER_SIGNER_IMAGE, value: "atlantis-signer:local" }
             - { name: PROVISIONER_POSTGRES_IMAGE, value: "atlantis-pg:${PG_IMAGE_TAG}" }
@@ -795,5 +803,224 @@ spec:
 EOF
 kubectl --context "$CLUSTER" -n atlantis-system rollout status deployment/atlantis-cloud --timeout=180s
 
+# ---------------------------------------------------------------------------
+# The console: the management UI, and the thing "Open organisation" opens.
+#
+# It ran on a developer's laptop for longer than it should have. Cloud stores
+# one console_url per organisation and the provisioner writes it from
+# CLOUD_AUDIENCE, so while that said localhost:3000 the button worked for
+# exactly one person and gave everybody else ERR_CONNECTION_REFUSED — including
+# the person running a from-scratch demo on the machine that had never run
+# `make dev-console-app`.
+#
+# ONE CONSOLE, NOT ONE PER ORGANISATION. It holds its own state — sessions,
+# enrolment tokens, caller certificates, the audit log — none of which has a
+# home in a tenant namespace, and it reaches each organisation over mTLS with
+# credentials it unseals from its own database. Supabase's dashboard is the same
+# shape for the same reason. So this is one Deployment beside Cloud rather than
+# a container in every tenant pod.
+#
+# THE PORT IS PINNED, like Cloud's. It is half of CLOUD_AUDIENCE, which is
+# compared for exact equality against the `aud` claim in every assertion and is
+# copied into cloud.orgs.console_url at provisioning time. A port Kubernetes
+# picked would change on re-create and silently invalidate both.
+# ---------------------------------------------------------------------------
+say "console"
+
+if ! "$CONTAINER" exec "$CLUSTER" crictl inspecti \
+    docker.io/library/atlantis-console:local >/dev/null 2>&1 ||
+    [ -z "${CONSOLE_SESSION_SECRET:-}" ]; then
+    if ! "$CONTAINER" exec "$CLUSTER" crictl inspecti \
+        docker.io/library/atlantis-console:local >/dev/null 2>&1; then
+        echo "  skipping the console: atlantis-console:local is not in the cluster."
+        echo "  Run 'make dev-k8s-load', which builds it and loads it."
+    else
+        echo "  skipping the console: no session secret was passed."
+        echo "  'make dev-k8s-load' creates one — see dev-session-secret."
+    fi
+    say "ready"
+    kubectl --context "$CLUSTER" get nodes
+    exit 0
+fi
+
+# CONSOLE_DATA_KEY is the same value the provisioner is given, and it has to be:
+# the provisioner seals each organisation's private key with it at registration
+# and the console unseals it to dial. Two different keysets produce rows that
+# look complete and refuse to decrypt.
+# The enrolment certificate has to name the address machines dial.
+#
+# Checked here rather than left to fail at `tide login`, where it arrives as
+# "could not verify the server's certificate" — a message about trust that says
+# nothing about the name being missing.
+#
+# It is easy to reach this state. init-certs.sh reissues a leaf only when the
+# file is absent, so adding ATLANTIS_DOMAIN after the certificate already exists
+# leaves the old names in place and changes nothing. The fix is to delete
+# certs/enroll-server.* and re-run, which the message says.
+ENROLL_HOST="${EXTERNAL_HOST:-atl-dev.test}"
+if [ -n "${CONSOLE_ENROLL_TLS_CERT_DATA:-}" ] &&
+    ! printf '%s' "${CONSOLE_ENROLL_TLS_CERT_DATA}" |
+        openssl x509 -noout -checkhost "${ENROLL_HOST}" >/dev/null 2>&1; then
+    echo "  the enrolment certificate does not cover ${ENROLL_HOST}, so 'tide login'"
+    echo "  against this cluster would fail to verify it. Regenerate it:"
+    echo "    rm -f certs/enroll-server.crt certs/enroll-server.key"
+    echo "    ATLANTIS_DOMAIN=${ENROLL_HOST} make dev-certs"
+    exit 1
+fi
+
+kubectl --context "$CLUSTER" -n atlantis-system \
+    create secret generic atlantis-console \
+    --from-literal=CONSOLE_PG_URL="${CONSOLE_PG_URL:?set CONSOLE_PG_URL}" \
+    --from-literal=CONSOLE_DATA_KEY="${CONSOLE_DATA_KEY:?set CONSOLE_DATA_KEY}" \
+    --from-literal=CONSOLE_SESSION_SECRET="${CONSOLE_SESSION_SECRET}" \
+    --from-literal=enroll-server.crt="${CONSOLE_ENROLL_TLS_CERT_DATA:-}" \
+    --from-literal=enroll-server.key="${CONSOLE_ENROLL_TLS_KEY_DATA:-}" \
+    --dry-run=client -o yaml | kubectl --context "$CLUSTER" apply -f - >/dev/null
+
+kubectl --context "$CLUSTER" apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: atlantis-console
+  namespace: atlantis-system
+  labels:
+    app.kubernetes.io/name: atlantis-console
+spec:
+  type: NodePort
+  selector: { app.kubernetes.io/name: atlantis-console }
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      # Pinned. See the note above — this number is half of CLOUD_AUDIENCE.
+      nodePort: ${CONSOLE_NODE_PORT:-30300}
+    # A second port, not a second Service: it is the same process. It carries
+    # only /enroll and /renew, never the pages or the API, and it terminates its
+    # own TLS because /renew reads the client certificate off the connection.
+    - name: enroll
+      port: 3443
+      targetPort: 3443
+      nodePort: ${CONSOLE_ENROLL_NODE_PORT:-30443}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: atlantis-console
+  namespace: atlantis-system
+  labels:
+    app.kubernetes.io/name: atlantis-console
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: atlantis-console }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: atlantis-console }
+    spec:
+      # The console never calls the Kubernetes API. It reaches organisations
+      # over mTLS at the addresses in its own database, which is why it needs no
+      # cluster credentials at all and should not be handed any.
+      automountServiceAccountToken: false
+      hostAliases:
+        - ip: "${PG_HOST_IP}"
+          hostnames: ["${PG_HOST_NAME}"]
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+        fsGroup: 65532
+      terminationGracePeriodSeconds: 40
+      containers:
+        - name: console
+          image: atlantis-console:local
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+          envFrom:
+            - secretRef: { name: atlantis-console }
+          env:
+            # All three are required and none has a default, deliberately: an
+            # empty expected issuer or audience does not fail, it skips the
+            # check — so a console missing one would accept assertions from any
+            # issuer, for any console.
+            - { name: CLOUD_ISSUER, value: "${CLOUD_ISSUER}" }
+            - { name: CLOUD_AUDIENCE, value: "${CLOUD_AUDIENCE}" }
+            # The keys are fetched in-cluster, and the issuer is not.
+            #
+            # CLOUD_ISSUER is an identity, compared byte for byte against the
+            # iss claim, so it has to be the address a browser used.
+            # CLOUD_JWKS_URL is only a place to fetch from, and the verifier
+            # keeps them independent for exactly this reason.
+            #
+            # No backticks anywhere in this block. It sits inside an unquoted
+            # heredoc, so the shell expands it before kubectl ever sees it:
+            # quoting a claim name the way prose would turns it into a command
+            # substitution and prints "iss: command not found" mid-deploy.
+            #
+            # Deriving one from the other put a host-only name inside a pod:
+            # atl-dev.test resolves on the machine running the browser and
+            # nowhere in cluster DNS, so every sign-in failed with "cannot reach
+            # the identity provider" while Cloud was healthy two pods away.
+            #
+            # The Service name rather than a hostAlias to the node. A hostAlias
+            # would work and would carry the node's IP, which changes whenever
+            # the cluster is rebuilt — the same staleness that once left
+            # kube-proxy pointing at an address that had moved.
+            - { name: CLOUD_JWKS_URL, value: "${CONSOLE_CLOUD_JWKS_URL:-http://atlantis-cloud.atlantis-system.svc.cluster.local:9500/.well-known/jwks.json}" }
+            # Enrolment. CONSOLE_ENROLL_PUBLIC_URL is not derivable from the
+            # bind address and must not be read from the Host header: the
+            # console prints it into a command that carries a live token, so a
+            # wrong host hands that token to whoever owns it.
+            - { name: CONSOLE_ENROLL_LISTEN, value: ":3443" }
+            - { name: CONSOLE_ENROLL_TLS_CERT, value: "/enroll/enroll-server.crt" }
+            - { name: CONSOLE_ENROLL_TLS_KEY, value: "/enroll/enroll-server.key" }
+            - { name: CONSOLE_ENROLL_PUBLIC_URL, value: "${CONSOLE_ENROLL_URL:-https://${EXTERNAL_HOST:-atl-dev.test}:${CONSOLE_ENROLL_NODE_PORT:-30443}}" }
+          ports:
+            - name: http
+              containerPort: 3000
+            - name: enroll
+              containerPort: 3443
+          # /api/setup/status is what the image's own HEALTHCHECK uses: it
+          # answers without a session, which every other route needs.
+          livenessProbe:
+            httpGet: { path: /api/setup/status, port: 3000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            httpGet: { path: /api/setup/status, port: 3000 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: 192Mi
+              cpu: 50m
+            # Equal to requests, like the tenant workloads: a console that is
+            # merely slow degrades every organisation's management at once.
+            limits:
+              memory: 192Mi
+          volumeMounts:
+            - { name: enroll, mountPath: /enroll, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: enroll
+          secret:
+            secretName: atlantis-console
+            items:
+              - { key: enroll-server.crt, path: enroll-server.crt }
+              - { key: enroll-server.key, path: enroll-server.key }
+            # 0440 with the fsGroup above, like Cloud's signing key: the private
+            # key is readable by the group and by nobody else.
+            defaultMode: 0440
+        - name: tmp
+          emptyDir: {}
+EOF
+kubectl --context "$CLUSTER" -n atlantis-system rollout status deployment/atlantis-console --timeout=180s
+
 say "ready"
 kubectl --context "$CLUSTER" get nodes
+echo
+echo "  console:  ${CLOUD_AUDIENCE}"
+echo "  cloud:    ${CLOUD_ISSUER}"
+echo "  enrol:    ${CONSOLE_ENROLL_URL:-https://${EXTERNAL_HOST:-atl-dev.test}:${CONSOLE_ENROLL_NODE_PORT:-30443}}"

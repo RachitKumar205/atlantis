@@ -160,12 +160,36 @@ type Config struct {
 	// with anything the platform runs.
 	NamespacePrefix string
 
-	// ExternalHost is the name callers and the console reach organisations at.
+	// ExternalHost is the name callers reach organisations at.
 	//
 	// A name, never an address. The local cluster's node IP changes on every
 	// recreate while its name does not, so an address here would bake a
 	// certificate that stops verifying the next time the cluster is rebuilt.
+	//
+	// It used to say "callers and the console". That was true while both were
+	// outside the cluster and stopped being true when the console moved into
+	// it — see ConsoleInCluster.
 	ExternalHost string
+
+	// ConsoleInCluster reports whether the console runs beside these
+	// organisations rather than outside the cluster.
+	//
+	// It decides Status.Endpoint, which is the address the CONSOLE dials, as
+	// distinct from Status.PublicEndpoint which is the address a CALLER dials.
+	// Status has kept those apart from the beginning, and its comment says they
+	// "differ once the console is inside the cluster and callers are not" —
+	// this is the setting that makes them differ.
+	//
+	// A deployment fact, not something this package can work out. An in-cluster
+	// console dialling ExternalHost asks cluster DNS to resolve a name that
+	// only exists outside, and gets "server misbehaving" from the cluster
+	// resolver — a message about DNS that names nothing an operator would
+	// connect to where the console happens to be running.
+	//
+	// The certificates already allow both: ensureCerts puts the in-cluster
+	// service names in the leaf's SANs alongside ExternalHost, so switching
+	// this does not need a reissue.
+	ConsoleInCluster bool
 
 	// StorageClass for the Postgres volume. Empty uses the cluster default,
 	// which is fine locally and is not something to rely on in a cluster where
@@ -222,6 +246,19 @@ type Config struct {
 	// cluster simply never becomes ready.
 	OperatorNamespace string
 
+	// ControlPlaneNamespace is where the console runs.
+	//
+	// The organisation's network policy allows that namespace's console pod to
+	// reach the ports an organisation serves on. Without it an in-cluster
+	// console is refused by the tenant isolation rule, because that rule is
+	// written as "everything except the pod network" — which was exactly right
+	// while the console was outside and silently excludes it now that it is not.
+	//
+	// The allow is narrow on purpose: this namespace AND the console's own pod
+	// label, not the namespace alone. Anything else running beside the console
+	// gets nothing, and another tenant's pod is still refused.
+	ControlPlaneNamespace string
+
 	// PostgresInstances is 1 for development. Three is the floor once anything
 	// is promised to anybody: CloudNativePG hard-restarts a single-instance
 	// cluster on every operator upgrade and blocks node drains.
@@ -267,6 +304,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.OperatorNamespace == "" {
 		c.OperatorNamespace = "cnpg-system"
+	}
+	if c.ControlPlaneNamespace == "" {
+		c.ControlPlaneNamespace = "atlantis-system"
 	}
 	return c
 }

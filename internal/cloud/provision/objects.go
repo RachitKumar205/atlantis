@@ -91,13 +91,14 @@ func (k *Kube) serviceAccount(ns string) ctrlclient.Object {
 	}
 }
 
-// networkPolicies is three policies rather than one, because they answer three
+// networkPolicies is four policies rather than one, because they answer four
 // different questions and a single policy that answered all of them would be
 // unreadable.
 //
 // Policies are additive — a pod is reachable if any policy admits the traffic —
-// so the baseline sets the floor and the other two open exactly what has to be
-// open.
+// so the baseline sets the floor and the other three open exactly what has to be
+// open: a caller from outside, the console from within the control plane, and
+// CloudNativePG for the database it manages.
 func (k *Kube) networkPolicies(ns string) []ctrlclient.Object {
 	proto := corev1.ProtocolTCP
 	port := func(p int32) networkingv1.NetworkPolicyPort {
@@ -122,14 +123,19 @@ func (k *Kube) networkPolicies(ns string) []ctrlclient.Object {
 		},
 	}
 
-	// 2. The services an organisation is reached at, from outside the cluster
-	//    only.
+	// 2. The services an organisation is reached at, from outside the cluster.
 	//
 	// "Outside the cluster" is expressed as the whole internet minus the pod
-	// network, which is what distinguishes the console and a caller — both off
-	// -cluster — from another tenant's pod. A pod cannot forge a source address
-	// outside the pod CIDR, so this is a real boundary rather than a
-	// convention.
+	// network, which is what distinguishes a caller from another tenant's pod. A
+	// pod cannot forge a source address outside the pod CIDR, so this is a real
+	// boundary rather than a convention.
+	//
+	// This used to say "the console and a caller — both off-cluster". That
+	// stopped being true when the console moved into the cluster: its traffic
+	// now comes from inside the pod CIDR, which this rule excludes by design, so
+	// it was refused here after resolving perfectly well. Dropped rather than
+	// rejected, so it presented as a page that loaded forever and then timed
+	// out. Policy 3 is what lets it in.
 	//
 	// It covers the health port too. That port is not harmless: /status and
 	// /metrics live on the same listener as /healthz and are unauthenticated by
@@ -162,7 +168,58 @@ func (k *Kube) networkPolicies(ns string) []ctrlclient.Object {
 		},
 	}
 
-	// 3. CloudNativePG reaches its own instances.
+	// 3. The console reaches this organisation.
+	//
+	// Narrow on purpose: the control-plane namespace AND the console's own pod
+	// label, in a single peer so the two are an AND rather than an OR. A
+	// namespace-only rule would admit anything that happens to run beside the
+	// console — Cloud, the provisioner, a debugging shell — none of which has
+	// business on a tenant's admin port.
+	//
+	// This does not weaken tenant isolation. Another organisation's pods carry
+	// neither the namespace nor the label, so policy 2's exclusion of the pod
+	// CIDR still refuses them, and the k8s tests that prove one tenant cannot
+	// reach another go on proving it.
+	//
+	// Harmless when the console runs outside the cluster: the selector matches
+	// no pod and the rule admits nobody. That is why it is unconditional rather
+	// than keyed to ConsoleInCluster — a policy that has to agree with a
+	// separate setting is a policy that will disagree with it.
+	console := &networkingv1.NetworkPolicy{
+		TypeMeta:   typeMeta("networking.k8s.io/v1", "NetworkPolicy"),
+		ObjectMeta: k.meta(ns, "console-access", "network"),
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{
+				MatchExpressions: []metav1.LabelSelectorRequirement{{
+					Key:      "app.kubernetes.io/name",
+					Operator: metav1.LabelSelectorOpIn,
+					Values:   []string{nameAtlantis, nameSigner},
+				}},
+			},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress: []networkingv1.NetworkPolicyIngressRule{{
+				From: []networkingv1.NetworkPolicyPeer{{
+					// One peer, both selectors: namespace AND pod. Two peers
+					// would be OR, which is the whole namespace.
+					NamespaceSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							// Set by Kubernetes on every namespace, so it needs
+							// nothing of ours to be labelled correctly.
+							"kubernetes.io/metadata.name": k.cfg.ControlPlaneNamespace,
+						},
+					},
+					PodSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"app.kubernetes.io/name": "atlantis-console"},
+					},
+				}},
+				Ports: []networkingv1.NetworkPolicyPort{
+					port(portGRPC), port(portHealth), port(portSigner),
+				},
+			}},
+		},
+	}
+
+	// 4. CloudNativePG reaches its own instances.
 	//
 	// Without this the baseline blocks the operator, and the symptom is the
 	// worst kind: the Cluster never becomes ready, with nothing in its status
@@ -188,7 +245,7 @@ func (k *Kube) networkPolicies(ns string) []ctrlclient.Object {
 		},
 	}
 
-	return []ctrlclient.Object{baseline, external, operator}
+	return []ctrlclient.Object{baseline, external, console, operator}
 }
 
 // pkiSecret is the source of truth for this organisation's certificates.

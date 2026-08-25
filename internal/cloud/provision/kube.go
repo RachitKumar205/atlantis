@@ -487,14 +487,34 @@ func (k *Kube) addresses(ctx context.Context, ns string, b *certs.Bundle) (Statu
 		}
 		return fmt.Sprintf("%s:%d", k.cfg.ExternalHost, port)
 	}
+
+	// What the CONSOLE dials, which is not always what a caller dials.
+	//
+	// Gated on the same NodePort allocation as the external form even though a
+	// Service name resolves the moment the Service exists. Readiness is the
+	// conjunction of these fields being non-empty, so letting the in-cluster
+	// address fill in first would report an organisation ready while no caller
+	// could reach it.
+	consoleAddr := func(service string, nodePort, servicePort int32) string {
+		if nodePort == 0 {
+			return ""
+		}
+		if !k.cfg.ConsoleInCluster {
+			return addr(nodePort)
+		}
+		return fmt.Sprintf("%s.%s.svc.cluster.local:%d", service, ns, servicePort)
+	}
+
+	endpoint := consoleAddr(nameAtlantis, grpcPort, portGRPC)
+	healthAddr := consoleAddr(nameAtlantis, healthPort, portHealth)
 	signerURL := ""
-	if signerPort != 0 {
-		signerURL = fmt.Sprintf("https://%s", addr(signerPort))
+	if s := consoleAddr(nameSigner, signerPort, portSigner); s != "" {
+		signerURL = "https://" + s
 	}
 	return Status{
-		Endpoint:       addr(grpcPort),
+		Endpoint:       endpoint,
 		PublicEndpoint: addr(grpcPort),
-		HealthAddr:     addr(healthPort),
+		HealthAddr:     healthAddr,
 		SignerAddr:     signerURL,
 
 		CAPEM:          b.CA.CertPEM,

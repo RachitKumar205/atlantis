@@ -46,7 +46,35 @@ CONSOLE_PG_URL      ?= postgres://$(CONSOLE_PG_ROLE):$(CONSOLE_PG_PASSWORD)@$(PG
 # local accounts and no development bypass, so these are required to start it —
 # `make dev-auth` runs the issuer these values point at.
 CLOUD_LISTEN       ?= :9500
-CLOUD_AUDIENCE     ?= http://localhost:3000
+
+# CLOUD_AUDIENCE is the console's own address, and it is also what the
+# provisioner writes into cloud.orgs.console_url — the URL behind "Open
+# organisation" in Cloud.
+#
+# It pointed at localhost:3000 for as long as the console only ever ran on a
+# developer's machine, which made that button work for exactly one person and
+# fail with ERR_CONNECTION_REFUSED for everybody else. The console now runs in
+# the cluster like the rest of the control plane, so this points there.
+#
+# `make dev-console-app` runs the console on this machine instead, under
+# CONSOLE_HOST_AUDIENCE. Run one or the other, not both, for the same reason
+# CLOUD_ISSUER carries.
+CONSOLE_NODE_PORT  ?= 30300
+CLOUD_AUDIENCE     ?= http://$(K8S_EXTERNAL_HOST):$(CONSOLE_NODE_PORT)
+
+# The enrolment listener, which is a second port and not a second service.
+#
+# It terminates its own TLS and asks the caller for a certificate, which the
+# pages port cannot do — `/renew` reads the client certificate straight off the
+# connection. That is why it is separate here and why it must not sit behind
+# anything that terminates TLS on its behalf.
+#
+# In a deployment this certificate is publicly trusted, so `tide login` verifies
+# it against the system roots and needs no --ca. Locally it chains to the dev CA,
+# so `tide login` needs --ca ./certs/ca.crt. The shape is the same; only where
+# the certificate comes from differs.
+CONSOLE_ENROLL_NODE_PORT ?= 30443
+CONSOLE_ENROLL_URL       ?= https://$(K8S_EXTERNAL_HOST):$(CONSOLE_ENROLL_NODE_PORT)
 CLOUD_JWKS_URL     ?= $(CLOUD_ISSUER)/.well-known/jwks.json
 CLOUD_SIGNING_KEY  ?= $(DEV_CERT_DIR)/cloud-signing-key.pem
 
@@ -331,7 +359,7 @@ build-pg-image: ## Build the Postgres image provisioned organisations run
 	$(CONTAINER) build --file Dockerfile.pg -t atlantis-pg:$(PG_IMAGE_TAG) .
 
 .PHONY: build-provision-images
-build-provision-images: build-server-image build-signer-image build-pg-image build-provisioner-image build-cloud-image ## Build every image the local cluster runs
+build-provision-images: build-server-image build-signer-image build-pg-image build-provisioner-image build-cloud-image build-console-image ## Build every image the local cluster runs
 
 .PHONY: build-signer-image
 build-signer-image: ## Build the atlantis-signer image (cert signing service)
@@ -437,6 +465,14 @@ DEV_CERT_DIR ?= ./certs
 # already gitignored. See dev-data-key for why it is a file and not minted per
 # run.
 DEV_DATA_KEY_FILE ?= $(DEV_CERT_DIR)/console-data-key
+
+# What the console signs session cookies with.
+#
+# A file rather than a value minted per run, for the same reason as the data
+# key next to it: a fresh secret invalidates every session that already exists,
+# so a console that regenerated one on each start would sign everybody out on
+# every restart and roll-out.
+DEV_SESSION_SECRET_FILE ?= $(DEV_CERT_DIR)/console-session-secret
 
 .PHONY: dev-certs
 dev-certs: ## Generate the local CAs + server, console, signer and enrolment certs into ./certs
@@ -644,7 +680,7 @@ dev-k8s: ## Create the local Kubernetes cluster with storage and CloudNativePG
 # the role and skips the Deployment rather than failing — `make dev-k8s` builds a
 # cluster and is not expected to have database passwords to hand.
 .PHONY: dev-k8s-load
-dev-k8s-load: build-provision-images dev-cloud-role dev-console-role dev-data-key dev-cloud-data-key dev-cloud-signing-key ## Rebuild the images and push them into the cluster
+dev-k8s-load: build-provision-images dev-certs dev-cloud-role dev-console-role dev-data-key dev-cloud-data-key dev-cloud-signing-key dev-session-secret ## Rebuild the images and push them into the cluster
 	CLUSTER=$(K8S_CLUSTER) CONTAINER=$(CONTAINER) FORCE_LOAD=1 \
 		PG_HOST="$(PG_HOST)" \
 		PG_IMAGE_TAG="$(PG_IMAGE_TAG)" \
@@ -658,6 +694,13 @@ dev-k8s-load: build-provision-images dev-cloud-role dev-console-role dev-data-ke
 		CLOUD_NODE_PORT="$(CLOUD_NODE_PORT)" \
 		CLOUD_DATA_KEY="$$(cat $(CLOUD_DATA_KEY_FILE))" \
 		CLOUD_SIGNING_KEY_DATA="$$(cat $(CLOUD_SIGNING_KEY))" \
+		CONSOLE_NODE_PORT="$(CONSOLE_NODE_PORT)" \
+		CLOUD_JWKS_URL="$(CLOUD_JWKS_URL)" \
+		CONSOLE_SESSION_SECRET="$$(cat $(DEV_SESSION_SECRET_FILE))" \
+		CONSOLE_ENROLL_NODE_PORT="$(CONSOLE_ENROLL_NODE_PORT)" \
+		CONSOLE_ENROLL_URL="$(CONSOLE_ENROLL_URL)" \
+		CONSOLE_ENROLL_TLS_CERT_DATA="$$(cat $(DEV_CERT_DIR)/enroll-server.crt)" \
+		CONSOLE_ENROLL_TLS_KEY_DATA="$$(cat $(DEV_CERT_DIR)/enroll-server.key)" \
 		./deploy/k8s-dev.sh
 
 # The provisioner, run on the host against the cluster's kubeconfig.
@@ -745,6 +788,18 @@ dev: dev-certs dev-infra ## Start Postgres + memcached, then run the server
 # were byte-for-byte copies, which meant a change to one would silently not
 # reach the other and nobody would notice until the browser target behaved
 # differently from the one everything else uses.
+# The console's own name when it is this machine rather than the cluster.
+#
+# Separate from CLOUD_AUDIENCE for the reason CLOUD_HOST_ISSUER is separate from
+# CLOUD_ISSUER. CLOUD_AUDIENCE defaults to the cluster, because that is where the
+# console runs; these targets run it here instead. Inheriting the default would
+# start a console on :3000 that insists its own name is atl-dev.test:30300, so
+# every assertion Cloud minted for it would be refused on an audience mismatch —
+# an error about a claim, not about which console you are looking at.
+#
+# Run one or the other. If you use this, point the organisation at it too:
+#   UPDATE cloud.orgs SET console_url = 'http://localhost:3000';
+CONSOLE_HOST_AUDIENCE ?= http://localhost:3000
 CONSOLE_DEV_ENV = \
 	CONSOLE_PG_URL="$(CONSOLE_PG_URL)" \
 	CONSOLE_SESSION_SECRET="$${CONSOLE_SESSION_SECRET:-dev-secret-change-in-prod-32chars!!}" \
@@ -752,7 +807,7 @@ CONSOLE_DEV_ENV = \
 	CONSOLE_COOKIE_SECURE=false \
 	CONSOLE_DATA_KEY="$$(cat $(DEV_DATA_KEY_FILE))" \
 	CLOUD_ISSUER="$(CLOUD_ISSUER)" \
-	CLOUD_AUDIENCE="$(CLOUD_AUDIENCE)" \
+	CLOUD_AUDIENCE="$(CONSOLE_HOST_AUDIENCE)" \
 	CLOUD_JWKS_URL="$(CLOUD_JWKS_URL)" \
 	$(CONSOLE_ENROLL_ENV)
 
@@ -778,6 +833,20 @@ dev-console-app: dev-certs dev-console-role dev-data-key build-console-embedded 
 # console.orgs rather than process configuration. Nothing is reachable until it
 # is registered — deliberately, because a fallback endpoint is exactly the
 # silent cross-organisation read the design exists to prevent.
+
+.PHONY: dev-session-secret
+dev-session-secret: ## Create (once) the secret the console signs session cookies with
+	@if [ ! -f "$(DEV_SESSION_SECRET_FILE)" ]; then \
+	  mkdir -p "$$(dirname $(DEV_SESSION_SECRET_FILE))"; \
+	  LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 48 > "$(DEV_SESSION_SECRET_FILE)"; \
+	  chmod 600 "$(DEV_SESSION_SECRET_FILE)"; \
+	  echo "==> wrote a new session secret to $(DEV_SESSION_SECRET_FILE)"; \
+	fi
+	@# 48 characters against a 32-character minimum, from urandom rather than a
+	@# fixed development string. A checked-in default would be the value every
+	@# local console shares, and the one somebody eventually carries into a
+	@# deployment because it was already in the Makefile and worked.
+	@echo "$$(cat $(DEV_SESSION_SECRET_FILE))"
 
 .PHONY: dev-data-key
 dev-data-key: ## Create (once) the local keyset that seals organisation credentials
