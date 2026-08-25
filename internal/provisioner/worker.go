@@ -91,6 +91,14 @@ type Cluster interface {
 // nothing for this package to hold open between organisations.
 type RegisterFunc func(ctx context.Context, pgURL, keyset string, r console.OrgRegistration) error
 
+// UnregisterFunc removes a destroyed organisation's registration from the
+// console.
+//
+// The mirror of RegisterFunc, and it takes no keyset: removing rows needs
+// nothing unsealed. Injected for the same reason — so the purge path can be
+// tested without a console database.
+type UnregisterFunc func(ctx context.Context, pgURL, org string) error
+
 // ClusterFactory builds a connection to the cluster.
 //
 // A factory rather than a value because Kubernetes credentials expire, rotate,
@@ -103,10 +111,11 @@ type ClusterFactory func() (Cluster, error)
 
 // Worker claims organisations and provisions them.
 type Worker struct {
-	cfg      Config
-	q        Queue
-	register RegisterFunc
-	log      *slog.Logger
+	cfg        Config
+	q          Queue
+	register   RegisterFunc
+	unregister UnregisterFunc
+	log        *slog.Logger
 
 	newCluster ClusterFactory
 
@@ -121,13 +130,13 @@ type Worker struct {
 	degraded atomic.Bool
 }
 
-// New returns a worker. The register function is optional and defaults to
-// console.RegisterOrg; tests supply their own to avoid needing a console
-// database for a test about the loop.
+// New returns a worker. The register and unregister functions are optional and
+// default to console.RegisterOrg and console.UnregisterOrg; tests supply their
+// own to avoid needing a console database for a test about the loop.
 //
 // The cluster arrives as a factory, and New calls it once so a bad
 // configuration is refused here rather than on the first claim.
-func New(cfg Config, q Queue, newCluster ClusterFactory, register RegisterFunc, log *slog.Logger) (*Worker, error) {
+func New(cfg Config, q Queue, newCluster ClusterFactory, register RegisterFunc, unregister UnregisterFunc, log *slog.Logger) (*Worker, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -140,6 +149,9 @@ func New(cfg Config, q Queue, newCluster ClusterFactory, register RegisterFunc, 
 	if register == nil {
 		register = console.RegisterOrg
 	}
+	if unregister == nil {
+		unregister = console.UnregisterOrg
+	}
 	if log == nil {
 		log = slog.Default()
 	}
@@ -151,7 +163,7 @@ func New(cfg Config, q Queue, newCluster ClusterFactory, register RegisterFunc, 
 		return nil, errors.New("provisioner: the cluster factory returned nothing")
 	}
 	return &Worker{
-		cfg: cfg, q: q, register: register, log: log,
+		cfg: cfg, q: q, register: register, unregister: unregister, log: log,
 		newCluster: newCluster, cluster: c,
 	}, nil
 }
@@ -903,6 +915,30 @@ func (w *Worker) purgeOne(ctx context.Context, org string) {
 		// to be deleted and quietly was not is the worst outcome here, so this
 		// keeps being retried rather than backing off into silence.
 		log.Error("could not destroy the organisation", "err", err)
+		if mErr := w.q.MarkPurgeFailed(ctx, org, err.Error()); mErr != nil {
+			log.Error("could not release the purge claim", "err", mErr)
+		}
+		return
+	}
+
+	// The console's copy, which the destroyed namespace does not take with it.
+	//
+	// It holds a sealed private key for this organisation, plus the sessions,
+	// enrolment tokens and certificate fingerprints that referenced it — none of
+	// which means anything now that the authority behind them is gone. Left
+	// behind, they accumulate one dead organisation at a time while `cloud org
+	// purge` reports that everything was destroyed.
+	//
+	// Between Destroy and MarkPurged on purpose. Before Destroy it would strip a
+	// live organisation's credentials and then possibly fail to destroy it,
+	// leaving something running that the console can no longer reach. After
+	// MarkPurged the row would be gone and nothing would retry this.
+	if err := w.unregister(ctx, w.cfg.ConsolePGURL, org); err != nil {
+		// Retried rather than logged past. The claim is released so the next
+		// pass picks it up; Destroy is idempotent against an absent namespace,
+		// so the retry converges instead of repeating work.
+		log.Error("the organisation was destroyed but the console still holds "+
+			"its credentials", "err", err)
 		if mErr := w.q.MarkPurgeFailed(ctx, org, err.Error()); mErr != nil {
 			log.Error("could not release the purge claim", "err", mErr)
 		}

@@ -78,7 +78,7 @@ func run(log *slog.Logger) error {
 	// neither a rotated authority nor a development cluster that was rebuilt.
 	newCluster := func() (provisioner.Cluster, error) { return openCluster(cfg.Provision, log) }
 
-	w, err := provisioner.New(cfg, db, newCluster, nil, log)
+	w, err := provisioner.New(cfg, db, newCluster, nil, nil, log)
 	if err != nil {
 		return err
 	}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/rachitkumar205/atlantis/internal/secrets"
 )
@@ -260,4 +261,89 @@ func leafOf(certPEM string) (*x509.Certificate, error) {
 		return nil, fmt.Errorf("the client certificate could not be parsed: %w", err)
 	}
 	return leaf, nil
+}
+
+// UnregisterOrg removes everything the console holds for an organisation that
+// no longer exists.
+//
+// # Why this exists
+//
+// Purging an organisation destroyed its namespace, its database and its
+// certificate authority, and left this row untouched. So the console went on
+// holding a sealed private key for an organisation that had been deleted, for
+// ever, and `cloud org purge` told the operator it had destroyed everything.
+// Nothing else ever deleted from console.orgs — the only DELETE in the tree was
+// in a test.
+//
+// # What it removes, and the one thing it keeps
+//
+// The registration and the operational state that referenced it: sessions bound
+// to the organisation, enrolment tokens that could still be redeemed, and the
+// fingerprint-to-organisation rows renewal looks up. None of those mean anything
+// once the certificate authority behind them is gone, and an enrolment token
+// outliving its organisation is a live credential for something that no longer
+// exists.
+//
+// The audit log is deliberately NOT removed. It references the organisation by
+// name and is supposed to outlive it: "what happened to acme" has to still have
+// an answer after acme stops existing, which is the same reason purgeOne writes
+// an audit row on its way out.
+//
+// # Idempotent
+//
+// Deleting nothing is success. The purge path retries after a partial failure,
+// and a second pass finding the rows already gone is the ordinary case rather
+// than a problem.
+func UnregisterOrg(ctx context.Context, pgURL, org string) error {
+	if org == "" {
+		return errors.New("an organisation is required")
+	}
+	// The same connection setup the console itself uses, rather than a bare
+	// pgxpool.New. console.orgs carries no row-level security today, so this is
+	// not load-bearing yet — it is here so that adding a policy later does not
+	// silently turn these deletes into no-ops.
+	cfg, err := newPoolConfig(pgURL)
+	if err != nil {
+		return fmt.Errorf("console database URL: %w", err)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("open console db: %w", err)
+	}
+	defer pool.Close()
+	// pgxpool.NewWithConfig is lazy, so an unreachable database would otherwise
+	// surface as a failure to delete rather than a failure to connect.
+	if err := pool.Ping(ctx); err != nil {
+		return fmt.Errorf("connect to console db: %w", err)
+	}
+
+	// One transaction. A half-removed organisation is the state this function
+	// exists to stop: enrolment tokens outliving the registration would be
+	// redeemable against an organisation the console can no longer describe.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin unregister: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	// Ordered dependents-first. Nothing here has a foreign key — the console
+	// schema declares none — so the order buys no integrity, only a readable
+	// transaction if one statement fails.
+	for _, q := range []struct{ what, sql string }{
+		{"enrolment tokens", `DELETE FROM console.enroll_tokens WHERE org = $1`},
+		{"caller certificates", `DELETE FROM console.caller_certs WHERE org = $1`},
+		{"sessions", `DELETE FROM console.sessions WHERE org = $1`},
+		{"the registration", `DELETE FROM console.orgs WHERE org = $1`},
+	} {
+		if _, err := tx.Exec(ctx, q.sql, org); err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == undefinedTable {
+				// A console database that predates one of these tables. Not a
+				// reason to leave the rest of the organisation registered.
+				continue
+			}
+			return fmt.Errorf("remove %s for %s: %w", q.what, org, err)
+		}
+	}
+	return tx.Commit(ctx)
 }

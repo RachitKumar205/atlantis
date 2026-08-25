@@ -422,11 +422,44 @@ func newTestWorker(t *testing.T, cfg Config, q Queue, c Cluster, reg RegisterFun
 
 func newTestWorkerF(t *testing.T, cfg Config, q Queue, f *fakeFactory, reg RegisterFunc) *Worker {
 	t.Helper()
-	w, err := New(cfg, q, f.next, reg, nil)
+	// A no-op unregistration by default, not nil.
+	//
+	// nil would fall back to console.UnregisterOrg, which opens the database at
+	// cfg.ConsolePGURL — a fake URL here — so every purge test would fail on a
+	// connection rather than on what it is about. A test that wants to assert
+	// what was removed replaces w.unregister with its own recorder.
+	w, err := New(cfg, q, f.next, reg,
+		func(context.Context, string, string) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return w
+}
+
+// unregisterRecorder collects what the purge path asked the console to remove.
+type unregisterRecorder struct {
+	mu   sync.Mutex
+	orgs []string
+	err  error
+}
+
+func (r *unregisterRecorder) record(ctx context.Context, _, org string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	if r.err != nil {
+		return r.err
+	}
+	r.orgs = append(r.orgs, org)
+	return nil
+}
+
+func (r *unregisterRecorder) seen() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.orgs...)
 }
 
 // ------------------------------------------------------------------ the loop
@@ -1780,5 +1813,85 @@ func TestAnUnregisteredRotationReportsThePreviousExpiry(t *testing.T) {
 		t.Errorf("the gauge reads %.0fs, want about %.0fs — it is reporting the "+
 			"certificate that was written rather than the one the console is "+
 			"actually presenting", got, want)
+	}
+}
+
+// ------------------------------------------- unregistering a purged org
+
+// A purge removes the console's copy as well as the namespace.
+//
+// Destroying the namespace takes the database and the certificate authority
+// with it and leaves console.orgs untouched — so the console went on holding a
+// sealed private key for an organisation that no longer existed, while `cloud
+// org purge` reported that everything had been destroyed.
+func TestPurgingRemovesTheConsoleRegistration(t *testing.T) {
+	q := newFakeQueue()
+	q.purgeQueue = []store.Claimed{{Org: "gone"}}
+	c := &fakeCluster{}
+
+	rec := &unregisterRecorder{}
+	w := newTestWorker(t, testConfig(), q, c, nil)
+	w.unregister = rec.record
+	w.reap(context.Background())
+
+	if got := rec.seen(); len(got) != 1 || got[0] != "gone" {
+		t.Errorf("the console was asked to remove %v, want [gone]; a purged "+
+			"organisation's credentials stay in console.orgs for ever", got)
+	}
+}
+
+// The namespace goes first, then the console's copy.
+//
+// The other order strips a live organisation's credentials and may then fail to
+// destroy it, leaving something running that the console can no longer reach.
+func TestTheNamespaceIsDestroyedBeforeTheRegistrationIsRemoved(t *testing.T) {
+	q := newFakeQueue()
+	q.purgeQueue = []store.Claimed{{Org: "gone"}}
+
+	var order []string
+	c := &fakeCluster{onDestroy: func(string) { order = append(order, "destroy") }}
+	rec := &unregisterRecorder{}
+
+	w := newTestWorker(t, testConfig(), q, c, nil)
+	w.unregister = func(ctx context.Context, pgURL, org string) error {
+		order = append(order, "unregister")
+		return rec.record(ctx, pgURL, org)
+	}
+	w.reap(context.Background())
+
+	if len(order) != 2 || order[0] != "destroy" || order[1] != "unregister" {
+		t.Errorf("the purge ran %v, want [destroy unregister]", order)
+	}
+}
+
+// An organisation whose console copy could not be removed is not marked purged.
+//
+// Marking it would end the retries with the credentials still in the console,
+// and nothing else ever revisits a purged row. Releasing the claim instead means
+// the next pass tries again; Destroy is idempotent against a namespace that is
+// already gone, so it converges rather than repeating work.
+func TestAFailedUnregistrationRetriesRatherThanMarkingPurged(t *testing.T) {
+	q := newFakeQueue()
+	q.purgeQueue = []store.Claimed{{Org: "gone"}}
+	c := &fakeCluster{}
+
+	rec := &unregisterRecorder{err: errors.New("console database is down")}
+	w := newTestWorker(t, testConfig(), q, c, nil)
+	w.unregister = rec.record
+	w.reap(context.Background())
+
+	q.mu.Lock()
+	purged := append([]string(nil), q.purged...)
+	failed := append([]failedMark(nil), q.purgeFailed...)
+	q.mu.Unlock()
+
+	if len(purged) != 0 {
+		t.Errorf("marked %v purged while the console still holds its credentials", purged)
+	}
+	if len(failed) != 1 || failed[0].org != "gone" {
+		t.Fatalf("the claim was not released for retry: %+v", failed)
+	}
+	if !strings.Contains(failed[0].reason, "console database is down") {
+		t.Errorf("the recorded reason does not name the failure: %q", failed[0].reason)
 	}
 }
