@@ -159,19 +159,26 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 		sandboxes: newSandboxLayer(cfg.SandboxPerUserLimit, cfg.SandboxTTL),
 		bgCtx:     bgCtx, bgCancel: bgCancel,
 	}
-	// The signer client, and the listener that will use it.
+	// The fallback signer and the enrolment listener, built independently.
 	//
-	// Both at startup, both fatal. Config.validateEnrollment has already
-	// refused a half-configured console, so reaching here with a broken
-	// certificate path means a file that is missing or unreadable — which is
-	// exactly the failure that must not wait until somebody needs a certificate.
-	if cfg.EnrollmentEnabled() {
+	// They used to be one branch, which meant a console could not have a
+	// listener without a process-wide signer address. A hosted console has no
+	// such address: every signer belongs to an organisation and signerFor picks
+	// the right one per request. See Config.EnrollmentEnabled.
+	//
+	// Both at startup, both fatal. validateEnrollment has already refused a
+	// half-configured group, so reaching here with a broken certificate path
+	// means a file that is missing or unreadable — exactly the failure that must
+	// not wait until somebody needs a certificate.
+	if cfg.FallbackSignerConfigured() {
 		signer, serr := newSignerClient(cfg)
 		if serr != nil {
 			db.close()
 			return nil, serr
 		}
 		s.signer = signer
+	}
+	if cfg.EnrollmentEnabled() {
 		if serr := s.buildEnrollListener(); serr != nil {
 			db.close()
 			return nil, serr

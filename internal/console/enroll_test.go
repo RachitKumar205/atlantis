@@ -101,10 +101,14 @@ func TestHalfConfiguredEnrolmentIsRefused(t *testing.T) {
 	}
 }
 
-// The refusal names every missing setting, not just the first one found.
+// The refusal names every missing setting in the group, not just the first.
 //
 // An operator configuring this from scratch would otherwise restart the console
 // once per variable, which is how a five-minute task becomes an afternoon.
+//
+// Scoped to the group since the two were separated. A signer address alone is a
+// half-configured signer; it says nothing about the enrolment listener, which is
+// legitimately empty when enrolment is off.
 func TestTheRefusalNamesEveryMissingSetting(t *testing.T) {
 	setConsoleEnv(t)
 	t.Setenv("ATL_SIGNER_ADDR", enrolmentEnv["ATL_SIGNER_ADDR"])
@@ -113,10 +117,7 @@ func TestTheRefusalNamesEveryMissingSetting(t *testing.T) {
 	if err == nil {
 		t.Fatal("a signer address alone was accepted")
 	}
-	for name := range enrolmentEnv {
-		if name == "ATL_SIGNER_ADDR" {
-			continue
-		}
+	for _, name := range []string{"ATL_SIGNER_CERT", "ATL_SIGNER_KEY", "ATL_SIGNER_CA"} {
 		if !strings.Contains(err.Error(), name) {
 			t.Errorf("the error does not name %s: %v", name, err)
 		}
@@ -125,6 +126,66 @@ func TestTheRefusalNamesEveryMissingSetting(t *testing.T) {
 	// looking at the wrong line.
 	if strings.Contains(err.Error(), "ATL_SIGNER_ADDR is unset") {
 		t.Errorf("the error names a setting that is present: %v", err)
+	}
+	// Nor the listener, which is off rather than broken. Naming it would tell an
+	// operator to configure something they did not ask for.
+	if strings.Contains(err.Error(), "CONSOLE_ENROLL_LISTEN") {
+		t.Errorf("the error names the enrolment listener, which is legitimately "+
+			"unset here: %v", err)
+	}
+}
+
+// Both groups are reported at once when both are half-configured.
+//
+// Returning only the first would restart the operator's edit-and-retry loop per
+// group — the same fault the test above exists to prevent, one level coarser.
+func TestTheRefusalNamesBothGroupsAtOnce(t *testing.T) {
+	setConsoleEnv(t)
+	t.Setenv("ATL_SIGNER_ADDR", enrolmentEnv["ATL_SIGNER_ADDR"])
+	t.Setenv("CONSOLE_ENROLL_LISTEN", enrolmentEnv["CONSOLE_ENROLL_LISTEN"])
+
+	_, err := ConfigFromEnv()
+	if err == nil {
+		t.Fatal("two half-configured groups were accepted")
+	}
+	if !strings.Contains(err.Error(), "ATL_SIGNER_CERT") {
+		t.Errorf("the error does not name the missing signer settings: %v", err)
+	}
+	if !strings.Contains(err.Error(), "CONSOLE_ENROLL_TLS_CERT") {
+		t.Errorf("the error does not name the missing listener settings: %v", err)
+	}
+}
+
+// The hosted shape: an enrolment listener and no process-wide signer at all.
+//
+// This is what every deployed console looks like. Each organisation carries its
+// own signer in console.orgs since migration 0009, and signerFor prefers it, so
+// there is no fleet-wide signer address to give — pointing the fallback at one
+// tenant's signer would route an unregistered organisation into somebody else's.
+//
+// It used to be refused. The two groups were one, so a listener could not be
+// configured without a signer address, and the console crash-looped on a
+// configuration that is the only correct one for production.
+func TestAListenerWithNoFallbackSignerIsAccepted(t *testing.T) {
+	setConsoleEnv(t)
+	for _, name := range []string{
+		"CONSOLE_ENROLL_LISTEN", "CONSOLE_ENROLL_TLS_CERT",
+		"CONSOLE_ENROLL_TLS_KEY", "CONSOLE_ENROLL_PUBLIC_URL",
+	} {
+		t.Setenv(name, enrolmentEnv[name])
+	}
+
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("a console with a listener and no fallback signer was refused: %v", err)
+	}
+	if !cfg.EnrollmentEnabled() {
+		t.Error("enrolment reports as disabled on a console that has a listener; " +
+			"the token route would answer 503 while every organisation's own " +
+			"signer sits ready")
+	}
+	if cfg.FallbackSignerConfigured() {
+		t.Error("a fallback signer is reported where none was set")
 	}
 }
 

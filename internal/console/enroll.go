@@ -239,7 +239,9 @@ func (s *Server) handleMintEnrollToken(w http.ResponseWriter, r *http.Request) {
 		// unconfigured in every deployment that ever ran, and the only way to
 		// find that out was to press the button.
 		jsonError(w, "certificate enrolment is not configured on this console: "+
-			"an operator sets ATL_SIGNER_ADDR and the enrolment listener",
+			"there is no enrolment listener, so a machine would have nowhere to "+
+			"redeem a token. An operator sets CONSOLE_ENROLL_LISTEN and its "+
+			"certificate",
 			http.StatusServiceUnavailable)
 		return
 	}

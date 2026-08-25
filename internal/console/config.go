@@ -248,7 +248,26 @@ func envInt(key string, fallback int) int {
 //
 // All of it or none of it — validateEnrollment refuses the states in between —
 // so one field answers for the whole feature.
-func (c Config) EnrollmentEnabled() bool { return c.SignerAddr != "" }
+// It is the LISTENER that decides this, not a signer address.
+//
+// It used to read SignerAddr, from when a console talked to one signer. Each
+// organisation now carries its own (console.orgs, migration 0009) and signerFor
+// prefers it, so a hosted console has every signer it needs and no process-wide
+// address at all — and under the old rule that console reported enrolment as
+// disabled while being perfectly able to issue certificates.
+//
+// The listener is the right question because it is the part that cannot be
+// resolved per organisation: without it there is nowhere for a machine to
+// redeem a token, whatever signer the organisation has. Which signer to use is
+// answered later, per organisation, by signerFor.
+func (c Config) EnrollmentEnabled() bool { return c.EnrollListen != "" }
+
+// FallbackSignerConfigured reports whether this console has a process-wide
+// signer to fall back on for organisations that carry none of their own.
+//
+// Expected to be false in a hosted deployment, where every organisation has its
+// own. `make dev-signer` is what it exists for.
+func (c Config) FallbackSignerConfigured() bool { return c.SignerAddr != "" }
 
 // validateEnrollment refuses a half-configured enrolment.
 //
@@ -288,42 +307,85 @@ func rejectRetiredEnrolmentEnv() error {
 		name, v)
 }
 
+// validateEnrollment checks two independent groups.
+//
+// # Why they are two groups and not one
+//
+// They were one, and the single group encoded an assumption that stopped being
+// true: that a console talks to ONE signer, named by ATL_SIGNER_ADDR. Since
+// migration 0009 each organisation carries its own signer in console.orgs, and
+// signerFor prefers it — the process-wide settings are a fallback for
+// organisations registered before that, and for `make dev-signer`.
+//
+// Keeping them in one group meant a console could not run an enrolment listener
+// without also being given a process-wide signer address. In a hosted
+// deployment there is no such address to give: every signer belongs to a
+// tenant, and pointing the fallback at one of them would route an organisation
+// with no row of its own into somebody else's signer — the same silent
+// cross-organisation read that removing ATL_ENDPOINT was meant to prevent.
+//
+// So: the listener is all-or-nothing, the fallback signer is all-or-nothing,
+// and neither requires the other.
 func (c Config) validateEnrollment() error {
-	set := map[string]string{
-		"ATL_SIGNER_ADDR":         c.SignerAddr,
-		"ATL_SIGNER_CERT":         c.SignerCert,
-		"ATL_SIGNER_KEY":          c.SignerKey,
-		"ATL_SIGNER_CA":           c.SignerCA,
-		"CONSOLE_ENROLL_LISTEN":   c.EnrollListen,
-		"CONSOLE_ENROLL_TLS_CERT": c.EnrollTLSCert,
-		"CONSOLE_ENROLL_TLS_KEY":  c.EnrollTLSKey,
-
-		// CONSOLE_ENROLL_CLIENT_CA used to be here, and the comment it carried
-		// is worth keeping because the failure it describes is the reason the
-		// setting is now gone rather than merely optional.
-		//
-		// It named one pool for the listener to verify every renewing machine
-		// against. buildEnrollListener set ClientCAs only when it was non-empty,
-		// and Go's VerifyClientCertIfGiven with a nil ClientCAs verifies against
-		// the SYSTEM roots, where no caller certificate chains — so a console
-		// configured exactly as the Makefile and the documentation described
-		// advertised enrolment as working and rejected every renewal inside the
-		// handshake. The suite stayed green because the fixture set it
-		// explicitly, and a setting only the fixture supplies is not
-		// configuration but a test passing for the wrong reason.
-		//
-		// Adding it to this set fixed that. What it could never fix is one pool
-		// against many authorities, which is what per-organisation signers made
-		// unavoidable — so the verification moved to handleRenew, where the
-		// organisation is known, and this setting has nothing left to name.
-		//
-		// CONSOLE_ENROLL_PUBLIC_URL: without it the console can enrol but cannot
-		// print a command anybody can run, because the address a machine reaches
-		// the enrolment listener at is not something it can derive. It must not
-		// be read from the Host header — that header is attacker-controlled and
-		// the page in question prints a live token.
-		"CONSOLE_ENROLL_PUBLIC_URL": c.EnrollPublicURL,
+	// Both groups are reported together when both are wrong. Returning the first
+	// would restart the operator's edit-and-retry loop once per group, which is
+	// the same "one variable per restart" this refusal exists to avoid — just at
+	// a coarser grain.
+	var problems []string
+	for _, g := range []struct {
+		what string
+		set  map[string]string
+	}{
+		{"the enrolment listener", map[string]string{
+			"CONSOLE_ENROLL_LISTEN":     c.EnrollListen,
+			"CONSOLE_ENROLL_TLS_CERT":   c.EnrollTLSCert,
+			"CONSOLE_ENROLL_TLS_KEY":    c.EnrollTLSKey,
+			"CONSOLE_ENROLL_PUBLIC_URL": c.EnrollPublicURL,
+		}},
+		{"the fallback signer", map[string]string{
+			"ATL_SIGNER_ADDR": c.SignerAddr,
+			"ATL_SIGNER_CERT": c.SignerCert,
+			"ATL_SIGNER_KEY":  c.SignerKey,
+			"ATL_SIGNER_CA":   c.SignerCA,
+		}},
+	} {
+		if err := c.validateGroup(g.what, g.set); err != nil {
+			problems = append(problems, err.Error())
+		}
 	}
+	if len(problems) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s", strings.Join(problems, "; and "))
+}
+
+// validateGroup refuses a group that is partly filled in.
+//
+// All of it or none of it, per group. The states in between are the ones that
+// fail late and quietly: a signer address with no client certificate produces a
+// handshake failure the console reports as "signer unreachable", and an
+// enrolment listener with no key does not listen at all. Neither is visible
+// until somebody needs a certificate.
+//
+// # Two settings that used to live here
+//
+// CONSOLE_ENROLL_CLIENT_CA named one pool for the listener to verify every
+// renewing machine against. buildEnrollListener set ClientCAs only when it was
+// non-empty, and Go's VerifyClientCertIfGiven with a nil ClientCAs verifies
+// against the SYSTEM roots, where no caller certificate chains — so a console
+// configured exactly as the Makefile and the documentation described advertised
+// enrolment as working and rejected every renewal inside the handshake. The
+// suite stayed green because the fixture set it explicitly, and a setting only
+// the fixture supplies is not configuration but a test passing for the wrong
+// reason. One pool could never cover many authorities, so the check moved into
+// handleRenew, where the organisation is known.
+//
+// CONSOLE_ENROLL_PUBLIC_URL stays, in the listener group: without it the
+// console can enrol but cannot print a command anybody can run, because the
+// address a machine reaches the listener at is not something it can derive. It
+// must not be read from the Host header — that header is attacker-controlled
+// and the page in question prints a live token.
+func (c Config) validateGroup(what string, set map[string]string) error {
 	var missing []string
 	filled := 0
 	for name, v := range set {
@@ -337,9 +399,9 @@ func (c Config) validateEnrollment() error {
 		return nil
 	}
 	sort.Strings(missing)
-	return fmt.Errorf("enrolment is half-configured: %s %s unset. "+
-		"Set all of them to issue caller certificates, or none of them to leave it off",
-		strings.Join(missing, ", "), plural(len(missing), "is", "are"))
+	return fmt.Errorf("%s is half-configured: %s %s unset. "+
+		"Set all of them, or none of them to leave it off",
+		what, strings.Join(missing, ", "), plural(len(missing), "is", "are"))
 }
 
 func plural(n int, one, many string) string {
