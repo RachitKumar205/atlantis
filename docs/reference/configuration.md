@@ -370,7 +370,6 @@ Read by `cmd/cloud`, which publishes the keys consoles verify against.
 | `CLOUD_TRUST_PROXY` | `false` | Read `X-Forwarded-For` when rate limiting. Leave off unless something you control terminates in front — the header is spoofable, and a limiter keyed on a spoofable value is one an attacker resets per request. |
 | `CLOUD_GITHUB_CLIENT_ID`, `CLOUD_GITHUB_CLIENT_SECRET` | (unset) | Sign in with GitHub. Both or neither — one without the other is refused at startup. Unset means the provider is not registered and its URLs answer 404. |
 | `CLOUD_GOOGLE_CLIENT_ID`, `CLOUD_GOOGLE_CLIENT_SECRET` | (unset) | Sign in with Google. Same rule. |
-| `CLOUD_SIGNIN_APP_URL` | (unset) | Where a finished OAuth callback sends the browser. Unset, the callback answers with a plain page naming the next step. |
 
 ### Signing in takes two factors, always
 

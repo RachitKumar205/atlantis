@@ -388,9 +388,10 @@ Cloud issued.
   first, which then reports that it expired.
 - Both providers use PKCE with `S256`, and Cloud stores no provider token — it
   reads the profile once during the callback and discards everything else.
-- With `CLOUD_SIGNIN_APP_URL` set, the callback redirects there with
-  `?next=enrol|verify`; unset, it answers with a plain page naming the next
-  step, which is what makes these routes usable before a sign-in app exists.
+- The callback returns the browser to `/signin?next=enrol|verify&provider=<id>`
+  — `enrol` when the account has no confirmed second factor, `verify` when it
+  has. The `Location` is relative, so it resolves against the origin serving the
+  sign-in application.
 
 **Three defects fixed underneath, all of the same shape** — a write that
 succeeded while doing something other than what it reported.
