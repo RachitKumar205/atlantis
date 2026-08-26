@@ -829,12 +829,12 @@ dev-console-app: dev-certs dev-console-role dev-data-key build-console-embedded 
 
 # ── Per-organisation atlantis registration ─────────────────────────────────
 #
-# The console no longer reads ATL_ENDPOINT or a certificate from its
-# environment. One console serves many organisations, each with its own
-# atlantis behind its own CA, so an address and a certificate are columns in
-# console.orgs rather than process configuration. Nothing is reachable until it
-# is registered — deliberately, because a fallback endpoint is exactly the
-# silent cross-organisation read the design exists to prevent.
+# The console reads no atlantis address or certificate from its environment.
+# One console serves many organisations, each with its own atlantis behind its
+# own CA, so both are columns in console.orgs.
+#
+# Nothing is reachable until it is registered. A fallback endpoint would answer
+# one organisation's reads from another organisation's atlantis.
 
 .PHONY: dev-session-secret
 dev-session-secret: ## Create (once) the secret the console signs session cookies with
@@ -875,45 +875,29 @@ dev-cloud-seed: dev-cloud-role build-cloud ## Put an existing account in an org:
 	  echo "account membership, it does not create one."; \
 	  exit 1; \
 	}
-	@# This used to run `cloud user create` too, and that account was a dead end.
-	@#
-	@# It writes a row with no password. Signing up for the same address then
-	@# takes handleSignup's ErrAlreadyExists branch, which deliberately answers
-	@# exactly as a real sign-up does and sends "somebody tried to sign up with
-	@# your address" instead of a verification link — so the browser shows the
-	@# success screen and the operator waits for a mail that never comes. It cost
-	@# an hour during the first end-to-end walkthrough, and the abandoned rows are
-	@# still in the development database.
-	@#
-	@# Sign-up in a browser is the path that works now, so the seed does the two
-	@# things a browser cannot: create the organisation and grant membership.
+	@# The seed grants membership and does not create the account. A row written
+	@# with no password sends a later sign-up for that address down
+	@# handleSignup's ErrAlreadyExists branch, which answers as a real sign-up
+	@# does and mails "somebody tried to sign up with your address": the browser
+	@# shows the success screen and no verification link arrives.
 	@#
 	@# The membership row is the gate. Cloud's /authorize reads it before minting
 	@# and so does `make dev-token`; neither produces an assertion for a pair
-	@# without one. `org create` refuses cleanly when the account does not exist
-	@# yet, which is the correct order of operations stated as an error.
+	@# without one.
 	@#
-	@# One command, where this used to be two.
+	@# `org create` takes the owner because an organisation with no member is a
+	@# 403 from /authorize however well it is provisioned. It refuses cleanly
+	@# when the account does not exist yet.
 	@#
-	@# `org create` now takes the owner, because an organisation with no member
-	@# is a 403 from /authorize no matter how well it is provisioned —
-	@# membership is checked before anything else. Splitting the two left that
-	@# state one forgotten command away, and this target is where it was
-	@# forgotten from.
-	@#
-	@# No `-` prefix. It is idempotent, so re-running is not an error — and a
-	@# `-` would swallow the failures that are, which is how a seed that stopped
-	@# working looks exactly like one that worked.
+	@# No `-` prefix. The target is idempotent, so re-running is not an error,
+	@# and a `-` would swallow the failures that are.
 	CLOUD_PG_URL="$(CLOUD_PG_URL)" $(BIN_DIR)/atlantis-cloud org create \
 		-org "$(ORG)" -owner "$(EMAIL)"
 	@echo
 	@echo "==> $(EMAIL) owns $(ORG), which is queued for provisioning."
 	@#
-	@# This used to say "Next: make dev-org-register". It stopped being true
-	@# when the provisioner landed: creating an organisation queues it, and a
-	@# running `make dev-provisioner` builds it without anybody typing
-	@# anything. A target that sends an operator at a command they no longer
-	@# need is the same defect as /authorize's 503 naming a CLI.
+	@# Creating an organisation queues it for provisioning; a running
+	@# `make dev-provisioner` builds it with nothing further typed.
 	@echo "    Next: make dev-provisioner (in another terminal) builds it."
 	@echo "          make dev-org-status ORG=$(ORG) follows it; then sign in at $(CLOUD_PUBLIC_URL)/signin"
 	@echo "          make dev-org-register ORG=$(ORG) is only for an atlantis you built by hand."
@@ -962,15 +946,14 @@ dev-org-register: dev-certs dev-data-key dev-cloud-role build-cloud ## Point an 
 
 # The key Cloud signs assertions with.
 #
-# A target of its own because Cloud now runs in the cluster, and the Deployment
-# takes this key from a Secret filled at deploy time. It used to be created
-# lazily by `cloud serve` on this machine, which worked while Cloud only ever
-# ran here — and left `make dev-k8s-load` on a clean checkout skipping Cloud
-# entirely, because the file it reads the Secret from did not exist yet.
+# A target of its own because Cloud runs in the cluster, and the Deployment
+# takes this key from a Secret filled at deploy time. A key created lazily by
+# `cloud serve` is missing from the file that Secret reads on a clean checkout,
+# and `make dev-k8s-load` then skips Cloud entirely.
 #
-# Idempotent. Re-running keeps the existing key, and that matters: a new key
-# invalidates every assertion in flight and every session, which presents as
-# everybody being signed out at once.
+# Idempotent. Re-running keeps the existing key: a new one invalidates every
+# assertion in flight and every session, which presents as everybody being
+# signed out at once.
 .PHONY: dev-cloud-signing-key
 dev-cloud-signing-key: ## Create (once) the key Cloud signs assertions with
 	@if [ ! -f "$(CLOUD_SIGNING_KEY)" ]; then \
@@ -1009,9 +992,9 @@ dev-cloud-data-key: ## Create (once) the keyset Cloud seals second-factor secret
 # Run one or the other, as with dev-provisioner.
 CLOUD_HOST_ISSUER ?= http://localhost:9500
 # CLOUD_MAIL_DEV prints verification and reset links to this terminal instead of
-# sending them, which is the intended local flow and the reason `cloud serve`
-# refuses to start with no transport at all: an unconfigured deployment used to
-# do this silently and look, from outside, exactly like one delivering mail.
+# sending them, which is the local flow. `cloud serve` refuses to start with no
+# transport at all: a deployment that logged links silently would look, from
+# outside, exactly like one delivering mail.
 #
 # Set CLOUD_RESEND_API_KEY and CLOUD_MAIL_FROM instead to send for real from
 # here — the two are mutually exclusive and Cloud says so if both are given.
@@ -1257,17 +1240,10 @@ dev-caller-cert: dev-certs ## Issue a local caller cert signed by the dev CA: ma
 	@echo "      This pair is for inspecting a handshake, not for running tide."
 
 # dev-isolated ran the whole stack, including atlantis itself, from
-# docker-compose. It does not work, and the reason has changed.
+# docker-compose. It does not work: Apple's `container` has no compose command.
 #
-# It used to have two: the atlantis image did not build, and Apple's `container`
-# has no compose command. **The first is fixed** — the proto stage now installs
-# its own plugins, and `make build-server-image` works. Only the second remains,
-# so rebuilding this target means hand-rolling what compose was doing: the certs
-# service, the shared named volumes, and the ordering between them.
-#
-# Leaving the old reason in place cost real time: a walkthrough hit this target,
-# read that the image build was broken, and went looking at a build that works.
-# A refusal that names a fixed problem is worse than no refusal at all.
+# Rebuilding it means hand-rolling what compose did — the certs service, the
+# shared named volumes, and the ordering between them.
 #
 # `make dev` covers the everyday case: Postgres and memcached in containers,
 # atlantis on the host where a debugger can reach it.
@@ -1383,23 +1359,16 @@ tidy: ## go mod tidy
 # atlantis/consumer/, or atlantis/vendorpkg/ diverges from the checked-in
 # tree. Run `make codegen` and commit the diff to recover.
 #
-# WHAT THIS DOES AND DOES NOT COVER
-#
 # Only useful in a tree that HAS .atl files — a caller's repo, or this one
-# with --workspace pointed at one. This repo ships none by design, so here
-# the command emits nothing and there is nothing to compare.
+# with --workspace pointed at one. This repo ships none, so here the command
+# emits nothing and there is nothing to compare. It reports which of those two
+# situations it is in.
 #
-# It used to report "codegen-check ok" in exactly that case: gen/ is
-# gitignored and absent on a fresh checkout, the mkdir -p below made both
-# sides of every diff empty-but-present, and comparing empty to empty
-# succeeded. So as a CI gate on this repo it passed unconditionally, for
-# any change to any emitter, and the green tick meant nothing. Meanwhile it
-# FAILED for developers whose working tree still held output generated
-# against a schema that has since moved to a caller repo — noisy where it
-# was wrong, silent where it mattered.
+# Reporting "codegen-check ok" there instead would pass this gate for any change
+# to any emitter: gen/ is gitignored and absent on a fresh checkout, and the
+# mkdir -p below makes both sides of every diff empty-but-present.
 #
-# It now says which of those two situations it is in, and emitter drift is
-# covered where it can actually be checked: TestEmittersMatchGolden in
+# Emitter drift is covered where it can be checked: TestEmittersMatchGolden in
 # internal/codegen runs every emitter against a committed fixture schema
 # and diffs the result against committed golden files. That runs under
 # plain `go test`, so it needs no .atl files anywhere and cannot go
