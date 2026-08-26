@@ -49,18 +49,20 @@ func TestEmittersMatchGolden(t *testing.T) {
 
 	got := map[string]string{}
 
-	// The same emitter set cmd/tidectl/codegen.go drives. A new emitter added
-	// there and not here is the one gap this test cannot see, which is what
-	// TestGoldenCoversEveryEmitter below is for.
+	// The same emitter set cmd/tidectl/codegen.go drives, at the same client
+	// prefix, so the golden files are the artifact that command produces. A new
+	// emitter added there and not here is the one gap this test cannot see,
+	// which is what TestGoldenCoversEveryEmitter below is for.
+	clientCfg := GenConfig{ModulePrefix: InRepoModulePrefix}
 	goEmitters := []struct {
 		name string
 		fn   func() ([]GoFile, error)
 	}{
 		{"go server", func() ([]GoFile, error) { return EmitGoServer(ir, GenConfig{}) }},
-		{"go client", func() ([]GoFile, error) { return EmitGoClient(ir, GenConfig{}) }},
+		{"go client", func() ([]GoFile, error) { return EmitGoClient(ir, clientCfg) }},
 		{"go keys", func() ([]GoFile, error) { return EmitGoCacheKeys(ir) }},
 		{"go custom server", func() ([]GoFile, error) { return EmitCustomServer(ir, GenConfig{}) }},
-		{"go custom client", func() ([]GoFile, error) { return EmitCustomClient(ir, GenConfig{}) }},
+		{"go custom client", func() ([]GoFile, error) { return EmitCustomClient(ir, clientCfg) }},
 		{"go jobs handlers", func() ([]GoFile, error) { return EmitJobsHandlers(ir) }},
 		{"go workflows", func() ([]GoFile, error) { return EmitWorkflows(ir) }},
 		{"go ephemerals", func() ([]GoFile, error) { return EmitEphemerals(ir) }},
@@ -118,10 +120,10 @@ func TestEmittersMatchGolden(t *testing.T) {
 			}
 		}
 		t.Logf("wrote %d golden files; review the diff before committing", len(got))
-		writeCompilecheckServer(t, ir)
+		writeCompilecheckTrees(t, ir)
 		return
 	}
-	compareCompilecheckServer(t, ir)
+	compareCompilecheckTrees(t, ir)
 
 	want, err := readGolden(goldenDir)
 	if err != nil {

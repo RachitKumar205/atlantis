@@ -30,9 +30,9 @@ type GoFile struct {
 // colliding as identical Go names in one `package server`.
 //
 // The emitted code depends on:
-//   - github.com/rachitkumar205/atlantis/internal/runtime          — Pool, Cache, Outbox interfaces + conv helpers
-//   - github.com/rachitkumar205/atlantis-go/pb/<ns>             — buf-generated proto types
-//   - github.com/pgvector/pgvector-go                    — only for entities with vector fields
+//   - github.com/rachitkumar205/atlantis/internal/runtime — Pool, Cache, Outbox interfaces + conv helpers
+//   - <GenConfig.ServerPBPrefix>/atlantis/<ns>/v1         — buf-generated proto types
+//   - github.com/pgvector/pgvector-go                     — only for entities with vector fields
 //   - standard library (context, database/sql, errors, fmt, time)
 //
 // SQL constants are baked into the file, one per query shape (Get / List /

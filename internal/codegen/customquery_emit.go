@@ -92,6 +92,9 @@ func EmitCustomClient(ir *dsl.IR, cfg GenConfig) ([]GoFile, error) {
 	if ir == nil {
 		return nil, fmt.Errorf("EmitCustomClient: ir is required")
 	}
+	if cfg.ModulePrefix == "" {
+		return nil, fmt.Errorf("EmitCustomClient: %w", errNoModulePrefix)
+	}
 	groups := groupCustomByNamespace(ir)
 	if len(groups) == 0 {
 		return nil, nil

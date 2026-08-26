@@ -51,8 +51,8 @@ jobs:
 
       - name: Generate proto Go code from atlantis/common/v1
         # internal/runtime/pagination.go imports
-        # github.com/rachitkumar205/atlantis-go/pb/atlantis/common/v1,
-        # which resolves via go.mod's `replace` to clients/go/pb/...
+        # github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/common/v1,
+        # which resolves via go.mod's `replace` to ./clients/go.
         # That directory is gitignored (derived output); regenerate it
         # before the build. buf.gen.yaml uses local plugins; install them
         # before buf runs.

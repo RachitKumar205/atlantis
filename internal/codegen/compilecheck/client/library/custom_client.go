@@ -7,7 +7,7 @@ import (
 
 	"google.golang.org/grpc"
 
-	pb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/library/v1"
+	pb "github.com/rachitkumar205/atlantis/internal/codegen/compilecheck/pb/atlantis/library/v1"
 )
 
 // CustomClient is the typed surface for the namespace's custom queries and procedures.

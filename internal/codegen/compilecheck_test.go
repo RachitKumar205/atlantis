@@ -9,7 +9,7 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
-// The emitted server, committed as an ordinary package so the Go compiler
+// The emitted Go, committed as ordinary packages so the Go compiler
 // type-checks it.
 //
 // The emitter tests call parseAsGo, which parses without type-checking, so a
@@ -28,148 +28,191 @@ import (
 //
 // A committed package that compiles but no longer matches the emitter would
 // report the emitter healthy from a stale artifact, so the same run that
-// compares the golden files compares this tree, and `-update` rewrites both.
-const compilecheckServerDir = "compilecheck/server"
+// compares the golden files compares these trees, and `-update` rewrites both.
 
-// compilecheckConfig points the emitter at the committed tree's own paths.
-// Both prefixes are inside this module: the emitted server imports atlantis's
-// internal/ packages, so it can only compile here.
+// compilecheckConfig points the emitters at the committed trees' own paths,
+// all inside this module. The emitted server imports atlantis's internal/
+// packages and can compile nowhere else; the client compiles wherever its pb
+// resolves, and compilecheck/pb is where the fixture's pb is committed.
 var compilecheckConfig = GenConfig{
+	ModulePrefix:    "github.com/rachitkumar205/atlantis/internal/codegen/compilecheck",
 	ServerPBPrefix:  "github.com/rachitkumar205/atlantis/internal/codegen/compilecheck/pb",
 	ServerPkgPrefix: "github.com/rachitkumar205/atlantis/internal/codegen/compilecheck/server",
 }
 
-// emitCompilecheckServer renders the fixture's server at the committed tree's
-// import paths, keyed by path relative to compilecheckServerDir.
-func emitCompilecheckServer(t *testing.T, ir *dsl.IR) map[string]string {
+type compilecheckEmitter struct {
+	name string
+	fn   func(*dsl.IR, GenConfig) ([]GoFile, error)
+}
+
+// compilecheckTree is one committed tree: the directory it lives in, the path
+// prefix its emitters write under, and the emitters that fill it.
+type compilecheckTree struct {
+	dir      string
+	prefix   string
+	emitters []compilecheckEmitter
+}
+
+// Every emitter that produces Go belongs to one of these trees. One added to
+// cmd/tidectl and left out here emits code nothing compiles, which is what
+// TestCompilecheckCoversEveryEmittedTree reports.
+var compilecheckTrees = []compilecheckTree{
+	{
+		dir:    "compilecheck/server",
+		prefix: "gen/go/server/",
+		emitters: []compilecheckEmitter{
+			{"EmitGoServer", EmitGoServer},
+			{"EmitCustomServer", EmitCustomServer},
+		},
+	},
+	{
+		dir:    "compilecheck/client",
+		prefix: "clients/go/client/",
+		emitters: []compilecheckEmitter{
+			{"EmitGoClient", EmitGoClient},
+			{"EmitCustomClient", EmitCustomClient},
+		},
+	},
+	{
+		dir:    "compilecheck/keys",
+		prefix: "gen/go/keys/",
+		emitters: []compilecheckEmitter{
+			{"EmitGoCacheKeys", func(ir *dsl.IR, _ GenConfig) ([]GoFile, error) {
+				return EmitGoCacheKeys(ir)
+			}},
+		},
+	},
+}
+
+// emitCompilecheckTree renders one tree at the committed import paths, keyed by
+// path relative to tree.dir.
+func emitCompilecheckTree(t *testing.T, tree compilecheckTree, ir *dsl.IR) map[string]string {
 	t.Helper()
 
-	// Both server-side Go emitters. EmitCustomServer is here because it emits
-	// the same KIND of code as EmitGoServer — importing pb and runtime, with
-	// the same pb prefix — and its output had never been compiled either. It
-	// carried the identical unresolvable `atlantis-go` import.
-	//
-	// Every server-side emitter belongs in this list. The client, keys, jobs,
-	// workflow and ephemeral emitters are not here yet; see the coverage note
-	// on TestCompilecheckCoversTheServerEmitters.
 	var files []GoFile
-	entityFiles, err := EmitGoServer(ir, compilecheckConfig)
-	if err != nil {
-		t.Fatalf("EmitGoServer for compilecheck: %v", err)
+	for _, em := range tree.emitters {
+		got, err := em.fn(ir, compilecheckConfig)
+		if err != nil {
+			t.Fatalf("%s for compilecheck: %v", em.name, err)
+		}
+		files = append(files, got...)
 	}
-	files = append(files, entityFiles...)
 
-	customFiles, err := EmitCustomServer(ir, compilecheckConfig)
-	if err != nil {
-		t.Fatalf("EmitCustomServer for compilecheck: %v", err)
-	}
-	files = append(files, customFiles...)
-
-	const emitPrefix = "gen/go/server/"
 	out := map[string]string{}
 	for _, gf := range files {
-		rel, ok := strings.CutPrefix(gf.Path, emitPrefix)
+		rel, ok := strings.CutPrefix(gf.Path, tree.prefix)
 		if !ok {
-			t.Fatalf("emitted server path %q does not start with %q; the "+
-				"remapping below would put it somewhere unexpected", gf.Path, emitPrefix)
+			t.Fatalf("emitted path %q does not start with %q; the remapping below "+
+				"would put it somewhere unexpected", gf.Path, tree.prefix)
 		}
 		out[rel] = gf.Content
 	}
 	if len(out) == 0 {
-		t.Fatal("the server emitters produced nothing for the fixture")
+		t.Fatalf("the emitters for %s produced nothing for the fixture", tree.dir)
 	}
 	return out
 }
 
-// Everything the emitters put under gen/go/server/ must be compiled.
-//
-// emitCompilecheckServer names its emitters by hand, so one added to
-// cmd/tidectl and not to that list emits server code this package never builds.
+// compilecheckTreeFor returns the tree that compiles an emitted path, and the
+// path relative to that tree's directory.
+func compilecheckTreeFor(path string) (compilecheckTree, string, bool) {
+	for _, tree := range compilecheckTrees {
+		if rel, ok := strings.CutPrefix(path, tree.prefix); ok {
+			return tree, rel, true
+		}
+	}
+	return compilecheckTree{}, "", false
+}
+
+// Every Go file the emitters produce must be compiled by one of the trees.
 //
 // The check is derived rather than listed: the golden set already holds every
-// emitter's output for the fixture, so anything in it under gen/go/server/ and
-// absent from the compile fixture is a hole, whatever emitter produced it.
-//
-// Server side only. gen/go/keys and clients/go/client are emitted and
-// golden-compared but not compiled: the client is caller code that imports the
-// caller's own pb, so compiling it here would need a second fixture module.
-func TestCompilecheckCoversTheServerEmitters(t *testing.T) {
-	const serverPrefix = "gen/go/server/"
+// emitter's output for the fixture, so a golden .go file with no counterpart in
+// a compile fixture is a hole, whatever emitter produced it.
+func TestCompilecheckCoversEveryEmittedTree(t *testing.T) {
 	goldenDir := filepath.Join("testdata", "golden")
 
 	want, err := readGolden(goldenDir)
 	if err != nil {
 		t.Fatalf("read golden: %v", err)
 	}
-	var serverFiles []string
+
+	checked := 0
 	for path := range want {
-		if strings.HasPrefix(path, serverPrefix) && strings.HasSuffix(path, ".go") {
-			serverFiles = append(serverFiles, strings.TrimPrefix(path, serverPrefix))
-		}
-	}
-	if len(serverFiles) == 0 {
-		t.Fatal("the golden set has no files under gen/go/server/, so this test " +
-			"is comparing two empty sets and proving nothing")
-	}
-
-	for _, rel := range serverFiles {
-		if _, err := os.Stat(filepath.Join(compilecheckServerDir, rel)); err != nil {
-			t.Errorf("%s%s is emitted but has no counterpart in %s, so it is never "+
-				"compiled. Add its emitter to emitCompilecheckServer: %v",
-				serverPrefix, rel, compilecheckServerDir, err)
-		}
-	}
-}
-
-func writeCompilecheckServer(t *testing.T, ir *dsl.IR) {
-	t.Helper()
-	if err := os.RemoveAll(compilecheckServerDir); err != nil {
-		t.Fatalf("clear %s: %v", compilecheckServerDir, err)
-	}
-	for rel, content := range emitCompilecheckServer(t, ir) {
-		dst := filepath.Join(compilecheckServerDir, rel)
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", dst, err)
-		}
-		if err := os.WriteFile(dst, []byte(content), 0o644); err != nil {
-			t.Fatalf("write %s: %v", dst, err)
-		}
-	}
-	t.Logf("rewrote %s — run `go build ./internal/codegen/compilecheck/...`, and "+
-		"regenerate its pb with buf if the fixture's .proto changed", compilecheckServerDir)
-}
-
-func compareCompilecheckServer(t *testing.T, ir *dsl.IR) {
-	t.Helper()
-	want := emitCompilecheckServer(t, ir)
-	for rel, content := range want {
-		path := filepath.Join(compilecheckServerDir, rel)
-		onDisk, err := os.ReadFile(path)
-		if err != nil {
-			t.Errorf("%s: %v\nThe committed compile fixture is what type-checks "+
-				"the emitter. Regenerate with: go test ./internal/codegen -run Golden -update",
-				path, err)
+		if !strings.HasSuffix(path, ".go") {
 			continue
 		}
-		if string(onDisk) != content {
-			t.Errorf("%s differs from what the emitter produces now.\n%s\n"+
-				"A committed package that compiles but no longer matches the "+
-				"emitter reports the emitter healthy on the strength of a stale "+
-				"artifact. Regenerate with: "+
-				"go test ./internal/codegen -run Golden -update",
-				path, firstDifference(string(onDisk), content))
+		tree, rel, ok := compilecheckTreeFor(path)
+		if !ok {
+			t.Errorf("%s is emitted but no compile fixture claims its prefix, so "+
+				"it is never compiled. Add a tree to compilecheckTrees", path)
+			continue
+		}
+		checked++
+		if _, err := os.Stat(filepath.Join(tree.dir, rel)); err != nil {
+			t.Errorf("%s is emitted but has no counterpart in %s, so it is never "+
+				"compiled. Add its emitter to that tree: %v", path, tree.dir, err)
 		}
 	}
-
-	// The reverse direction: a file on disk the emitter no longer produces is
-	// dead code that still compiles, so `go build` would keep passing on an
-	// artifact nothing generates.
-	entries, err := os.ReadDir(compilecheckServerDir)
-	if err != nil {
-		t.Fatalf("read %s: %v", compilecheckServerDir, err)
+	if checked == 0 {
+		t.Fatal("the golden set holds no emitted .go files, so this test is " +
+			"comparing two empty sets and proving nothing")
 	}
-	if len(entries) == 0 {
-		t.Fatal("the compile fixture directory is empty, so `go build` compiles " +
-			"nothing and the type check this package exists for is not happening")
+}
+
+func writeCompilecheckTrees(t *testing.T, ir *dsl.IR) {
+	t.Helper()
+	for _, tree := range compilecheckTrees {
+		if err := os.RemoveAll(tree.dir); err != nil {
+			t.Fatalf("clear %s: %v", tree.dir, err)
+		}
+		for rel, content := range emitCompilecheckTree(t, tree, ir) {
+			dst := filepath.Join(tree.dir, rel)
+			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", dst, err)
+			}
+			if err := os.WriteFile(dst, []byte(content), 0o644); err != nil {
+				t.Fatalf("write %s: %v", dst, err)
+			}
+		}
+		t.Logf("rewrote %s", tree.dir)
+	}
+	t.Log("run `go build ./internal/codegen/compilecheck/...`, and regenerate " +
+		"its pb with buf if the fixture's .proto changed")
+}
+
+func compareCompilecheckTrees(t *testing.T, ir *dsl.IR) {
+	t.Helper()
+	for _, tree := range compilecheckTrees {
+		for rel, content := range emitCompilecheckTree(t, tree, ir) {
+			path := filepath.Join(tree.dir, rel)
+			onDisk, err := os.ReadFile(path)
+			if err != nil {
+				t.Errorf("%s: %v\nThe committed compile fixture is what type-checks "+
+					"the emitter. Regenerate with: go test ./internal/codegen -run Golden -update",
+					path, err)
+				continue
+			}
+			if string(onDisk) != content {
+				t.Errorf("%s differs from what the emitter produces now.\n%s\n"+
+					"A committed package that compiles but no longer matches the "+
+					"emitter reports the emitter healthy on the strength of a stale "+
+					"artifact. Regenerate with: "+
+					"go test ./internal/codegen -run Golden -update",
+					path, firstDifference(string(onDisk), content))
+			}
+		}
+
+		// The reverse direction: a file on disk the emitter no longer produces is
+		// dead code that still compiles, so `go build` would keep passing on an
+		// artifact nothing generates.
+		entries, err := os.ReadDir(tree.dir)
+		if err != nil {
+			t.Fatalf("read %s: %v", tree.dir, err)
+		}
+		if len(entries) == 0 {
+			t.Fatalf("%s is empty, so `go build` compiles nothing and the type "+
+				"check it exists for is not happening", tree.dir)
+		}
 	}
 }

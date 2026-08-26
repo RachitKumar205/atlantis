@@ -62,16 +62,18 @@ func cmdCodegen(args []string) int {
 	prior, _ := loadCheckpoint(*checkpoint) // missing checkpoint is fine on first run
 	codegen.AssignProtoNumbers(prior, newIR)
 
-	// Emit every artifact.
+	// Emit every artifact. The client prefix is this repo's own clients/go,
+	// which is where the wrappers land and where buf writes their pb.
+	clientCfg := codegen.GenConfig{ModulePrefix: codegen.InRepoModulePrefix}
 	emitters := []struct {
 		name string
 		fn   func() ([]codegen.GoFile, error)
 	}{
 		{"go server", func() ([]codegen.GoFile, error) { return codegen.EmitGoServer(newIR, codegen.GenConfig{}) }},
-		{"go client", func() ([]codegen.GoFile, error) { return codegen.EmitGoClient(newIR, codegen.GenConfig{}) }},
+		{"go client", func() ([]codegen.GoFile, error) { return codegen.EmitGoClient(newIR, clientCfg) }},
 		{"go keys", func() ([]codegen.GoFile, error) { return codegen.EmitGoCacheKeys(newIR) }},
 		{"go custom server", func() ([]codegen.GoFile, error) { return codegen.EmitCustomServer(newIR, codegen.GenConfig{}) }},
-		{"go custom client", func() ([]codegen.GoFile, error) { return codegen.EmitCustomClient(newIR, codegen.GenConfig{}) }},
+		{"go custom client", func() ([]codegen.GoFile, error) { return codegen.EmitCustomClient(newIR, clientCfg) }},
 		{"go jobs handlers", func() ([]codegen.GoFile, error) { return codegen.EmitJobsHandlers(newIR) }},
 		{"go workflows", func() ([]codegen.GoFile, error) { return codegen.EmitWorkflows(newIR) }},
 		{"go ephemerals", func() ([]codegen.GoFile, error) { return codegen.EmitEphemerals(newIR) }},

@@ -293,7 +293,7 @@ procedure DeleteOutfit for SavedOutfit {
   steps { delete SavedOutfit where id = $outfit_id }
 }
 `)
-	files, err := EmitCustomClient(ir, GenConfig{})
+	files, err := EmitCustomClient(ir, testClientCfg)
 	if err != nil {
 		t.Fatalf("EmitCustomClient: %v", err)
 	}

@@ -11,8 +11,8 @@ import (
 // EmitGoClient renders the typed Go client that callers import. One file
 // per entity, packaged by namespace to mirror the server layout:
 //
-//	gen/go/client/consumer/account_client.go   package consumer
-//	gen/go/client/vendor/product_variant_client.go   package vendor
+//	clients/go/client/consumer/account_client.go             package consumer
+//	clients/go/client/vendorpkg/product_variant_client.go    package vendorpkg
 //
 // Each per-entity file exposes a typed interface (`AccountClient`) and a
 // concrete struct whose method bodies dial through the buf-generated
@@ -24,6 +24,9 @@ import (
 func EmitGoClient(newIR *dsl.IR, cfg GenConfig) ([]GoFile, error) {
 	if newIR == nil {
 		return nil, fmt.Errorf("EmitGoClient: newIR is required")
+	}
+	if cfg.ModulePrefix == "" {
+		return nil, fmt.Errorf("EmitGoClient: %w", errNoModulePrefix)
 	}
 	var out []GoFile
 	for i := range newIR.Entities {

@@ -5,6 +5,33 @@ import (
 	"testing"
 )
 
+// testClientCfg is a caller's module path, not this one. A generated client is
+// caller code, so the tests emit at a prefix only a caller would supply; a path
+// hardcoded in the emitter would show up as this prefix being ignored.
+var testClientCfg = GenConfig{ModulePrefix: "example.com/caller/internal/gen"}
+
+// An empty ModulePrefix would emit `pb "/pb/atlantis/consumer/v1"`, which
+// resolves in no module. Both client emitters refuse it.
+func TestEmitClients_RequireModulePrefix(t *testing.T) {
+	// Custom queries as well as entities, so neither emitter can pass by
+	// having nothing to emit.
+	ir := lowerCustom(t, customSchemaFixture+`
+query OutfitsForConsumer for SavedOutfit {
+  input { consumer_id: bigint }
+  output as SavedOutfit
+  sql touches(SavedOutfit) {
+    SELECT id FROM consumer_saved_outfit WHERE consumer_id = $consumer_id
+  }
+}
+`)
+	if _, err := EmitGoClient(ir, GenConfig{}); err == nil {
+		t.Error("EmitGoClient accepted an empty ModulePrefix")
+	}
+	if _, err := EmitCustomClient(ir, GenConfig{}); err == nil {
+		t.Error("EmitCustomClient accepted an empty ModulePrefix")
+	}
+}
+
 func TestEmitGoClient_ProducesPerEntityFilesPerNamespace(t *testing.T) {
 	// Per-namespace package layout. Two entities in the same namespace →
 	// two files in clients/go/client/<ns>/. No top-level aggregator anymore —
@@ -13,7 +40,7 @@ func TestEmitGoClient_ProducesPerEntityFilesPerNamespace(t *testing.T) {
 entity Account in consumer { id bigint primary  email text not null }
 entity Outfit  in consumer { id bigint primary  name  text not null }
 `)
-	files, err := EmitGoClient(ir, GenConfig{})
+	files, err := EmitGoClient(ir, testClientCfg)
 	if err != nil {
 		t.Fatalf("EmitGoClient: %v", err)
 	}
@@ -39,7 +66,7 @@ entity Outfit  in consumer { id bigint primary  name  text not null }
 
 func TestEmitGoClient_PackageHeader(t *testing.T) {
 	ir := lower(t, `entity Account in consumer { id bigint primary }`)
-	files, _ := EmitGoClient(ir, GenConfig{})
+	files, _ := EmitGoClient(ir, testClientCfg)
 	c := files[0].Content
 	// `package consumer`, mirroring gen/go/server/consumer/.
 	assertContains(t, c, "package consumer")
@@ -67,7 +94,7 @@ entity CartItem in consumer {
   primary by cart_id, variant_id
 }
 `)
-	files, err := EmitGoClient(ir, GenConfig{})
+	files, err := EmitGoClient(ir, testClientCfg)
 	if err != nil {
 		t.Fatalf("EmitGoClient: %v", err)
 	}
@@ -81,7 +108,7 @@ func TestEmitGoClient_NoValueStructEmission(t *testing.T) {
 	// message is the canonical value type. A stray `type Account struct`
 	// in the emitted client file means a partial revert.
 	ir := lower(t, `entity Account in consumer { id bigint primary  email text not null }`)
-	files, _ := EmitGoClient(ir, GenConfig{})
+	files, _ := EmitGoClient(ir, testClientCfg)
 	c := files[0].Content
 	assertNotContains(t, c, "type Account struct")
 }
@@ -92,7 +119,7 @@ func TestEmitGoClient_InterfaceUsesProtoTypes(t *testing.T) {
 	// purely so callers depend on one stable interface that we can
 	// extend with retries / metrics later without touching buf output.
 	ir := lower(t, `entity A in x { id bigint primary  v text }`)
-	files, _ := EmitGoClient(ir, GenConfig{})
+	files, _ := EmitGoClient(ir, testClientCfg)
 	c := findFile(t, files, "clients/go/client/x/a_client.go")
 	for _, sig := range []string{
 		"type AClient interface {",
@@ -113,7 +140,7 @@ func TestEmitGoClient_ConcreteDialsBufStub(t *testing.T) {
 	// here later, that's the right place — buf-generated stubs stay
 	// untouched.
 	ir := lower(t, `entity Account in consumer { id bigint primary  email text not null }`)
-	files, _ := EmitGoClient(ir, GenConfig{})
+	files, _ := EmitGoClient(ir, testClientCfg)
 	c := findFile(t, files, "clients/go/client/consumer/account_client.go")
 	assertContains(t, c, "inner pb.AccountServiceClient")
 	assertContains(t, c, "func NewAccountClient(cc grpc.ClientConnInterface) AccountClient")
@@ -126,7 +153,7 @@ func TestEmitGoClient_NoErrNotWiredSentinel(t *testing.T) {
 	// The earlier `errNotWired` placeholders were replaced when the typed
 	// dials the real buf stub; the sentinel is dead code.
 	ir := lower(t, `entity A in x { id bigint primary }`)
-	files, _ := EmitGoClient(ir, GenConfig{})
+	files, _ := EmitGoClient(ir, testClientCfg)
 	assertNotContains(t, files[0].Content, "errNotWired")
 }
 
@@ -138,7 +165,7 @@ entity ProductVariant in vendor {
   index hnsw on search_vec ops cosine
 }
 `)
-	files, _ := EmitGoClient(ir, GenConfig{})
+	files, _ := EmitGoClient(ir, testClientCfg)
 	c := findFile(t, files, "clients/go/client/vendorpkg/product_variant_client.go")
 	// Search method takes the proto request, returns proto response —
 	// matches the buf-generated stub's signature.
@@ -147,7 +174,7 @@ entity ProductVariant in vendor {
 
 func TestEmitGoClient_NoSearchWithoutHNSW(t *testing.T) {
 	ir := lower(t, `entity A in x { id bigint primary  v vector(8) }`)
-	files, _ := EmitGoClient(ir, GenConfig{})
+	files, _ := EmitGoClient(ir, testClientCfg)
 	c := findFile(t, files, "clients/go/client/x/a_client.go")
 	assertNotContains(t, c, "SearchBy")
 }
@@ -165,7 +192,7 @@ entity CartItem in consumer {
   primary by cart_id, variant_id
 }
 `)
-	files, _ := EmitGoClient(ir, GenConfig{})
+	files, _ := EmitGoClient(ir, testClientCfg)
 	if len(files) != 1 {
 		t.Fatalf("want 1 file, got %d", len(files))
 	}
@@ -187,10 +214,10 @@ entity A in x { id bigint primary  v text  vec vector(16)  index hnsw on vec ops
 entity B in y { id bigint primary  ref bigint references x.A.id }
 `
 	ir1 := lower(t, src)
-	files1, _ := EmitGoClient(ir1, GenConfig{})
+	files1, _ := EmitGoClient(ir1, testClientCfg)
 
 	ir2 := lower(t, src)
-	files2, _ := EmitGoClient(ir2, GenConfig{})
+	files2, _ := EmitGoClient(ir2, testClientCfg)
 
 	if len(files1) != len(files2) {
 		t.Fatalf("file count mismatch")
@@ -207,7 +234,7 @@ entity B in y { id bigint primary  ref bigint references x.A.id }
 
 func TestEmitGoClient_DoNotEditBanner(t *testing.T) {
 	ir := lower(t, `entity A in x { id bigint primary }`)
-	files, _ := EmitGoClient(ir, GenConfig{})
+	files, _ := EmitGoClient(ir, testClientCfg)
 	for _, f := range files {
 		if !strings.Contains(f.Content, "DO NOT EDIT") {
 			t.Errorf("missing DO NOT EDIT in %s", f.Path)
@@ -237,7 +264,7 @@ func paths(files []GoFile) []string {
 
 func TestEmitGoClient_QueryMethodEmitted(t *testing.T) {
 	ir := lower(t, `entity Account in consumer { id bigint primary email text not null }`)
-	files, _ := EmitGoClient(ir, GenConfig{})
+	files, _ := EmitGoClient(ir, testClientCfg)
 	c := findFile(t, files, "clients/go/client/consumer/account_client.go")
 	// Interface signature.
 	assertContains(t, c, "QueryAccount(ctx context.Context, req *pb.QueryAccountRequest, opts ...grpc.CallOption) (*pb.QueryAccountResponse, error)")
