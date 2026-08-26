@@ -13,6 +13,35 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Added
 
+#### Generated client code is compiled
+
+`internal/codegen/compilecheck` gained two more trees, so the client and
+cache-key emitters are type-checked by `go build ./...` the way the server
+emitters already were.
+
+They needed to be. The client had been emitting an import that resolves in no
+module: `GenConfig.ModulePrefix` fell back to
+`github.com/rachitkumar205/atlantis-go`, which is in neither `go.mod` nor
+`go.sum`, so `cd clients/go && go build ./...` failed on any machine holding
+`.atl` files. CI never saw it — this repo ships no schema, so that build
+compiled nothing and passed.
+
+**`ModulePrefix` no longer has a default.** The two client emitters refuse an
+empty one instead of emitting an import nothing can resolve, and `tidectl
+codegen` passes `codegen.InRepoModulePrefix`. `tide generate` is unaffected: it
+has always derived the prefix from the caller's own module, which is the only
+value that can be right.
+
+The coverage check no longer carries a list of what is exempt. Every `.go` file
+in the golden set must belong to some compile fixture, so an emitter added to
+`cmd/tidectl` and to no tree now fails a test that previously named the server
+emitters alone.
+
+`tests/sdk` runs in CI as well. It sits behind `-tags=sdk`, which appeared in no
+workflow, and it could not have passed if it had run: the SDK module is nested
+inside the main module's import path, so the prefix it used to find leaked
+internal imports matched all of its own packages too.
+
 #### `tide login`, and the end of caller-side server configuration
 
 A machine enrols itself:
