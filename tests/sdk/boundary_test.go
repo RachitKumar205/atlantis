@@ -37,13 +37,17 @@ func TestSDKHasNoAtlantisInternalImports(t *testing.T) {
 	if err != nil {
 		t.Fatalf("go list inside %s: %v\n%s", sdkDir, err, out)
 	}
+	// The SDK module is nested inside the main module's path, so its own
+	// packages carry mainModule as a prefix too and only sdkModule separates
+	// them. Both end in `/` so a future `github.com/rachitkumar205/atlantis-foo`
+	// does not match either.
+	const (
+		mainModule = "github.com/rachitkumar205/atlantis/"
+		sdkModule  = "github.com/rachitkumar205/atlantis/clients/go/"
+	)
 	var leaks []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		// The SDK's own module path is `github.com/rachitkumar205/atlantis/clients/go`; the leaked
-		// path would be the main module `github.com/rachitkumar205/atlantis` (note the
-		// missing `-go` suffix). Match the prefix exactly + a `/` to avoid
-		// false-positives if someone names a future module `atlantis-foo`.
-		if strings.HasPrefix(line, "github.com/rachitkumar205/atlantis/") {
+		if strings.HasPrefix(line, mainModule) && !strings.HasPrefix(line, sdkModule) {
 			leaks = append(leaks, line)
 		}
 	}
