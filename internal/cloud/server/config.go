@@ -1,22 +1,12 @@
-// Package server is Atlantis Cloud's HTTP surface.
+// Package server is Atlantis Cloud's HTTP surface: the JWKS document every
+// console verifies against, the account flows (sign up, verify an address,
+// request and complete a password reset), sign-in, OAuth identity linking, and
+// the organisation routes behind them.
 //
-// # What it serves today
-//
-// The JWKS document every console verifies against, and the account flows that
-// do not authenticate anybody: sign up, verify an address, request a password
-// reset, complete one.
-//
-// # What it deliberately does not serve
-//
-// Sign-in. Cloud's sign-in is two-legged — a password, then a second factor —
-// and the second factor does not exist yet. A route that issued a session on a
-// password alone would be the exact posture this product refuses, sitting in
-// the tree looking finished; one that could not complete would be untestable.
-// So it lands with the factor that gates it.
-//
-// Nothing here creates a session. Completing a password reset sets the password
-// and sends the user to sign in, which is why this package has no cookie
-// handling at all.
+// Sign-in is two-legged — a password, then a TOTP second factor — with a
+// pending cookie held between the legs. A correct password alone mints no
+// session: it produces a pending login that must be completed by verifying a
+// factor or enrolling one.
 package server
 
 import (
@@ -40,63 +30,60 @@ type Config struct {
 	Issuer     string // CLOUD_ISSUER — required
 	SigningKey string // CLOUD_SIGNING_KEY
 
-	// PublicURL is the base every emailed link is built from.
-	//
-	// Required, with no default, and the reason is worth stating: this string
-	// becomes a URL in an email that asks somebody to prove who they are. A
-	// wrong value does not fail — it sends every user a working link to the
-	// wrong host, which is a credible phishing primitive if that host is not
-	// ours and a broken flow if it is. Guessing it from the Host header would
-	// be worse, because the Host header is attacker-controlled.
+	// PublicURL is the base every emailed link is built from. Required, with no
+	// default: a wrong value still produces working links, pointing at the
+	// wrong host. Not derived from the Host header, which is caller-controlled.
 	PublicURL string // CLOUD_PUBLIC_URL — required
 
 	// ExtraOrigins are additional origins accepted on state-changing /api/*
 	// routes, beyond PublicURL and the request's own Host.
 	//
-	// This exists for one situation and should not be set outside it. Running
-	// the frontend with `vite dev` serves the page from localhost:5173 and
-	// proxies /api to Cloud with changeOrigin, which rewrites Host to Cloud's
-	// address while the browser still sends the page's origin — so neither the
-	// public URL nor the Host matches, and every write is refused.
+	// `vite dev` serves the page from localhost:5173 and proxies /api with
+	// changeOrigin, which rewrites Host to Cloud's address while the browser
+	// still sends the page's origin. Neither PublicURL nor Host then matches
+	// and every write is refused.
 	//
-	// Explicit rather than inferred. The alternative considered was to allow any
-	// loopback origin, which would mean a deployment reachable at a loopback
-	// address silently accepts cross-site writes from anything else on the box.
-	// A setting somebody has to type is a setting somebody has to justify.
+	// Not inferred from the request: allowing any loopback origin would accept
+	// cross-site writes from anything else on the same host.
 	ExtraOrigins []string // CLOUD_EXTRA_ORIGINS — development only
 
-	// SMTP. All optional: with no address, Cloud logs messages instead of
-	// sending them and warns on every one. See internal/cloud/mail.
+	// Cloud refuses to start unless exactly one mail transport is completely
+	// configured, or MailDev is set. See validateMail.
+	ResendAPIKey string // CLOUD_RESEND_API_KEY
+
+	// MailFrom is the sender for whichever transport is in use. Accepts
+	// `Name <addr>` as well as a bare address. Falls back to CLOUD_SMTP_FROM.
+	MailFrom string // CLOUD_MAIL_FROM
+
+	// MailDev selects the logging mailer, which prints messages instead of
+	// sending them. It is never the default: mail.Log writes password-reset
+	// links to the log.
+	MailDev bool // CLOUD_MAIL_DEV
+
+	// SMTP, for a deployment with its own relay. There is no SMTPFrom field;
+	// CLOUD_SMTP_FROM feeds MailFrom above.
 	SMTPAddr     string // CLOUD_SMTP_ADDR
-	SMTPFrom     string // CLOUD_SMTP_FROM
 	SMTPUser     string // CLOUD_SMTP_USER
 	SMTPPassword string // CLOUD_SMTP_PASSWORD
 
 	// CheckBreaches asks Have I Been Pwned whether a password has leaked.
-	//
-	// Default on. It is a call to a third party during sign-up, so the caller
-	// fails open when it cannot be reached — a password is accepted rather than
-	// sign-up depending on somebody else's uptime — and counts how often that
-	// happens.
+	// Default true. The caller fails open when the API is unreachable and
+	// counts how often that happens.
 	CheckBreaches bool // CLOUD_HIBP_CHECK — default true
 
 	// TrustProxy makes the rate limiter read X-Forwarded-For.
 	//
-	// Off by default because the header is trivially spoofable, and a limiter
-	// keyed on a spoofable value is a limiter an attacker resets per request.
-	// Turn it on only when something you control terminates in front.
+	// Off by default: the header is spoofable, so the limiter can be reset per
+	// request. Set it only behind a terminator that overwrites the header.
 	TrustProxy bool // CLOUD_TRUST_PROXY
 
 	// DataKeyset seals each account's TOTP secret in cloud.totp_secrets.
 	//
-	// Base64 Tink keyset, required, no default — the same value shape and the
-	// same package the console uses for organisation private keys. A second
-	// factor has to be recomputed to be checked, so unlike the argon2id
-	// password hash beside it, it cannot be hashed and must be encrypted.
+	// Base64 Tink keyset, required, no default. A TOTP secret is recomputed to
+	// be checked, so it is encrypted rather than hashed.
 	//
-	// Generating one per boot would encrypt every enrolled factor under a key
-	// that dies with the process, which presents as every account being locked
-	// out after a restart with the rows intact and unopenable.
+	// No per-boot default: a key that dies with the process leaves every
+	// enrolled factor unopenable after a restart, with the rows intact.
 	DataKeyset string // CLOUD_DATA_KEY
 
 	// CookieSecure sets the Secure flag on the session cookie. Default false so
@@ -105,25 +92,12 @@ type Config struct {
 
 	// OAuth provider credentials, from each provider's developer console.
 	//
-	// A provider with neither value set is not registered at all, and its
-	// routes answer 404. That is deliberate: the alternative is a route that
-	// exists, accepts the request, and fails at the redirect with an error
-	// about a missing client id — which reads to whoever hits it as a broken
-	// deployment rather than an unconfigured feature.
-	//
-	// One of a pair without the other IS an error, at boot. It means somebody
-	// intended to configure the provider and did half of it, and finding that
-	// out at the first sign-in attempt is worse than finding it out at start-up.
+	// A provider with neither value set is not registered, and its routes
+	// answer 404. One of a pair without the other is refused at boot.
 	GitHubClientID     string // CLOUD_GITHUB_CLIENT_ID
 	GitHubClientSecret string // CLOUD_GITHUB_CLIENT_SECRET
 	GoogleClientID     string // CLOUD_GOOGLE_CLIENT_ID
 	GoogleClientSecret string // CLOUD_GOOGLE_CLIENT_SECRET
-
-	// CLOUD_SIGNIN_APP_URL used to live here, naming where a finished OAuth
-	// callback sent the browser. It is gone: Cloud serves the sign-in
-	// application itself, so the only correct value was PublicURL, and two
-	// settings that must agree are a setting that will eventually disagree.
-	// handOff redirects to a relative path instead.
 
 	// SendTimeout bounds a single mail send.
 	SendTimeout time.Duration
@@ -131,14 +105,17 @@ type Config struct {
 
 func ConfigFromEnv() (Config, error) {
 	c := Config{
-		Listen:        envOr("CLOUD_LISTEN", ":9500"),
-		PGURL:         os.Getenv("CLOUD_PG_URL"),
-		Issuer:        os.Getenv("CLOUD_ISSUER"),
-		SigningKey:    envOr("CLOUD_SIGNING_KEY", "./certs/cloud-signing-key.pem"),
-		PublicURL:     strings.TrimRight(os.Getenv("CLOUD_PUBLIC_URL"), "/"),
-		ExtraOrigins:  splitOrigins(os.Getenv("CLOUD_EXTRA_ORIGINS")),
+		Listen:       envOr("CLOUD_LISTEN", ":9500"),
+		PGURL:        os.Getenv("CLOUD_PG_URL"),
+		Issuer:       os.Getenv("CLOUD_ISSUER"),
+		SigningKey:   envOr("CLOUD_SIGNING_KEY", "./certs/cloud-signing-key.pem"),
+		PublicURL:    strings.TrimRight(os.Getenv("CLOUD_PUBLIC_URL"), "/"),
+		ExtraOrigins: splitOrigins(os.Getenv("CLOUD_EXTRA_ORIGINS")),
+		ResendAPIKey: os.Getenv("CLOUD_RESEND_API_KEY"),
+		// CLOUD_SMTP_FROM is the fallback.
+		MailFrom:      envOr("CLOUD_MAIL_FROM", os.Getenv("CLOUD_SMTP_FROM")),
+		MailDev:       os.Getenv("CLOUD_MAIL_DEV") == "true",
 		SMTPAddr:      os.Getenv("CLOUD_SMTP_ADDR"),
-		SMTPFrom:      os.Getenv("CLOUD_SMTP_FROM"),
 		SMTPUser:      os.Getenv("CLOUD_SMTP_USER"),
 		SMTPPassword:  os.Getenv("CLOUD_SMTP_PASSWORD"),
 		CheckBreaches: os.Getenv("CLOUD_HIBP_CHECK") != "false",
@@ -173,27 +150,20 @@ func ConfigFromEnv() (Config, error) {
 				"For local development: `make dev-cloud-data-key` prints one to export.")
 	}
 
-	// Parsed rather than trusted. A PublicURL that is not an absolute URL
-	// produces links nobody can follow, and the first person to find out is a
-	// user who cannot verify their address.
+	// Parsed rather than trusted: a PublicURL that is not absolute produces
+	// unfollowable links in every message this server sends.
 	u, err := url.Parse(c.PublicURL)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return Config{}, fmt.Errorf("CLOUD_PUBLIC_URL must be an absolute URL "+
 			"like https://cloud.atlantis.dev, got %q", c.PublicURL)
 	}
 
-	// A configured mail server with no sender address produces a message every
-	// receiver rejects, which presents as "email is not arriving" rather than
-	// as a missing setting.
-	if c.SMTPAddr != "" && c.SMTPFrom == "" {
-		return Config{}, fmt.Errorf("CLOUD_SMTP_FROM is required when CLOUD_SMTP_ADDR is set: " +
-			"a message with no sender is refused by every receiver")
+	if err := c.validateMail(); err != nil {
+		return Config{}, err
 	}
 
-	// Half a provider is a mistake, not a choice. Neither value set means the
-	// provider is off, which is a supported state; exactly one set means
-	// somebody meant to turn it on, and the first sign of the missing half
-	// would otherwise be a user who has already consented at GitHub.
+	// Neither value set means the provider is off. Exactly one set fails at the
+	// callback, after consent has already been granted at the provider.
 	for _, p := range []struct{ idName, id, secretName, secret string }{
 		{"CLOUD_GITHUB_CLIENT_ID", c.GitHubClientID, "CLOUD_GITHUB_CLIENT_SECRET", c.GitHubClientSecret},
 		{"CLOUD_GOOGLE_CLIENT_ID", c.GoogleClientID, "CLOUD_GOOGLE_CLIENT_SECRET", c.GoogleClientSecret},
@@ -201,8 +171,8 @@ func ConfigFromEnv() (Config, error) {
 		switch {
 		case p.id != "" && p.secret == "":
 			return Config{}, fmt.Errorf("%s is set but %s is not: "+
-				"a client id without its secret cannot complete a sign-in, and the "+
-				"failure would land on somebody who had already granted access",
+				"a client id without its secret cannot complete a sign-in, and "+
+				"the failure lands after consent has been granted",
 				p.idName, p.secretName)
 		case p.secret != "" && p.id == "":
 			return Config{}, fmt.Errorf("%s is set but %s is not: "+
@@ -223,10 +193,9 @@ func envOr(key, fallback string) string {
 
 // splitOrigins parses CLOUD_EXTRA_ORIGINS.
 //
-// Comma-separated, trailing slashes trimmed so a value copied from a browser's
-// address bar works. Empty entries are dropped rather than becoming an origin
-// that matches the empty string — sameOrigin already refuses a missing header,
-// and a config typo must not turn that refusal off.
+// Comma-separated, trailing slashes trimmed. Empty entries are dropped: an
+// origin matching the empty string would undo sameOrigin's refusal of a
+// missing header.
 func splitOrigins(s string) []string {
 	var out []string
 	for _, part := range strings.Split(s, ",") {
@@ -236,4 +205,51 @@ func splitOrigins(s string) []string {
 		}
 	}
 	return out
+}
+
+// validateMail reports an error unless exactly one mail transport is fully
+// configured, or MailDev is set.
+//
+// Address verification and password reset both depend on mail, and neither
+// reports a send failure in its response, so the failure surfaces at start-up.
+func (c Config) validateMail() error {
+	resend := c.ResendAPIKey != ""
+	smtp := c.SMTPAddr != ""
+
+	if c.MailDev {
+		// With both set, the logging mailer wins and nothing is delivered.
+		if resend || smtp {
+			return fmt.Errorf("CLOUD_MAIL_DEV is set alongside a real mail transport: " +
+				"the logging mailer would win and nothing would be delivered, so " +
+				"unset one of them")
+		}
+		return nil
+	}
+
+	switch {
+	case resend && smtp:
+		// Ambiguous rather than redundant: the error names the cost.
+		return fmt.Errorf("CLOUD_RESEND_API_KEY and CLOUD_SMTP_ADDR are both set: " +
+			"choose one, or a failed delivery gets investigated against the " +
+			"transport that was not used")
+	case !resend && !smtp:
+		return fmt.Errorf("no mail transport is configured, so account verification " +
+			"and password reset cannot be delivered.\n\n" +
+			"Set CLOUD_RESEND_API_KEY with CLOUD_MAIL_FROM, or CLOUD_SMTP_ADDR with " +
+			"CLOUD_SMTP_FROM.\n" +
+			"For local development, CLOUD_MAIL_DEV=true prints messages to the log " +
+			"instead of sending them")
+	}
+
+	// A transport with no sender produces a message every receiver rejects,
+	// which presents as mail not arriving.
+	if c.MailFrom == "" {
+		which, with := "CLOUD_RESEND_API_KEY", "CLOUD_MAIL_FROM"
+		if smtp {
+			which, with = "CLOUD_SMTP_ADDR", "CLOUD_MAIL_FROM (or CLOUD_SMTP_FROM)"
+		}
+		return fmt.Errorf("%s is set but %s is not: "+
+			"a message with no sender is refused by every receiver", which, with)
+	}
+	return nil
 }

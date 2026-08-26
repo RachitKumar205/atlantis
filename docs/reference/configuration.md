@@ -360,8 +360,11 @@ Read by `cmd/cloud`, which publishes the keys consoles verify against.
 | `CLOUD_DATA_KEY` | (unset; **required**) | Base64 Tink keyset sealing each account's TOTP secret. `cloud data-key` prints one. Not recoverable if lost. |
 | `CLOUD_COOKIE_SECURE` | `false` | `Secure` flag on Cloud's session cookie. Flip to `true` once a TLS terminator sits in front. |
 | `CLOUD_PUBLIC_URL` | (unset; **required**) | Base URL every emailed link is built from. See below. |
-| `CLOUD_SMTP_ADDR` | (unset) | `host:port` of a mail server. **Unset means links are written to the log rather than sent.** |
-| `CLOUD_SMTP_FROM` | (unset; required with `CLOUD_SMTP_ADDR`) | Sender address. A message with no sender is refused by every receiver. |
+| `CLOUD_RESEND_API_KEY` | (unset) | Sends through Resend's HTTP API. How a deployment sends. |
+| `CLOUD_MAIL_FROM` | (unset; required with a transport) | Sender address, for whichever transport is in use. Resend accepts `Name <addr>`. Supersedes `CLOUD_SMTP_FROM`, which still works. |
+| `CLOUD_MAIL_DEV` | `false` | `true` writes messages to the log instead of sending them. Mutually exclusive with a real transport. |
+| `CLOUD_SMTP_ADDR` | (unset) | `host:port` of your own mail relay, as an alternative to Resend. |
+| `CLOUD_SMTP_FROM` | (unset) | Older name for `CLOUD_MAIL_FROM`. The newer one wins when both are set. |
 | `CLOUD_SMTP_USER`, `CLOUD_SMTP_PASSWORD` | (unset) | SMTP credentials. Sent only over an encrypted connection — Go's `PlainAuth` refuses otherwise, which is why STARTTLS is attempted unconditionally. |
 | `CLOUD_HIBP_CHECK` | `true` | Refuse passwords found in a known breach, via Have I Been Pwned's k-anonymity range API. The password never leaves the process; only the first five characters of its SHA-1 are sent. |
 | `CLOUD_TRUST_PROXY` | `false` | Read `X-Forwarded-For` when rate limiting. Leave off unless something you control terminates in front — the header is spoofable, and a limiter keyed on a spoofable value is one an attacker resets per request. |
@@ -698,11 +701,21 @@ broken flow if that host is ours and a phishing primitive if it is not. Deriving
 it from the `Host` header would be worse, because that header is
 attacker-controlled.
 
-**With no `CLOUD_SMTP_ADDR`, links go to the log.** Cloud warns at startup and
-again on every message, and both warnings are deliberate: this is the one
-setting whose absence looks exactly like everything working. Accounts are
-created, the response says a message is on its way, and the link sits in a log
-nobody reads.
+**Cloud refuses to start with no mail transport.** Set `CLOUD_RESEND_API_KEY`
+with `CLOUD_MAIL_FROM`, or `CLOUD_SMTP_ADDR` with a sender, or
+`CLOUD_MAIL_DEV=true` to write links to the log during development.
+
+That refusal replaced a fallback, and the reason is that this was the one
+setting whose absence looked exactly like everything working: accounts created,
+the response saying a message is on its way, and the link sitting in a log
+nobody reads. The logging mailer still warns on every send — it is now something
+you ask for rather than something you end up with.
+
+**Resend needs its sending domain verified** before anything will leave. An
+unverified domain is a 403 whose message names domain verification rather than a
+generic failure, because "email is not arriving" is otherwise a long thing to
+diagnose. Resend recommends a subdomain over the root domain, to keep sending
+reputation separate.
 
 **Sign-up and reset-request answer identically whether or not the address has an
 account** — same status, same body, and held to the same latency floor. Without

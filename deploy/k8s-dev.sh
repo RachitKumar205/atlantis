@@ -698,10 +698,29 @@ if ! "$CONTAINER" exec "$CLUSTER" crictl inspecti \
     exit 0
 fi
 
+# Mail. Cloud refuses to start with no transport at all, so one of these is
+# always set.
+#
+# With no API key the cluster gets the logging mailer, and verification links
+# appear in `kubectl logs deploy/atlantis-cloud` rather than in an inbox. Pass
+# CLOUD_RESEND_API_KEY (and CLOUD_MAIL_FROM) to send for real from here.
+#
+# The two are mutually exclusive — Cloud refuses both, because the logging
+# mailer would win and the deployment would deliver nothing while holding a
+# valid key.
+if [ -n "${CLOUD_RESEND_API_KEY:-}" ]; then
+    CLOUD_MAIL_DEV_VALUE="false"
+else
+    CLOUD_MAIL_DEV_VALUE="true"
+fi
+
+# The API key goes in the Secret rather than the pod spec: it is a credential,
+# and env on a Deployment is readable by anything that can read Deployments.
 kubectl --context "$CLUSTER" -n atlantis-system \
     create secret generic atlantis-cloud \
     --from-literal=CLOUD_PG_URL="${CLOUD_PG_URL:?set CLOUD_PG_URL}" \
     --from-literal=CLOUD_DATA_KEY="${CLOUD_DATA_KEY:?set CLOUD_DATA_KEY}" \
+    --from-literal=CLOUD_RESEND_API_KEY="${CLOUD_RESEND_API_KEY:-}" \
     --from-literal=signing-key.pem="${CLOUD_SIGNING_KEY_DATA}" \
     --dry-run=client -o yaml | kubectl --context "$CLUSTER" apply -f - >/dev/null
 
@@ -765,6 +784,10 @@ spec:
           env:
             - { name: CLOUD_ISSUER, value: "${CLOUD_ISSUER}" }
             - { name: CLOUD_PUBLIC_URL, value: "${CLOUD_PUBLIC_URL:-${CLOUD_ISSUER}}" }
+            # See the note above the Secret. Without a Resend key this is the
+            # logging mailer, and verification links come out of the pod log.
+            - { name: CLOUD_MAIL_DEV, value: "${CLOUD_MAIL_DEV_VALUE}" }
+            - { name: CLOUD_MAIL_FROM, value: "${CLOUD_MAIL_FROM:-}" }
           ports:
             - name: http
               containerPort: 9500

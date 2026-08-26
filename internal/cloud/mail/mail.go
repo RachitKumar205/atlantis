@@ -1,23 +1,10 @@
 // Package mail sends the two messages Atlantis Cloud needs: verify this
 // address, and reset this password.
 //
-// # Why an interface for two messages
+// Three transports implement Mailer: SMTP, Resend, and Log for development.
 //
-// The same reason internal/secrets has one. The implementation is
-// expected to change — SMTP today, very likely a transactional API later — and
-// an interface means that change is a constructor rather than an edit to every
-// call site. Two implementations exist from the start so the interface is
-// shaped by more than one caller: SMTP for a deployment, and a logging one for
-// development, which is also what the tests use.
-//
-// # What is deliberately not here
-//
-// Templates, HTML, retries and a queue. A verification email is a sentence and
-// a link; making it a rendering pipeline before anything has sent one would be
-// building for a product that does not exist. Retries in particular are worth
-// naming as absent: a failed send surfaces to the caller, and the caller tells
-// the user to try again, because a background retry needs durable state that
-// nothing here has.
+// Messages are plain text. There is no retry and no queue: Send reports the
+// failure to its caller, which asks the user to try again.
 package mail
 
 import (
@@ -32,34 +19,38 @@ import (
 	"time"
 )
 
-// Mailer sends one message.
-//
-// Deliberately narrow. A wider interface — attachments, cc, reply-to — would be
-// designed against nothing, because Cloud sends two message shapes and both are
-// a subject and a paragraph.
+// Mailer sends one plain-text message. There is no cc, reply-to or attachment.
 type Mailer interface {
 	Send(ctx context.Context, to, subject, body string) error
 }
 
 // ErrHeaderInjection reports a recipient or subject containing a line break.
-//
-// This is a real attack rather than tidiness. The recipient address arrives
-// from a sign-up form, and an address containing CRLF followed by `Bcc:` turns
-// one verification email into a mail relay. The check is here, in the one place
-// that composes a message, rather than in each caller.
+// The recipient arrives from a sign-up form; CRLF followed by "Bcc:" turns one
+// verification message into a relay.
 var ErrHeaderInjection = errors.New("line breaks are not allowed in a recipient or subject")
+
+// checkHeaderFields reports whether from, to and subject are free of line
+// breaks.
+//
+// Separate from compose so that a transport which does not build an RFC 5322
+// message still applies it. JSON encoding escapes the break in transit and says
+// nothing about what the receiving service does with it.
+func checkHeaderFields(from, to, subject string) error {
+	for _, field := range []string{to, subject, from} {
+		if strings.ContainsAny(field, "\r\n") {
+			return ErrHeaderInjection
+		}
+	}
+	return nil
+}
 
 // compose builds an RFC 5322 message, refusing anything that would inject a
 // header.
 func compose(from, to, subject, body string) ([]byte, error) {
-	for _, field := range []string{to, subject, from} {
-		if strings.ContainsAny(field, "\r\n") {
-			return nil, ErrHeaderInjection
-		}
+	if err := checkHeaderFields(from, to, subject); err != nil {
+		return nil, err
 	}
-	// Date is included because some receivers treat its absence as a spam
-	// signal, and a verification email landing in spam is indistinguishable
-	// from one that was never sent.
+	// Some receivers treat a missing Date as a spam signal.
 	msg := "From: " + from + "\r\n" +
 		"To: " + to + "\r\n" +
 		"Subject: " + subject + "\r\n" +
@@ -93,9 +84,8 @@ type SMTP struct {
 
 // Send delivers one message.
 //
-// Written against smtp.Client rather than smtp.SendMail because SendMail takes
-// no context and dials with no timeout — a hung mail server would hold a
-// request open until something else gave up.
+// Uses smtp.Client rather than smtp.SendMail: SendMail takes no context and
+// dials with no timeout.
 func (s *SMTP) Send(ctx context.Context, to, subject, body string) error {
 	msg, err := compose(s.From, to, subject, body)
 	if err != nil {
@@ -120,9 +110,8 @@ func (s *SMTP) Send(ctx context.Context, to, subject, body string) error {
 	}
 	defer conn.Close() //nolint:errcheck
 
-	// The deadline is what makes the context bound the exchange rather than
-	// only the dial: smtp.Client's own reads and writes go through this
-	// connection.
+	// smtp.Client reads and writes through this connection, so the deadline
+	// bounds the whole exchange and not just the dial.
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}
@@ -133,9 +122,7 @@ func (s *SMTP) Send(ctx context.Context, to, subject, body string) error {
 	}
 	defer c.Close() //nolint:errcheck
 
-	// STARTTLS when the server offers it. Not optional in the sense a caller
-	// can turn it off — the alternative is sending a password-reset link, and
-	// possibly a password, across the network in clear text.
+	// Always attempted when offered; there is no configuration to disable it.
 	if ok, _ := c.Extension("STARTTLS"); ok {
 		if err := c.StartTLS(&tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}); err != nil {
 			return fmt.Errorf("STARTTLS: %w", err)
@@ -144,9 +131,8 @@ func (s *SMTP) Send(ctx context.Context, to, subject, body string) error {
 
 	if s.Username != "" {
 		// PlainAuth refuses to send credentials over an unencrypted connection
-		// unless the host is localhost. That refusal is load-bearing and is why
-		// the STARTTLS attempt above is not conditional on configuration: a
-		// server that does not offer it will fail here rather than leak.
+		// unless host is localhost, so a server that offered no STARTTLS fails
+		// here rather than sending the password in clear text.
 		if err := c.Auth(smtp.PlainAuth("", s.Username, s.Password, host)); err != nil {
 			return fmt.Errorf("authenticate to the mail server: %w", err)
 		}
@@ -171,23 +157,16 @@ func (s *SMTP) Send(ctx context.Context, to, subject, body string) error {
 	return c.Quit()
 }
 
-// Log writes messages to the log instead of sending them.
-//
-// What a development environment gets, so `make dev` needs no mail server: the
-// verification link appears in the console output and can be pasted into a
-// browser.
-//
-// It warns on every send, at every send, and that is deliberate. A deployment
-// that reaches production without SMTP configured would otherwise print
-// password-reset links into its logs and look, from the outside, exactly like
-// one that was delivering them — while every user waited for an email that was
-// never sent.
+// Log writes messages to the log instead of sending them, so `make dev` needs
+// no mail server. Every send logs at warn level: this transport puts
+// password-reset links in the log, and a deployment running on it looks from
+// the outside like one that is delivering mail.
 type Log struct{ Logger *slog.Logger }
 
 func (l *Log) Send(_ context.Context, to, subject, body string) error {
 	if _, err := compose("dev@localhost", to, subject, body); err != nil {
-		// Checked even though nothing is transmitted, so a header-injection bug
-		// is caught in development rather than first appearing in production.
+		// Checked even though nothing is transmitted, so that a header-injection
+		// bug fails in development.
 		return err
 	}
 	logger := l.Logger

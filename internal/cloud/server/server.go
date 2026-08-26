@@ -89,16 +89,26 @@ func New(cfg Config, db *store.Store, iss *issuer.Issuer, spaFS fs.FS, log *slog
 		sleep:     realSleep,
 	}
 
-	// No mail server means the logging mailer, which prints the link and warns
-	// every time. See internal/cloud/mail for why the warning is not optional.
-	if cfg.SMTPAddr != "" {
+	// Which transport sends the two messages that gate account recovery.
+	//
+	// Config.validateMail has already refused everything ambiguous — no
+	// transport, both transports, a transport with no sender — so this is a
+	// choice between configurations already known to be complete rather than a
+	// fallback chain. The logging mailer is reached only by asking for it.
+	switch {
+	case cfg.MailDev:
+		s.mailer = &cloudmail.Log{Logger: log}
+	case cfg.ResendAPIKey != "":
+		s.mailer = &cloudmail.Resend{
+			APIKey: cfg.ResendAPIKey, From: cfg.MailFrom,
+			Timeout: cfg.SendTimeout, Logger: log,
+		}
+	default:
 		s.mailer = &cloudmail.SMTP{
-			Addr: cfg.SMTPAddr, From: cfg.SMTPFrom,
+			Addr: cfg.SMTPAddr, From: cfg.MailFrom,
 			Username: cfg.SMTPUser, Password: cfg.SMTPPassword,
 			Timeout: cfg.SendTimeout,
 		}
-	} else {
-		s.mailer = &cloudmail.Log{Logger: log}
 	}
 
 	if cfg.CheckBreaches {
@@ -128,8 +138,7 @@ func (s *Server) Close() {
 }
 
 func (s *Server) routes() {
-	// The key set every console verifies against. Unchanged from what
-	// `cloud serve` published before this package existed.
+	// The key set every console verifies against.
 	s.mux.Handle("GET "+issuer.JWKSPath, s.iss.Handler())
 
 	s.mux.HandleFunc("POST /api/auth/signup", s.handleSignup)
@@ -137,56 +146,42 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/auth/reset/complete", s.handleResetComplete)
 	s.mux.HandleFunc("POST /api/auth/verify/resend", s.handleResendVerification)
 
-	// Sign-in, in two legs. Nothing here issues a session except
-	// handleVerifySecondFactor and the enrolment that completes a sign-in.
+	// Sign-in, in two legs. Only handleVerifySecondFactor and the enrolment
+	// that completes a sign-in issue a session.
 	//
-	// JSON only. There was a script-free HTML enrolment page beside these, and
-	// it went for the same reason WebAuthn is not here yet: nothing could reach
-	// it. Sign-in returns JSON, so a person in a browser never arrives at the
-	// page, and it confirmed a factor without completing the sign-in the way
-	// these routes do. The verification and reset pages below are different —
-	// each is the target of a link in an email somebody receives. Enrolment
-	// gets its page from the Cloud sign-in app, along with the QR code.
+	// JSON only, unlike the verification and reset pages below, which are the
+	// targets of links in mail. The sign-in app renders enrolment and its QR
+	// code.
 	s.mux.HandleFunc("POST /api/auth/login", s.handleLogin)
 	s.mux.HandleFunc("POST /api/auth/2fa/verify", s.handleVerifySecondFactor)
 	s.mux.HandleFunc("POST /api/auth/2fa/enrol/begin", s.handleEnrolBegin)
 	s.mux.HandleFunc("POST /api/auth/2fa/enrol/finish", s.handleEnrolFinish)
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
 
-	// What the sign-in screen needs before anybody has signed in.
+	// What the sign-in screen needs before a session exists, so it is
+	// unauthenticated: the page decides whether to draw a provider button
+	// before there is a session to ask about.
 	//
-	// Unauthenticated by necessity: the page has to decide whether to draw a
-	// "Continue with GitHub" button before there is a session to ask about.
-	// providerNames() was otherwise reachable only through
-	// handleListIdentities, which starts with requireSession.
-	//
-	// It discloses which providers this deployment configured, which is already
-	// observable — /auth/github either redirects to GitHub or it does not.
+	// It discloses which providers are configured, which /auth/github already
+	// does by either redirecting or answering 404.
 	s.mux.HandleFunc("GET /api/auth/config", s.handleAuthConfig)
 
 	// Whether a half-finished sign-in is in progress, and what it needs next.
 	//
-	// The pending cookie is HttpOnly, so a reloaded page cannot read it and has
-	// no other way to ask. Without this the app shows a fresh sign-in form to
-	// somebody who is mid-enrolment; on the password path they can retype a
-	// password, but on the OAuth path there is nothing to retype and the whole
-	// provider round trip has to be done again for no visible reason.
+	// The pending cookie is HttpOnly, so a reloaded page cannot read it. Without
+	// this route the app draws a fresh sign-in form mid-enrolment, and on the
+	// OAuth path that means repeating the whole provider round trip.
 	s.mux.HandleFunc("GET /api/auth/pending", s.handlePendingState)
 
-	// Signing in through a provider. Registered per provider and only when it
-	// is configured, so an unconfigured one is absent rather than present and
-	// failing — see configuredProviders.
+	// Signing in through a provider, registered only for configured ones.
 	for name := range s.providers {
 		s.mux.HandleFunc("GET /auth/"+name, s.handleOAuthStart(name))
 		s.mux.HandleFunc("GET /auth/"+name+"/callback", s.handleOAuthCallback(name))
 	}
 
-	// Managing connected accounts, registered UNCONDITIONALLY.
-	//
-	// Not behind the same check as the routes above, and the difference matters:
-	// removing a provider's credentials must not strand the people who already
-	// linked it with no way to see the connection or remove it. The link exists
-	// in the database whether or not Cloud can still start a sign-in with it.
+	// Managing connected accounts, registered unconditionally. A link survives
+	// in the database after its provider's credentials are removed, and has to
+	// remain visible and removable.
 	s.mux.HandleFunc("GET /api/account/identities", s.handleListIdentities)
 	s.mux.HandleFunc("POST /api/account/identities/{provider}/unlink", s.handleUnlinkIdentity)
 
@@ -205,12 +200,9 @@ func (s *Server) routes() {
 	// form posts — see its comment.
 	s.mux.HandleFunc("POST /api/orgs", s.handleCreateOrg)
 
-	// Deletion, in two halves that are deliberately not symmetrical.
-	//
-	// Delete requires the organisation's own name in the body; restore requires
-	// nothing beyond membership. The guard belongs on the destructive direction,
-	// and putting one on the recovery direction would make undoing a mistake
-	// harder than making it.
+	// Deletion and restore are not symmetrical. Delete requires the
+	// organisation's own name in the body; restore requires nothing beyond
+	// membership, so undoing a mistake is never harder than making it.
 	//
 	// Neither destroys anything. Both write a row; the provisioner is the only
 	// process that touches the cluster.
@@ -225,33 +217,26 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /authorize", s.handleAuthorize)
 	s.mux.HandleFunc("POST /authorize/reauth", s.handleReauth)
 
-	// Reached from an email, by a person, in a browser. Plain pages rather than
-	// JSON for that reason. They are deliberately unstyled and framework-free:
-	// the Cloud sign-in app replaces them, and a link in an email that already
-	// works is worth more now than one that waits for a frontend.
+	// Reached from an email, by a person, in a browser, so these answer with
+	// plain pages rather than JSON. Unstyled and framework-free; the Cloud
+	// sign-in app replaces them.
 	s.mux.HandleFunc("GET /verify", s.handleVerify)
 	s.mux.HandleFunc("GET /reset", s.handleResetForm)
 	s.mux.HandleFunc("POST /reset", s.handleResetSubmit)
 
-	// Liveness. Deliberately answers without touching anything: a liveness probe
-	// that failed when the database hiccupped would restart a healthy process
-	// and turn a recoverable outage into a crash loop.
+	// Liveness, answering without touching anything. A liveness probe that
+	// failed on a database hiccup would restart a healthy process and turn a
+	// recoverable outage into a crash loop.
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	// Readiness, which is a different question and used to have no answer.
-	//
-	// Cloud's Deployment had to probe either /healthz — a bare 200 that reports
-	// success while Postgres is unreachable — or the JWKS route, which proves
-	// only that the signing key loaded. Under both, this process reports itself
-	// ready to serve sign-ins it cannot complete: every account lookup, every
-	// membership check and every session write is a database call.
-	//
-	// So the load balancer sends it traffic and each request fails
-	// individually, which is the outage this route exists to convert into "this
-	// replica is not ready".
+	// Readiness is a different question from liveness. Every account lookup,
+	// membership check and session write is a database call, so a replica that
+	// answers /healthz while Postgres is unreachable reports itself ready to
+	// serve sign-ins it cannot complete, and the load balancer sends it traffic
+	// that fails one request at a time.
 	s.mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		// Bounded, so a wedged database cannot hold a probe open for the whole
 		// request and make readiness itself the thing that hangs.
@@ -265,37 +250,32 @@ func (s *Server) routes() {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	// ── The sign-in application ─────────────────────────────────────────────
-	//
-	// Registered last, and last on purpose: `GET /` matches every GET path, so
-	// everything above has to be more specific to survive. It is — every
-	// pattern in this function is method-qualified and names a literal path, so
+	// The sign-in application, registered last because `GET /` matches every GET
+	// path. Everything above it is method-qualified and names a literal path, so
 	// net/http's conflict rule never fires and each one still wins.
 	//
 	// `GET /` rather than a method-less `/`, unlike the console
-	// (internal/console/server.go:450). A POST to a page route is a mistake,
-	// and 405 says so; the console answers it with index.html.
+	// (internal/console/server.go:450): a POST to a page route is a mistake, and
+	// 405 says so where index.html would not.
 	s.mux.Handle("GET /", s.withSPAPolicy(http.HandlerFunc(s.handleSPA)))
 
 	// An unmatched API path must not be answered by the app.
 	//
 	// Without these, `GET /api/typo` falls to the catch-all and returns 200
-	// with index.html — which reaches a client as a JSON parse error naming
-	// something that has nothing to do with the mistake.
+	// with index.html, which reaches a client as a JSON parse error.
 	//
-	// Both methods, because registering only GET is worse than registering
-	// neither: `POST /api/typo` would then match `GET /api/`'s path but not its
-	// method, and net/http answers that with 405 and a text/plain body.
-	// PUT/DELETE/PATCH still do — Cloud has no such routes, so nothing can
-	// reach it today, and this is the shape to extend when one appears.
+	// Both methods. With only GET registered, `POST /api/typo` matches
+	// `GET /api/`'s path but not its method, and net/http answers 405 with a
+	// text/plain body. PUT, DELETE and PATCH still do; Cloud has no such
+	// routes, and this is the shape to extend when one appears.
 	s.mux.HandleFunc("GET /api/", notFoundJSON)
 	s.mux.HandleFunc("POST /api/", notFoundJSON)
 
 	// Same trap, one level up. OAuth routes are registered only for providers
-	// this deployment has credentials for, so `/auth/google` on a deployment
-	// with no Google credentials used to be a clean 404 — and behind the
-	// catch-all would become 200 index.html. A literal segment beats a
-	// wildcard, so a configured `GET /auth/github` still wins over these.
+	// this deployment has credentials for, so behind the catch-all
+	// `/auth/google` with no Google credentials would answer 200 index.html
+	// instead of 404. A literal segment beats a wildcard, so a configured
+	// `GET /auth/github` still wins over these.
 	s.mux.HandleFunc("GET /auth/{provider}", notFoundJSON)
 	s.mux.HandleFunc("GET /auth/{provider}/callback", notFoundJSON)
 }
@@ -307,14 +287,9 @@ func notFoundJSON(w http.ResponseWriter, _ *http.Request) {
 
 // handleSPA serves the sign-in application.
 //
-// A method reading s.spaFS per request, rather than a handler built once in
-// routes() around the field's value. The difference is not stylistic: building
-// it once captures whatever spaFS held at construction, which makes the struct
-// field a lie afterwards and silently ignores anything set later. A test
-// swapping in a filesystem is the case that found it, and a test that cannot
-// see its own setup take effect is the failure mode.
-//
-// internal/console does the same for the same reason.
+// Reads s.spaFS per request. A handler built once in routes() captures whatever
+// the field held at construction and ignores anything assigned later, including
+// a test's filesystem. internal/console does the same.
 func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 	spafs.Handler(s.spaFS, "sign-in app not built yet — run: make build-cloud-spa").
 		ServeHTTP(w, r)
@@ -322,10 +297,9 @@ func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 
 // withSPAPolicy widens the CSP for the one handler that needs it.
 //
-// This is the whole of the opt-in. securityHeaders has already set strictCSP by
-// the time this runs, and nothing has been flushed, so overwriting the header
-// here is what makes the sign-in application loadable — and leaves every other
-// route on `default-src 'none'` without having to remember to.
+// securityHeaders has already set strictCSP by the time this runs and nothing
+// has been flushed, so overwriting the header here is the whole opt-in. Every
+// other route keeps `default-src 'none'`.
 func (s *Server) withSPAPolicy(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", spaCSP)
@@ -335,31 +309,23 @@ func (s *Server) withSPAPolicy(next http.Handler) http.Handler {
 
 // strictCSP is the policy every route gets unless it says otherwise.
 //
-// `default-src 'none'` — nothing loads from anywhere. It fits every route Cloud
-// had before the sign-in application: JSON, and three script-free pages reached
-// with a single-use token in the query string.
+// `default-src 'none'`: nothing loads from anywhere. It fits the JSON routes
+// and the three script-free pages reached with a token in the query string.
 const strictCSP = "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 
-// spaCSP is the policy for the sign-in application, and only for it.
+// spaCSP is the Content-Security-Policy for the sign-in application. Wider than
+// strictCSP, which the plain pages use, because a React page loads its own
+// bundle.
 //
-// Wider than strictCSP because a React page has to load its own bundle, and
-// narrower than the console's because this is the origin holding every
-// password, every TOTP secret and the assertion signing key:
-//
-//   - `script-src 'self'` with no 'unsafe-inline' — the directive that actually
-//     stops injected code running.
-//   - `style-src 'self'` with no 'unsafe-inline', which the console does allow.
-//     The cost is a rule: no inline style attributes anywhere in web/cloud, so
-//     no `style={{…}}` and no `style={{'--x': v}}` either — a style attribute is
-//     governed by style-src-attr, which falls back to here. Dynamic values go
-//     through a class or ref + el.style.setProperty(), which is CSSOM and not
-//     governed by CSP.
+//   - `script-src 'self'`, no 'unsafe-inline'.
+//   - `style-src 'self'`, no 'unsafe-inline', which the console does allow.
+//     This forbids inline style attributes anywhere in web/cloud: a style
+//     attribute is governed by style-src-attr, which falls back to style-src.
+//     Dynamic values go through a class, or ref + el.style.setProperty(), which
+//     is CSSOM and not governed by CSP.
 //   - No `data:` in img-src, so Vite must not inline small assets
-//     (assetsInlineLimit: 0). The QR code is inline SVG rectangles, which needs
-//     no allowance at all.
-//   - No external host anywhere. Geist is self-hosted rather than fetched from
-//     Google, because a page where passwords are typed should make no
-//     third-party request.
+//     (assetsInlineLimit: 0). The QR code is inline SVG rectangles.
+//   - No external host. Geist is self-hosted rather than fetched from Google.
 const spaCSP = "default-src 'none'; script-src 'self'; style-src 'self'; " +
 	"img-src 'self'; font-src 'self'; connect-src 'self'; " +
 	"form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
@@ -423,8 +389,6 @@ func (s *Server) sweepExpired(ctx context.Context) {
 	}
 }
 
-// ── Small helpers ───────────────────────────────────────────────────────────
-
 // writeJSON answers with a JSON body that is never stored.
 //
 // no-store on every response rather than on the ones that need it, for the same
@@ -463,10 +427,8 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 
 // validEmail reports whether an address is one this product will send to.
 //
-// net/mail.ParseAddress accepts a great deal that is technically legal and
-// practically not an address anyone has — display names, angle brackets, source
-// routes. The extra checks narrow it to something that will survive being put
-// in a To: header and typed back by a human.
+// net/mail.ParseAddress accepts display names, angle brackets and source
+// routes. The extra checks narrow it to an address that survives a To: header.
 func validEmail(addr string) bool {
 	if len(addr) > 254 || strings.ContainsAny(addr, "\r\n ") {
 		return false

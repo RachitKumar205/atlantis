@@ -701,6 +701,8 @@ dev-k8s-load: build-provision-images dev-certs dev-cloud-role dev-console-role d
 		CONSOLE_ENROLL_URL="$(CONSOLE_ENROLL_URL)" \
 		CONSOLE_ENROLL_TLS_CERT_DATA="$$(cat $(DEV_CERT_DIR)/enroll-server.crt)" \
 		CONSOLE_ENROLL_TLS_KEY_DATA="$$(cat $(DEV_CERT_DIR)/enroll-server.key)" \
+		CLOUD_RESEND_API_KEY="$${CLOUD_RESEND_API_KEY:-}" \
+		CLOUD_MAIL_FROM="$${CLOUD_MAIL_FROM:-}" \
 		./deploy/k8s-dev.sh
 
 # The provisioner, run on the host against the cluster's kubeconfig.
@@ -1006,10 +1008,20 @@ dev-cloud-data-key: ## Create (once) the keyset Cloud seals second-factor secret
 #
 # Run one or the other, as with dev-provisioner.
 CLOUD_HOST_ISSUER ?= http://localhost:9500
+# CLOUD_MAIL_DEV prints verification and reset links to this terminal instead of
+# sending them, which is the intended local flow and the reason `cloud serve`
+# refuses to start with no transport at all: an unconfigured deployment used to
+# do this silently and look, from outside, exactly like one delivering mail.
+#
+# Set CLOUD_RESEND_API_KEY and CLOUD_MAIL_FROM instead to send for real from
+# here — the two are mutually exclusive and Cloud says so if both are given.
 CLOUD_DEV_ENV = \
 	CLOUD_ISSUER="$(CLOUD_HOST_ISSUER)" \
 	CLOUD_PG_URL="$(CLOUD_PG_URL)" \
 	CLOUD_PUBLIC_URL="$(CLOUD_HOST_ISSUER)" \
+	CLOUD_MAIL_DEV="$$([ -n "$${CLOUD_RESEND_API_KEY:-}" ] && echo false || echo true)" \
+	CLOUD_RESEND_API_KEY="$${CLOUD_RESEND_API_KEY:-}" \
+	CLOUD_MAIL_FROM="$${CLOUD_MAIL_FROM:-}" \
 	CLOUD_DATA_KEY="$$(cat $(CLOUD_DATA_KEY_FILE))"
 
 .PHONY: dev-auth
