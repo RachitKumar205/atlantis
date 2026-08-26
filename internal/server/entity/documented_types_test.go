@@ -16,24 +16,21 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/testsupport/dsltypes"
 )
 
-// The dispatcher publishes its own protobuf descriptors, so it carries a
-// SECOND copy of the DSL-type-to-wire-type mapping. dslFieldToProtoField's
-// comment claims it uses "the same type mapping as coltype.ProtoType", and
-// nothing checked that.
+// The dispatcher publishes its own protobuf descriptors, so it carries a second
+// copy of the DSL-type-to-wire-type mapping, which dslFieldToProtoField claims
+// is "the same type mapping as coltype.ProtoType".
 //
-// It was false. `real` and `double` were absent from setProtoType, so they hit
-// the default arm and were published as proto `string` while `tide codegen`
-// published them as `float` and `double` for the same schema. A generated
-// client putting fixed32 on the wire against a descriptor that says string
-// unmarshals without error, leaves the field unset, and the write reaches
-// Postgres as "" — `invalid input syntax for type double precision`. The read
-// path lost the value silently: makeScanTarget had no arm either, so the row
-// was stringified through fmt.Sprintf into a field the client decodes as 0.
+// A type missing from setProtoType hits the default arm and is published as
+// proto `string` while `tide codegen` publishes it as `float` or `double` for
+// the same schema. A generated client putting fixed32 on the wire against a
+// descriptor that says string unmarshals without error, leaves the field unset,
+// and the write reaches Postgres as "" — `invalid input syntax for type double
+// precision`. The read path loses the value silently, because makeScanTarget
+// has no arm either and the row is stringified through fmt.Sprintf into a field
+// the client decodes as 0.
 //
-// That gap was unreachable until the codegen tables learned the two types,
-// because apply failed at the DDL first. Making one half work is what exposed
-// the other, which is the argument for pinning them to each other rather than
-// each to the page separately.
+// The two are pinned to each other rather than each to the documentation, since
+// a gap in one is unreachable while the other still fails at the DDL.
 
 // protoKindForATL maps what coltype.ProtoType returns to the descriptor kind
 // the dispatcher must produce for the same column.

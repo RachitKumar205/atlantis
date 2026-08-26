@@ -89,10 +89,11 @@ func New%s(cc grpc.ClientConnInterface) %s {
 	return GoFile{Path: path, Content: b.String()}, nil
 }
 
-// emitClientIfaceMethods writes the six core methods + per-HNSW search
-// onto an interface body. The signatures match what the buf-generated
-// service client exposes — we keep grpc.CallOption variadics so callers
-// can pass per-call deadlines / retries through.
+// emitClientIfaceMethods writes the seven core methods, plus one search per
+// HNSW index, onto an interface body.
+//
+// The signatures match the buf-generated service client, grpc.CallOption
+// variadics included, so a caller can pass per-call deadlines and retries.
 func emitClientIfaceMethods(b *strings.Builder, e *dsl.Entity) {
 	for _, verb := range []string{"Get", "List", "BatchGet", "Create", "Update", "Delete", "Query"} {
 		fmt.Fprintf(b, "\t%s%s(ctx context.Context, req *pb.%s%sRequest, opts ...grpc.CallOption) (*pb.%s%sResponse, error)\n",

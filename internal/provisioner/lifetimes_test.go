@@ -13,13 +13,9 @@ import (
 // The two numbers that decide whether console credentials renew safely.
 //
 // certs.ClientLifetime is how long one lasts; DefaultConsoleCertRenewWithin is
-// how much life must be left before the provisioner replaces it. Neither is
-// meaningful alone, they live in different packages, and nothing else makes
-// them agree — so a change to one of them is exactly the edit that passes review
-// and produces an outage weeks later.
-//
-// Both failure directions are silent, which is why they are pinned here rather
-// than left to the comments that explain them.
+// how much life must be left before the provisioner replaces it. They live in
+// different packages, nothing else makes them agree, and both failure
+// directions are silent.
 
 // A freshly issued certificate must not already be due for renewal.
 //
@@ -37,12 +33,10 @@ func TestAFreshConsoleCertificateIsNotImmediatelyDueForRenewal(t *testing.T) {
 	}
 }
 
-// The window has to leave room for passes to fail.
-//
-// Its whole purpose is margin: how long the provisioner can be wedged, mid-
-// deploy, or locked out of the cluster before an organisation loses console
-// access. A window measured in a few reconcile intervals would mean a single
-// bad afternoon expires the fleet.
+// The window is margin: how long the provisioner can be wedged, mid-deploy, or
+// locked out of the cluster before an organisation loses console access. A
+// window measured in a few reconcile intervals means one bad afternoon expires
+// the fleet.
 //
 // Asserted as a multiple of the reconcile interval rather than as a fixed
 // duration, so shortening the interval cannot silently narrow the margin.
@@ -92,9 +86,7 @@ func TestTheConsoleCertificateLifetimeStaysWithinAMonth(t *testing.T) {
 // now". Every `console_cert_seconds_left < threshold` rule would therefore fire
 // the moment this process starts and keep firing until the first reconcile
 // pass — up to a reconcile interval of paging on every deploy, restart and
-// rollout. An alert that goes off routinely is one somebody silences, and this
-// is the alert that stands between a rotation quietly failing and a fleet-wide
-// outage.
+// rollout.
 //
 // NaN is the value that means "not measured": comparisons against it are false,
 // so nothing fires, and it renders as a gap rather than a cliff.

@@ -4,20 +4,19 @@ import (
 	"strings"
 )
 
-// Partial-index `where` predicates are validated by delegating to Postgres's
-// own parser (pg_query_go), which is a cgo dependency. Because Go links a
-// package as a unit, a single import of pg_query_go anywhere in package dsl
-// forces every binary that touches the DSL to link libpg_query — including
-// `tide`, whose plan/apply path ships raw .atl bytes to the server and never
-// parses locally.
+// Partial-index `where` predicates are validated by Postgres's own parser,
+// pg_query_go, which is a cgo dependency. Go links a package as a unit, so one
+// import of it anywhere in package dsl makes every binary touching the DSL link
+// libpg_query — including `tide`, which ships raw .atl bytes to the server and
+// never parses locally.
 //
-// So lowerPredicate lives in two build-tagged files: predexpr_cgo.go carries
-// the real implementation, predexpr_nocgo.go a refusing stub. This file holds
-// only the parts that are pure Go and are needed by both.
+// lowerPredicate therefore lives in two build-tagged files: predexpr_cgo.go
+// holds the implementation and predexpr_nocgo.go a refusing stub. This file
+// holds the pure-Go parts both need.
 //
-// The server is unaffected: it imports internal/dsl/sqlvalidate, which depends
-// on pg_query_go directly, so a CGO_ENABLED=0 server build fails at compile
-// time rather than silently skipping validation.
+// The server imports internal/dsl/sqlvalidate, which depends on pg_query_go
+// directly, so a CGO_ENABLED=0 server build fails to compile rather than
+// skipping validation.
 
 // dslToSQL rewrites a captured predicate into SQL: DSL `"..."` string literals
 // become SQL `'...'` (decoding DSL escapes, doubling embedded single quotes),

@@ -2,20 +2,18 @@
 // drain loop) and the server-side dispatcher (Temporal-style worker
 // poll over gRPC).
 //
-// The same primitives — claim a batch, extend lease, mark complete,
-// report failure, move to DLQ, release row — drive both code paths.
-// Centralising them here means the dispatcher and the SDK Worker
-// agree on the exact SQL semantics (predicate shape, lease format,
-// terminal-state writes) without one drifting from the other. The
-// claim CTE in particular MUST stay byte-identical: SKIP LOCKED is
-// what makes a direct-PG worker and a dispatcher session safe to
-// coexist on the same queue, so any difference would break the
-// safety story.
+// The same primitives drive both paths: claim a batch, extend the lease, mark
+// complete, report failure, move to the DLQ, release a row. One copy here is
+// what keeps the predicate shape, the lease format and the terminal-state
+// writes identical between them.
 //
-// Schema is hardcoded to `atlantis.jobs` — the existing Worker
-// already does this, and the dispatcher inherits the same convention.
-// If atlantis ever runs against a non-default schema, this is the
-// one file to update.
+// The claim CTE especially. FOR UPDATE SKIP LOCKED is what lets a direct-PG
+// worker and a dispatcher session share a queue, and two spellings of it are
+// two claim semantics.
+//
+// The schema is written literally as `atlantis.jobs` throughout. Config.Schema
+// reaches none of these statements, so this is the file to change if atlantis
+// ever runs elsewhere.
 
 package jobs
 
@@ -113,10 +111,9 @@ RETURNING j.id, j.job_name, j.args, j.attempts, j.max_retries,
 // "dispatcher/<sessionID>" for the dispatcher. Used by ExtendLease's
 // predicate to ensure only the current claimant can heartbeat.
 //
-// leaseUntil is the absolute deadline written to claimed_until. The
-// caller computes this as now() + HeartbeatBudget; we don't compute
-// here so the same wall-clock is used for both the row update and any
-// in-process bookkeeping.
+// leaseUntil is the absolute deadline written to claimed_until, computed by the
+// caller as now() + HeartbeatBudget rather than here, so the row update and the
+// caller's own bookkeeping share one wall-clock reading.
 //
 // workerKind is one of the WorkerKind* constants. sessionID is the
 // dispatcher session id (empty for direct-PG).
@@ -268,10 +265,9 @@ FROM atlantis.jobs WHERE id = $1`, jobID, errMsg); err != nil {
 //     reset the row to pending, but the claim CTE's retry gate now
 //     refuses to re-claim it (attempts >= GREATEST(max_retries,1)). With
 //     no claim and no Fail, nothing would otherwise DLQ it.
-//   - running + lease long-expired + attempts maxed: an abandoned row
-//     from a session that died without releasing (e.g. the pre-ExtendLease
-//     -fix incident rows). The extra 5-minute grace past claimed_until
-//     guarantees no live, heartbeating session still owns it.
+//   - running + lease long-expired + attempts maxed: a row abandoned by a
+//     session that died without releasing. The extra 5-minute grace past
+//     claimed_until guarantees no live, heartbeating session still owns it.
 //
 // Both predicates require attempts >= GREATEST(max_retries,1) so a row
 // with budget left is never swept — those continue through normal claim/

@@ -18,10 +18,10 @@ import (
 // rejection reaches production through exactly one path: validateCustomSQL
 // returns messages, and ApplyMigration turns them into an error.
 //
-// PlanSchema calls the same function and does NOT refuse, correctly: a plan
-// should show every problem at once rather than stop at the first. So the whole
-// enforcement rests on this one call site behaving differently from the other,
-// and nothing was checking that it did. Softening it to a warning — which is
+// PlanSchema calls the same function and does not refuse, correctly: a plan
+// shows every problem at once rather than stopping at the first. So enforcement
+// rests on this one call site behaving differently from the other. Softening it
+// to a warning — which is
 // the natural thing to do the first time a legitimate query trips the gate —
 // would leave every test in the repository green.
 //
@@ -167,10 +167,9 @@ func TestValidateCustomSQL_GatesEntityChecksForTheSubmittingCaller(t *testing.T)
 	if !strings.Contains(joined, "shop.Mine") {
 		t.Errorf("did not name the offending entity: %s", joined)
 	}
-	// Another caller's stored content is deliberately out of scope here — it was
-	// judged when its owner applied it, and re-judging it now would let their
-	// staleness block this apply. Asserted so the scoping is a decision rather
-	// than an accident.
+	// Another caller's stored content is out of scope: it was judged when its
+	// owner applied it, and re-judging it now lets their staleness block this
+	// apply. Asserted so the scoping is a decision rather than an accident.
 	if strings.Contains(joined, "other.Theirs") {
 		t.Errorf("validated another caller's entity, which turns their stored "+
 			"content into a block on this caller's apply: %s", joined)

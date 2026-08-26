@@ -12,8 +12,8 @@ import (
 // mustGate names the RPCs that execute schema DDL derived from caller-submitted
 // files, and therefore have to consult the change policy.
 //
-// RollbackSchema is deliberately absent, and the omission is a decision rather
-// than an oversight. It returns the schema to a state that already passed this
+// RollbackSchema is absent, and the omission is a decision. It returns the
+// schema to a state that already passed this
 // gate once, it is CAPABILITY_OPERATOR rather than SCHEMA_APPLY, and it is what
 // somebody reaches for at 3am. Requiring a second human there is how a gate
 // gets switched off permanently — the failure mode is not "rollback was
@@ -143,9 +143,9 @@ func TestEveryGateOutcomeIsCovered(t *testing.T) {
 				found[literalText(call.Args[len(call.Args)-1])] = true
 			}
 		case *ast.SelectorExpr:
-			// status.Errorf(code, format, ...) — the format is second. fmt.Errorf
-			// is deliberately NOT collected: those wrap an internal failure and
-			// are not an answer the gate gives.
+			// status.Errorf(code, format, ...) — the format is second.
+			// fmt.Errorf is not collected: those wrap an internal failure
+			// rather than an answer the gate gives.
 			if id, ok := fun.X.(*ast.Ident); ok && id.Name == "status" &&
 				fun.Sel.Name == "Errorf" && len(call.Args) >= 2 {
 				found[literalText(call.Args[1])] = true

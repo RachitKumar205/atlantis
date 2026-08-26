@@ -17,9 +17,9 @@ import (
 	"github.com/rachitkumar205/atlantis/migrations"
 )
 
-// The console schema moved out of an idempotent CREATE-IF-NOT-EXISTS block in
-// internal/console/store.go and into migrations/console. These tests pin the
-// two properties that move had to preserve.
+// migrations/console carries a schema that every running console already built
+// for itself, by re-executing one idempotent CREATE-IF-NOT-EXISTS block on each
+// boot. The tests below pin what the migration tree owes those databases.
 //
 // Env-gated like the other live-PG tests:
 //
@@ -39,13 +39,12 @@ func adminDSN(t *testing.T) string {
 	return dsn
 }
 
-// theOldWay is the schema exactly as store.migrate wrote it, kept here as the
-// thing the baseline migration has to reproduce.
+// theOldWay is the schema the console built for itself before it had
+// migrations, and what migration 0001 has to reproduce.
 //
-// It is a literal rather than a reference because the function it came from is
-// deleted. If the baseline drifts from this, a database built by an old console
-// and one built by a new console differ — and the difference surfaces later, as
-// a migration that works on one and fails on the other.
+// A literal, since nothing in the tree emits it any more. Where the baseline
+// drifts from this, a database built by an old console differs from one built
+// today, and the difference surfaces at the next migration.
 const theOldWay = `
 CREATE SCHEMA IF NOT EXISTS console;
 CREATE TABLE IF NOT EXISTS console.users (
@@ -80,10 +79,10 @@ CREATE INDEX IF NOT EXISTS console_audit_log_created_at_idx ON console.audit_log
 
 // A database built the old way converges, keeping its rows.
 //
-// This is the case the baseline exists for. Every console that has ever run
-// carries these tables already, so migration 1 has to be a no-op against them
-// AND record its version — otherwise the next migration to add a column runs
-// against a database golang-migrate believes is empty.
+// Every console that has ever run carries these tables, so migration 0001 is a
+// no-op against them and records its version. Without the second, the next
+// migration to add a column runs against a database golang-migrate reads as
+// empty.
 func TestAnExistingConsoleDatabaseConverges(t *testing.T) {
 	dsn := pgcatalog.PrivateDatabase(t, adminDSN(t), "atlantis_console_upgrade")
 	ctx := context.Background()
@@ -112,9 +111,9 @@ INSERT INTO console.users (email, password_hash) VALUES ('op@example.com', 'x')
 RETURNING id`).Scan(&userID); err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
-	// Two audit rows: one by a user who still exists, one by a user who was
-	// already deleted. 0003 handles them by different branches, and the second
-	// is the one where there is nothing left to copy an email from.
+	// Two audit rows: one by a user who still exists, one by a user already
+	// deleted. 0003 takes a different branch for each, and the second has no
+	// email left to copy.
 	if _, err := pool.Exec(ctx, `
 INSERT INTO console.audit_log (user_id, action, created_at)
 VALUES ($1, 'approve_plan', '2099-01-15 12:00:00+00'),
@@ -127,12 +126,10 @@ VALUES ($1, 'approve_plan', '2099-01-15 12:00:00+00'),
 		t.Fatalf("migrate an existing console database: %v", err)
 	}
 
-	// The audit trail survives the identity swap.
-	//
-	// This is the property migration 0003 is most able to break quietly.
-	// console.users is dropped, and every historical row referenced it by id —
-	// so unless the email is copied across first, the log keeps every row and
-	// can no longer say who any of them was.
+	// The audit trail survives the identity swap. Migration 0003 drops
+	// console.users, and every historical row referenced it by id, so unless the
+	// email is copied across first the log keeps every row and can name none of
+	// them.
 	var actor, actorEmail string
 	if err := pool.QueryRow(ctx, `
 SELECT actor, actor_email FROM console.audit_log WHERE action = 'approve_plan'`).
@@ -160,11 +157,11 @@ SELECT actor, actor_email FROM console.audit_log WHERE action = 'sign_out_all'`)
 	}
 	if orphanEmail != "" {
 		t.Errorf("orphaned actor_email = %q, want empty — there was no user to "+
-			"read one from, and inventing one would be worse than leaving it blank", orphanEmail)
+			"read one from", orphanEmail)
 	}
 
-	// And console.users is gone, rather than left behind holding password
-	// hashes nothing reads.
+	// console.users is dropped, not left behind holding password hashes nothing
+	// reads.
 	var usersExists bool
 	if err := pool.QueryRow(ctx, `
 SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'console' AND tablename = 'users')`).
@@ -175,9 +172,8 @@ SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'console' AND tablenam
 		t.Error("console.users survived the migration, still holding password hashes")
 	}
 
-	// The version is recorded, which is the half that makes the NEXT migration
-	// possible. A no-op that leaves the history empty is the failure mode this
-	// test exists to catch: everything looks fine until the migration after it.
+	// The version is recorded. A no-op that converges the schema and leaves the
+	// history empty reads as success until the migration after it.
 	var version int
 	if err := pool.QueryRow(ctx,
 		`SELECT version FROM public.`+migrate.ConsoleHistoryTable).Scan(&version); err != nil {
@@ -191,19 +187,16 @@ SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'console' AND tablenam
 
 // An upgraded database and a fresh one end up with the same schema.
 //
-// This used to compare a freshly-migrated database against theOldWay verbatim,
-// which held only while the baseline was the whole history. It stopped being
-// true at migration 0003 — correctly, since that migration exists to change the
-// shape.
+// Whatever the migrations do, a console running since before they existed ends
+// up indistinguishable from one installed today. Otherwise the next migration
+// works on one and fails on the other.
 //
-// The durable property is the one below: whatever the migrations do, a console
-// that has been running since before they existed must end up indistinguishable
-// from one installed today. Otherwise the next migration works on one and fails
-// on the other, and which one you have depends on when you started.
+// Comparing against theOldWay verbatim holds only while the baseline is the
+// whole history; migration 0003 changes the shape, which is what it is for.
 //
-// Compared through the catalogue rather than by reading the SQL, because the
-// question is what Postgres ended up with — a migration that produces a subtly
-// different default or a missing index passes any review of the file.
+// Compared through the catalogue rather than by reading the SQL: the question
+// is what Postgres ended up with, and a migration producing a different default
+// or a missing index passes any review of the file.
 func TestAnUpgradedDatabaseMatchesAFreshOne(t *testing.T) {
 	admin := adminDSN(t)
 
@@ -331,28 +324,23 @@ SELECT c.relname, pg_get_partkeydef(c.oid)
 
 // Running twice changes nothing.
 //
-// #55 fixed exactly this for the infra tree: without the search_path pin,
-// golang-migrate creates its version table wherever search_path resolves, finds
-// it empty on the next connection, and replays the whole history. That was
-// survivable only because the statements were CREATE ... IF NOT EXISTS. It
-// stops being survivable at the first ALTER.
+// Without the search_path pin, golang-migrate creates its version table
+// wherever search_path resolves, finds it empty on the next connection, and
+// replays the whole history — survivable only while every statement is
+// CREATE ... IF NOT EXISTS, and not past the first ALTER.
 func TestASecondMigrateIsANoOp(t *testing.T) {
 	dsn := pgcatalog.PrivateDatabase(t, adminDSN(t), "atlantis_console_twice")
 	ctx := context.Background()
 
-	// Reproduce the condition the pin exists for, which a bare private database
-	// does NOT have.
+	// The condition the pin exists for, which a bare private database does not
+	// have.
 	//
-	// The default search_path is `"$user", public`. The hazard only appears once
-	// a schema named after the connecting role exists: the unqualified history
-	// table then resolves there, finds nothing, and golang-migrate concludes the
-	// database has never been migrated. Production has exactly that — the role
-	// is `atlantis` and the infra tree creates a schema called `atlantis` — but
-	// a fresh test database has neither, so without this the test passes whether
-	// or not the pin is present.
-	//
-	// Found by mutation: deleting `search_path=public` broke nothing until this
-	// was added.
+	// The default search_path is `"$user", public`, so the hazard needs a schema
+	// named after the connecting role: the unqualified history table resolves
+	// there, finds nothing, and golang-migrate reads the database as never
+	// migrated. Production has both — the role is `atlantis` and the infra tree
+	// creates a schema called `atlantis` — and a fresh test database has
+	// neither, so the test passes with or without the pin until this runs.
 	setup, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Fatalf("connect for setup: %v", err)
@@ -391,11 +379,9 @@ func TestASecondMigrateIsANoOp(t *testing.T) {
 	}
 }
 
-// An empty embedded tree is an error, not a silent success.
-//
-// A binary that carries no schema and starts anyway is the shape of every
-// failure in this area: the run reports success, the database is empty, and the
-// first query is what finally says so.
+// An empty embedded tree is an error, not a silent success. A binary that
+// carries no schema and starts anyway reports a successful migration against an
+// empty database, and the first query is what says otherwise.
 func TestAnEmptyEmbeddedTreeIsRefused(t *testing.T) {
 	err := migrate.RunFS("postgres://unused/db", migrations.Console, "nosuchdir",
 		migrate.ConsoleHistoryTable, quiet())

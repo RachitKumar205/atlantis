@@ -8,17 +8,15 @@ import (
 // Author text must never be able to end the comment line it is written into.
 //
 // A `--` comment ends at the first newline, and the DSL lexer turns `\n` in a
-// string literal into a real newline. A review shipped
+// string literal into a real newline. On PostgreSQL 17.8,
 //
 //	total int check "total > 0 /*\n; DROP POLICY shop_doc_partition ON shop.doc; --*/"
 //
-// through parse, lower, every validator in internal/dsl/sqlvalidate, and the
-// emitter, then applied the migration on PostgreSQL 17.8. The expression is an
-// ordinary CHECK to a parser — the newline is whitespace and the block comment
-// is stripped — so nothing rejected it. In the emitted migration the second
-// line was top-level SQL, and applying it dropped the row-level security policy
-// off the table: the exact capability the CHECK gate exists to remove, arriving
-// through the generated comment instead of through the constraint.
+// passes parse, lower, every validator in internal/dsl/sqlvalidate and the
+// emitter: to a parser the expression is an ordinary CHECK, since the newline
+// is whitespace and the block comment is stripped. In the emitted migration the
+// second line is top-level SQL, and applying it drops the row-level security
+// policy off the table.
 //
 // Asserted at the builder, because that is where every channel converges.
 // CHECK, backfill, index expression and index predicate all reach the same

@@ -148,9 +148,8 @@ func TestAForeignArgon2VersionIsRefusedByName(t *testing.T) {
 	}
 }
 
-// encodeAt builds a PHC string at chosen parameters, for testing the upgrade
-// path. It deliberately mirrors Hash rather than calling it, because the point
-// is to produce something Hash would not.
+// encodeAt builds a PHC string at chosen parameters, for the upgrade path. It
+// mirrors Hash rather than calling it, so it can produce what Hash would not.
 func encodeAt(t *testing.T, password string, memory, time uint32, threads uint8) string {
 	t.Helper()
 	salt := []byte("0123456789abcdef")

@@ -477,14 +477,13 @@ hypertable Purchase in vendor on purchased_at {
 	}
 }
 
-// ---- Step 7.5: custom queries and procedures ----
+// The tests below pin the parsed shape of `query` and `procedure`.
 //
-// These tests pin the parsed shape of the new top-level constructs.
-// The grammar's load-bearing piece is raw-SQL capture inside the lexer
-// (so SQL chars like `'`, `--`, `*` don't crash the regular scanner),
-// so every test exercises a non-trivial SQL body to keep that wire
-// honest. Validation rules (identifier resolution, $arg presence, type
-// checks) live in IR lowering — covered separately in ir_test.go.
+// Raw-SQL capture happens in the lexer, so every test carries a SQL body
+// holding characters the regular scanner would take as tokens: `'`, `--`, `*`.
+//
+// Identifier resolution, $arg presence and type checks happen at IR lowering;
+// ir_test.go covers those.
 
 func TestParse_QueryDecl_BasicShape(t *testing.T) {
 	src := `
@@ -539,12 +538,11 @@ query OutfitsForConsumer for SavedOutfit {
 	}
 }
 
-// TestParse_QueryDecl_RawSQLPreservesSpecialChars confirms the lexer's
-// raw-mode capture leaves the body byte-identical. The body contains
-// SQL single-quoted strings (with embedded escape `”`), SQL line
-// comments (`-- comment`), and a `*` — chars the regular DSL lexer
-// would otherwise choke on. This is the load-bearing invariant that
-// lets pg_query_go see the source as PG itself would.
+// TestParse_QueryDecl_RawSQLPreservesSpecialChars confirms the lexer's raw-mode
+// capture leaves the body byte-identical, so pg_query_go sees the source
+// PostgreSQL would. The body holds single-quoted strings with a doubled-quote
+// escape inside one, a `-- comment`, and a `*`, all of which the regular DSL
+// lexer takes as tokens.
 func TestParse_QueryDecl_RawSQLPreservesSpecialChars(t *testing.T) {
 	src := `
 query VendorByName for Vendor {

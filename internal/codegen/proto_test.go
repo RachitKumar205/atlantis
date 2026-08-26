@@ -299,9 +299,6 @@ func TestProto_HeaderComment(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// QueryX surface emission
-
 func TestProto_EmitQueryRPC(t *testing.T) {
 	ir := lower(t, `
 entity Account in consumer {

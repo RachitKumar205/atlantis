@@ -1,24 +1,13 @@
-// Package provisioner turns queued organisations into running ones.
+// Package provisioner turns queued organisations into running ones, joining
+// internal/cloud/store, internal/cloud/provision and internal/console.
 //
-// It is the process that closes the chain. internal/cloud/store knows an
-// organisation is waiting; internal/cloud/provision knows how to build one;
-// internal/console knows how to record one. Until this package existed, nothing
-// called the second of those from anywhere — provisioning was a package with no
-// importer outside its own tests.
+// A separate binary from `cloud serve`: only this process holds Kubernetes
+// credentials. They come from controller-runtime's config.GetConfig, which
+// resolves in-cluster credentials first and falls back to KUBECONFIG and then
+// ~/.kube/config, so one binary works in a cluster and on a laptop.
 //
-// # Why this is a binary and not a goroutine in cloud serve
-//
-// It holds Kubernetes credentials. cloud serve holds every password, every TOTP
-// secret and the assertion signing key, and W3 deliberately made it a React
-// origin with script-src 'self'. That risk was accepted on the understanding
-// that script on Cloud's origin could reach /api/account/*. It was not accepted
-// on the understanding that it could schedule pods.
-//
-// # Two provisioners are safe
-//
-// The claim is one statement — a CTE with FOR UPDATE SKIP LOCKED feeding an
-// UPDATE — so concurrent claimants skip rows already held rather than re-reading
-// them. Scale is more processes, not more goroutines here.
+// Two provisioners are safe. The claim is one statement, a CTE with FOR UPDATE
+// SKIP LOCKED feeding an UPDATE, so scale is more processes.
 package provisioner
 
 import (
@@ -35,10 +24,10 @@ import (
 // Defaults for the loop's own timings.
 //
 // ReadyTimeout is the one provision.Config field this package sets rather than
-// leaving empty, and the reason is the lease: a wait that outlives the claim
+// leaving empty. The lease is sized from it — a wait that outlives the claim
 // hands the organisation to a second provisioner while the first is still
-// working on it. The lease has to be sized against this number, so this number
-// has to be known here rather than defaulted out of sight inside NewKube.
+// working on it — so it has to be known here rather than defaulted inside
+// NewKube.
 const (
 	DefaultPollInterval      = 10 * time.Second
 	DefaultReconcileInterval = 5 * time.Minute
@@ -49,35 +38,21 @@ const (
 	DefaultHealthAddr        = ":8082"
 
 	// DefaultConsoleCertRenewWithin is how much life the console's certificate
-	// must have left before a reconcile pass replaces it.
+	// must have left before a reconcile pass replaces it. Ten days is how long
+	// this provisioner can be wedged before an organisation loses console
+	// access.
 	//
-	// Ten days, sized against the outage it prevents rather than against the
-	// certificate: it is how long this provisioner can be wedged, or simply not
-	// running, before an organisation loses console access altogether. A window
-	// tight to the renewal cadence would make the provisioner a component whose
-	// weekend outage is a fleet-wide one.
-	//
-	// Paired with certs.ClientLifetime, which is thirty days: a credential is
-	// replaced with a third of its life left, so two consecutive passes can be
-	// missed entirely and nothing breaks. Changing either number without the
-	// other is what turns the margin into an outage — a renewal window wider
-	// than the lifetime rotates on every pass, and one much narrower removes the
-	// slack this is here to provide.
+	// Paired with certs.ClientLifetime, thirty days. A window wider than the
+	// lifetime rotates on every pass; a much narrower one removes the margin.
 	DefaultConsoleCertRenewWithin = 10 * 24 * time.Hour
 
-	// DefaultMetricsAddr is loopback, and the 127.0.0.1 is the point rather
-	// than the port.
+	// DefaultMetricsAddr is loopback. The address matters, not the port:
+	// DefaultHealthAddr binds every interface so the kubelet can reach the
+	// probes, and tenant namespaces restrict ingress rather than egress, so a
+	// tenant workload can connect to anything it can address.
 	//
-	// /metrics used to share DefaultHealthAddr, which binds every interface
-	// because the kubelet has to reach the probes on it. That made per-caller
-	// counts readable by any pod in the cluster: tenant namespaces restrict
-	// ingress, not egress, so a tenant workload can open a connection to
-	// anything it can address.
-	//
-	// Nothing scrapes this process today, so binding it where only this pod can
-	// reach costs nothing and closes that. A scraper arriving later is a reason
-	// to give this listener a credential — not a reason to have left it open in
-	// the meantime.
+	// Nothing scrapes this process today. A scraper arriving later needs this
+	// listener to carry a credential.
 	DefaultMetricsAddr = "127.0.0.1:9102"
 
 	// leaseFactor sizes the default lease from ReadyTimeout. Three times leaves
@@ -108,24 +83,13 @@ type Config struct {
 	// that reason. A second name for one value is two settings that must agree.
 	ConsoleURL string
 
-	// ClaimedBy names this process in the queue. Not load-bearing for
-	// correctness, which is the lease's job, but a wedged row whose claimant is
-	// blank is one nobody can trace to a process.
+	// ClaimedBy names this process in the queue. Correctness rests on the
+	// lease; this is what traces a wedged row back to a process.
 	ClaimedBy string
 
-	// There is deliberately no Kubeconfig field.
-	//
-	// controller-runtime's config.GetConfig already resolves in-cluster
-	// credentials first and falls back to KUBECONFIG and then ~/.kube/config,
-	// which is exactly the behaviour that lets one binary work in both places
-	// without a flag deciding which. A field here would be read from the
-	// environment, stored, and never consulted — an inert setting that looks
-	// like configuration, which is the shape CONSOLE_ENROLL_CLIENT_CA was
-	// retired for.
-
 	// PollInterval is how often an idle queue is checked. There is no
-	// LISTEN/NOTIFY: provisioning takes minutes and happens rarely, so a ticker
-	// is honest and a trigger channel would be machinery with no reader.
+	// LISTEN/NOTIFY: provisioning takes minutes and happens rarely, so a
+	// trigger channel would have no reader a ticker does not already cover.
 	PollInterval time.Duration
 
 	// ReconcileInterval is how often ready organisations are checked against
@@ -136,8 +100,7 @@ type Config struct {
 
 	// ConsoleCertRenewWithin is how close to expiry the console's credential
 	// for an organisation may get before a reconcile pass reissues it. See
-	// DefaultConsoleCertRenewWithin for how the number is chosen, and why it
-	// currently never fires.
+	// DefaultConsoleCertRenewWithin for how the number is chosen.
 	ConsoleCertRenewWithin time.Duration
 
 	// Lease is how long a claim is held before another provisioner may take it.
@@ -148,7 +111,7 @@ type Config struct {
 	// RetryBase and RetryMax bound the backoff after a failure. Escalating,
 	// capped: a permanent fault like a bad image reference must not become a
 	// loop that provisions nothing and fills the log, and a transient cluster
-	// problem must still recover with nobody watching.
+	// problem must still recover unattended.
 	RetryBase time.Duration
 	RetryMax  time.Duration
 
@@ -168,10 +131,8 @@ type Config struct {
 // ConfigFromEnv reads the whole configuration and reports everything wrong with
 // it at once.
 //
-// One error naming every missing setting, not one per restart. An operator
-// configuring this from scratch would otherwise learn about ten variables over
-// ten restarts, which is how a five-minute task becomes an afternoon — the same
-// reasoning validateEnrollment records in internal/console/config.go.
+// One error naming every missing setting, so an operator configuring this from
+// scratch does not learn about ten variables over ten restarts.
 func ConfigFromEnv() (Config, error) {
 	c := Config{
 		CloudPGURL:     os.Getenv("CLOUD_PG_URL"),
@@ -193,7 +154,7 @@ func ConfigFromEnv() (Config, error) {
 		MetricsAddr: envOr("PROVISIONER_METRICS_LISTEN", DefaultMetricsAddr),
 
 		Provision: provision.Config{
-			// Set here, deliberately, because the lease is sized from it.
+			// Set here because the lease is sized from it.
 			ReadyTimeout: envDuration("PROVISIONER_READY_TIMEOUT", DefaultReadyTimeout),
 
 			// Required — provision.Config.validate refuses without them, and
@@ -203,16 +164,13 @@ func ConfigFromEnv() (Config, error) {
 			// becomes Ready.
 			ExternalHost: os.Getenv("PROVISIONER_EXTERNAL_HOST"),
 
-			// Defaults TRUE, and defaults rather than being required because
-			// the console running beside the organisations is the deployed
-			// shape — a hosted console is in the cluster, and the address it
-			// dials is a Service name.
+			// Defaults true: a hosted console runs in the cluster and dials a
+			// Service name. False for a console on a developer's machine, which
+			// is what `make dev-console-app` runs.
 			//
-			// Set it false for a console on somebody's machine, which is what
-			// `make dev-console-app` runs. Getting it wrong does not fail at
-			// startup: the console resolves a name that does not exist where it
-			// is running, and every page reports a DNS error naming the cluster
-			// resolver.
+			// A wrong value does not fail at startup. The console resolves a
+			// name that does not exist where it is running, and every page
+			// reports a DNS error naming the cluster resolver.
 			ConsoleInCluster: envBool("PROVISIONER_CONSOLE_IN_CLUSTER", true),
 
 			ServerImage:   os.Getenv("PROVISIONER_SERVER_IMAGE"),
@@ -220,13 +178,10 @@ func ConfigFromEnv() (Config, error) {
 			PostgresImage: os.Getenv("PROVISIONER_POSTGRES_IMAGE"),
 			MemcachedAddr: os.Getenv("PROVISIONER_MEMCACHED_ADDR"),
 
-			// Everything below is read and left EMPTY when unset, rather than
-			// defaulted here.
-			//
-			// provision.Config.withDefaults is unexported and runs inside
-			// NewKube. Supplying fallbacks here would create a second source of
-			// truth for each of these, and two sources of truth drift — with
-			// this one silently winning, because it runs first.
+			// Everything below is left empty when unset rather than defaulted
+			// here. provision.Config.withDefaults runs inside NewKube;
+			// fallbacks here would be a second source of truth that wins,
+			// because it runs first.
 			NamespacePrefix:   os.Getenv("PROVISIONER_NAMESPACE_PREFIX"),
 			StorageClass:      os.Getenv("PROVISIONER_STORAGE_CLASS"),
 			PullPolicy:        os.Getenv("PROVISIONER_PULL_POLICY"),
@@ -282,8 +237,6 @@ func (c Config) validate() error {
 			"it is written to cloud.orgs.console_url, which requires one", c.ConsoleURL)
 	}
 
-	// The guard the whole lease design rests on.
-	//
 	// WaitReady can burn the entire ReadyTimeout. A lease shorter than that
 	// expires mid-wait, and the row becomes claimable by a second provisioner
 	// that starts from the top — while the first returns from its wait and
@@ -320,8 +273,7 @@ func (c Config) validate() error {
 	if c.ReconcileInterval <= 0 {
 		return errors.New("PROVISIONER_RECONCILE_INTERVAL must be positive")
 	}
-	// Zero would read as "only rotate a certificate that has already expired",
-	// which is a renewal window that guarantees the outage it exists to avoid.
+	// Zero would mean rotating only a certificate that has already expired.
 	if c.ConsoleCertRenewWithin <= 0 {
 		return errors.New("PROVISIONER_CONSOLE_CERT_RENEW_WITHIN must be positive")
 	}
@@ -339,12 +291,10 @@ func (c Config) backoff(attempts int) time.Duration {
 	d := c.RetryBase
 	for i := 1; i < attempts; i++ {
 		d *= 2
-		// `d <= 0` catches the doubling overflowing int64, which needs an
-		// absurd RetryMax to reach but is worth closing here rather than in
-		// the store: a negative duration arrives at MarkProvisioningFailed as
-		// "claimable immediately", which it refuses — so a permanent fault
-		// would start reporting an error about recording the error, and the
-		// original cause would be the one that got lost.
+		// `d <= 0` catches the doubling overflowing int64. A negative duration
+		// arrives at MarkProvisioningFailed as "claimable immediately", which
+		// it refuses, so the failure would be reported as an error about
+		// recording the error and the original cause would be lost.
 		if d >= c.RetryMax || d <= 0 {
 			return c.RetryMax
 		}
@@ -357,9 +307,8 @@ func (c Config) backoff(attempts int) time.Duration {
 
 // defaultName identifies this process in the queue.
 //
-// The hostname is right in both deployments: locally it is the developer's
-// machine, and in Kubernetes it is the pod name, which is exactly what somebody
-// reading a stuck row wants to `kubectl logs`.
+// The hostname is right in both deployments: locally the developer's machine,
+// in Kubernetes the pod name, which is the argument to `kubectl logs`.
 func defaultName() string {
 	if h, err := os.Hostname(); err == nil && h != "" {
 		return h
@@ -403,10 +352,9 @@ func envDuration(name string, def time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
-		// Deliberately the default rather than an error, matching envDuration
-		// in cmd/server and internal/console. A malformed duration is a typo,
-		// and the alternative — refusing to boot — is a worse trade for a
-		// setting that has a working default.
+		// The default rather than an error, matching envDuration in cmd/server
+		// and internal/console: a malformed duration is a typo on a setting
+		// that has a working default.
 		return def
 	}
 	return d

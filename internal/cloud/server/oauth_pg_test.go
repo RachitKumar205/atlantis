@@ -132,8 +132,6 @@ func (f *fixture) identityCount(t *testing.T, email string) int {
 	return len(linked)
 }
 
-// ── The invariant ───────────────────────────────────────────────────────────
-
 // A provider sign-in produces a pending login, never a session.
 //
 // This is the property the whole step is arranged around. A provider vouching
@@ -146,8 +144,7 @@ func TestAProviderSignInIsNotASession(t *testing.T) {
 	cookie, state := f.startOAuth(t, "github", "")
 	rec := f.callback(t, "github", cookie, state, nil)
 
-	// 303 back to the sign-in application. It used to be a 200 text/plain page
-	// naming an HTTP route; see handOff.
+	// 303 back to the sign-in application; see handOff.
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("callback: %d %s", rec.Code, rec.Body.String())
 	}
@@ -209,8 +206,6 @@ func TestASecondProviderSignInFindsTheSameAccount(t *testing.T) {
 		t.Errorf("two sign-ins produced %d links", n)
 	}
 }
-
-// ── The auto-link rule ──────────────────────────────────────────────────────
 
 // A provider-verified address matching an account WITH a second factor links,
 // and still has to present that factor.
@@ -416,8 +411,6 @@ func TestConnectingAClaimedProviderAccountIsRefused(t *testing.T) {
 	}
 }
 
-// ── The state cookie ────────────────────────────────────────────────────────
-
 // A state that does not match the cookie is refused.
 func TestAMismatchedStateIsRefused(t *testing.T) {
 	f := newFixture(t)
@@ -571,8 +564,6 @@ func TestADeclinedConsentIsNotAnError(t *testing.T) {
 	}
 }
 
-// ── Configuration ───────────────────────────────────────────────────────────
-
 // A provider with no credentials has no routes at all.
 func TestAnUnconfiguredProviderDoesNotExist(t *testing.T) {
 	f := newFixtureWithoutProviders(t)
@@ -612,8 +603,6 @@ func TestConnectedAccountsSurviveAProviderBeingTurnedOff(t *testing.T) {
 		t.Fatalf("unlink: %d %s", un.Code, un.Body.String())
 	}
 }
-
-// ── Connected accounts ──────────────────────────────────────────────────────
 
 // Reading and removing connections needs a session, not a pending login.
 func TestConnectedAccountsNeedASession(t *testing.T) {
@@ -741,8 +730,6 @@ func (f *fixture) finishEnrolment(t *testing.T, pending string) string {
 	}
 	return session
 }
-
-// ── Linking, from a signed-in account ───────────────────────────────────────
 
 // Connecting a provider while signed in attaches it to that account and does
 // not start a new sign-in.
@@ -920,10 +907,9 @@ func TestTheOAuthStartIsRateLimited(t *testing.T) {
 
 // The callback returns the browser to the sign-in application.
 //
-// It used to answer with a text/plain page naming an HTTP route, and to
-// redirect only when CLOUD_SIGNIN_APP_URL was set. Cloud serves the application
-// itself now, so the redirect is unconditional and the target is relative —
-// which resolves against this origin, the one that just set the pending cookie.
+// Cloud serves that application, so the redirect is unconditional and its
+// target is relative, resolving against the origin that just set the pending
+// cookie.
 func TestTheCallbackReturnsToTheSignInApp(t *testing.T) {
 	f := newFixture(t)
 	f.fakeFor("github", "gh-21", "redirect@example.com", "Redirect")
@@ -938,8 +924,8 @@ func TestTheCallbackReturnsToTheSignInApp(t *testing.T) {
 	if !strings.HasPrefix(loc, "/signin?next=") {
 		t.Fatalf("Location is %q, want a relative /signin path", loc)
 	}
-	// Relative on purpose. An absolute URL here would be a second place the
-	// origin is written down, and a stale one strands the sign-in.
+	// An absolute URL would be a second place the origin is written down, and a
+	// stale one strands the sign-in.
 	if strings.Contains(loc, "://") {
 		t.Errorf("Location is absolute: %q", loc)
 	}

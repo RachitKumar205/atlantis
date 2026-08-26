@@ -29,12 +29,8 @@ func ctxWithCertCN(cn string) context.Context {
 	return peer.NewContext(context.Background(), p)
 }
 
-// ---------------------------------------------------------------------------
-// fakeServerStream — minimal grpc.ServerStream for testing the
-// stream-flavor interceptors defined alongside their unary siblings
-// in auth.go.
-// ---------------------------------------------------------------------------
-
+// fakeServerStream is the minimal grpc.ServerStream the stream interceptors in
+// auth.go need.
 type fakeServerStream struct{ ctx context.Context }
 
 func (s *fakeServerStream) SetHeader(metadata.MD) error  { return nil }
@@ -43,10 +39,6 @@ func (s *fakeServerStream) SetTrailer(metadata.MD)       {}
 func (s *fakeServerStream) Context() context.Context     { return s.ctx }
 func (s *fakeServerStream) SendMsg(any) error            { return nil }
 func (s *fakeServerStream) RecvMsg(any) error            { return nil }
-
-// ---------------------------------------------------------------------------
-// resolveCallerStreamInterceptor
-// ---------------------------------------------------------------------------
 
 // TestResolveCallerStream_PopulatesContextFromCertCN confirms the
 // streaming flavor extracts the cert CN exactly like the unary
@@ -90,10 +82,6 @@ func TestResolveCallerStream_AnonymousFallback(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// recoveryStreamInterceptor
-// ---------------------------------------------------------------------------
-
 // TestRecoveryStream_PanicConvertedToInternal confirms a handler
 // panic doesn't escape the interceptor. For long-lived streams
 // (WorkerSession runs for hours), a panic taking down the whole
@@ -123,10 +111,6 @@ func TestRecoveryStream_NoPanicPassesThrough(t *testing.T) {
 		t.Errorf("normal error should pass through unchanged, got %v", err)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// loggingStreamInterceptor
-// ---------------------------------------------------------------------------
 
 // TestLoggingStream_LogsCloseWithMethodCallerCode confirms a stream
 // closure emits a log record with the canonical method/caller/code

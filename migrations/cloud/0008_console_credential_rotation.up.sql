@@ -1,23 +1,12 @@
 -- Let an operator ask for the console's credentials to be replaced.
 --
--- ── Why this is a request rather than a command ────────────────────────────
+-- A request, not a command. The credentials live in a Secret in the
+-- organisation's namespace and only the provisioner holds Kubernetes
+-- credentials, so `cloud org rotate-console` marks the row and the provisioner
+-- acts on its next reconcile pass. Same shape as purge_after.
 --
--- The credentials live in a Secret in the organisation's namespace, and Cloud
--- cannot reach it. Only the provisioner holds Kubernetes credentials — that is
--- the point of the scoped service account it runs under, and widening Cloud's
--- access so that one command could write a Secret would undo it.
---
--- So this follows purge_after exactly: `cloud org rotate-console` marks the row
--- and the provisioner acts on its next reconcile pass. The operator's command
--- returns immediately and the work happens where the credentials are.
---
--- ── Why rotation is not simply left to expiry ──────────────────────────────
---
--- Automatic rotation is driven by how much life a certificate has left, which
--- is the right trigger for the ordinary case and the wrong one for the case
--- that matters. An operator who believes a credential has leaked needs it
--- replaced now, and "wait for the renewal window" is not an answer — before
--- this column there was no way to ask at all.
+-- Automatic rotation triggers on remaining certificate life, which does not
+-- cover a credential believed to have leaked.
 ALTER TABLE cloud.org_provisioning
     ADD COLUMN IF NOT EXISTS console_rotate_requested_at TIMESTAMPTZ;
 

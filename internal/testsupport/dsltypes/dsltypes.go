@@ -1,27 +1,23 @@
 // Package dsltypes reads the field-type table out of the type-mapping
 // reference so tests can assert the code implements what the page promises.
 //
-// # Why the doc is the source
+// A DSL type is spelled out in six places that have to agree: schema.SQLType
+// renders the DDL, coltype.ProtoType and coltype.GoType shape the generated
+// API, coltype.ScanFragments and coltype.BindExpr move values across the wire,
+// entity.setProtoType publishes the wire type from the runtime dispatcher, and
+// docs/reference/dsl-types.md states what a caller can expect.
 //
-// A DSL type is spelled out in six places that must agree: schema.SQLType
-// renders the DDL, coltype.ProtoType and coltype.GoType shape the caller's
-// generated API, coltype.ScanFragments and coltype.BindExpr move values across
-// the wire, entity.setProtoType publishes the same wire type from the runtime
-// dispatcher, and docs/reference/dsl-types.md tells the customer what to
-// expect. Nothing connected them and they drifted: `real` and `double` were
-// documented, parsed, and implemented in NONE of the code tables. `double`
-// rendered as the Postgres type `DOUBLE`, which does not exist.
+// Unconnected, they drift: `real` and `double` were documented and parsed while
+// absent from every code table, and `double` rendered as the Postgres type
+// `DOUBLE`, which does not exist.
 //
-// Restating the type list inside each test would add a seventh place to
-// forget. Reading the page instead makes it the contract, and makes a type
-// documented-but-unimplemented a test failure rather than a support ticket.
+// Reading the page makes it the contract, and a documented type that nothing
+// implements a test failure. Restating the list inside each test adds a seventh
+// place to forget.
 //
-// # Why a package rather than a helper per test
-//
-// Two packages need these rows — internal/codegen/coltype, which owns four of
-// the mappings, and internal/server/entity, which owns the dispatcher's. A
-// copy of the parser in each is the same drift this exists to prevent, one
-// level up.
+// A package rather than a helper per test: internal/codegen/coltype owns four
+// of the mappings and internal/server/entity the dispatcher's, so a copy of the
+// parser in each is the same drift one level up.
 package dsltypes
 
 import (
@@ -40,10 +36,11 @@ const DocPath = "docs/reference/dsl-types.md"
 // concrete element type instead of substituting into this row.
 const ArrayRowSpelling = "[]T"
 
-// Row is one line of a four-column type table. The Go column is carried
-// because a caller may want it, but note the page describes the
-// proto-generated Go type there — `*timestamppb.Timestamp` for a timestamp —
-// which is not what coltype.GoType returns for the scan side.
+// Row is one line of a four-column type table.
+//
+// The page's Go column holds the proto-generated type —
+// `*timestamppb.Timestamp` for a timestamp — which is not what coltype.GoType
+// returns for the scan side.
 type Row struct {
 	ATL   string
 	PG    string
@@ -81,7 +78,7 @@ func Rows() ([]Row, error) {
 		cells := cellSplit.Split(strings.Trim(line, "|"), -1)
 		if len(cells) != 4 {
 			// The nullability table is three columns and describes generated
-			// Go rather than the mapping; skipping it by shape is deliberate.
+			// Go rather than the mapping, so column count skips it.
 			continue
 		}
 		// A cell carries prose outside the backticks — "`vector(N)` (pgvector)"
@@ -103,11 +100,10 @@ func Rows() ([]Row, error) {
 		out = append(out, Row{ATL: vals[0], PG: vals[1], Proto: vals[2], Go: vals[3]})
 	}
 
-	// A floor, because every failure mode of the parser above is "returns
-	// fewer rows" and a silently empty table would turn every caller into a
-	// test that asserts nothing. The real count is comfortably above this;
-	// the number only has to be high enough that a reformatted table cannot
-	// slip through as a handful of rows.
+	// A floor: every failure mode of the parser above returns fewer rows, and an
+	// empty table turns each caller into a test that asserts nothing. The real
+	// count is well above 15, which only has to be high enough that a
+	// reformatted table cannot pass as a handful of rows.
 	if len(out) < 15 {
 		return nil, fmt.Errorf("parsed only %d rows from %s — the table format "+
 			"changed and every test built on this is now checking almost nothing",

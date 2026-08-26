@@ -34,11 +34,9 @@ func planClassName(c adminpb.PlanClass) string {
 //	3 — operational error (parse error, network failure, unknown plan class).
 //	4 — --dry-run only, on a class `tide plan` would exit 4 for.
 //
-// `tide apply` and `tide plan` no longer share a code map. plan classifies and
-// reports; apply submits and reports what the server decided, and "waiting for
-// a reviewer" is an outcome plan cannot produce.
-//
-// cmdApply is the main user touchpoint for tide apply.
+// apply and plan keep separate code maps. plan classifies and reports; apply
+// submits and reports what the server decided, and waiting on a reviewer is an
+// outcome plan cannot produce.
 func cmdApply(args []string) int {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -516,19 +514,16 @@ func collectPCFiles(paths []string) ([]*adminpb.SubmittedFile, error) {
 			}
 			// Hidden directories are not schema, and one of them is ours.
 			//
-			// `tide pull` writes the merged schema of the whole organisation
-			// into .tide-cache/schema/ for editors to read, and `tide plan`
-			// runs a pull before it plans. With the documented
-			// `schema_paths: ["."]`, the next plan then submits the caller's
-			// own entities twice — once from source and once from the mirror —
-			// and the server refuses with "duplicate entity", pointing at a
-			// path the author never created.
+			// `tide pull` writes the organisation's merged schema into
+			// .tide-cache/schema/, and `tide plan` pulls before it plans. Under
+			// the documented `schema_paths: ["."]` the next plan submits this
+			// caller's entities twice, from source and from the mirror, and the
+			// server refuses with "duplicate entity" naming a path nothing in
+			// the repository wrote. The first apply in a fresh workspace
+			// succeeds and every one after it fails.
 			//
-			// So: the first `tide apply` in a fresh workspace succeeds and
-			// every one after it fails, which is the worst possible order to
-			// discover this in. Skipping every dot-directory rather than
-			// .tide-cache alone also keeps .git and vendored virtualenvs out,
-			// and none of them is a place schema belongs.
+			// Every dot-directory is skipped, not .tide-cache alone, which also
+			// leaves out .git and vendored virtualenvs.
 			//
 			// The root itself is never skipped: `schema_paths: ["."]` arrives
 			// here as a path of exactly ".".

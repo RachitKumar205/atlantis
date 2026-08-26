@@ -13,14 +13,12 @@ import (
 
 // TOTP parameters.
 //
-// Six digits over thirty seconds with SHA-1 is not a security preference; it is
-// what every authenticator app implements. Choosing anything else produces
-// codes that Google Authenticator and its imitators silently compute
-// differently, which presents to the user as "my codes never work".
+// Six digits over thirty seconds with SHA-1 is what authenticator apps
+// implement; anything else computes different codes in Google Authenticator and
+// its imitators.
 //
-// Skew of one step either side absorbs clock drift between the phone and this
-// server. It also triples the window in which a captured code is valid, which
-// is why SpendTOTPStep records the step a code came from — see the store.
+// Skew of one step either side absorbs clock drift, and triples the window a
+// captured code is valid for, which is why SpendTOTPStep records the step.
 const (
 	totpPeriod = 30
 	totpSkew   = 1
@@ -33,9 +31,8 @@ var ErrBadCode = errors.New("that code is not right")
 
 // NewTOTPSecret mints a secret and the otpauth:// URI that enrols it.
 //
-// issuer appears as the account's label in the authenticator app, so it should
-// be the product name rather than a hostname — a user with several accounts
-// sees the label and nothing else.
+// issuer is the account's label in the authenticator app, so it is the product
+// name rather than a hostname.
 func NewTOTPSecret(issuer, account string) (secret, uri string, err error) {
 	key, err := totp.Generate(totp.GenerateOpts{
 		Issuer:      issuer,
@@ -52,17 +49,12 @@ func NewTOTPSecret(issuer, account string) (secret, uri string, err error) {
 
 // VerifyTOTP checks a code and reports which time step it came from.
 //
-// # Why the step is returned rather than just a boolean
+// It returns the step, not just a boolean. A TOTP code is valid for its whole
+// period and for the periods either side once skew is allowed, ninety seconds
+// in total here, so the same code works repeatedly within that window. The
+// caller records the step to refuse a second use.
 //
-// A TOTP code is valid for its whole period, and for the periods either side of
-// it once skew is allowed — ninety seconds in total here. Within that window
-// the same code works repeatedly, so a code read over a shoulder, or relayed by
-// a phishing proxy, can be presented again. Recording which step it came from
-// lets the caller refuse a second use; a boolean cannot, because it does not
-// say what to record.
-//
-// The comparison is constant-time. The code is attacker-supplied by definition,
-// and a byte-at-a-time comparison leaks how much of a guess was right.
+// The comparison is constant-time; the code comes from the request.
 func VerifyTOTP(secret, code string, now time.Time) (int64, error) {
 	code = strings.TrimSpace(code)
 	if code == "" {
@@ -77,8 +69,7 @@ func VerifyTOTP(secret, code string, now time.Time) (int64, error) {
 	}
 
 	// Every candidate step is checked even after one matches, so the time taken
-	// does not depend on which step was right — a difference an attacker could
-	// otherwise use to align their clock with the server's.
+	// does not reveal which step was right.
 	matched := int64(-1)
 	for skew := -totpSkew; skew <= totpSkew; skew++ {
 		at := now.Add(time.Duration(skew) * totpPeriod * time.Second)

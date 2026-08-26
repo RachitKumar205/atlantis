@@ -44,8 +44,8 @@ func parentChildIR() *dsl.IR {
 func TestInboundIndexIsKeyedByTheWrittenEntity(t *testing.T) {
 	idx := buildInboundIndex(parentChildIR())
 
-	// Keyed by the CHILD. Keying by the parent would be the natural reading of
-	// the declaration and useless at the point of use.
+	// Keyed by the child. The write path knows only its own entity id, so a
+	// parent-keyed index cannot be looked up there.
 	rules := idx["consumer.CartItem"]
 	if len(rules) != 1 {
 		t.Fatalf("consumer.CartItem has %d inbound rules, want 1: %+v", len(rules), rules)

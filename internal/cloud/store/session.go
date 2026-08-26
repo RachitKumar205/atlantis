@@ -12,11 +12,8 @@ import (
 
 // Session and pending-login lifetimes.
 //
-// The session window matches the console's (internal/console/store.go): long
-// enough to cover a working day without re-authenticating, short enough that a
-// stolen cookie has a bounded life. The pending window is minutes, because it
-// is the gap between typing a password and typing a code — anything longer is
-// a half-authenticated credential sitting around for no reason.
+// The session window matches the console's in internal/console/store.go. The
+// pending window is minutes: it spans typing a password and typing a code.
 const (
 	SessionTTL = 12 * time.Hour
 	PendingTTL = 10 * time.Minute
@@ -27,8 +24,8 @@ var ErrNoSession = errors.New("not signed in")
 
 // newToken mints 256 bits of URL-safe randomness.
 //
-// Same shape as the console's session token: 43 characters rather than the 64 a
-// hex encoding would take, for the same entropy.
+// Same shape as the console's session token: 43 base64url characters against
+// hex's 64, for the same entropy.
 func newToken() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
@@ -37,13 +34,8 @@ func newToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// ── Sessions ────────────────────────────────────────────────────────────────
-
-// CreateSession issues a signed-in session.
-//
-// Only ever called after a second factor has been presented. There is no code
-// path from a password to this function, which is the property the whole
-// two-table split exists to make structural rather than remembered.
+// CreateSession issues a signed-in session. No code path reaches it from a
+// password alone; a second factor has always been presented.
 func (s *Store) CreateSession(ctx context.Context, userID string) (string, error) {
 	token, err := newToken()
 	if err != nil {
@@ -60,9 +52,8 @@ func (s *Store) CreateSession(ctx context.Context, userID string) (string, error
 
 // SessionUser resolves a session token to its account.
 //
-// Returns ErrNoSession for an unknown or expired token — and, importantly, for
-// a *pending login* token, because a pending login is not in this table. That
-// is the point of the split: no check has to be remembered here.
+// Returns ErrNoSession for an unknown or expired token, and for a pending-login
+// token, which lives in another table.
 func (s *Store) SessionUser(ctx context.Context, token string) (*User, error) {
 	if token == "" {
 		return nil, ErrNoSession
@@ -90,15 +81,12 @@ func (s *Store) DeleteSession(ctx context.Context, token string) error {
 
 // DeleteSessionsOf signs every browser out for one account.
 //
-// Called after a password change, so that a session established with the old
-// password does not outlive it. Without this, changing a password because
-// somebody else knows it leaves them signed in.
+// Called after a password change, so a session established with the old
+// password does not outlive it.
 func (s *Store) DeleteSessionsOf(ctx context.Context, userID string) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM cloud.sessions WHERE user_id = $1`, userID)
 	return err
 }
-
-// ── Half-finished logins ────────────────────────────────────────────────────
 
 // PendingLogin is a password that has been verified and a second factor that
 // has not.
@@ -106,8 +94,7 @@ type PendingLogin struct {
 	UserID string
 
 	// MayEnrol distinguishes an account with no second factor, which must set
-	// one up, from one that has a factor and must present it. Both are
-	// half-finished; neither is a session.
+	// one up, from one that holds a factor and must present it.
 	MayEnrol bool
 }
 
@@ -129,9 +116,8 @@ func (s *Store) CreatePendingLogin(ctx context.Context, userID string, mayEnrol 
 
 // PendingLoginFor resolves a half-finished login.
 //
-// Deliberately does NOT spend it. A wrong TOTP code should not cost the user
-// their whole login — they retype the code. What spends it is
-// SpendPendingLogin, called only when the factor has been accepted.
+// It does not spend it, so a wrong TOTP code costs only the code.
+// SpendPendingLogin does, once the factor has been accepted.
 func (s *Store) PendingLoginFor(ctx context.Context, token string) (*PendingLogin, error) {
 	if token == "" {
 		return nil, ErrNoSession
@@ -153,9 +139,8 @@ func (s *Store) PendingLoginFor(ctx context.Context, token string) (*PendingLogi
 // SpendPendingLogin consumes a half-finished login and returns the account it
 // belonged to.
 //
-// One statement, so the check and the spend cannot race — the same reasoning as
-// SpendEmailToken. Two concurrent requests presenting one pending token must
-// not both proceed to create a session.
+// One statement, as with SpendEmailToken, so two concurrent requests presenting
+// the same pending token cannot both reach a session.
 func (s *Store) SpendPendingLogin(ctx context.Context, token string) (string, error) {
 	var userID string
 	err := s.pool.QueryRow(ctx, `
@@ -172,13 +157,10 @@ func (s *Store) SpendPendingLogin(ctx context.Context, token string) (string, er
 	return userID, nil
 }
 
-// ── Expiry ──────────────────────────────────────────────────────────────────
-
 // DeleteExpiredSessions removes sessions and pending logins that have run out.
 //
-// Returns both counts so the caller can log them, including zero. A sweep that
-// silently deletes nothing forever is a shape this repository has shipped
-// before — see the TTL sweeper in the CHANGELOG.
+// Returns both counts, including zero, so a sweep that deletes nothing is
+// distinguishable from one that did not run.
 func (s *Store) DeleteExpiredSessions(ctx context.Context) (sessions, pending int64, err error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM cloud.sessions WHERE expires_at < NOW()`)
 	if err != nil {

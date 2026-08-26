@@ -33,13 +33,12 @@ import (
 //
 //	$ PG_URL=... MEMCACHED_ADDR=... ATL_ALLOW_APPLY_MUTATION=true tidectl dev
 //
-// dev re-runs codegen against the working-tree .atl files (no commit
-// required), rebuilds cmd/server, and starts it. Edit a .atl, Ctrl+C
-// the server, re-run tidectl dev — the loop is "edit, restart, repeat."
-// Hot-reload-on-change is a follow-up.
+// dev re-runs codegen against the working-tree .atl files, needing no commit,
+// rebuilds cmd/server and starts it. Nothing watches for changes: editing a
+// .atl means stopping the server and re-running.
 //
-// Production deployments use the prod workspace manifest with
-// `source: git` and pinned refs — `tidectl dev` is dev-mode only.
+// A production workspace manifest uses `source: git` with pinned refs, which
+// this command does not read.
 func cmdDev(args []string) int {
 	fs := flagSet("dev")
 	workspaceFile := fs.String("workspace", "atlantis.dev.yaml", "Path to the dev workspace manifest.")

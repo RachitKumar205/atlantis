@@ -39,9 +39,8 @@ func TestMigratedRPCsAreTracked(t *testing.T) {
 	// stub from one that overrides it, so only behaviour separates "migrated"
 	// from "forgotten".
 	//
-	// Requests are empty dynamic messages. A migrated RPC may well reject one
-	// as invalid — that is fine and is the point. Any code other than
-	// Unimplemented means a real handler ran.
+	// Requests are empty dynamic messages, and a migrated RPC may reject one as
+	// invalid. Any code other than Unimplemented means a real handler ran.
 	conn, panics := dialTestConn(t, &Service{})
 	ctx := context.Background()
 

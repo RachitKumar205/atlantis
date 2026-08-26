@@ -10,24 +10,18 @@ import (
 
 // The generated Admin service.
 //
-// The migration that produced this file is finished: all 32 RPCs take and
-// return generated types, and the hand-rolled JSON descriptor that served them
-// alongside has been deleted.
+// Every RPC takes and returns generated types.
 //
-// One constraint from that migration is worth keeping, because it is what a
-// future dual-serve window would run into again. Server-side migration can be
-// incremental; client-side migration cannot. A client dialing with
-// grpc.ForceCodecV2 sets the codec as a *connection*-wide default, and grpc-go
-// derives the content-subtype from it for every call on that connection — so a
+// A dual-serve window is constrained on the client side. A client dialing with
+// grpc.ForceCodecV2 sets the codec as a connection-wide default, and grpc-go
+// derives the content-subtype from it for every call on that connection, so a
 // client cannot move one RPC at a time over an existing dial. Each client moves
-// wholesale, on its own dial, which is also how a released binary is deployed.
+// wholesale, on its own dial, which is how a released binary is deployed.
 //
-// UnimplementedAdminServiceServer is still embedded, and it still costs the
-// compile-time check the deleted hand-rolled AdminServer interface provided:
-// adding an RPC to the proto and forgetting to implement it here is a runtime
-// Unimplemented, not a build failure. TestMigratedRPCsAreTracked is the
-// replacement — it enumerates the descriptor and fails on any method that is
-// neither implemented nor explicitly listed as pending.
+// UnimplementedAdminServiceServer is embedded, so adding an RPC to the proto
+// and not implementing it here is a runtime Unimplemented rather than a build
+// failure. TestMigratedRPCsAreTracked enumerates the descriptor and fails on
+// any method neither implemented nor listed as pending.
 type grpcServer struct {
 	adminpb.UnimplementedAdminServiceServer
 	svc *Service
@@ -94,14 +88,9 @@ var migratedRPCs = map[string]bool{
 	"GetLogs":                true,
 }
 
-// ---------------------------------------------------------------------------
-// Migrated RPCs
-//
-// Each method here is a plain forward. The conversion between wire types and
-// domain types belongs on *Service, not in a translation layer — a translation
-// layer is the four-copies problem wearing a different hat, and it would have
-// to be deleted again later.
-// ---------------------------------------------------------------------------
+// The methods below are plain forwards. Conversion between wire types and
+// domain types lives on *Service rather than in a translation layer, which
+// would be a fourth copy of every shape.
 
 func (g *grpcServer) GetCallerAliases(ctx context.Context, req *adminpb.GetCallerAliasesRequest) (*adminpb.GetCallerAliasesResponse, error) {
 	return g.svc.GetCallerAliases(ctx, req)

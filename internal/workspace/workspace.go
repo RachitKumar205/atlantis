@@ -234,10 +234,10 @@ func (w *Workspace) resolveCaller(c Caller, cacheDir string) (string, error) {
 }
 
 // resolveLocal returns the absolute path to the caller's working tree.
-// Relative paths in the manifest resolve against the manifest's own
-// directory so `path: ../api` is stable across invocations from
-// different working directories. The directory must exist; we don't
-// auto-create it because that would mask typos.
+//
+// A relative path in the manifest resolves against the manifest's own
+// directory, so `path: ../api` holds whatever the working directory is. The
+// directory must already exist: creating it turns a typo into an empty tree.
 func (w *Workspace) resolveLocal(c Caller) (string, error) {
 	p := c.Path
 	if !filepath.IsAbs(p) {

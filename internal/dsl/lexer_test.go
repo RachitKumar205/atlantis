@@ -248,7 +248,7 @@ func TestLex_ArgPlaceholder(t *testing.T) {
 	// `$` alone before whitespace is an error. The error consumes the
 	// `$`, then `1bad` lexes as integer + identifier.
 	// The next token here is the literal int 1 from the recovery path.
-	// We only check the trailing lone `$` produces a TokError.
+	// Only the trailing lone `$` is checked, for TokError.
 	last := toks[len(toks)-2] // -1 is EOF, -2 is the previous token
 	if last.Kind != TokError {
 		t.Fatalf("expected lone $ to be an error, got %v", last)
@@ -288,8 +288,8 @@ entity SavedOutfit in consumer {
 }
 `
 	toks := lexAll(t, src)
-	// We don't pin the exact sequence — that's the parser's job to assert.
-	// We just verify no TokError, and the file ends with EOF.
+	// The exact sequence is the parser's to assert. This checks only that no
+	// TokError appears and the file ends with EOF.
 	for _, tok := range toks {
 		if tok.Kind == TokError {
 			t.Fatalf("unexpected lex error: %s at %s", tok.Value, tok.Pos)

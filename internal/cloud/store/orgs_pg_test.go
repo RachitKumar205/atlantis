@@ -12,14 +12,11 @@ import (
 
 // Creating an organisation the way a browser will, and the ways it must refuse.
 
-// Posting a name somebody else owns must not hand you their organisation.
-//
-// This is the whole reason CreateOrgForOwner exists rather than a flag on
-// CreateOrgWithOwner. That function upserts — deliberately, because `cloud org
-// create` is documented as safe to re-run — and its memberships upsert is
-// `ON CONFLICT (user_id, org) DO UPDATE SET role`. For a user with no existing
-// row that is a plain INSERT, so posting somebody else's organisation name
-// makes you its admin and rewrites its display name, and nothing refuses.
+// CreateOrgWithOwner upserts, because `cloud org create` is documented as safe
+// to re-run. Its memberships upsert is ON CONFLICT (user_id, org) DO UPDATE SET
+// role, which for a user with no existing row is a plain INSERT: posting
+// somebody else's organisation name through it makes you their admin and
+// rewrites their display name, with nothing refusing.
 func TestCreatingATakenNameGrantsNothing(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -33,11 +30,9 @@ func TestCreatingATakenNameGrantsNothing(t *testing.T) {
 
 	err := db.CreateOrgForOwner(ctx, "taken-org", "Bob's Company", bob, identity.RoleAdmin)
 
-	// Errorf, not Fatalf, and the ordering is deliberate. The two assertions
-	// below are the ones that matter — whether Bob got anything — and they must
-	// run even when the refusal arrives in an unexpected shape. A mutation that
-	// made this upsert like the CLI version was caught here by a *different*
-	// unique violation, with the escalation checks never reaching the runner.
+	// Errorf, not Fatalf: the two assertions below decide whether Bob got
+	// anything, and they must run even when the refusal arrives as some other
+	// unique violation.
 	if !errors.Is(err, ErrAlreadyExists) {
 		t.Errorf("bob creating alice's organisation = %v, want ErrAlreadyExists", err)
 	}
@@ -56,25 +51,17 @@ func TestCreatingATakenNameGrantsNothing(t *testing.T) {
 	}
 }
 
-// Two creates for one account take turns.
-//
-// # Why this holds the lock itself rather than racing two goroutines
-//
-// The obvious test — start two creates at once against a limit of one, assert
-// one fails — was written first and **passed with the lock removed**, three
-// times running. The window between the count and the insert is well under a
-// millisecond, so two goroutines simply never interleaved, and the test proved
-// nothing while reading as though it proved the thing it was named for.
+// Two goroutines racing a limit of one prove nothing: the window between the
+// count and the insert is well under a millisecond, so they never interleave
+// and the assertion passes with the lock removed.
 //
 // This holds the account row exactly as CreateOrgForOwner does, then asserts a
-// create blocks until it is released. That is deterministic, and it fails
-// immediately if the lock is dropped: without it the create sails past a held
-// row, which is the whole defect.
+// create blocks until it is released. Without the lock the create sails past a
+// held row.
 //
-// A count is not a constraint, and under READ COMMITTED — which this pool uses
-// — counting inside a transaction bounds nothing on its own. There is no
-// constraint expressing "at most N rows per user" to fall back on, so the lock
-// is the mechanism rather than a belt on braces.
+// A count is not a constraint. Under READ COMMITTED, which this pool uses,
+// counting inside a transaction bounds nothing, and no constraint expresses "at
+// most N rows per user".
 func TestTwoCreatesForOneAccountTakeTurns(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -121,11 +108,8 @@ func TestTwoCreatesForOneAccountTakeTurns(t *testing.T) {
 	}
 }
 
-// Concurrent creates for *different* accounts do not block each other.
-//
-// The lock is per account by design. One that serialised every create in the
-// deployment would be a correctness fix that quietly became a throughput
-// ceiling, and nothing would report it.
+// The lock is per account. One that serialised every create in the deployment
+// would hold the limit and cap throughput, with nothing reporting it.
 func TestCreatesForDifferentAccountsDoNotBlock(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -159,11 +143,9 @@ func TestCreatesForDifferentAccountsDoNotBlock(t *testing.T) {
 	}
 }
 
-// The limit counts what this account created, not what it can act in.
-//
-// If it counted admin memberships, somebody adding you to their organisation
-// would consume your quota — and would do it through AddMember, which never
-// touches the create path's lock.
+// The limit counts what this account created. Counting admin memberships would
+// let somebody adding you to their organisation consume your quota, and would
+// do it through AddMember, which never touches the create path's lock.
 func TestTheLimitCountsCreationNotMembership(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -204,7 +186,6 @@ func TestTheLimitIsReportedAsItself(t *testing.T) {
 	}
 }
 
-// An invalid or reserved name never reaches the database.
 func TestBadNamesAreRefusedBeforeTheDatabase(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -222,7 +203,6 @@ func TestBadNamesAreRefusedBeforeTheDatabase(t *testing.T) {
 	}
 }
 
-// A created organisation is queued, owned, and visible to its creator.
 func TestACreatedOrganisationIsQueuedAndVisible(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -262,11 +242,8 @@ func TestACreatedOrganisationIsQueuedAndVisible(t *testing.T) {
 	}
 }
 
-// An organisation with no queue row still appears.
-//
-// `acme` and `walkthru2` were registered by hand and have no row in
-// org_provisioning. An INNER JOIN would drop them out of their members' lists
-// entirely — they are provisioned, just not by the provisioner.
+// An organisation registered by hand has no row in org_provisioning. An INNER
+// JOIN would drop it out of its members' lists.
 func TestAnOrganisationWithNoQueueRowStillAppears(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -294,8 +271,6 @@ func TestAnOrganisationWithNoQueueRowStillAppears(t *testing.T) {
 	}
 }
 
-// Reading an organisation you are not in is indistinguishable from one that
-// does not exist.
 func TestANonMemberCannotTellAnOrganisationExists(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -312,7 +287,7 @@ func TestANonMemberCannotTellAnOrganisationExists(t *testing.T) {
 		t.Fatalf("want ErrNotFound for both, got %v and %v", realErr, fakeErr)
 	}
 	if realErr.Error() == fakeErr.Error() {
-		return // identical, which is the point
+		return // identical
 	}
 	// Different text is only acceptable if it is the name echoed back.
 	if !strings.Contains(realErr.Error(), "private-org") || !strings.Contains(fakeErr.Error(), "no-such-org") {

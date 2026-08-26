@@ -9,22 +9,19 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// rowQuerier is the slice of a pgx pool this check needs. Narrow on purpose:
-// the check is then callable against a pool, a connection or a transaction,
-// which is what lets a test run it under SET LOCAL ROLE.
+// rowQuerier is the slice of a pgx pool this check needs. Narrow, so the check
+// is callable against a pool, a connection or a transaction, which is what lets
+// a test run it under SET LOCAL ROLE.
 type rowQuerier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-// unpolicedTables are the console tables that deliberately carry no
-// organisation boundary.
-//
-// Each one is a decision, not an omission, and each is here rather than in a
-// comment so that adding a table without deciding is impossible — see
-// verifyConsolePolicies.
+// unpolicedTables are the console tables that carry no organisation boundary.
+// verifyConsolePolicies fails on any table in the schema that is neither
+// policed nor listed here, so a new table cannot arrive undecided.
 //
 //   - sessions: the bootstrap table. getSessionInfo is the query that
-//     *discovers* which organisation a request belongs to, so it cannot be
+//     discovers which organisation a request belongs to, so it cannot be
 //     filtered by that organisation. Its bulk operations are scoped through
 //     orgStore instead, which makes writing one without an organisation a
 //     compile error.
@@ -40,23 +37,18 @@ type rowQuerier interface {
 //
 //   - caller_certs: the same bootstrap shape as sessions, one layer out. It maps
 //     a certificate's fingerprint to the organisation and caller it was issued
-//     for, and renewal's whole question is "which organisation is this
-//     certificate from" — asked before anything knows the answer, so it cannot
-//     be filtered by it. The key is a SHA-256 over a certificate nobody else
-//     holds, so a lookup is not a search: you can only find the row for a
-//     certificate you already have. Handlers that LIST these rows scope them by
-//     the session's organisation in Go.
+//     for, and renewal resolves the organisation from the certificate before
+//     anything knows it, so it cannot be filtered by it. The key is a SHA-256
+//     over the certificate, so a lookup requires already holding it. Handlers
+//     that list these rows scope them by the session's organisation in Go.
 //
-// console.enroll_tokens is deliberately absent from this list. It is policed,
-// and the policy is load-bearing rather than decorative: the enrolment route has
-// no session, so the request names the organisation, the handler binds that, and
-// the RESTRICTIVE policy is what compares it against the row.
+// console.enroll_tokens is absent and is policed. The enrolment route has no
+// session, so the request names the organisation, the handler binds it, and the
+// RESTRICTIVE policy compares it against the row.
 //
-// Not listed, because it is not in this schema: console_schema_migrations.
-// internal/migrate pins search_path=public for exactly this reason, so
-// golang-migrate's bookkeeping lands in public and the query below never sees
-// it. An entry for it was written and then removed — a dead exemption is worse
-// than none, because it asserts that a table is here when it is not.
+// console_schema_migrations is not listed because it is not in this schema:
+// internal/migrate pins search_path=public, so golang-migrate's bookkeeping
+// lands in public and the query below never sees it.
 var unpolicedTables = map[string]string{
 	"sessions":         "bootstrap: the session lookup is what discovers the organisation",
 	"spent_assertions": "global by design: a per-organisation replay check is not a replay check",
@@ -65,28 +57,12 @@ var unpolicedTables = map[string]string{
 }
 
 // verifyConsolePolicies asks the live catalogue whether the organisation
-// boundary is actually in place.
+// boundary is in place. Binding succeeds whether or not a policy exists, and so
+// does every query after it, so a console with no policy is indistinguishable
+// from a working one.
 //
-// # Why this exists at all
-//
-// Binding an organisation succeeds whether or not a policy is there. So does
-// every query afterwards. An operator signing in sees their own data and a
-// working console either way — the only observable signal reports healthy
-// while every organisation reads every other organisation's rows.
-//
-// The server-side equivalent, pg.VerifyPartitionPolicies, was written after a
-// review reproduced exactly that: the differ emitted nothing, the unbound
-// request was correctly refused, and the bound request returned every tenant's
-// rows. Reading the migration files does not help, because the question is what
-// the database ended up with.
-//
-// # Why it checks unknown tables too
-//
-// The dangerous case is not a policy that was removed; it is a table that never
-// had one. A new console table is written, nobody thinks about isolation, and
-// it holds several organisations' rows from its first row onward. Requiring
-// every table to be either policed or named above turns that from an oversight
-// into a boot failure.
+// An unlisted table is an error: one that never had a policy holds several
+// organisations' rows from its first insert.
 func verifyConsolePolicies(ctx context.Context, q rowQuerier) error {
 	rows, err := q.Query(ctx, `
 		SELECT c.relname,
@@ -105,7 +81,6 @@ func verifyConsolePolicies(ctx context.Context, q rowQuerier) error {
 		   AND c.relispartition = false
 		 ORDER BY c.relname`)
 	if err != nil {
-		// A check that could not run is not a check that passed.
 		return fmt.Errorf("could not verify the organisation boundary: %w", err)
 	}
 	defer rows.Close()
@@ -130,9 +105,9 @@ func verifyConsolePolicies(ctx context.Context, q rowQuerier) error {
 		case !rls:
 			faults = append(faults, fmt.Sprintf("console.%s has no row-level security", name))
 		case !forced:
-			// The trap this catches: ENABLE without FORCE leaves the owner
-			// exempt, and the console's role owns these tables. `\d` lists the
-			// policy; it applies to nobody who connects.
+			// ENABLE without FORCE leaves the owner exempt, and the console's
+			// role owns these tables. `\d` lists the policy; it applies to
+			// nobody who connects.
 			faults = append(faults, fmt.Sprintf(
 				"console.%s has row-level security enabled but not FORCED, so the owning role reads through it", name))
 		case boundaryPolicies == 0:

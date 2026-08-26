@@ -14,10 +14,6 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
-// ---------------------------------------------------------------------------
-// GetSchemaHistory — paginated version list
-// ---------------------------------------------------------------------------
-
 // GetSchemaHistoryRequest asks for a page of schema version summaries,
 // ordered newest-first. Before is a cursor (version number); only
 // versions < Before are returned. Caller filters to a single caller.
@@ -54,7 +50,7 @@ func (s *Service) GetSchemaHistory(ctx context.Context, req *adminpb.GetSchemaHi
 	if req.GetLimit() > 0 && req.GetLimit() <= 100 {
 		limit = req.GetLimit()
 	}
-	// Fetch limit+1 so we can detect whether there are more rows.
+	// limit+1, so the extra row reports whether another page exists.
 	fetchLimit := limit + 1
 
 	var rows pgx.Rows
@@ -135,10 +131,7 @@ func countDiffChanges(raw []byte) int {
 	return d.Len()
 }
 
-// ---------------------------------------------------------------------------
-// GetSchemaVersion — full data for one version
-// ---------------------------------------------------------------------------
-
+// GetSchemaVersionRequest asks for the full data of one version.
 type GetSchemaVersionRequest struct {
 	Version int64 `json:"version"`
 }
@@ -182,10 +175,7 @@ WHERE version = $1`, req.GetVersion()).Scan(
 	return schemaVersionToPB(&resp), nil
 }
 
-// ---------------------------------------------------------------------------
-// DiffSchemaVersions — compute diff between two historical versions
-// ---------------------------------------------------------------------------
-
+// DiffSchemaVersionsRequest names two historical versions to diff.
 type DiffSchemaVersionsRequest struct {
 	FromVersion int64 `json:"from_version"`
 	ToVersion   int64 `json:"to_version"`
@@ -242,10 +232,7 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, ver).Scan(
 	}, nil
 }
 
-// ---------------------------------------------------------------------------
-// GetEntityLineage — blame for one entity
-// ---------------------------------------------------------------------------
-
+// GetEntityLineageRequest asks which versions changed one entity.
 type GetEntityLineageRequest struct {
 	EntityID string `json:"entity_id"`
 }
@@ -296,10 +283,7 @@ ORDER BY field_name`, req.GetEntityId())
 	return &adminpb.GetEntityLineageResponse{Entries: lineageToPB(entries)}, nil
 }
 
-// ---------------------------------------------------------------------------
-// GetEntityOwners — entity -> caller map
-// ---------------------------------------------------------------------------
-
+// GetEntityOwnersRequest asks for the entity-to-caller map.
 type GetEntityOwnersRequest struct{}
 
 type EntityOwnerEntry struct {
@@ -350,10 +334,7 @@ ORDER BY e.entity_id`)
 	return &adminpb.GetEntityOwnersResponse{Owners: ownersToPB(owners)}, nil
 }
 
-// ---------------------------------------------------------------------------
-// RollbackSchema — revert to a prior version
-// ---------------------------------------------------------------------------
-
+// RollbackSchemaRequest names the prior version to revert to.
 type RollbackSchemaRequest struct {
 	ToVersion int64  `json:"to_version"`
 	Caller    string `json:"caller"`
@@ -410,8 +391,8 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.GetToV
 		return nil, errors.New("admin: no current checkpoint to rollback from")
 	}
 
-	// Compute diff from current to target (so the SQL takes us from
-	// current state to target state).
+	// Diffed current to target, so the emitted SQL moves the database from one
+	// to the other.
 	codegen.AssignProtoNumbers(currentIR, targetIR)
 	d := codegen.ComputeDiff(currentIR, targetIR)
 	scripts, err := codegen.EmitSQL(currentIR, targetIR, d)
@@ -450,11 +431,8 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.GetToV
 	}, nil
 }
 
-// ---------------------------------------------------------------------------
-// PreviewRollback — compute the SQL a rollback would execute, without
-//                   executing or persisting anything
-// ---------------------------------------------------------------------------
-
+// PreviewRollbackRequest asks for the SQL a rollback would execute, without
+// executing or persisting anything.
 type PreviewRollbackRequest struct {
 	ToVersion int64 `json:"to_version"`
 }
@@ -534,8 +512,6 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.GetToV
 	}, nil
 }
 
-// --- Wire conversion ---
-//
 // Two nullable columns cross as proto3 `optional`: parent_version is absent
 // for the root schema version, and removed_at is absent while a field is still
 // present. Both are *int64 on the JSON side with omitempty, so absent means

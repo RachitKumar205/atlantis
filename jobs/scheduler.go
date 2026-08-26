@@ -13,15 +13,11 @@ import (
 // The scheduler: the component that turns atlantis.job_schedules from a table
 // into firing jobs.
 //
-// migrations/infra/0006_jobs.up.sql described this component in 2 paragraphs,
-// jobs/registry.go documented its advisory-lock election, and it was never
-// written. The consequences were invisible in exactly the way a missing
-// background job always is: `ttl_field` deleted nothing, the DSL's `schedule`
-// modifier parsed and validated and produced no fires, and docs/guides/row-ttl.md
-// shipped with a "Verify" step promising a sweep that could not happen. Nothing
-// errored, because nothing ran.
+// Without it, `ttl_field` deletes nothing, the DSL's `schedule` modifier parses
+// and validates and produces no fires, and docs/guides/row-ttl.md documents a
+// sweep that cannot happen — all without an error, because nothing runs.
 //
-// Design notes that are load-bearing:
+// Three properties:
 //
 //   - ONE replica evaluates at a time, held by a session-level advisory lock.
 //     Without it, every replica reads the same due row and enqueues its own

@@ -22,19 +22,15 @@ const ReapParkedJobName = "atlantis.ReapParked"
 // the change reversible; it also means the objects accumulate until something
 // removes them. This is that something.
 //
-// The reaper is the half of park-and-reap that costs money if it is missing and
-// costs data if it is wrong, so it is deliberately conservative:
+// A missing reaper costs storage and a wrong one costs data, so three rules
+// bound it:
 //
-//   - It only ever touches rows in atlantis.parked_objects. It does not go
-//     looking for things that match a naming convention, because a table an
-//     operator renamed by hand to something ending in __parked is not a
-//     tombstone and must not be dropped on that evidence.
-//   - It reaps one object per statement and records each one before moving on,
-//     so a failure part-way leaves an accurate register rather than a set of
-//     drops nobody can account for.
-//   - A drop that fails is logged and skipped, not retried in a loop. The
-//     usual cause is a dependency added after the park, and repeatedly failing
-//     to drop is much better than cascading.
+//   - It touches only rows in atlantis.parked_objects, never a name matching a
+//     convention. A table renamed by hand to end in __parked is not a tombstone.
+//   - It reaps one object per statement and records each before the next, so a
+//     failure part-way leaves an accurate register rather than unrecorded drops.
+//   - A failed drop is logged and skipped, not retried. The usual cause is a
+//     dependency added after the park, where the alternative is CASCADE.
 type ReapParkedHandler struct {
 	Pool   *pgxpool.Pool
 	Logger *slog.Logger
@@ -57,8 +53,8 @@ type ReapParkedHandler struct {
 	LockTimeout time.Duration
 }
 
-// DefaultReapLockTimeout is short on purpose. Reaping has no deadline, so
-// waiting buys nothing and risks everything.
+// DefaultReapLockTimeout is short. Reaping has no deadline, so blocking on a
+// lock trades nothing for a held ACCESS EXCLUSIVE queue.
 const DefaultReapLockTimeout = 3 * time.Second
 
 type parkedRow struct {
@@ -167,13 +163,12 @@ SELECT count(*), count(*) FILTER (WHERE reap_after <= now())
 // disagree with the database about what is there. Postgres makes DDL
 // transactional, so this costs nothing.
 //
-// An explicit pgx transaction rather than a multi-statement string: when a
-// statement inside a simple-protocol "BEGIN; ...; COMMIT;" fails, Postgres
-// skips the rest INCLUDING the COMMIT, and the connection goes back to the
-// pool inside a failed transaction. pgxpool discards such a connection, so
-// every failed reap silently destroyed and rebuilt a backend on the pool that
-// also serves auth and the admin plane. pgx issues a real ROLLBACK here and
-// the connection is reusable.
+// An explicit pgx transaction, not a multi-statement string. When a statement
+// inside a simple-protocol "BEGIN; ...; COMMIT;" fails, Postgres skips the rest
+// including the COMMIT and the connection returns to the pool inside a failed
+// transaction, which pgxpool then discards — so each failed reap rebuilds a
+// backend on the pool that also serves auth and the admin plane. pgx issues a
+// real ROLLBACK and the connection stays usable.
 func (h *ReapParkedHandler) reapOne(ctx context.Context, p parkedRow) error {
 	drop, err := reapStatement(p)
 	if err != nil {
@@ -228,14 +223,12 @@ UPDATE atlantis.parked_objects
 	}
 }
 
-// describeCause renders a failure the way somebody debugging it needs it.
+// describeCause renders a failure with the half that names the dependency.
 //
-// pgx's PgError.Error() prints only Message, and for the failure that actually
-// happens here — "cannot drop table X because other objects depend on it" —
-// the useful half is in Detail ("view v depends on table X"). Storing only the
-// message points the operator at a string that repeats the object name they
-// are already looking at. Both the CLI and the console surface this field as
-// the answer to "why is this still here".
+// pgx's PgError.Error() prints Message alone, and the failure here is "cannot
+// drop table X because other objects depend on it", whose useful half is in
+// Detail: "view v depends on table X". Message repeats the object name the
+// reader already has. The CLI and the console both surface this field.
 func describeCause(err error) string {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {

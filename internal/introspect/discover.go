@@ -74,12 +74,10 @@ var atlantisOwnedInPublic = map[string]bool{
 // DiscoverTables lists tables that physically exist and that declaredIR does
 // not describe.
 //
-// This is the capability adopt never had. FromPostgres can only verify what it
-// is told about — loadExistingTables filters pg_class down to the declared
-// pairs — so a database can only be adopted by somebody who has already
-// written a declaration for every table in it. That is the whole of the
-// onboarding problem: the person adopting a legacy database is exactly the
-// person who has not written those files.
+// FromPostgres verifies only what it is told about: loadExistingTables filters
+// pg_class down to the declared pairs, so adoption requires a declaration for
+// every table already written. A legacy database being adopted is precisely the
+// case where those files do not exist yet.
 //
 // Pass nil schemas to search every non-system schema, which is what onboarding
 // wants. Pass an explicit list to narrow it.

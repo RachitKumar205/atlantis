@@ -14,8 +14,8 @@ import (
 var (
 	// dispatchedTotal counts jobs the dispatcher has pushed to a worker
 	// session. Counted at the moment the Dispatch envelope reaches the
-	// session outbox; not waiting for Ack so the gauge of "what we
-	// intended to dispatch" doesn't lag the actual workload.
+	// session outbox, without waiting for Ack, so the count of dispatches
+	// issued does not lag the workload.
 	dispatchedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "atlantis",
 		Subsystem: "dispatcher",

@@ -10,22 +10,20 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/runtime"
 )
 
-// FakeCache is an in-memory runtime.Cache used by tests that exercise the
-// handler logic without needing real memcached semantics. It satisfies the
-// same interface the generated server expects, so swapping it in for a
-// real Cache lets us unit-test the cache miss / set sequence cheaply.
+// FakeCache is an in-memory runtime.Cache for tests that drive handler logic
+// without needing memcached's semantics. It satisfies the interface the
+// generated server expects, so the miss/set sequence can be asserted cheaply.
 //
-// FakeCache is NOT a substitute for the testcontainers memcached when the
-// test is about invalidation timing (PLAN §B.4) — for that, use Harness
-// which wires the Grafana fork directly. The fake is meant for cases like:
+// It is not a substitute for the testcontainers memcached in a test about
+// invalidation timing, which depends on real SET ordering; Harness wires the
+// Grafana fork for that. This is for:
 //
 //	cache := &FakeCache{}
 //	s := NewAccountServer(harness.Pool, cache, harness.Outbox)
 //	// ... drive s, then inspect cache.SetCalls
 //
-// Concurrency: every public method takes a write lock. The cardinality of
-// keys per test is small (single-digit), so the simple lock is correct +
-// inexpensive.
+// Every public method takes a write lock. A test holds single-digit key counts,
+// so nothing finer is worth the complexity.
 type FakeCache struct {
 	mu       sync.Mutex
 	store    map[string]fakeEntry

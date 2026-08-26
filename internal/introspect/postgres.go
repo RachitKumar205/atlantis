@@ -2,32 +2,27 @@
 // instance and reconstructs a *dsl.IR shaped like what tidectl codegen
 // would emit. It is the read-only counterpart to internal/codegen.
 //
-// v1 scope. The output IR is intentionally partial: only the table /
-// column / nullability / primary-key / foreign-key facts are filled in.
-// CHECK constraints, multi-column UNIQUEs, and secondary indexes are
-// not lowered back into the IR — they would round-trip through several
-// canonicalization steps (pg_get_constraintdef adds parens; opclass
-// reconstruction is index-method-specific) and the false-drift cost
-// outweighs the value for the first cut. Those facts are surfaced as
-// advisory warnings instead so the operator can audit them out-of-band.
+// The output IR is partial. Table, column, nullability, primary-key and
+// foreign-key facts are filled in; CHECK constraints, multi-column UNIQUEs and
+// secondary indexes are surfaced as advisory warnings rather than lowered,
+// because round-tripping them produces false drift — pg_get_constraintdef adds
+// parens, and opclass reconstruction is index-method-specific.
 //
-// Atlantis-only metadata (cache, query_timeout, proto_number ledgers,
-// relations, soft_delete, touch_on_update) has no SQL footprint. We
-// copy those values verbatim from the declared IR onto the output
-// entity so a downstream diff treats them as equal by construction.
+// Atlantis-only metadata — cache, query_timeout, proto_number ledgers,
+// relations, soft_delete, touch_on_update — has no SQL footprint, so those
+// values are copied verbatim from the declared IR onto the output entity and a
+// downstream diff treats them as equal by construction.
 //
-// partition_field is NOT in that set, despite once being listed here.
-// It has a very real SQL footprint — ENABLE and FORCE ROW LEVEL
-// SECURITY plus a policy — and copying it verbatim made the live IR
-// agree with the schema by construction, so `tide adopt` could never
-// report a table whose isolation the database is not actually
-// enforcing. It is read from pg_policy; see loadPartitionPolicies.
+// partition_field is not in that set. It has a SQL footprint, ENABLE and FORCE
+// ROW LEVEL SECURITY plus a policy, and copying it verbatim would make the live
+// IR agree with the schema by construction — leaving `tide adopt` unable to
+// report a table whose isolation the database is not enforcing. It is read from
+// pg_policy; see loadPartitionPolicies.
 //
-// Introspection is restricted to the tables the declared IR claims:
-// every entity in declaredIR.Entities has a resolved physical
-// (schema, table) — either its `table "schema.name"` override or the
-// codegen default `atlantis.<ns>_<snake_entity>`. We only query for
-// those pairs.
+// Only the tables the declared IR claims are queried. Every entity in
+// declaredIR.Entities resolves to a physical (schema, table) pair, from its
+// `table "schema.name"` override or the codegen default
+// `atlantis.<ns>_<snake_entity>`.
 package introspect
 
 import (
@@ -48,16 +43,16 @@ type Querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-// physRef is the on-disk (schema, table) pair we key every query off
-// of. Hoisted to package scope so helpers can share the type.
+// physRef is the on-disk (schema, table) pair every query is keyed by. At
+// package scope so the helpers share the type.
 type physRef struct {
 	schema, table string
 }
 
 // FromPostgres returns an IR reconstructed from live-DB metadata, the
 // set of declared-entity IDs that actually exist in the live DB, and
-// advisory warnings (facts we deliberately don't try to verify, and
-// security heuristics like un-declared tenant_id columns).
+// advisory warnings — facts this does not verify, plus security heuristics
+// such as an undeclared tenant_id column.
 //
 // The existing-ID set is used by adopt to filter the IR checkpoint:
 // only entities that physically exist get baselined, so subsequent
@@ -730,9 +725,9 @@ func tryParseDecimalAsInt(s string) (int64, bool) {
 
 // isStringCastTarget reports whether the cast suffix on a quoted Postgres
 // literal merely re-asserts the column's own string type. pg_get_expr
-// renders the cast using the canonical type name (e.g. `'active'::character varying`
-// for a varchar column, `'foo'::text` for text), so we have to recognize
-// every variant Postgres might produce.
+// renders the cast under the canonical type name — `'active'::character
+// varying` for a varchar column, `'foo'::text` for text — so every variant
+// Postgres produces is listed below.
 func isStringCastTarget(t string) bool {
 	switch t {
 	case "", "text", "bpchar", "character", "character varying", "name":
@@ -820,9 +815,8 @@ func partitionWarnings(out, declared *dsl.Entity) []string {
 	return warns
 }
 
-// unverifiedWarnings records facts adopt deliberately doesn't lift back
-// into IR. The operator sees them in the report so they know the diff
-// is silent on these specific axes.
+// unverifiedWarnings records the facts adopt does not lift back into IR. They
+// appear in the report, so the axes the diff is silent on are named.
 func unverifiedWarnings(declared *dsl.Entity, cons constraints) []string {
 	var warns []string
 	if n := len(declared.Indexes); n > 0 {
@@ -864,9 +858,8 @@ func multiColUniqCount(us []uniqSpec) int {
 // loadPartitionPolicies reports, per table, which column the live database
 // actually enforces tenant isolation on — "" when it enforces none.
 //
-// # What counts as enforced
-//
-// All three of: row-level security ENABLED, FORCED, and a permissive policy
+// Enforced means all three of: row-level security ENABLED, FORCED, and a
+// permissive policy
 // whose USING expression compares a column to atlantis.current_partition().
 // Any one missing and the table is not isolated, whatever the schema says:
 //
@@ -875,18 +868,16 @@ func multiColUniqCount(us []uniqSpec) int {
 //     creates and connects as their owner
 //   - no policy, nothing filters
 //
-// # Why the column comes out of the predicate
+// The column is read from the predicate through pg_get_expr. Returning a
+// boolean and reusing the declared name reports a policy on the wrong column as
+// correct — reachable because moving `partition by` to another column is a
+// change the database does not apply by itself. Read this way, a policy scoping
+// an undeclared column surfaces as drift.
 //
-// Returning a boolean and reusing the declared name would report a policy on
-// the WRONG column as correct — reachable because moving `partition by` to
-// another column is a change the database does not apply by itself. The column
-// is read from pg_get_expr, so a policy scoping a column nobody declared shows
-// up as drift instead of agreement.
-//
-// A policy this cannot parse yields "", which reports as "not isolated". That
-// direction is deliberate: the resulting plan emits DROP POLICY IF EXISTS
-// followed by CREATE POLICY, which converges a hand-written policy onto the
-// declared one. The opposite default would silently accept it.
+// A policy this cannot parse yields "", reported as not isolated. The plan then
+// emits DROP POLICY IF EXISTS followed by CREATE POLICY, converging a
+// hand-written policy onto the declared one; the other default accepts it
+// unread.
 func loadPartitionPolicies(ctx context.Context, q Querier, pairs []physRef, existing map[physRef]bool) (map[physRef]string, error) {
 	out := make(map[physRef]string, len(pairs))
 	schemas := make([]string, 0, len(pairs))

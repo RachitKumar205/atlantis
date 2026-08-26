@@ -10,32 +10,19 @@ import (
 	"testing"
 )
 
-// TestEveryValidatorHasAProductionCaller is the guard this package needed and
-// did not have.
+// TestEveryValidatorHasAProductionCaller fails when an exported Validate*
+// function in this package has no call site outside it.
 //
-// `ValidateBackfillExpression` existed, was tested, was documented in three
-// separate comments as running "at admin.PlanSchema time" — and had **no
-// production caller at all**. Meanwhile the expression it was supposed to check
-// was interpolated verbatim into `SET <col> = <expr>` against the live table.
-// Every individual piece looked right in review; only the absence of a call
-// site was wrong, and nothing was looking for that.
+// A validator with no caller is either dead code or a control that is not
+// running. ValidateBackfillExpression was the second: tested, documented in
+// three comments as running at admin.PlanSchema time, and never called, while
+// the expression it checks was interpolated into `SET <col> = <expr>` against
+// the live table.
 //
-// This is the same failure the capability work removed from the admin plane: a
-// security control that depends on someone remembering to invoke it. The fix
-// there was to make omission impossible. Here it is to make omission fail the
-// build.
-//
-// A validator with no caller is either dead code that should be deleted, or a
-// control that is not running. Both are worth a red test.
-//
-// # What this does NOT catch
-//
-// It checks that the name appears in call position somewhere, not that a live
-// request path reaches it. Orphaning an intermediate wrapper — leaving
-// `admin.validateBackfillExpressions` in the tree while deleting the one call
-// to it from BeginBackfillPlan — leaves this test green, and was verified to do
-// so. The per-RPC assertion in internal/server/admin covers that case; this one
-// is the cheap backstop for wholesale deletion.
+// It looks for the name in call position, not for a request path that reaches
+// it. Leaving admin.validateBackfillExpressions in the tree while deleting the
+// one call to it from BeginBackfillPlan keeps this test green; the per-RPC
+// assertion in internal/server/admin covers that case.
 func TestEveryValidatorHasAProductionCaller(t *testing.T) {
 	root := repoRoot(t)
 

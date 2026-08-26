@@ -15,11 +15,9 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// ----------------------------------------------------------------------------
-// Test fixture: a hand-built TestFilter message that mirrors what codegen
-// the translator emits. Built via descriptorpb + protodesc so we
-// don't need a buf-generated test proto cluttering the repo.
-
+// testFilterDescriptor builds a TestFilter message matching the shape codegen
+// emits, through descriptorpb and protodesc rather than a buf-generated proto
+// committed to the repository.
 func testFilterDescriptor(t *testing.T) protoreflect.MessageDescriptor {
 	t.Helper()
 	// Match buf-generated layout: import the common/v1 file, declare
@@ -125,10 +123,9 @@ func newFilter(t *testing.T) *dynamicpb.Message {
 	return dynamicpb.NewMessage(testFilterDescriptor(t))
 }
 
-// setPredicate assigns a hand-built predicate onto a filter field.
-// `predProto` is a real proto message we marshal+unmarshal into the
-// dynamic predicate slot. This is the same path the gRPC dispatcher uses
-// when the filter arrives over the wire.
+// setPredicate assigns a hand-built predicate onto a filter field. predProto is
+// a real proto message, marshalled and unmarshalled into the dynamic predicate
+// slot — the path the gRPC dispatcher takes when a filter arrives over the wire.
 func setPredicate(t *testing.T, filter *dynamicpb.Message, field string, predProto proto.Message) {
 	t.Helper()
 	fd := filter.Descriptor().Fields().ByName(protoreflect.Name(field))
@@ -182,9 +179,6 @@ func translateErr(t *testing.T, f *dynamicpb.Message) error {
 	_, _, _, err := TranslateFilter(testSpec(), f.ProtoReflect(), 1)
 	return err
 }
-
-// ----------------------------------------------------------------------------
-// Unit tests — every predicate type × every arm
 
 func TestStringPredicate_AllArms(t *testing.T) {
 	cases := []struct {
@@ -399,9 +393,6 @@ func TestNumericPredicate(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Composite arms
-
 func TestComposite_AND(t *testing.T) {
 	child1 := newFilter(t)
 	setPredicate(t, child1, "name", &commonv1.StringPredicate{
@@ -469,9 +460,6 @@ func TestComposite_FlattenSingle(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Safety: depth cap, in list cap, string length cap
-
 func TestSafety_DepthCap(t *testing.T) {
 	// Nest deeper than MaxFilterDepth using `not`.
 	leaf := newFilter(t)
@@ -513,9 +501,6 @@ func TestSafety_StringLengthCap(t *testing.T) {
 		t.Errorf("expected string-cap error")
 	}
 }
-
-// ----------------------------------------------------------------------------
-// Edge cases
 
 func TestEmpty_FilterReturnsEmptyFragment(t *testing.T) {
 	f := newFilter(t)
@@ -626,9 +611,8 @@ func TestUnknownFilterField(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Fuzz: random filter bytes → translate → assert safety invariants
-
+// FuzzTranslator_NoInjection feeds random bytes through translate and asserts
+// the safety invariants hold.
 func FuzzTranslator_NoInjection(f *testing.F) {
 	// Seed with a few realistic predicates.
 	for _, seed := range [][]byte{

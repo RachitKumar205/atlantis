@@ -70,11 +70,10 @@ func TestPartitionPolicyCastsTheFunctionNotTheColumn(t *testing.T) {
 	}
 }
 
-// The policy predicate runs on every read, so it needs an index — and the
-// index must be on the discriminator, which is the part a name check cannot
-// see. An earlier version of this test asserted only that something called
-// "_partition_idx" appeared; emitting it on the wrong column passed the entire
-// package, because an index on any column is valid DDL.
+// The policy predicate runs on every read, so it needs an index, and the index
+// must be on the discriminator — the part a name check cannot see. Asserting
+// only that something called "_partition_idx" appeared passes an index on any
+// column, since that is valid DDL.
 func TestPartitionIndexIsOnTheDiscriminator(t *testing.T) {
 	out, err := EmitInitial(partIR("tenant", dsl.FieldType{Name: "text"}, nil))
 	if err != nil {
@@ -94,11 +93,10 @@ func TestPartitionIndexIsOnTheDiscriminator(t *testing.T) {
 // It is emitted unconditionally, including when the schema already declares
 // something covering the column.
 //
-// Skipping in that case is what the previous version did, and it tied a
-// safety-critical index to a declaration somebody may reasonably delete:
-// emitPartitionPolicy runs only at entity creation, so dropping the `unique by`
-// took the index with it, via a migration classified ADDITIVE. A duplicate
-// btree is bounded and visible; a silently missing one is not.
+// Skipping there ties the index to a declaration that can be deleted on its own
+// merits. emitPartitionPolicy runs only at entity creation, so dropping the
+// `unique by` takes the index with it through a migration classified additive.
+// A duplicate btree is bounded and visible; a missing one is neither.
 func TestPartitionIndexIsEmittedEvenWhenTheSchemaCoversTheColumn(t *testing.T) {
 	for _, tc := range []struct {
 		name string

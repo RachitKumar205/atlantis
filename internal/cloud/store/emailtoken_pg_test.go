@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-// A token round-trips and resolves to its account.
 func TestIssueAndSpendAToken(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -36,12 +35,10 @@ func TestIssueAndSpendAToken(t *testing.T) {
 	}
 }
 
-// The token is not in the database — only a hash of it is.
-//
-// It travels in a URL, so it lands in browser history, in the referrer of
-// anything the landing page loads, and in logs along the way. Storing it
-// verbatim would make a read of this table a working reset for every account
-// with one pending.
+// The token travels in a URL, so it lands in browser history, in the referrer
+// of anything the landing page loads, and in logs along the way. Stored
+// verbatim, a read of this table is a working reset for every account with one
+// pending.
 func TestTheTokenItselfIsNotStored(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -61,16 +58,14 @@ func TestTheTokenItselfIsNotStored(t *testing.T) {
 		t.Fatal("the token is in the database verbatim")
 	}
 
-	// And it is the RIGHT hash — without this the test above passes against a
-	// column of unrelated bytes, and the spend would then work for the wrong
-	// reason or not at all.
+	// And the right hash: without this the check above passes against a column
+	// of unrelated bytes.
 	want := sha256.Sum256([]byte(token))
 	if string(stored) != string(want[:]) {
 		t.Error("the stored hash is not the SHA-256 of the token")
 	}
 }
 
-// A token is single-use, and the second attempt is refused.
 func TestATokenCannotBeSpentTwice(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -87,11 +82,9 @@ func TestATokenCannotBeSpentTwice(t *testing.T) {
 	}
 }
 
-// A token issued to verify an address cannot set a password.
-//
-// The two are issued under different conditions — one at sign-up to an address
-// nobody has proven, the other on request to one already proven — so a token
-// good for both would be only as strong as the weaker path that issued it.
+// Verification is issued at sign-up to an address nobody has proven; reset is
+// issued to one already proven. A token good for both would be only as strong
+// as the weaker path that issued it.
 func TestATokenIsBoundToItsPurpose(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -102,14 +95,13 @@ func TestATokenIsBoundToItsPurpose(t *testing.T) {
 	if _, err := db.SpendEmailToken(ctx, verify, PurposeResetPassword); !errors.Is(err, ErrTokenInvalid) {
 		t.Fatalf("a verification token was accepted to reset a password: %v", err)
 	}
-	// And it still works for what it was issued for — without this the check
-	// above passes against a spend that refuses everything.
+	// And it still works for its own purpose: without this the check above
+	// passes against a spend that refuses everything.
 	if _, err := db.SpendEmailToken(ctx, verify, PurposeVerifyEmail); err != nil {
 		t.Errorf("the token no longer works for its own purpose: %v", err)
 	}
 }
 
-// An expired token is refused.
 func TestAnExpiredTokenIsRefused(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -125,12 +117,8 @@ func TestAnExpiredTokenIsRefused(t *testing.T) {
 	}
 }
 
-// An unknown token is refused, and is indistinguishable from every other
-// failure.
-//
 // One error for unknown, expired, spent and wrong-purpose. Telling them apart
-// would let somebody probe for valid tokens, and the user's next step is the
-// same in all four cases: ask for another link.
+// would let somebody probe for valid tokens.
 func TestAnUnknownTokenIsRefused(t *testing.T) {
 	db := newTestStore(t)
 
@@ -140,11 +128,8 @@ func TestAnUnknownTokenIsRefused(t *testing.T) {
 	}
 }
 
-// A token stops working when the account's address changes.
-//
 // Without the address check, somebody who controlled the mailbox when the reset
-// was issued keeps a working reset after losing control of it — which is
-// exactly the recovery an account takeover needs.
+// was issued keeps a working reset after losing control of it.
 func TestATokenDiesWithTheAddressItWasSentTo(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -162,11 +147,8 @@ func TestATokenDiesWithTheAddressItWasSentTo(t *testing.T) {
 	}
 }
 
-// Setting a password invalidates every other reset in flight.
-//
 // Requesting three resets otherwise leaves three live credentials, and using
-// one leaves two — which matters precisely in the case a reset was requested
-// because somebody else had access.
+// one leaves two.
 func TestSettingAPasswordInvalidatesOtherResets(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -187,11 +169,9 @@ func TestSettingAPasswordInvalidatesOtherResets(t *testing.T) {
 	}
 }
 
-// Invalidating one purpose leaves the other alone.
-//
-// Setting a password must not silently void a pending address verification —
-// the user would follow that link and be told it is invalid, with no way to get
-// another except by changing their address.
+// Setting a password must not void a pending address verification: the user
+// would follow that link, be told it is invalid, and have no way to get another
+// except by changing their address.
 func TestInvalidationIsScopedToItsPurpose(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -207,7 +187,6 @@ func TestInvalidationIsScopedToItsPurpose(t *testing.T) {
 	}
 }
 
-// The sweep removes expired rows and leaves live ones.
 func TestExpiredTokensAreSwept(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -222,9 +201,7 @@ func TestExpiredTokensAreSwept(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	// Asserted on the count, not just on absence of error. A sweep that deletes
-	// nothing and reports success is a shape this repository has shipped
-	// before — see the TTL sweeper in the CHANGELOG.
+	// Asserted on the count: a sweep that deletes nothing also reports success.
 	if n != 1 {
 		t.Errorf("swept %d rows, want 1", n)
 	}
@@ -279,9 +256,8 @@ func TestMarkEmailVerified(t *testing.T) {
 		t.Fatal("the account is still unverified after being marked")
 	}
 
-	// Following the link a second time changes nothing and says so, rather than
-	// re-stamping the time — which would make the column mean "last clicked"
-	// instead of "when proven".
+	// A second click reports ErrNotFound and leaves the timestamp alone, so the
+	// column means when the address was proven, not when it was last clicked.
 	if err := db.MarkEmailVerified(ctx, u.ID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("a second verification reported %v, want ErrNotFound", err)
 	}

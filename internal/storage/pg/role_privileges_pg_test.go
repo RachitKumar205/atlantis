@@ -51,13 +51,12 @@ func rolePrivPool(t *testing.T) (*pgxpool.Pool, context.Context) {
 	return pool, ctx
 }
 
-// FORCE ROW LEVEL SECURITY closes the ordinary owner exemption, which is why a
-// reasonable person checks for FORCE, finds it, and stops looking. It does not
-// close BYPASSRLS and it does not close superuser.
+// FORCE ROW LEVEL SECURITY closes the ordinary owner exemption. It closes
+// neither BYPASSRLS nor superuser, so a check that finds FORCE and stops there
+// reports a table that leaks as configured correctly.
 //
-// This proves that on the same table, with the same forced policy, the answer
-// depends entirely on who is asking — which is what makes the boot assertion
-// load-bearing rather than defensive.
+// On the same table, with the same forced policy, the answer depends on the
+// role asking.
 func TestRolePrivilegesDecideWhetherForcedRLSMeansAnything(t *testing.T) {
 	pool, ctx := rolePrivPool(t)
 
@@ -96,7 +95,8 @@ func TestRolePrivilegesDecideWhetherForcedRLSMeansAnything(t *testing.T) {
 		}
 	}
 
-	// Confirm the table really is configured the way an operator would check.
+	// Confirm the table really is configured the way a deployment check reads
+	// it.
 	var enabled, forced bool
 	if err := pool.QueryRow(ctx, `
 SELECT relrowsecurity, relforcerowsecurity FROM pg_class
@@ -108,7 +108,7 @@ SELECT relrowsecurity, relforcerowsecurity FROM pg_class
 			enabled, forced)
 	}
 
-	// --- as the role atlantis actually connects with -------------------------
+	// As the role atlantis actually connects with.
 	privs, err := DetectRolePrivileges(ctx, PgxRoleQuerier{Q: pool})
 	if err != nil {
 		t.Fatalf("DetectRolePrivileges: %v", err)
@@ -133,8 +133,8 @@ SELECT relrowsecurity, relforcerowsecurity FROM pg_class
 				"RLS: %v", err)
 		}
 	} else {
-		// This is the state the deployment is in today, and the point of the
-		// assertion. Prove the consequence rather than asserting it.
+		// The bypassing role reads both tenants' rows through a forced policy.
+		// Executed, not assumed.
 		if seen != 2 {
 			t.Errorf("role %q reports superuser=%v bypassrls=%v but saw %d of 2 rows; "+
 				"the relationship between the role attributes and the leak is not what "+

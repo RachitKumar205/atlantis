@@ -13,9 +13,8 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/runtime/sandbox/sim"
 )
 
-// makeUserSandbox builds a typical "consumer.user" entity through the
-// public façade, so we exercise NewT + the wired Cache/Outbox at the
-// same time.
+// makeUserSandbox builds a "consumer.user" entity through the public façade,
+// which drives NewT and the wired Cache and Outbox with it.
 func makeUserSandbox(t *testing.T) *sandbox.Sandbox {
 	t.Helper()
 	sb := sandbox.NewT(t, sandbox.Options{})

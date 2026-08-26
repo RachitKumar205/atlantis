@@ -1,20 +1,12 @@
-// Stream interceptor flavors of the security-critical chain. Mirrors
-// the unary versions in this package so the streaming RPC introduced
-// by jobsdispatcher (and any future streaming RPCs) gets the same
-// auth + cert-binding walls as every admin unary RPC.
+// Stream interceptor flavors of the security-critical chain, mirroring the
+// unary versions in this package so jobsdispatcher's streaming RPC gets the
+// same auth and cert-binding walls as every admin unary RPC.
 //
-// Background: PR 2's WorkerDispatch was the first streaming RPC in
-// atlantis. The original auth.go comment noted that the unary
-// interceptors were "identical in shape but not needed because no
-// RPC is streaming yet." This file backfills the streaming halves.
-//
-// Pattern: each interceptor extracts its core check into a shared
-// helper inside the same source file as its unary partner; the stream
-// wrapper here calls that helper and forwards to the handler via a
-// ctxStream that carries the modified context. The handler always
-// reads identity via stream.Context() so the wiring stays
-// indistinguishable between unary and stream from the handler's
-// point of view.
+// Each interceptor extracts its core check into a shared helper in the same
+// source file as its unary partner. The stream wrapper here calls that helper
+// and forwards to the handler through a ctxStream carrying the modified
+// context, so a handler reading identity via stream.Context() cannot tell the
+// two apart.
 
 package interceptors
 

@@ -326,7 +326,7 @@ func buildCustomQueryDescs(cq *dsl.CustomQuery, ns string) (protoreflect.FileDes
 			TypeName: strPtr(rowTypeName),
 		})
 	} else {
-		// Entity-output: repeated entity field. We reference the entity
+		// Entity-output: a repeated entity field, referencing the entity
 		// message by its fully qualified name. The entity's file descriptor
 		// must be available in the resolver.
 		one := int32(1)
@@ -418,9 +418,9 @@ func (s *Server) executeCustomQueryWithReq(ctx context.Context, cqm *customQuery
 	// Bind input args in placeholder order. `cqm.sql` has been rewritten
 	// from `$name` to `$1, $2, ...` at snapshot-build time; `cqm.argOrder`
 	// lists the input names in the order they first appear in the rewritten
-	// SQL. We iterate it to bind values in the order PG expects. Inputs
-	// declared but never referenced in the SQL are intentionally omitted —
-	// no placeholder, no arg.
+	// SQL, and iterating it binds values in the order PG expects. An input
+	// declared but never referenced in the SQL has no placeholder and so no
+	// arg.
 	args := make([]any, 0, len(cqm.argOrder))
 	for _, name := range cqm.argOrder {
 		fd := cqm.requestDesc.Fields().ByName(protoreflect.Name(name))

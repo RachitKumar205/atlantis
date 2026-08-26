@@ -14,27 +14,15 @@ var ErrNoSecondFactor = errors.New("no second factor is enrolled")
 
 // ErrNoUser reports an attempt to bind an empty user.
 //
-// Fails closed. An empty bind leaves cloud.current_user_id() returning NULL,
-// under which the RESTRICTIVE policy admits nothing — so the caller would read
-// an empty result rather than an error, and "there is no second factor" is a
-// much worse thing to conclude wrongly than "something failed".
+// An empty bind leaves cloud.current_user_id() NULL, under which the
+// RESTRICTIVE policy admits nothing, so the caller reads an empty result rather
+// than an error and concludes there is no second factor.
 var ErrNoUser = errors.New("no user bound")
 
-// UserStore is a Store bound to one user.
-//
-// # Why this exists now and not in C1
-//
-// C1 had no table that could carry a per-user boundary — its four were all
-// either lookups that *discover* who a request is, or registries. A bound
-// handle guarding nothing would have been an abstraction with no purpose, so it
-// was left out.
-//
-// cloud.totp_secrets and cloud.backup_codes changed that: both are read only
-// for a user who has already been identified. The row-level-security policy is
-// the actual boundary; this is what makes it reachable without every call site
-// remembering to bind. A caller that has not said who it is acting for cannot
-// call these methods at all, and that is a compile error rather than an empty
-// result.
+// UserStore is a Store bound to one user. Its methods query cloud.totp_secrets
+// and cloud.backup_codes, whose row-level-security policies are the boundary;
+// this handle sets `cloud.user` so those policies match, and makes an unbound
+// query a compile error rather than an empty result.
 type UserStore struct {
 	db     *Store
 	userID string
@@ -49,11 +37,9 @@ func (s *Store) ForUser(userID string) *UserStore { return &UserStore{db: s, use
 
 // tx runs fn inside a transaction with the user bound.
 //
-// A transaction is required rather than convenient: cloud.set_user uses
-// set_config(..., true), which is transaction-local. That is what makes it safe
-// on a pooled connection — the value reverts when the transaction ends, so the
-// next request to borrow the same backend cannot inherit it. A plain SET on the
-// pool would persist into whatever unrelated request came next.
+// A transaction is required: cloud.set_user uses set_config(..., true), which
+// is transaction-local, so the value reverts when the transaction ends and the
+// next request to borrow the backend cannot inherit it.
 func (u *UserStore) tx(ctx context.Context, fn func(pgx.Tx) error) error {
 	if u.userID == "" {
 		return ErrNoUser
@@ -69,17 +55,15 @@ func (u *UserStore) tx(ctx context.Context, fn func(pgx.Tx) error) error {
 			return
 		}
 		// Rollback on a fresh context, not the request's. pgx destroys the
-		// pooled connection when a rollback Exec fails, so rolling back on a
-		// cancelled context churns the pool — and a cancelled request is the
-		// common case, not an exotic one.
+		// pooled connection when a rollback Exec fails, so rolling back on an
+		// already-cancelled context churns the pool.
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), txFinishTimeout)
 		defer cancel()
 		_ = tx.Rollback(rctx)
 	}()
 
-	// The bind must be the first statement. Anything issued ahead of it runs
-	// unscoped, and under the RESTRICTIVE policy that means reading nothing —
-	// which looks like "no second factor enrolled" rather than like a bug.
+	// The bind must be the first statement. Anything ahead of it runs unscoped
+	// and reads nothing under the RESTRICTIVE policy.
 	if _, err := tx.Exec(ctx, `SELECT cloud.set_user($1)`, u.userID); err != nil {
 		return fmt.Errorf("bind user: %w", err)
 	}
@@ -97,13 +81,10 @@ func (u *UserStore) tx(ctx context.Context, fn func(pgx.Tx) error) error {
 	return nil
 }
 
-// ── TOTP ────────────────────────────────────────────────────────────────────
-
 // PutTOTPSecret stores an unconfirmed secret, replacing any previous one.
 //
-// Unconfirmed because enrolment is not finished until the user has proved they
-// can generate a code from it. Storing it confirmed would let somebody scan a
-// code, close the page, and be locked out by a factor they never captured.
+// Unconfirmed until a code proves the authenticator captured it. Storing it
+// confirmed gates the account behind a factor no authenticator holds.
 func (u *UserStore) PutTOTPSecret(ctx context.Context, ciphertext []byte) error {
 	return u.tx(ctx, func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `
@@ -149,16 +130,13 @@ func (u *UserStore) ConfirmTOTP(ctx context.Context, step int64) error {
 // SpendTOTPStep records that a code from this step has been accepted, and
 // reports whether it was already spent.
 //
-// # Why a step counter rather than nothing
-//
-// A TOTP code is valid for its whole 30-second window, and by default for the
-// window either side of it. Without this, a code observed over a shoulder or
-// captured by a phishing proxy can be presented again for the rest of that
-// window — which is ample. The comparison is `>=` rather than `=` so an
-// out-of-order or replayed *earlier* step is refused too.
+// A TOTP code is valid for its whole 30-second window and, by default, for the
+// window either side, so without a spent-step record a captured code can be
+// replayed for the rest of that period. The comparison is >= rather than =, so
+// an earlier step is refused as well as a repeated one.
 //
 // One statement, so two concurrent presentations of the same code cannot both
-// win the check and both proceed.
+// pass.
 func (u *UserStore) SpendTOTPStep(ctx context.Context, step int64) (bool, error) {
 	spent := false
 	err := u.tx(ctx, func(tx pgx.Tx) error {
@@ -177,14 +155,10 @@ func (u *UserStore) SpendTOTPStep(ctx context.Context, step int64) (bool, error)
 	return spent, err
 }
 
-// ── Backup codes ────────────────────────────────────────────────────────────
-
 // ReplaceBackupCodes discards any existing codes and stores a fresh set of
 // hashes.
 //
-// Replacing rather than appending: a user regenerating their codes expects the
-// old printout to stop working, and a set that accumulated would mean a code
-// from a sheet thrown away years ago still opens the account.
+// Replacing rather than appending, so a discarded printout stops working.
 func (u *UserStore) ReplaceBackupCodes(ctx context.Context, hashes []string) error {
 	return u.tx(ctx, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
@@ -206,7 +180,7 @@ func (u *UserStore) ReplaceBackupCodes(ctx context.Context, hashes []string) err
 //
 // The caller compares the presented code against each, because the hash is
 // salted per code and cannot be looked up. Ten argon2id verifications is around
-// half a second, on an operation used approximately once in an account's life.
+// half a second.
 func (u *UserStore) UnusedBackupCodeHashes(ctx context.Context) (map[int64]string, error) {
 	out := map[int64]string{}
 	err := u.tx(ctx, func(tx pgx.Tx) error {
@@ -232,8 +206,8 @@ func (u *UserStore) UnusedBackupCodeHashes(ctx context.Context) (map[int64]strin
 
 // SpendBackupCode marks one code used, reporting whether it was still unused.
 //
-// The check and the write are one statement for the same reason as everywhere
-// else here: two requests presenting the same code must not both succeed.
+// The check and the write are one statement, so two requests presenting the
+// same code cannot both succeed.
 func (u *UserStore) SpendBackupCode(ctx context.Context, id int64) (bool, error) {
 	spent := false
 	err := u.tx(ctx, func(tx pgx.Tx) error {
@@ -252,22 +226,9 @@ func (u *UserStore) SpendBackupCode(ctx context.Context, id int64) (bool, error)
 
 // HasConfirmedFactor reports whether this account can complete a sign-in.
 //
-// # Why this is on the bound handle
-//
-// It was written unscoped, on the bare pool, with a comment arguing that was
-// fine because it returns only a boolean. That argument was wrong, and a test
-// caught it: cloud.totp_secrets is policed, so an unbound read matches nothing
-// and the count is always zero. Every sign-in therefore reported "no second
-// factor enrolled" and handed out a pending login that could ENROL one —
-// letting anybody holding just a password replace the second factor on an
-// account that already had one.
-//
-// The failure was silent in exactly the way the migration's own notes predicted:
-// reading nothing through a policy looks like an empty table rather than like a
-// missing bind.
-//
-// There is no bootstrap problem here to justify going around the boundary. This
-// is asked after the password has been verified, so the user is already known.
+// On the bound handle, not the pool. cloud.totp_secrets is policed, so an
+// unbound count reads zero rather than failing, and every sign-in would issue a
+// pending login permitted to enrol a replacement factor.
 func (u *UserStore) HasConfirmedFactor(ctx context.Context) (bool, error) {
 	found := false
 	err := u.tx(ctx, func(tx pgx.Tx) error {

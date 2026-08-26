@@ -140,14 +140,12 @@ func TestGeneratedSchemaRoundTrips(t *testing.T) {
 // round trip: what happens to a column atlantis cannot describe.
 //
 // A legacy database is full of them — `timestamp` without a zone, `json`,
-// `inet`, `char(n)`. The emitter used to declare four of those because its
-// whitelist tested whether the spelling was one token rather than whether the
-// toolchain implements the type. Every one rendered valid Postgres, so plan
-// and apply were clean and the checkpoint was written; `tide codegen` was the
-// first thing to fail, after the customer had committed the file.
+// `inet`, `char(n)`. A whitelist testing whether the spelling is one token
+// rather than whether the toolchain implements the type declares four of these.
+// Each renders valid Postgres, so plan and apply are clean and the checkpoint
+// is written; `tide codegen` is the first step to fail.
 //
-// Omitting them is the honest answer, and naming them in the file is what
-// makes it honest rather than lossy.
+// The column is omitted and named in the file, so the omission is visible.
 func TestGeneratedSchemaOmitsWhatCodegenCannotCarry(t *testing.T) {
 	pool := roundTripPool(t)
 	ctx := context.Background()

@@ -135,8 +135,6 @@ func TestTheAuthorizeURLCarriesTheChallenge(t *testing.T) {
 	}
 }
 
-// ── GitHub ──────────────────────────────────────────────────────────────────
-
 func githubOK(f *fakeProvider, emails string) *GitHub {
 	f.routes["/user"] = `{"id":4242,"login":"ada","name":"Ada Lovelace"}`
 	f.routes["/user/emails"] = emails
@@ -161,8 +159,8 @@ func TestGitHubTakesThePrimaryVerifiedAddress(t *testing.T) {
 	if id.Email != "ada@example.com" {
 		t.Errorf("address is %q, want the folded primary", id.Email)
 	}
-	// The numeric id, not the login: a login can be changed and reissued to
-	// somebody else, and a link keyed to it would follow the name.
+	// The numeric id, not the login. A login can be changed and reissued to a
+	// different account, and a link keyed to it would follow the name.
 	if id.Subject != "4242" {
 		t.Errorf("subject is %q, want the numeric id", id.Subject)
 	}
@@ -261,8 +259,6 @@ func TestGitHubFallsBackToTheLogin(t *testing.T) {
 	}
 }
 
-// ── Google ──────────────────────────────────────────────────────────────────
-
 func googleWith(f *fakeProvider, userinfo string) *Google {
 	f.routes["/userinfo"] = userinfo
 	g := f.google()
@@ -342,8 +338,8 @@ func TestAHugeResponseIsBounded(t *testing.T) {
 	g.client = srv.Client()
 	g.tokenURL, g.userInfoURL = srv.URL+"/token", srv.URL+"/userinfo"
 
-	// Truncated at the cap, so the JSON no longer parses. The point is that it
-	// fails rather than allocating whatever was sent.
+	// Truncated at the cap, so the JSON does not parse: it fails rather than
+	// allocating whatever was sent.
 	_, err := g.Identify(context.Background(), "c", "v", "https://cloud.test/cb")
 	if err == nil {
 		t.Fatal("an oversized response was accepted")

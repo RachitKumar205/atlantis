@@ -132,10 +132,6 @@ func TestLogRing_ConcurrentAppendNoDuplicateSeq(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// RingHandler tee tests
-// ---------------------------------------------------------------------------
-
 func TestRingHandler_TeeForwardsToDownstreamAndRing(t *testing.T) {
 	var buf bytes.Buffer
 	ring := NewLogRing(64)

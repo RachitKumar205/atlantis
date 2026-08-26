@@ -28,10 +28,10 @@ type VersionSetter interface {
 	IsStale(err error) bool
 }
 
-// LRUInvalidator is the in-process LRU notification surface. The reader
-// package's *Reader satisfies this. After memcached SET succeeds we tell
-// every running reader to drop its tier-0 entry; without that, tier-0
-// would happily keep serving stale bytes until eviction.
+// LRUInvalidator is the in-process LRU notification surface, satisfied by the
+// reader package's *Reader. Every running reader is told to drop its tier-0
+// entry once the memcached SET succeeds; otherwise tier-0 serves stale bytes
+// until eviction.
 type LRUInvalidator interface {
 	Invalidate(entity, id string)
 }
@@ -133,10 +133,11 @@ type Worker struct {
 	lastDrainNS atomic.Int64
 }
 
-// NewWorker constructs a Worker. The pool MUST be a pgxpool so we can use
-// pgx's native LISTEN/NOTIFY via Acquire(). Returns an error iff
-// cfg.Schema is not a valid SQL identifier — the worker's SQL is built
-// with fmt.Sprintf so a hostile schema would otherwise produce injection.
+// NewWorker constructs a Worker. The pool is a pgxpool because pgx's native
+// LISTEN/NOTIFY needs Acquire().
+//
+// Returns an error only when cfg.Schema is not a valid SQL identifier: the
+// worker builds its SQL with fmt.Sprintf, so a hostile schema is injection.
 //
 // qc is optional. When nil, generation_bump rows are still drained but
 // the bump is a no-op — this lets older callers (and tests that don't
@@ -275,27 +276,23 @@ func (w *Worker) runListenSession(ctx context.Context, notifyCh chan struct{}) e
 // the outbox for the next iter. Drain reads the count to know when
 // the table is empty.
 //
-// Concurrency invariant: claim + apply + delete are wrapped in
-// a single Postgres transaction. `SELECT ... FOR UPDATE SKIP LOCKED` holds
-// the row lock until COMMIT — without the tx, the lock was released the
-// moment the SELECT returned, allowing another worker to claim and process
-// the same row and produce a stale pointer overwrite. With the tx, only
-// one worker can hold a given outbox row at a time across the full cycle.
+// Claim, apply and delete run in one Postgres transaction, so
+// `SELECT ... FOR UPDATE SKIP LOCKED` holds the row lock through to COMMIT and
+// one worker owns an outbox row for the whole cycle.
 //
-// We do memcached SET *inside* the tx (an open Postgres tx wrapping a
-// network call to memcached). Normally an anti-pattern, but here:
+// The memcached SET happens inside that transaction — a network call under an
+// open Postgres tx — which holds here because:
 //
 //   - the tx exists only to keep the row lock from claimInTx held until
 //     DELETE — two workers may run their own txs in parallel against
 //     different batches (SKIP LOCKED makes them disjoint), so there is
 //     no global serialization being held open
 //   - the memcached call has a short hard timeout (100ms by default)
-//   - the tx only holds row locks on the small bounded batch we just
-//     claimed; it does not block any data path
+//   - the tx holds row locks on the claimed batch alone, blocking no data path
 //
-// Releasing the lock the moment the SELECT returns and then racing the
-// DELETE is the alternative, and it lets two workers double-process the
-// same row and produce a stale pointer overwrite.
+// Releasing the lock when the SELECT returns and racing the DELETE lets two
+// workers double-process one row and overwrite a fresh pointer with a stale
+// one.
 func (w *Worker) drainOnce(ctx context.Context) int {
 	tx, err := w.pool.Begin(ctx)
 	if err != nil {
@@ -550,10 +547,10 @@ func (w *Worker) applyGenerationBump(ctx context.Context, r pendingRow) error {
 	return nil
 }
 
-// markFailureInTx bumps attempts and records last_error / last_error_at.
-// Sanitized so we never persist raw error messages — those can leak
-// hostnames, query fragments, or PII. We persist only the error *kind*
-// and a truncated category.
+// markFailureInTx bumps attempts and records last_error and last_error_at.
+//
+// Sanitized: a raw error message can carry hostnames, query fragments or PII,
+// so only the error kind is persisted. See sanitizeError.
 //
 // When the next attempt count meets MaxAttempts the row moves to the
 // dead-letter table so subsequent drain passes don't keep claiming it.
@@ -602,9 +599,8 @@ func (w *Worker) deleteInTx(ctx context.Context, tx pgx.Tx, id int64) error {
 	return err
 }
 
-// sanitizeError keeps a tiny category string so operators can grep, without
-// persisting attacker-influenceable raw text. Categories pinned here so the
-// audit story is "the only strings we ever store are these constants".
+// sanitizeError maps an error to one of a fixed set of category strings, so the
+// only text this package writes to the database is a constant from this switch.
 func sanitizeError(err error) string {
 	switch {
 	case err == nil:

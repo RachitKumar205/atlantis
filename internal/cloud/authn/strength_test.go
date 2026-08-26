@@ -102,8 +102,8 @@ func TestHIBPSendsOnlyAPrefix(t *testing.T) {
 	if len(prefix) != 5 {
 		t.Fatalf("sent %q, want a five-character prefix", prefix)
 	}
-	// The whole point of the range API: the service must not learn the
-	// password or enough of its hash to identify it.
+	// The range API exists so the service learns neither the password nor
+	// enough of its hash to identify it.
 	if strings.Contains(gotPath, pw) {
 		t.Fatal("the password itself was sent to the breach service")
 	}

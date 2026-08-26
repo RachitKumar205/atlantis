@@ -17,12 +17,9 @@ import (
 // adminClient wraps the generated AdminServiceClient with the connection it
 // owns, so callers get one thing to defer Close on.
 //
-// This used to be a hand-rolled JSON-envelope client with a custom codec, and
-// each subcommand redeclared the message it sent. The shapes lived in four
-// places — here, tidectl, the console, and the server — with nothing checking
-// that they agreed. Now they are generated from
-// atlantis/admin/v1/admin.proto, and a field the server adds is a field this
-// client has.
+// The messages are generated from atlantis/admin/v1/admin.proto, so a field the
+// server adds is a field this client has. tidectl, the console and the server
+// read the same file.
 type adminClient struct {
 	adminpb.AdminServiceClient
 	conn *grpc.ClientConn
@@ -31,10 +28,9 @@ type adminClient struct {
 // dial opens the mTLS channel to atlantis.
 //
 // TLS material is required. The server presents a certificate and demands one
-// back on every connection, so a client with none does not get a degraded
-// channel — it gets no channel. The insecure fallback that used to be here
-// printed a warning and then failed at the handshake with an error naming
-// neither the cause nor the fix.
+// back on every connection, so a client with none gets no channel rather than a
+// degraded one. An insecure fallback here would warn and then fail at the
+// handshake, naming neither the cause nor the fix.
 func dial(cfg *tideConfig) (*adminClient, error) {
 	if cfg.TLS.CertPEM == "" {
 		return nil, fmt.Errorf(
@@ -80,9 +76,8 @@ func emitJSON(m proto.Message, inlineJSONBytes ...string) error {
 }
 
 func buildTLS(cfg *tideConfig) (credentials.TransportCredentials, error) {
-	// One source now: the credential store, loaded by applyStoreCredentials.
-	// The file-path and inline-PEM variants that used to be selected between
-	// here are gone — see tideConfig for why.
+	// One source: the credential store, loaded by applyStoreCredentials. See
+	// tideConfig for why nothing else can supply this material.
 	//
 	// CertPEM and KeyPEM hold the same bytes: one file with the key and the
 	// certificate in it, so renewal is a single atomic rename. X509KeyPair

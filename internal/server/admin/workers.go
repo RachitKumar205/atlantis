@@ -3,10 +3,9 @@
 //
 // All four RPCs read or mutate the dispatcher's in-memory session
 // map. They are wired by cmd/server/main.go via Service.SetDispatcher
-// after both the Service and the Dispatcher are constructed — the
-// admin package deliberately does NOT import jobsdispatcher (to
-// preserve the existing import hierarchy where admin is a leaf), so
-// the contract here is a narrow interface.
+// after both the Service and the Dispatcher are constructed. admin
+// does not import jobsdispatcher, keeping admin a leaf, so the
+// contract here is a narrow interface.
 //
 // Authorization:
 //
@@ -17,9 +16,8 @@
 //     CAPABILITY_OPERATOR at the gRPC layer — they act on a worker
 //     that belongs to some other caller.
 //
-// The BFF also writes audit-log rows on Drain / Evict; the gRPC
-// layer doesn't (auditing the BFF layer is where the operator's
-// session id is available).
+// The BFF writes the audit-log rows on Drain and Evict, the gRPC layer
+// having no operator session id to record.
 
 package admin
 
@@ -195,14 +193,12 @@ func (s *Service) EvictWorker(ctx context.Context, req *adminpb.EvictWorkerReque
 	return &adminpb.EvictWorkerResponse{}, nil
 }
 
-// --- Wire conversion ---
-//
 // The dispatcher is a separate subsystem that deals in domain types; this
 // package is the wire boundary, so the translation lives here rather than
 // reshaping the dispatcher's interface.
 //
-// Two asymmetries between the two representations are deliberate and have to
-// be preserved in both directions.
+// Two asymmetries between the representations have to be preserved in both
+// directions.
 //
 // DispatcherSessionDetail embeds DispatcherSessionSnapshot, so encoding/json
 // flattens the snapshot's fields into the detail object. The proto nests it
@@ -211,28 +207,22 @@ func (s *Service) EvictWorker(ctx context.Context, req *adminpb.EvictWorkerReque
 // JSON shim therefore un-nests on the way back out.
 //
 // A nil timestamp is not the Unix epoch. timestamppb's AsTime maps nil to
-// 1970-01-01, whereas the Go zero time marshals as "0001-01-01T00:00:00Z" —
-// which is what a never-set ConnectedAt emitted before this migration. The
-// helpers below keep the zero value zero in both directions.
+// 1970-01-01, whereas the Go zero time marshals as "0001-01-01T00:00:00Z",
+// which is what a never-set ConnectedAt carries. The helpers below keep the
+// zero value zero in both directions.
 //
-// Two behaviour changes are deliberate rather than incidental.
+// Two behaviour changes follow from the proto shapes.
 //
 // Timestamps are normalised to UTC. The dispatcher stamps with time.Now(),
-// which carries the server's local zone, so a response previously rendered
-// "2026-07-29T21:55:38+05:30" and now renders the same instant as
-// "...T16:25:38Z". Preserving the offset is not possible — a protobuf
-// Timestamp has no zone — and it was never desirable: an API response that
-// leaks the server's TZ is a latent bug, not a contract. Consumers parse with
-// offset-aware Date(), so the instant is unchanged.
+// which carries the server's local zone, so "2026-07-29T21:55:38+05:30"
+// renders as "...T16:25:38Z". A protobuf Timestamp has no zone, so the offset
+// cannot be preserved. Consumers parse with offset-aware Date(), so the instant
+// is unchanged.
 //
-// Empty repeated fields marshal as [] rather than null. jobsdispatcher goes
-// out of its way to return non-nil slices for exactly this reason (see the
-// comment on GetSession: "a null crashes the session-detail page"), and the
-// adapter in cmd/server then discards that for two of the three. Rather than
-// reproduce an inconsistency that a protobuf round trip cannot represent
-// anyway — the wire has no nil-versus-empty distinction — every repeated
-// field here is non-nil. That also makes this path and the generated one
-// agree once the latter is registered.
+// Empty repeated fields marshal as [] rather than null. jobsdispatcher returns
+// non-nil slices because a null crashes the session-detail page, and the
+// adapter in cmd/server discards that for two of the three. The wire has no
+// nil-versus-empty distinction, so every repeated field here is non-nil.
 
 func timeToPB(t time.Time) *timestamppb.Timestamp {
 	if t.IsZero() {

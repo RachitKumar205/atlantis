@@ -14,10 +14,9 @@ import (
 
 // The signed-in half of Cloud's API.
 //
-// Everything else Cloud serves answers for somebody who is not signed in yet —
-// /api/auth/config is deliberately unauthenticated, /api/auth/pending reads a
-// pre-session cookie — or hands a browser off to a console. These are the first
-// routes that answer "who are you, and what do you have".
+// Every other route answers before a session exists — /api/auth/config is
+// unauthenticated and /api/auth/pending reads a pre-session cookie — or hands
+// the browser off to a console. These are the first routes that read a session.
 //
 // That is also why the sign-in application has never had a signed-in state:
 // there was nothing to ask. It boots on config and pending, both pre-session,
@@ -41,13 +40,9 @@ type meResponse struct {
 
 // orgResponse is one organisation as its member sees it.
 //
-// # What is deliberately absent
-//
-// The last provisioning error. It is written for an operator and carries image
-// references, cluster hostnames and API paths — one produced by the local
-// walkthrough contained the whole Kubernetes API server URL. A customer whose
-// organisation failed gets the state, the attempt count and somewhere to ask;
-// the detail stays in `cloud org status`.
+// The last provisioning error is not included. It carries image references,
+// cluster hostnames and API paths; one produced locally contained the whole
+// Kubernetes API server URL. It is reachable through `cloud org status`.
 type orgResponse struct {
 	Name        string `json:"name"`
 	DisplayName string `json:"display_name,omitempty"`
@@ -58,8 +53,8 @@ type orgResponse struct {
 	State    string `json:"state"`
 	Attempts int    `json:"attempts"`
 
-	// URL is where to send somebody who clicks this organisation, and it is
-	// built here rather than assembled by the client from a name it holds.
+	// URL is the destination for this organisation, built here rather than
+	// assembled by the client from a name it holds.
 	// Always /authorize, never a console directly: the membership re-read is
 	// the gate, and a client that linked straight to a console would skip it.
 	//
@@ -69,19 +64,16 @@ type orgResponse struct {
 
 	// CreatedByMe is whose organisation it is, which the screen says out loud.
 	//
-	// It does NOT gate deletion, though an earlier version of this comment said
-	// it would. cloud.orgs.created_by is nullable, so an organisation whose
-	// creator closed their account would have nobody able to delete it; the
-	// guard is an admin membership instead. See store.SoftDeleteOrg.
+	// It does not gate deletion. cloud.orgs.created_by is nullable, so an
+	// organisation whose creator closed their account would be undeletable;
+	// the guard is an admin membership. See store.SoftDeleteOrg.
 	CreatedByMe bool `json:"created_by_me"`
 
 	// PurgeAfter is when a deleted organisation stops being restorable, RFC3339,
 	// and empty in every other state.
 	//
-	// Sent because "deleted" and "deleted, restorable until Tuesday" are
-	// different messages and only the second tells somebody what to do. The
-	// screen renders the date; it does not compute it, because the window is a
-	// property of the row rather than of whatever the client believes it to be.
+	// Sent rather than computed by the client: the window is a property of the
+	// row. The screen renders the date.
 	PurgeAfter string `json:"purge_after,omitempty"`
 }
 
@@ -123,9 +115,9 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 
 // handleGetOrg reports one organisation, for a screen waiting on it.
 //
-// Membership-gated, and an organisation the caller is not in is reported as
-// absent — the same answer as one that does not exist. Distinguishing them
-// would let anybody enumerate which organisations are registered.
+// Membership-gated. An organisation the caller is not in reports as absent,
+// the same answer one that does not exist gets, so the route cannot enumerate
+// registered organisations.
 func (s *Server) handleGetOrg(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.requireSession(w, r)
 	if !ok {
@@ -159,8 +151,8 @@ func (s *Server) orgResponse(o store.OrgSummary) orgResponse {
 	if o.PurgeAfter != nil {
 		out.PurgeAfter = o.PurgeAfter.UTC().Format(time.RFC3339)
 	}
-	// Only once there is a console to reach. /authorize would answer its own
-	// 503 otherwise, and a link that reliably fails is worse than no link.
+	// Only once there is a console to reach; /authorize would answer its own
+	// 503 otherwise.
 	if o.ConsoleURL != "" {
 		out.URL = s.cfg.PublicURL + "/authorize?org=" + url.QueryEscape(o.Name)
 	}
@@ -169,25 +161,16 @@ func (s *Server) orgResponse(o store.OrgSummary) orgResponse {
 
 // sameOrigin refuses a cross-site state-changing request, answering it if so.
 //
-// # Why this is required here and not on the form routes
+// Applies to /api/* only. Cloud's session cookie is SameSiteLaxMode rather than
+// the console's Strict, because verification and reset links arrive as
+// top-level navigations from a mail client and Strict drops the cookie on
+// those. Lax already blocks a cross-site POST; this is a second check.
 //
-// Cloud's session cookie is SameSiteLaxMode, not the console's Strict, and for
-// a stated reason: verification and reset links arrive as top-level navigations
-// from a mail client, and Strict drops the cookie on exactly those. Lax already
-// blocks a cross-site POST, so this is a second answer to the same question
-// rather than the only one.
-//
-// The console's version of this check allows a request with no Origin header
-// and leans on Strict to cover that. Cloud cannot lean on Strict, so this
-// requires the header — but only where requiring it is safe.
-//
-// It is safe on /api/* and nowhere else. Those are reached by fetch in cors
-// mode, which always appends a real Origin. The form posts — POST /reset and
-// POST /authorize/reauth — are reached as HTML form navigations, and
-// securityHeaders sets Referrer-Policy: no-referrer on every response, under
-// which a form navigation sends `Origin: null`. Requiring the header there
-// would refuse the two flows the Lax cookie exists to protect, which is the
-// mistake an earlier draft of this made.
+// Unlike the console's equivalent, a missing Origin header is refused. That is
+// safe on /api/*, which is reached by fetch in cors mode and always carries a
+// real Origin. It is not safe on the form posts: securityHeaders sets
+// Referrer-Policy: no-referrer, under which POST /reset and
+// POST /authorize/reauth send `Origin: null`.
 func (s *Server) sameOrigin(w http.ResponseWriter, r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
@@ -203,14 +186,12 @@ func (s *Server) sameOrigin(w http.ResponseWriter, r *http.Request) bool {
 
 // originMatches compares an Origin against where this server believes it is.
 //
-// Compared against the configured public URL rather than r.Host, because the
-// two disagree in the one setup a developer uses every day: Vite's proxy sets
-// changeOrigin, rewriting Host to Cloud's address while the browser still sends
-// the page's own origin. A host comparison would refuse every write under
-// `vite dev` and be discovered by whoever next ran the frontend.
+// Compared against the configured public URL, which Vite's proxy makes differ
+// from r.Host: changeOrigin rewrites Host to Cloud's address while the browser
+// still sends the page's own origin.
 //
-// r.Host is still accepted, for a deployment reached at a name the public URL
-// does not name — a private ingress, a health probe from inside the cluster.
+// r.Host is accepted too, for a deployment reached at a name the public URL
+// does not carry, such as a private ingress.
 func (s *Server) originMatches(origin string, r *http.Request) bool {
 	if strings.EqualFold(origin, s.cfg.PublicURL) {
 		return true
@@ -263,11 +244,8 @@ func (s *Server) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		user.ID, identity.RoleAdmin)
 	switch {
 	case errors.Is(err, store.ErrAlreadyExists):
-		// "Not available" rather than "taken", and the same answer a reserved
-		// name gets. Not to hide that the name exists — names are globally
-		// unique, so anybody can discover that by trying, and pretending
-		// otherwise would be theatre. It is because to the person typing, taken
-		// and reserved are the same fact and have the same remedy.
+		// The same answer a reserved name gets. Both have the same remedy, and
+		// names are globally unique, so existence is discoverable by trying.
 		jsonError(w, "that name is not available", http.StatusConflict)
 		return
 	case errors.Is(err, store.ErrOrgLimitReached):
@@ -280,19 +258,16 @@ func (s *Server) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The first human-actor row in cloud.audit_log — until now the provisioner
-	// was its only writer. The actor's email is written onto the row rather than
-	// resolved later, so it says who acted then and not who holds that identity
-	// now.
+	// The actor's email is written onto the row rather than resolved later, so
+	// it records who acted then and not who holds that identity now.
 	s.db.LogAction(r.Context(), name, user.ID, user.Email, "org.created", map[string]any{
 		"display_name": body.DisplayName,
 	})
 
 	o, err := s.db.OrgForUser(r.Context(), user.ID, name)
 	if err != nil {
-		// Created, but unreadable a moment later. Report the creation rather
-		// than an error: the organisation exists and is queued, and a client
-		// that retried would be told the name is taken — by itself.
+		// Created but unreadable. Reported as created, since it exists and is
+		// queued, and a retry answers that the name is taken.
 		s.log.Error("read back a created organisation", "org", name, "err", err)
 		writeJSON(w, http.StatusCreated, orgResponse{Name: name, Role: string(identity.RoleAdmin),
 			State: string(store.StatePending), CreatedByMe: true})
@@ -303,18 +278,15 @@ func (s *Server) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 
 // notReadyMessage explains why an organisation cannot be entered yet.
 //
-// Reads the queue rather than saying one thing for every case, because the four
-// states want four different answers and only one of them is "wait".
+// Reads the queue, because the four states have four different answers and
+// only one of them is "wait".
 //
-// Deliberately says nothing about *why* a failure failed. The reason is in
-// last_error, which is written for an operator — see orgResponse. Somebody
-// locked out of their organisation is the last person who should be handed a
-// Kubernetes API path.
+// It says nothing about why a failure failed. last_error is written for an
+// operator and carries image references and cluster hostnames; see orgResponse.
 func (s *Server) notReadyMessage(ctx context.Context, org string) string {
 	p, err := s.db.ProvisioningFor(ctx, org)
 	if err != nil {
-		// No queue row at all: registered by hand, or created before any of
-		// this existed. Nothing is coming to finish it.
+		// No queue row: registered by hand. Nothing will finish it.
 		return "That organisation is not ready yet.\n\n" +
 			"If this does not resolve, ask whoever set it up."
 	}
@@ -334,10 +306,9 @@ func (s *Server) notReadyMessage(ctx context.Context, org string) string {
 
 // deleteWindow is how long a deleted organisation stays restorable.
 //
-// A constant rather than configuration, and that is a decision worth defending:
-// it is a promise made to somebody at the moment they press delete, and a value
-// an operator can change per deployment is one where two customers get
-// different promises from the same product.
+// A constant rather than configuration: the window is quoted at the moment of
+// deletion, and a per-deployment value gives two customers different answers
+// from the same product.
 //
 // It is passed to SoftDeleteOrg rather than read there, and the resulting date
 // is stored on the row. So changing this number affects organisations deleted
@@ -346,21 +317,11 @@ const deleteWindow = 30 * 24 * time.Hour
 
 // handleDeleteOrg soft-deletes an organisation.
 //
-// # What this does not do
+// It destroys nothing: it writes a row, and the provisioner tears the namespace
+// down once deleteWindow elapses. No Cloud route reaches the cluster.
 //
-// It does not destroy anything. It writes a row; the provisioner tears the
-// namespace down once the window runs out. Cloud holds every password, every
-// TOTP secret and the assertion signing key, and internal/provisioner's package
-// comment is explicit that the risk of script on this origin was accepted on
-// the understanding it could reach /api/account/* — not that it could schedule
-// pods, or delete them.
-//
-// # The confirmation is checked here, not in a dialog
-//
-// A dialog defends against a misclick and nothing else: this request is four
-// lines of JavaScript to issue directly. Requiring the organisation's own name
-// in the body, compared server-side, is what makes "I meant a different tab" a
-// 400 rather than a destroyed organisation.
+// The body must carry the organisation's own name, compared server-side, since
+// the request can be issued without the client's confirmation dialog.
 func (s *Server) handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
 	if !s.rateLimited(w, r) {
 		return
@@ -388,9 +349,9 @@ func (s *Server) handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
 	err := s.db.SoftDeleteOrg(r.Context(), org, user.ID, deleteWindow)
 	switch {
 	case errors.Is(err, store.ErrNotPermitted):
-		// Distinct from the not-found below on purpose. This account is a
-		// member and already knows the organisation exists, so naming the
-		// reason discloses nothing and saves them guessing.
+		// Distinct from the not-found below. This account is a member and
+		// already knows the organisation exists, so naming the reason
+		// discloses nothing.
 		jsonError(w, "only an admin of this organisation may delete it", http.StatusForbidden)
 		return
 	case errors.Is(err, store.ErrNotFound):

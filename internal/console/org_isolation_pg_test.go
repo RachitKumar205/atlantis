@@ -14,15 +14,12 @@ import (
 
 // The organisation boundary, exercised rather than asserted.
 //
-// # Why these tests are shaped the way they are
-//
 // A policy that isolates nothing passes every test that only ever looks at one
-// organisation. The previous version of this package had exactly that property:
-// the fixture hardcoded Org: "acme", so no test could have observed a boundary
-// whether or not one existed. Every test here uses two organisations, and every
-// scoped read is paired with a count taken as the superuser — because a scoped
-// read that returns nothing and a broken policy that returns nothing are the
-// same observation, and only the ground-truth count tells them apart.
+// organisation, so a fixture hardcoding one org cannot observe a boundary
+// whether or not one exists. Every test here uses two organisations, and every
+// scoped read is paired with a count taken as the superuser: a scoped read
+// returning nothing and a broken policy returning nothing are the same
+// observation, and only the ground-truth count separates them.
 //
 // Modelled on internal/runtime/partition_bind_pg_test.go and
 // internal/server/entity/partition_endtoend_pg_test.go, which learned this the
@@ -137,7 +134,7 @@ func TestUnboundReadsReturnNothing(t *testing.T) {
 	ctx := context.Background()
 	total := seedAudit(t, f)
 
-	// Straight on the pool, as every console query used to run.
+	// Straight on the pool, with no organisation bound.
 	var n int
 	if err := f.srv.db.pool.QueryRow(ctx, `SELECT count(*) FROM console.audit_log`).Scan(&n); err != nil {
 		t.Fatalf("unbound read: %v", err)
@@ -254,9 +251,9 @@ func TestReadingAPartitionDirectlyReturnsNothing(t *testing.T) {
 
 	// Find the partition holding the rows just written.
 	//
-	// relkind = 'r' matters: relispartition is true for partitioned INDEXES
-	// too, and the first version of this query picked up audit_log_pNNNN_pkey
-	// and failed with "cannot open relation".
+	// relkind = 'r' matters: relispartition is true for partitioned indexes
+	// too, so without it the query picks up audit_log_pNNNN_pkey and fails
+	// with "cannot open relation".
 	var partition string
 	if err := f.pool.QueryRow(ctx, `
 		SELECT c.relname

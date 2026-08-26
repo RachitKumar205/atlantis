@@ -9,9 +9,8 @@ import (
 
 // A declaration whose expiry cannot run is refused, and one that can is not.
 //
-// The pairing is the point. A guard that refused everything partitioned would
-// also pass a test that only checked the refusal, and it would block the very
-// shape #50 exists to enable.
+// Both halves, because a guard refusing everything partitioned also passes a
+// test that only checks the refusal, while blocking the shape #50 enables.
 func TestUnexpirableEntities(t *testing.T) {
 	cases := []struct {
 		name   string

@@ -44,9 +44,8 @@ func cmdRollback(args []string) int {
 	}
 
 	if *dryRun {
-		// In dry-run mode, use DiffSchemaVersions to show what would happen
-		// without actually loading the target version vs current. We use
-		// GetSchemaHistory to find the current version, then diff.
+		// GetSchemaHistory finds the current version, then DiffSchemaVersions
+		// reports the change without loading either one.
 		return rollbackDryRun(cfg, *toVersion, *timeout)
 	}
 

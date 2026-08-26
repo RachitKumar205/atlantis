@@ -181,10 +181,9 @@ func (s *Service) GetWorkflowStatus(ctx context.Context, req *adminpb.GetWorkflo
 	if req.GetWorkflowId() == "" {
 		return nil, errors.New("admin: WorkflowID is required")
 	}
-	// The column is bigint, so binding a non-numeric string surfaces
-	// "invalid input syntax for type bigint" — a driver message about our
-	// schema, for what is simply a workflow that does not exist. Parse first
-	// and answer the question that was asked.
+	// The column is bigint, so binding a non-numeric string surfaces "invalid
+	// input syntax for type bigint" — a driver message about this schema, for
+	// a workflow that does not exist. Parsed first, so the answer names that.
 	wfID, perr := strconv.ParseInt(req.GetWorkflowId(), 10, 64)
 	if perr != nil {
 		return &adminpb.GetWorkflowStatusResponse{Found: false}, nil
@@ -204,9 +203,9 @@ func (s *Service) GetWorkflowStatus(ctx context.Context, req *adminpb.GetWorkflo
 	// Migration 0028 closed exactly this on atlantis.jobs and did not reach
 	// the sibling table; 0029 adds the column and this uses it.
 	//
-	// A miss reports Found=false rather than a permission error, and that is
-	// deliberate: telling an unauthorised caller "that workflow exists but is
-	// not yours" is itself an answer about another caller's data.
+	// A miss reports Found=false rather than a permission error: telling an
+	// unauthorised caller "that workflow exists but is not yours" is itself an
+	// answer about another caller's data.
 	err := s.pool.QueryRow(ctx, `
 SELECT id, workflow_name, status, COALESCE(current_step, ''), started_at, completed_at,
        COALESCE(error_msg, ''), COALESCE(submitted_by, '')
@@ -226,8 +225,6 @@ WHERE id = $1 AND ($2 = '' OR owner_caller = $2)`, wfID, s.jobReadScope(ctx)).Sc
 	return &adminpb.GetWorkflowStatusResponse{Found: true, Workflow: workflowStatusToPB(ws)}, nil
 }
 
-// --- Wire conversion ---
-//
 // The proto models Workflow as a nil message when the instance is not found.
 // What a consumer sees for that nil is decided at the JSON boundary by
 // clients/go/adminjson, not here.

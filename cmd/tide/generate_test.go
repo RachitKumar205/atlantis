@@ -27,12 +27,10 @@ func TestGeneratedFileNameRefusesPathTraversal(t *testing.T) {
 		"semi;colon",
 		"dot.dot",
 		"",
-		// A leading digit. The first version of this check accepted it, because
-		// it tested only "is every rune alphanumeric or underscore" and never
-		// "is the FIRST rune a letter". `2024_events` is an ordinary legacy
-		// table name; it yields "2024Events", which lexes as a number followed
-		// by an identifier, so the .atl written for it did not parse and the
-		// customer got a syntax error in a file they had not written.
+		// A leading digit, which a check asking only whether every rune is
+		// alphanumeric or underscore accepts. `2024_events` is an ordinary
+		// legacy table name; it yields "2024Events", which lexes as a number
+		// followed by an identifier, so the .atl written for it does not parse.
 		"2024Events",
 		"1",
 	} {
@@ -52,9 +50,7 @@ func TestGeneratedFileNameAcceptsOrdinaryNames(t *testing.T) {
 		"V2":         "v2.atl",
 		"_private":   "_private.atl",
 		// Non-ASCII letters. The DSL's isIdentStart is unicode.IsLetter, so
-		// this is a valid entity name and generated fine before any check
-		// existed. An ASCII-only check refused it and told the customer to
-		// rename a table that was never the problem.
+		// these are valid entity names, and an ASCII-only check refuses them.
 		"CaféOrders": "caféorders.atl",
 		"Ünicode":    "ünicode.atl",
 	} {
@@ -71,17 +67,12 @@ func TestGeneratedFileNameAcceptsOrdinaryNames(t *testing.T) {
 
 // TestRefuseMissingSchema drives the decision directly.
 //
-// The first version of this test was an AST tripwire: it walked cmdInspect
-// collecting *ast.Ident and *ast.BasicLit nodes and asserted the strings
-// "generating" and "ErrNotExist" appeared somewhere in the result. A review
-// showed it could not catch the defect it existed for — flipping either
-// negation (`!generating` to `generating`) restores the original bug verbatim
-// while leaving every identifier untouched, because a negation is a UnaryExpr
-// the walk never visited. It reproduced that: both assertions still passed
-// against a body with both negations inverted.
+// An AST tripwire over cmdInspect — collecting *ast.Ident and *ast.BasicLit and
+// asserting "generating" and "ErrNotExist" appear — passes against a body with
+// both negations inverted. A negation is a UnaryExpr, which such a walk never
+// visits, so `!generating` reads the same as `generating`.
 //
-// So the decision moved into refuseMissingSchema and this drives it across the
-// whole input space. Each row is a case a user actually hits.
+// The rows below are the whole input space of refuseMissingSchema.
 func TestRefuseMissingSchema(t *testing.T) {
 	other := errors.New("permission denied")
 

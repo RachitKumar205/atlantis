@@ -68,10 +68,8 @@ func (e *WorkflowEngine) lookupWorkflowJob(ctx context.Context, jobID int64) (wf
 	err = e.pool.QueryRow(ctx,
 		`SELECT COALESCE(workflow_id, 0), COALESCE(workflow_step, '') FROM atlantis.jobs WHERE id = $1`, jobID).Scan(&wfID, &stepName)
 	if err != nil {
-		// Try the dead table.
-		// Jobs_dead doesn't have workflow columns yet, so this is a
-		// no-op for now. When we add workflow_id/step to jobs_dead,
-		// this path will activate.
+		// atlantis.jobs_dead carries no workflow_id or workflow_step, so a job
+		// already moved there reports no workflow.
 		return 0, "", nil
 	}
 	return wfID, stepName, nil

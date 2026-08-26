@@ -10,12 +10,11 @@ import (
 	"testing"
 )
 
-// unscheduledBuiltins names handler types in this package that are
-// deliberately NOT registered as built-in jobs, each with the reason.
+// unscheduledBuiltins names the handler types in this package that are not
+// registered as built-in jobs, each with its reason.
 //
-// An entry here is a claim somebody has to justify, which is the point: the
-// alternative to an explicit list is the implicit one that let the TTL sweeper
-// ship unregistered for months while `ttl_field` quietly did nothing.
+// Explicit, so a handler nothing schedules is a written claim rather than an
+// omission.
 var unscheduledBuiltins = map[string]string{
 	"RemoteHandler": "" +
 		"Not a built-in. Registered per-job from ATL_JOBS_REMOTE_HANDLERS, " +
@@ -25,14 +24,12 @@ var unscheduledBuiltins = map[string]string{
 // Every job handler in this package must be either scheduled as a built-in or
 // listed above with a reason.
 //
-// This is the test that would have caught the sweeper. It reads the source
-// rather than the runtime because there is nothing to inspect at runtime — an
-// unregistered handler is a type nobody constructs, indistinguishable from a
-// registered one until the moment it fails to run.
+// It reads the source, because there is nothing to inspect at runtime: an
+// unregistered handler is a type nothing constructs, and it looks exactly like
+// a registered one until the moment it fails to run.
 func TestEveryHandlerIsScheduledOrExplicitlyNot(t *testing.T) {
 	// Every .go file in the directory, build tags included. A handler behind a
-	// build tag is still a handler somebody has to decide about, and skipping
-	// one would reintroduce exactly the blind spot this test exists to close.
+	// build tag still needs a decision, and skipping one reopens the gap.
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("read package dir: %v", err)

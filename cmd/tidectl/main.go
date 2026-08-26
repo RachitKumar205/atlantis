@@ -1,24 +1,14 @@
 // tidectl — server-side admin CLI for atlantis.
 //
-// Subcommands:
+// commands() below is the dispatch table and carries each subcommand's help
+// line.
 //
-//	tidectl codegen   Regenerate proto / Go / SQL / keys from a directory of .atl files.
-//	tidectl plan      Diff a directory of .atl files against the IR checkpoint and
-//	                emit the staged migration .up.sql / .down.sql.
-//	tidectl promote   Move a staged migration into the migrations directory.
-//	tidectl lint      Parse + lower every .atl file in a directory, exit 0 iff clean.
-//	tidectl migrate-up   Run golang-migrate up against $PG_URL.
-//	tidectl migrate-down Run golang-migrate down 1 against $PG_URL.
-//	tidectl dev       One-shot local-dev loop: codegen + buf generate + go build +
-//	                exec atlantis-server. Reads atlantis.dev.yaml (working-tree
-//	                paths via source: local). Use for iteration; production
-//	                deployments use the workspace.yaml + git refs path.
-//	tidectl version   Print tidectl version.
+// codegen, plan, promote, lint and dev work on local files. migrate-up and
+// migrate-down run golang-migrate against $PG_URL. adopt, inspect, history,
+// blame, owners and rollback dial a running server through dialAdmin.
 //
-// tidectl is *operator-shaped*. It runs against local files and (for migrate)
-// the database. Day-to-day developer workflow is `tide apply`, not tidectl.
-// tidectl is what the on-call operator reaches for when they need to
-// inspect or repair state.
+// The day-to-day caller workflow is `tide apply`; tidectl is for inspecting or
+// repairing state.
 package main
 
 import (
@@ -40,19 +30,17 @@ type command struct {
 	name string
 	help string
 	fn   func(args []string) int
-	// hidden keeps a command reachable without advertising it. Used for a
-	// renamed command's old spelling: a pipeline that still calls it keeps
-	// working, and nobody reading `tidectl` with no arguments learns the name
-	// we are trying to retire.
+	// hidden keeps a command reachable without listing it, for a renamed
+	// command's old spelling: an existing pipeline keeps working and `tidectl`
+	// with no arguments does not teach the retired name.
 	hidden bool
 }
 
 // commands is the dispatch table.
 //
-// A function rather than a slice built inside main() so a test can assert on
-// it as data. The alternative was a test that string-matched this file's
-// source, which pins the formatting rather than the property and goes red on a
-// reordering that changes nothing.
+// A function rather than a slice inside main(), so a test reads it as data. A
+// test that string-matched this file would pin its formatting and go red on a
+// reordering.
 func commands() []command {
 	return []command{
 		{"codegen", "Regenerate proto / Go / SQL / keys from .atl files", cmdCodegen, false},

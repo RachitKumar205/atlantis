@@ -9,9 +9,9 @@ import (
 
 // Lexer turns a source byte stream into a sequence of Tokens.
 //
-// The lexer is hand-written rather than table-driven: the grammar is small
-// (well under 100 keywords) and a hand-written scanner gives us better error
-// positions, better error messages, and zero runtime dependencies.
+// Hand-written rather than table-driven: the grammar holds well under 100
+// keywords, and a hand-written scanner carries exact positions into its error
+// messages with no runtime dependency.
 //
 // The lexer does NOT consume comments — they are discarded before the parser
 // ever sees them. Whitespace is likewise discarded.
@@ -45,8 +45,8 @@ type Lexer struct {
 	// as a single TokString (see captureWherePredicate).
 	armedForWhere bool
 
-	// pending holds tokens we've already produced but haven't yet returned
-	// to the caller. Raw-SQL capture needs to emit LBRACE, then BODY, then
+	// pending holds tokens already produced but not yet returned to the
+	// caller. Raw-SQL capture needs to emit LBRACE, then BODY, then
 	// continue scanning past the closing `}` — using a small queue keeps
 	// the next() call honest as a single-token producer.
 	pending []Token
@@ -205,8 +205,6 @@ func (l *Lexer) next() Token {
 	return Token{Kind: TokError, Value: fmt.Sprintf("unexpected character %q", r), Pos: start}
 }
 
-// ---- scanning primitives ----
-
 func (l *Lexer) skipWhitespaceAndComments() {
 	for l.pos < len(l.src) {
 		r, size := l.peekRune()
@@ -237,7 +235,7 @@ func (l *Lexer) skipWhitespaceAndComments() {
 }
 
 func (l *Lexer) scanString(start Position) Token {
-	// We already know src[l.pos] == '"'
+	// src[l.pos] is known to be '"'.
 	l.advance(1)
 	var buf []byte
 	for l.pos < len(l.src) {
@@ -322,21 +320,21 @@ func (l *Lexer) scanIdentOrKeyword(start Position) Token {
 	}
 	text := string(l.src[identStart:l.pos])
 	if kw, ok := keywords[text]; ok {
-		// Arm the raw-SQL capture so the next `{` we emit triggers
-		// body-verbatim mode. `touches` only appears in the grammar as
-		// the argument-list prefix on raw SQL blocks (`sql touches(...)
-		// { ... }`), so this is a reliable signal without needing the
-		// lexer to understand the surrounding parser state.
+		// Arm the raw-SQL capture so the next `{` enters body-verbatim
+		// mode. `touches` appears in the grammar only as the argument-list
+		// prefix on a raw SQL block, `sql touches(...) { ... }`, so the
+		// lexer needs no parser state to recognise it.
 		if kw == TokTouches {
 			l.armedForRawSQL = true
 		}
-		// Arm raw capture of a partial-index `where` predicate. The predicate
-		// is a SQL expression (full operator surface) the regular scanner would
-		// choke on (`*`, `~`, `||`, …), so capture it verbatim. `where` also
-		// occurs in cache-invalidate and typed update/delete steps, so we only
-		// arm when this `where` follows a `partial` (the only producer of
-		// TokPartial is `index partial` / `unique index partial`, whose field
-		// list is always followed by the predicate `where`).
+		// Arm raw capture of a partial-index `where` predicate, a SQL
+		// expression over the full operator surface — `*`, `~`, `||` — that
+		// the regular scanner would take as tokens.
+		//
+		// `where` also occurs in cache-invalidate and typed update/delete
+		// steps, so capture arms only after a `partial`. TokPartial comes
+		// only from `index partial` / `unique index partial`, whose field
+		// list is always followed by the predicate `where`.
 		if kw == TokPartial {
 			l.sawPartial = true
 		}
@@ -407,32 +405,22 @@ func (l *Lexer) skipDSLString() bool {
 	return false
 }
 
-// captureRawSQLBody consumes bytes verbatim from the current position
-// until the `}` that closes the raw SQL block at brace depth zero. The
-// returned token's Value holds the captured body (no leading `{`, no
-// trailing `}`) and its position is `start` — typically the position of
-// the opening `{` so error messages point at the right place. The
-// cursor is left positioned at the matching `}`; the caller picks it up
-// as the next token through the regular scanner.
+// captureRawSQLBody consumes bytes verbatim from the current position to the
+// `}` closing the raw SQL block at brace depth zero.
 //
-// Brace counting is SQL-string aware:
+// The returned token's Value is the body without the surrounding braces, and
+// its position is start, the opening `{`. The cursor is left on the matching
+// `}` for the regular scanner to pick up as the next token.
 //
-//   - Single-quoted strings (`'foo”bar'`): braces inside are ignored.
-//     `”` is the SQL escape for an embedded single quote.
-//   - Double-quoted identifiers (`"foo"`): treated like single-quoted
-//     strings for brace-counting purposes. Embedded `""` escapes.
-//   - SQL line comments (`-- ...\n`): braces inside are ignored.
-//   - SQL block comments (`/* ... */`): braces inside are ignored.
-//     PG block comments nest; we count depth to match.
+// Braces are ignored inside single-quoted strings, double-quoted identifiers,
+// `--` line comments and `/* */` block comments. PG block comments nest, so
+// their depth is counted.
 //
-// Dollar-quoted strings (`$tag$ ... $tag$`) are not recognized — they
-// are rarely used in caller workloads and pg_query_go catches any
-// ambiguity at IR-lowering time. If a user actually needs one, the
-// missing-brace-balance error will surface at parse time with the
-// LBRACE's position attached.
+// Dollar-quoted strings, `$tag$ ... $tag$`, are not recognised: a brace inside
+// one is counted, and an unbalanced result surfaces as a parse error carrying
+// the opening brace's position.
 //
-// Returns (token, false) if EOF is hit before the matching `}` is
-// found — i.e. the source contains an unterminated raw SQL block.
+// Returns (token, false) on EOF before the matching `}`.
 func (l *Lexer) captureRawSQLBody(start Position) (Token, bool) {
 	bodyStart := l.pos
 	depth := 1 // we already consumed the opening `{`
@@ -530,8 +518,6 @@ func (l *Lexer) skipSQLBlockComment() bool {
 	return false
 }
 
-// ---- low-level cursor ----
-
 func (l *Lexer) peekRune() (rune, int) {
 	if l.pos >= len(l.src) {
 		return 0, 0
@@ -565,8 +551,6 @@ func (l *Lexer) position() Position {
 func (l *Lexer) tok(kind TokenKind, value string) Token {
 	return Token{Kind: kind, Value: value, Pos: l.position()}
 }
-
-// ---- rune predicates ----
 
 func isDigit(r rune) bool { return r >= '0' && r <= '9' }
 

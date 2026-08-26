@@ -5,12 +5,10 @@ import (
 	"testing"
 )
 
-// TestRewriteAtlantisTableRefs_HonorsOverride: when an entity declares
-// `table "consumer.accounts"`, user-authored SQL that references the
-// atlantis-flat form gets rewritten to the override location at emit
-// time. This is the load-bearing case for layering atlantis on top of
-// an existing database — procedures keep working without per-procedure
-// hand edits.
+// When an entity declares `table "consumer.accounts"`, user-authored SQL
+// referencing the atlantis-flat form is rewritten to the override location at
+// emit time, so procedures keep working when atlantis is layered on an existing
+// database.
 func TestRewriteAtlantisTableRefs_HonorsOverride(t *testing.T) {
 	ir := lower(t, `entity Account in consumer {
   table "consumer.accounts"

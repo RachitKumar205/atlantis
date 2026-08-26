@@ -649,7 +649,8 @@ func (s *Server) handleQuery(ctx context.Context, meta *entityMeta, dec func(any
 		return nil, err
 	}
 
-	// Pagination: if we got more rows than the limit, trim and set next_page_token.
+	// More rows than the limit means another page: trim and set
+	// next_page_token.
 	if int32(entities.Len()) > limit {
 		// Extract cursor from the boundary row (the limit-th entity, 0-indexed).
 		boundaryEntity := entities.Get(int(limit) - 1).Message().Interface().(*dynamicpb.Message)
@@ -769,21 +770,19 @@ func goValueFromProtoReflect(msg protoreflect.Message, fd protoreflect.FieldDesc
 
 // buildPKArray builds a typed Go slice for the ANY($1) SQL pattern.
 //
-// This is the FOURTH primary-key table in this file, and the three above it
-// were given the full type list one commit before this one was. Leaving it on
-// the short list produced two different failures on primary-key types the DSL
-// accepts and lowers without complaint:
+// The fourth primary-key type table in this file, and it carries the same list
+// as the other three. A short list produces two failures on primary-key types
+// the DSL accepts and lowers without complaint:
 //
-//   - A bytea key went through fmt.Sprintf("%v", []byte{…}) and reached
-//     Postgres as the Go rendering "[222 173 190 239]". BatchGet returned zero
-//     rows with a nil error — the caller asked for a key that exists and was
+//   - A bytea key goes through fmt.Sprintf("%v", []byte{…}) and reaches
+//     Postgres as the Go rendering "[222 173 190 239]". BatchGet returns zero
+//     rows with a nil error: the caller asked for a key that exists and is
 //     told it does not.
-//   - A jsonb key rendered the same way and failed with "invalid input syntax
+//   - A jsonb key renders the same way and fails with "invalid input syntax
 //     for type json", which is at least loud.
 //
-// boolean and real survived only because Postgres coerces an unknown-typed
-// literal like "true" or "1e+06", which the code did not arrange and must not
-// rely on.
+// boolean and real survive a short list only because Postgres coerces an
+// unknown-typed literal like "true" or "1e+06", which nothing here arranges.
 func buildPKArray(pk columnMeta, list protoreflect.List) (any, error) {
 	switch pk.field.Type.Name {
 	case "text", "varchar", "citext", "uuid", "numeric":
@@ -861,33 +860,30 @@ func makePKScanTargets(meta *entityMeta) []any {
 
 // makeScanTargets allocates typed scan destinations for a set of columns.
 //
-// Typed, not []*any, and that is the whole point. Scanning into *any lets pgx
-// pick the Go representation, which does not match what the rest of the system
-// uses: a uuid arrives as [16]uint8, a numeric as pgtype.Numeric, a timestamptz
-// as time.Time, a jsonb as map[string]any. Cache ids elsewhere are built from
-// goValueFromProto, so the same row would produce two different ids —
-// "49:[17 17 17 …]" from one path and "36:1111-2222-…" from the other. The
-// mismatch is silent: an outbox row is written, the worker faithfully bumps a
-// pointer key nobody reads, and the cached row stays stale until TTL.
-// The arms below MUST stay paired with readScanTargets and with
-// goValueFromProtoReflect. All three describe the same column, and a cache id
-// built from one must equal a cache id built from another.
+// Typed, not []*any. Scanning into *any lets pgx pick the Go representation,
+// which does not match what the rest of the system uses: a uuid arrives as
+// [16]uint8, a numeric as pgtype.Numeric, a timestamptz as time.Time, a jsonb
+// as map[string]any. Cache ids elsewhere are built from goValueFromProto, so
+// the same row produces two different ids — "49:[17 17 17 …]" from one path and
+// "36:1111-2222-…" from the other. The mismatch is silent: an outbox row is
+// written, the worker bumps a pointer key nobody reads, and the cached row
+// stays stale until TTL.
 //
-// They were not paired. Only four types were listed and everything else fell
-// to `new(string)`, which fails two different ways:
+// The arms below stay paired with readScanTargets and goValueFromProtoReflect.
+// All three describe the same column, and a cache id built from one must equal
+// a cache id built from another. A type missing from the list falls to
+// `new(string)`, which fails two ways:
 //
 //   - timestamptz, date, boolean and bytea cannot be scanned into *string at
 //     all. pgx refuses with "cannot scan timestamptz (OID 1184) in binary
 //     format into *string", so every Create on an entity with such a primary
-//     key died at the RETURNING clause, with a driver error naming neither
+//     key dies at the RETURNING clause, with a driver error naming neither
 //     the column nor the cause. checkPKPredicates advertises exactly those
 //     types as valid primary keys.
-//   - float4 and float8 DO scan into *string, and that is worse. pgx hands
-//     back Postgres's text rendering, so a double holding 1e6 read back as
-//     "1000000" here while the read path produced float64(1e6), which
-//     runtime.CompositeID renders "1e+06". Two ids for one row: the outbox
-//     bumps a key nobody reads and the parent's cached row stays stale until
-//     TTL — verbatim the failure this function's doc describes.
+//   - float4 and float8 do scan into *string, and pgx hands back Postgres's
+//     text rendering: a double holding 1e6 reads back as "1000000" here while
+//     the read path produces float64(1e6), which runtime.CompositeID renders
+//     "1e+06". Two ids for one row, which is the stale-cache failure above.
 func makeScanTargets(cols []columnMeta) []any {
 	targets := make([]any, len(cols))
 	for i, cm := range cols {

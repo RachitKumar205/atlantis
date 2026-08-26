@@ -2,13 +2,9 @@
 // session, and publishes the public keys those assertions are verified
 // against.
 //
-// This is the first piece of Atlantis Cloud rather than a test double. Cloud
-// is the identity provider for every console it runs, so it has to hold a
-// signing key, serve a JWKS document and mint tokens in production; that is
-// what this package does. Running it on a loopback port during development is
-// the same code with a different address, which is the point — the console
-// verifies against a JWKS URL in every environment and has no development
-// bypass to drift out of step with the production path.
+// A console verifies against a JWKS URL in every environment, with no
+// development bypass. Running this on a loopback port during development is the
+// same code at a different address.
 package issuer
 
 import (
@@ -29,17 +25,15 @@ import (
 )
 
 // JWKSPath is where Handler publishes the key set. The console is configured
-// with a full URL rather than a base, so this constant is Cloud's own layout
-// and not a contract — but it follows RFC 8615 so the endpoint is where anyone
-// familiar with OIDC would look for it.
+// with a full URL, so this is Cloud's own layout rather than a contract. It
+// follows RFC 8615.
 const JWKSPath = "/.well-known/jwks.json"
 
 // SigningAlgorithm is the only algorithm this issuer signs with.
 //
-// ES256 over RS256 for the size: an assertion is posted by a browser, and a
-// P-256 signature is 64 bytes against 256 for RSA-2048. The verifier accepts
-// both, so this can change without a flag day, but there is no reason to start
-// on the larger one.
+// ES256 over RS256 for size: an assertion is posted by a browser, and a P-256
+// signature is 64 bytes against RSA-2048's 256. The verifier accepts both, so
+// this can change without a flag day.
 const SigningAlgorithm = jose.ES256
 
 // DefaultTTL is how long a minted assertion is valid for.
@@ -56,11 +50,9 @@ const DefaultTTL = 2 * time.Minute
 type Key struct {
 	// ID is the RFC 7638 thumbprint of the public key, base64url encoded.
 	//
-	// Deriving it from the key rather than assigning a name means two keys
-	// cannot collide on a kid, and that a key's identity survives being
-	// reloaded from storage. It also makes rotation self-describing: a
-	// console that sees an unfamiliar kid is looking at a genuinely different
-	// key, not a renamed one.
+	// Derived from the key, so two keys cannot collide on a kid and a key's
+	// identity survives being reloaded from storage. An unfamiliar kid is a
+	// different key, not a renamed one.
 	ID string
 
 	priv *ecdsa.PrivateKey
@@ -83,10 +75,9 @@ func GenerateKey() (*Key, error) {
 
 // thumbprintOf computes a key's RFC 7638 thumbprint, which becomes its kid.
 //
-// Shared with the key-file loader so a key reloaded from disk gets the same
-// kid it had when generated. If the two disagreed, a restart would silently
-// republish the same key under a new name and every assertion still in flight
-// would name a kid the key set no longer lists.
+// Shared with the key-file loader, so a key reloaded from disk keeps the kid it
+// was generated with. Two implementations would republish the same key under a
+// new name across a restart, orphaning every assertion in flight.
 func thumbprintOf(k *Key) (string, error) {
 	pub := k.PublicJWK()
 	tp, err := pub.Thumbprint(crypto.SHA256)
@@ -98,11 +89,8 @@ func thumbprintOf(k *Key) (string, error) {
 
 // PublicJWK returns the public half of the key, in the form it is published.
 //
-// It builds the JWK from priv.Public() rather than from priv, so there is no
-// path by which the private key reaches the published document: the value
-// returned here does not contain it to begin with. A test asserts the served
-// JWKS carries no "d" parameter, which is the shape a leaked EC private key
-// would take.
+// Built from priv.Public(), so the returned value does not hold the private
+// key at all. A test asserts the served JWKS carries no "d" parameter.
 func (k *Key) PublicJWK() jose.JSONWebKey {
 	return jose.JSONWebKey{
 		Key:       k.priv.Public(),
@@ -124,10 +112,9 @@ type Option func(*Issuer)
 
 // WithRetiredKeys publishes keys that are no longer used for signing.
 //
-// This is what makes rotation non-disruptive. A key stays published for as
-// long as assertions signed by it may still be in flight — with DefaultTTL,
-// minutes — so promoting a new signing key never lands a console in the state
-// where a token it holds refers to a kid the key set no longer lists.
+// A key stays published for as long as assertions signed by it may be in
+// flight, which is DefaultTTL, so promoting a new signing key never leaves a
+// console holding a token whose kid the key set no longer lists.
 func WithRetiredKeys(keys ...*Key) Option {
 	return func(i *Issuer) { i.retired = append(i.retired, keys...) }
 }
@@ -177,13 +164,11 @@ type Grant struct {
 	Email string
 	Name  string
 
-	// Audience names the console this assertion is for, and is the reason an
-	// assertion minted for one organisation's console cannot be replayed
-	// against another's.
+	// Audience names the console this assertion is for, so one minted for a
+	// given organisation's console cannot be replayed against another's.
 	//
-	// Since C5 this is the organisation's registered console URL, which is also
-	// where the browser is sent — one value, so the token's audience and its
-	// destination cannot disagree.
+	// It is the organisation's registered console URL, which is also where the
+	// browser is sent, so audience and destination cannot disagree.
 	Audience string
 
 	// StepUp says a second factor was presented for this assertion. Set only by
@@ -197,12 +182,9 @@ type Grant struct {
 
 // Mint returns a signed assertion for g.
 //
-// It builds the claims it is about to sign, runs them through the same
-// identity.Claims.Validate the verifier uses, and refuses rather than signing
-// something no console would accept. That check is here so an incomplete grant
-// fails at the point where the mistake was made, with the field named, instead
-// of surfacing later as an unexplained rejection at whichever console the user
-// happened to be sent to.
+// The claims run through the same identity.Claims.Validate the verifier uses,
+// so an incomplete grant fails here with the field named rather than as a
+// rejection at whichever console the browser reached.
 func (i *Issuer) Mint(g Grant) (string, error) {
 	if g.Audience == "" {
 		return "", fmt.Errorf("%w: aud", identity.ErrMissingClaim)
@@ -269,10 +251,9 @@ func (i *Issuer) Mint(g Grant) (string, error) {
 
 // newTokenID returns the `jti` for one assertion: 128 bits from crypto/rand.
 //
-// It must be unpredictable, not merely unique. A console records spent
-// assertion ids to refuse replay, so a guessable jti would let someone pre-emptively
-// burn an id that a legitimate assertion is about to carry, turning a
-// sign-in into a failure the user cannot explain or retry past.
+// Unpredictable, not merely unique. A console records spent assertion ids to
+// refuse replay, so a guessable jti can be burned before the assertion carrying
+// it arrives.
 func newTokenID() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -292,11 +273,10 @@ func (i *Issuer) Handler() http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/jwk-set+json")
 
-		// Short, and deliberately not zero. Consoles cache the key set on
-		// their own schedule and refetch on an unrecognised kid, so this
-		// bound only affects intermediaries; keeping it under the key
-		// overlap window means a proxy cannot serve a set that predates a
-		// rotation for longer than the retired key remains valid.
+		// Consoles cache on their own schedule and refetch on an unrecognised
+		// kid, so this bounds intermediaries only. Under the key overlap
+		// window, so a proxy cannot serve a pre-rotation set for longer than
+		// the retired key stays valid.
 		w.Header().Set("Cache-Control", "public, max-age=300")
 
 		_, _ = w.Write(body)

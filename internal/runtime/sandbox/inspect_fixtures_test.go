@@ -34,8 +34,6 @@ func peopleIR() *dsl.IR {
 	}
 }
 
-// ─────────────────────────── Inspect ───────────────────────────
-
 func TestInspectDescribe(t *testing.T) {
 	sb := sandbox.NewT(t, sandbox.Options{IR: peopleIR()})
 
@@ -167,8 +165,6 @@ func TestInspectDiff(t *testing.T) {
 		t.Fatalf("diff: %+v want Added=1 Removed=1 Modified=1", td)
 	}
 }
-
-// ─────────────────────────── Fixtures ───────────────────────────
 
 func TestFixturesBulkBasic(t *testing.T) {
 	sb := sandbox.NewT(t, sandbox.Options{IR: peopleIR(), Seed: 7})

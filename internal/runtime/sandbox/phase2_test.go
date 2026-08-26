@@ -54,8 +54,6 @@ func snapshotEmails(t *testing.T, sb *sandbox.Sandbox) []string {
 	return out
 }
 
-// ────────────────────── time-travel marks ──────────────────────
-
 // TestMarkRestoreRoundTrip is the basic API contract: capture state,
 // mutate, restore — observed state matches what Mark saw.
 func TestMarkRestoreRoundTrip(t *testing.T) {
@@ -139,8 +137,6 @@ func TestMarkOwnerMismatch(t *testing.T) {
 		t.Fatalf("expected ErrMarkOwnerMismatch, got %v", err)
 	}
 }
-
-// ────────────────────── forked sandboxes ──────────────────────
 
 // TestForkParentIsolated confirms that children's writes don't reach
 // the parent.
@@ -229,8 +225,6 @@ func TestForkOfFork(t *testing.T) {
 	}
 }
 
-// ────────────────────── StrictDeterministic ──────────────────────
-
 // TestStrictDeterministicClock confirms two sandboxes seeded
 // identically observe identical now() sequences.
 func TestStrictDeterministicClock(t *testing.T) {
@@ -303,8 +297,6 @@ func TestDeterminismOffUsesWallClock(t *testing.T) {
 		t.Fatalf("snapshot empty")
 	}
 }
-
-// ────────────────────── ON CONFLICT DO UPDATE ──────────────────────
 
 // TestOnConflictDoNothing exercises the silent-skip path.
 func TestOnConflictDoNothing(t *testing.T) {

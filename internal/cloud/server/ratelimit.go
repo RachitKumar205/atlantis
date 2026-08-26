@@ -10,17 +10,11 @@ import (
 	"time"
 )
 
-// Rate-limiter bounds.
+// Rate-limiter bounds. Ported from the console's loginLimiter
+// (internal/console/server.go), which throttles assertion exchange.
 //
-// Ported from the console's loginLimiter (internal/console/server.go) rather
-// than written again, because the two are solving the same problem and a second
-// implementation is a second thing to get wrong. What differs is what it
-// protects: the console throttles assertion exchange, this throttles sign-up
-// and password-reset requests.
-//
-// Sign-up and reset are both a request that causes an email to be sent to an
-// address the requester chose. Without a limit that is a mail cannon pointed at
-// anyone, using our sending reputation.
+// Sign-up and reset both send mail to an address the requester chose, so
+// without a limit they relay mail under this deployment's sending reputation.
 //
 // Memory bound: at most limiterMaxIPs entries of at most limiterMax timestamps.
 const (
@@ -112,33 +106,22 @@ func (s *Server) clientIP(r *http.Request) string {
 	return host
 }
 
-// The latency floor.
+// The latency floor. A registered address costs a database write, a token and
+// an email; an unregistered one costs none of those, a difference of tens of
+// milliseconds that is measurable from outside.
 //
-// # Why a floor and not just identical responses
-//
-// Sign-up and reset-request answer the same way whether or not the address has
-// an account — that is what stops the response body being an oracle. It is not
-// enough on its own, because the WORK differs: a registered address means a
-// database write, a token, and an email; an unregistered one means none of
-// those. The difference is tens of milliseconds and is trivially measurable
-// from outside, so the body says nothing and the clock says everything.
-//
-// Holding every response to a fixed floor removes the signal. The floor has to
-// exceed the slow path, or the slow path pokes through it and the defence
-// silently stops working for exactly the requests that matter.
+// The floor must exceed the slow path. A slow path that overruns it shows
+// through as the response that took longer.
 const latencyFloor = 500 * time.Millisecond
 
-// latencyJitter is added on top so the floor itself is not a clean edge.
-//
-// Without it every response lands at almost exactly the floor, and a slow path
-// that overruns is visible as the one response that does not. A few tens of
-// milliseconds of noise costs nothing and removes that.
+// latencyJitter is added on top so responses do not land on a clean edge at the
+// floor, where an overrunning slow path is the one that misses it.
 const latencyJitter = 50 * time.Millisecond
 
 // floorLatency waits until at least the floor has passed since start.
 //
-// Takes the context so a client that has gone away does not hold the handler
-// for the remainder — and so tests do not sleep.
+// Takes the context so a client that has gone away does not hold the handler,
+// and so tests can substitute a sleeper.
 func floorLatency(ctx context.Context, start time.Time, sleep func(context.Context, time.Duration)) {
 	target := latencyFloor + time.Duration(rand.Int64N(int64(latencyJitter)))
 	if elapsed := time.Since(start); elapsed < target {
@@ -147,8 +130,7 @@ func floorLatency(ctx context.Context, start time.Time, sleep func(context.Conte
 }
 
 // realSleep is the production sleeper. Tests substitute one that records the
-// requested duration instead of waiting, so the property can be asserted
-// without adding half a second per case.
+// requested duration instead of waiting.
 func realSleep(ctx context.Context, d time.Duration) {
 	t := time.NewTimer(d)
 	defer t.Stop()

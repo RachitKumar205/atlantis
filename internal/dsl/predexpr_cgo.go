@@ -9,23 +9,23 @@ import (
 )
 
 // lowerPredicate parses and validates a partial-index `where` predicate captured
-// verbatim by the lexer. The predicate is a SQL boolean expression — atlantis
-// does NOT reimplement Postgres's grammar; it transforms DSL `"..."` string
-// literals to SQL `'...'`, then parses with Postgres's own parser (pg_query),
-// the same delegate-to-the-authority approach as the drift matcher. This covers
-// the full legal index-predicate surface by construction.
+// verbatim by the lexer.
 //
-// The two pre-tree shapes (`<col> IS [NOT] NULL`, `<col> <op> <string|int|bool
-// literal>`) are detected from the parse tree and returned as the structured
-// legacy PredExpr so their IR JSON / diff key / cache suffix stay byte-identical
-// (no checkpoint churn). Everything else is returned as PredKindExpr holding the
-// canonical predicate text plus its referenced columns.
+// The predicate is a SQL boolean expression, so it goes to Postgres's own
+// parser: DSL `"..."` literals become SQL `'...'`, then pg_query parses the
+// result. That covers the legal index-predicate surface without a second
+// grammar.
 //
-// Column existence is validated later (validateEntity) via PredExpr.Columns();
-// here we only reject what is detectable in a raw parse — empty/unparseable
+// Two shapes — `<col> IS [NOT] NULL` and `<col> <op> <literal>` — are detected
+// from the tree and returned as the structured PredExpr, keeping their IR JSON,
+// diff key and cache suffix byte-identical. Everything else returns
+// PredKindExpr holding the canonical text and its referenced columns.
+//
+// Only what a raw parse can see is rejected here: empty or unparseable
 // predicates, multi-statement injection, subqueries, and window/aggregate
-// syntax. Plain aggregates and volatile functions are rejected by Postgres at
-// CREATE INDEX (apply) time, exactly as volatility has always been.
+// syntax. validateEntity checks column existence later through
+// PredExpr.Columns(), and Postgres rejects plain aggregates and volatile
+// functions at CREATE INDEX time.
 func lowerPredicate(raw string) (*PredExpr, error) {
 	sql := dslToSQL(raw)
 	if sql == "" {

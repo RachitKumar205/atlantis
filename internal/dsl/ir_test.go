@@ -215,7 +215,8 @@ entity OutfitItem in consumer {
 }
 
 func TestIR_QueryTimeoutBounds(t *testing.T) {
-	// 50ms minimum — we only support s/m/h/d, so test 1s lower bound.
+	// The 50ms floor is unreachable through the grammar, which spells
+	// durations in s/m/h/d, so 1s is the smallest case.
 	mustLower(t, `entity A in x { id bigint primary  query_timeout = 1s }`)
 	mustLower(t, `entity A in x { id bigint primary  query_timeout = 30s }`)
 	err := mustLowerErr(t, `entity A in x { id bigint primary  query_timeout = 1m }`)
@@ -223,8 +224,6 @@ func TestIR_QueryTimeoutBounds(t *testing.T) {
 		t.Errorf("expected upper-bound error, got: %v", err)
 	}
 }
-
-// ---- validation rules ----
 
 func TestIR_Rule1_NoPrimary(t *testing.T) {
 	err := mustLowerErr(t, `entity A in x { id bigint }`)
@@ -366,9 +365,8 @@ func TestIR_Rule7_DuplicateField(t *testing.T) {
 }
 
 func TestIR_Rule8_DuplicateEntityGlobally(t *testing.T) {
-	// Same Name, different namespaces — still considered duplicate by ID, but
-	// our ID is namespace.Name so different namespaces are *not* duplicates.
-	// This test verifies that genuinely duplicate IDs trip the rule.
+	// An ID is namespace.Name, so the same Name in two namespaces is two IDs.
+	// This checks that a genuinely repeated ID trips the rule.
 	src := `
 entity A in x { id bigint primary }
 entity A in x { id bigint primary }
@@ -425,8 +423,6 @@ hypertable P in v on ts {
 	}
 }
 
-// ---- JSON round-trip ----
-
 func TestIR_JSONRoundTrip(t *testing.T) {
 	ir := mustLower(t, `
 entity Account in consumer {
@@ -462,7 +458,7 @@ hypertable Purchase in vendor on purchased_at {
 }
 
 func TestIR_RefusesNewerVersion(t *testing.T) {
-	// Hand-craft a checkpoint claiming a version we don't support.
+	// A checkpoint claiming a version past CurrentIRVersion.
 	bad := []byte(`{"version":9999,"entities":[]}`)
 	_, err := DecodeJSONIR(bad)
 	if err == nil || !strings.Contains(err.Error(), "newer than supported") {
@@ -484,19 +480,7 @@ entity B in y { id bigint primary }
 	}
 }
 
-// `partition by` is rejected until the isolation it documents actually exists.
-//
-// This test previously asserted that PartitionField was set, which was true and
-// worthless: the field is set, and nothing reads it. internal/server/entity
-// never references it, and CallerPartition / WithCallerPartition have no callers
-// anywhere, so there is not even a value to inject. Reads returned every
-// tenant's rows while docs/guides/add-a-new-entity.md and the grammar reference
-// both stated that callers cannot override the predicate.
-//
-// A silently-absent isolation guarantee is worse than a missing feature,
-// because the author has been told twice that it holds. When task #11 lands the
-// enforcement moves into Postgres RLS, where no forgotten call site can leak,
-// and this becomes an assertion about the policy instead.
+// `partition by` names a field that exists and cannot be NULL.
 func TestIR_PartitionBy_RequiresANotNullDiscriminator(t *testing.T) {
 	// Accepted when the discriminator cannot be NULL.
 	ir := mustLower(t, `
@@ -553,13 +537,12 @@ entity Order in consumer {
 	}
 }
 
-// ---- Step 7.5: custom query / procedure lowering + validation ----
+// The tests below cover `query` and `procedure` lowering: the resolved IR
+// shape, and the rejection cases the cache and safety invariants rest on.
 //
-// Lowering tests check the resolved IR shape; validation tests pin the
-// rejection cases the cache / safety invariants depend on. Identifier
-// resolution INSIDE the raw SQL body is the pg_query_go layer's job
-// (covered in the tidectl plan tests); this file covers the dep-free
-// validator that runs on every codegen pass.
+// Identifier resolution inside a raw SQL body belongs to cmd/tidectl/plan.go
+// and pg_query_go. This file covers the dependency-free validator that runs on
+// every codegen pass.
 
 const customQuerySchemaFixture = `
 entity Account in consumer {
@@ -700,9 +683,8 @@ query Foo for SavedOutfit {
 }
 
 func TestIR_LowerQuery_RejectsUnusedInput(t *testing.T) {
-	// Declared inputs that the SQL never references are almost always
-	// typos. We surface them as errors so the engineer can clean up
-	// before the proto goes on the wire.
+	// A declared input the SQL never references is an error, not a warning: it
+	// otherwise reaches the proto as a field nothing binds.
 	err := mustLowerErr(t, customQuerySchemaFixture+`
 query Foo for SavedOutfit {
   input { consumer_id: bigint, never_used: text }

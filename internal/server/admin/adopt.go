@@ -129,9 +129,9 @@ func (s *Service) AdoptBaseline(ctx context.Context, req *adminpb.AdoptBaselineR
 		return nil, fmt.Errorf("advisory lock: %w", err)
 	}
 
-	// Idempotency: every caller's last adopt hash must match the new
-	// hash, OR we proceed. Mixed match/no-match → proceed (operator is
-	// re-doing one caller and re-confirming the rest).
+	// Idempotency: either every caller's last adopt hash matches the new one,
+	// or the adopt proceeds. A mixed result proceeds too, being one caller
+	// re-done and the rest re-confirmed.
 	hashesNow := make(map[string]string, len(subs))
 	allMatch := true
 	for _, sub := range subs {
@@ -184,21 +184,20 @@ func (s *Service) AdoptBaseline(ctx context.Context, req *adminpb.AdoptBaselineR
 	// filtering, adopt would baseline phantom entities (RPCs reachable
 	// but failing at runtime against missing tables).
 	//
-	// Filtered from the INTROSPECTED IR, not the declared one, and that is
-	// the whole point rather than a detail. Filtering handles an entity that
-	// does not exist; it cannot handle an ATTRIBUTE that does not exist on an
-	// entity that does. Baselining the declaration recorded every such
-	// attribute as already present, so the drift adopt had just reported as
-	// outstanding work became work that could never happen: the next
-	// `tide plan` compared the declaration against a checkpoint saying the
-	// same thing and found nothing to do.
+	// Filtered from the introspected IR, not the declared one. Filtering
+	// handles an entity that does not exist; it cannot handle an attribute
+	// that does not exist on an entity that does. Baselining the declaration
+	// records every such attribute as already present, so the drift adopt just
+	// reported becomes work that can never happen: the next `tide plan`
+	// compares the declaration against a checkpoint saying the same thing and
+	// finds nothing to do.
 	//
-	// `partition by` is the case that makes this urgent. A table declared
-	// with tenant isolation but carrying no policy was baselined as isolated,
-	// so no apply ever created the policy, and the dispatcher — which reads
-	// the checkpoint — believed the table was partitioned. Every caller then
-	// read every tenant's rows while the one operator-visible signal, omit
-	// the tenant and get refused, kept reporting healthy.
+	// `partition by` is the sharpest case. A table declared with tenant
+	// isolation but carrying no policy, baselined as isolated, gets no policy
+	// from any later apply, and the dispatcher reads the checkpoint and treats
+	// the table as partitioned. Every caller then reads every tenant's rows
+	// while the one operator-visible signal — omit the tenant, get refused —
+	// keeps reporting healthy.
 	//
 	// The same shape applied to a declared column that did not exist. Using
 	// the introspected IR fixes both at once, and any future attribute
@@ -453,21 +452,15 @@ func filterToExistingEntities(in *dsl.IR, existing map[string]bool) *dsl.IR {
 // "removed" kinds are pure additions or removals; everything else is a
 // modification (both sides exist, they disagree). The string match is
 // against codegen.ChangeKind values verbatim, so a kind added in codegen and
-// not listed here falls to the default. That default is the safer assumption —
-// "mismatch" understates nothing — but it is silent, not loud: check_added and
-// check_removed were reported as mismatches for as long as it took to notice.
-// Nothing links this switch to codegen's ChangeKind constants at compile time,
-// so driftseverity_test.go reads them out of codegen's source and holds this
-// function to the rule above. That test is what caught index_added,
-// composite_unique_added, custom_query_added, procedure_added and their
-// removal counterparts all being reported as modifications — eight kinds, none
-// of them new, misfiled for as long as the list was maintained by hand.
+// not listed here falls to the default. "mismatch" understates nothing, but it
+// is silent: an unlisted _added kind reads as a modification. Nothing links
+// this switch to codegen's ChangeKind constants at compile time, so
+// driftseverity_test.go reads them out of codegen's source and holds this
+// function to the rule above.
 //
-// The kinds stay enumerated rather than classified by suffix so that each one
-// is a decision. A future kind whose name ends in _added but which is really a
-// tightening of an existing column would be classified wrongly by a suffix
-// rule and correctly by a person; the test exists to make sure the person is
-// asked.
+// The kinds stay enumerated rather than classified by suffix, so each is a
+// decision. A kind whose name ends in _added but which is really a tightening
+// of an existing column would be classified wrongly by a suffix rule.
 func classifyDriftSeverity(kind string) string {
 	switch kind {
 	case "entity_added",
@@ -515,8 +508,6 @@ func classifyDriftSeverity(kind string) string {
 	}
 	return "mismatch"
 }
-
-// --- Wire conversion ---
 
 func callerSubmissionsFromPB(in []*adminpb.CallerSubmission) []CallerSubmission {
 	if len(in) == 0 {

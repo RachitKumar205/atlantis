@@ -1,19 +1,16 @@
-// Per-session batched lease extension processor. Heartbeat /
-// Checkpoint receive paths enqueue job IDs onto a buffered channel;
-// this goroutine drains them in batches of up to flushInterval (250ms)
-// and runs one jobs.ExtendLease per batch. Replaces the previous
-// synchronous-PG-hit-per-envelope path that wedged the stream's recv
-// loop under heavy load.
+// Per-session batched lease extension processor. Heartbeat and Checkpoint
+// receive paths enqueue job IDs onto a buffered channel; this goroutine drains
+// them in batches over flushInterval (250ms) and runs one jobs.ExtendLease per
+// batch.
 //
-// Why this matters: with the synchronous path, 16 concurrent handlers
-// emitting heartbeats every 10s produced a steady stream of single-id
-// UPDATEs. When PG was momentarily slow, the recv goroutine blocked on
-// ExtendLease → the stream's recv buffer filled → the SDK's stream.Send
-// blocked → heartbeats backed up in the SDK's sendCh → enqueueSend
-// dropped them (non-blocking default:). Server stopped seeing
-// heartbeats, lease expired, jobs were revoked + re-dispatched. The
-// batched processor breaks this feedback loop: enqueueing is O(1),
-// the recv loop never blocks on PG.
+// One ExtendLease per envelope wedges the recv loop under load. With 16
+// concurrent handlers heartbeating every 10s, a momentarily slow PG blocks the
+// recv goroutine on ExtendLease, the stream's recv buffer fills, the SDK's
+// stream.Send blocks, heartbeats back up in the SDK's sendCh, and enqueueSend
+// drops them on its non-blocking default — so the server stops seeing
+// heartbeats, the lease expires, and the jobs are revoked and re-dispatched.
+//
+// Enqueueing is O(1), so the recv loop never blocks on PG.
 
 package jobsdispatcher
 
@@ -71,20 +68,18 @@ func (d *Dispatcher) runLeaseProcessor(ctx context.Context, s *session) {
 		if len(batch) == 0 {
 			return
 		}
-		// Group by lease duration so per-job `heartbeat <dur>` overrides
-		// land on the SQL UPDATE, not just on the initial claim. Most
-		// sessions have no overrides — one group; we emit one
-		// ExtendLease call. Sessions with mixed durations emit one
-		// ExtendLease per distinct duration.
+		// Grouped by lease duration so per-job `heartbeat <dur>` overrides
+		// land on the SQL UPDATE and not only on the initial claim. A session
+		// with no overrides is one group and one ExtendLease call; one with
+		// mixed durations emits one call per distinct duration.
 		groups := make(map[time.Duration][]int64, 1)
 		s.inflightMu.Lock()
 		for _, id := range batch {
 			row, ok := s.inflight[id]
 			if !ok {
-				// Row was completed / revoked between enqueue and
-				// flush. Skip — extending a lease we no longer own
-				// would no-op (claimedBy mismatch) but emits a
-				// pointless UPDATE.
+				// Row completed or revoked between enqueue and flush.
+				// Extending a lease this session no longer owns no-ops on
+				// the claimedBy mismatch and still costs an UPDATE.
 				continue
 			}
 			dur := s.leaseDurFor(row.jobName, d.cfg.HeartbeatBudget)

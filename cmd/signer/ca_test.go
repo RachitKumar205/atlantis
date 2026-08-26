@@ -26,7 +26,7 @@ import (
 
 func writeCA(t *testing.T, dir string, a certs.Authority) {
 	t.Helper()
-	// The filenames are load-bearing: loadCA reads exactly ca.crt and ca.key.
+	// loadCA reads exactly these two names.
 	if err := os.WriteFile(filepath.Join(dir, "ca.crt"), a.CertPEM, 0o600); err != nil {
 		t.Fatal(err)
 	}

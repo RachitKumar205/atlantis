@@ -7,11 +7,8 @@ import (
 	"strings"
 )
 
-// GitHub's endpoints, from its OAuth app documentation.
-//
-// Constants rather than configuration: these are not per-deployment, and a
-// deployment that could point them elsewhere would be a deployment where
-// changing one environment variable redirects every sign-in to an attacker.
+// GitHub's endpoints, from its OAuth app documentation. Constants, not
+// configuration: one setting would redirect every sign-in.
 const (
 	githubAuthURL   = "https://github.com/login/oauth/authorize"
 	githubTokenURL  = "https://github.com/login/oauth/access_token"
@@ -19,11 +16,9 @@ const (
 	githubEmailsURL = "https://api.github.com/user/emails"
 )
 
-// githubScope asks for the addresses and nothing else.
-//
-// Not `read:user`, which grants the whole profile, and not `user`, which
-// includes the ability to follow accounts. Cloud needs one verified address and
-// a display name, and the name comes back on /user without any scope at all.
+// githubScope asks for addresses and nothing else. `read:user` grants the whole
+// profile and `user` adds the ability to follow accounts; the display name
+// comes back on /user with no scope at all.
 const githubScope = "user:email"
 
 // GitHub signs people in with a GitHub account.
@@ -31,13 +26,9 @@ type GitHub struct {
 	ClientID     string
 	ClientSecret string
 
-	// Endpoints and the HTTP client, unexported so only this package can move
-	// them — which in practice means only its tests.
-	//
-	// They are deliberately not configuration. A deployment able to point the
-	// token endpoint somewhere else is a deployment where one environment
-	// variable sends this client secret, and every authorization code, to
-	// whoever set it.
+	// Unexported, so only this package's tests move them. Not configuration:
+	// a settable token endpoint sends the client secret and every
+	// authorization code wherever it points.
 	client                       *http.Client
 	tokenURL, userURL, emailsURL string
 }
@@ -76,10 +67,9 @@ func (g *GitHub) AuthCodeURL(state, challenge, redirectURI string) string {
 
 // Identify exchanges the code and reads the account's verified primary address.
 //
-// Two calls, because GitHub's /user endpoint reports a `email` field that is
-// the account's PUBLIC profile email — which the user types in freely, is not
-// verified, and is empty for most accounts. The address that means anything is
-// on /user/emails, flagged.
+// Two calls: /user's `email` field is the public profile address, freely typed,
+// unverified and empty for most accounts. The flagged address is on
+// /user/emails.
 func (g *GitHub) Identify(ctx context.Context, code, verifier, redirectURI string) (*Identity, error) {
 	token, err := exchange(ctx, g.http(), g.tokenURL,
 		g.ClientID, g.ClientSecret, code, verifier, redirectURI)
@@ -127,8 +117,7 @@ func (g *GitHub) Identify(ctx context.Context, code, verifier, redirectURI strin
 		name = profile.Login
 	}
 	return &Identity{
-		// The numeric id, not the login. A login can be changed and reused by
-		// somebody else; the id cannot.
+		// The numeric id, not the login: a login can be changed and reused.
 		Subject: itoa(profile.ID),
 		Email:   strings.ToLower(email),
 		Name:    name,

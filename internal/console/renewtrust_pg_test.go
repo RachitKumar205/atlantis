@@ -16,17 +16,13 @@ import (
 
 // Who may renew, asserted as a property rather than as a mechanism.
 //
-// # Why these do not assert a status code
-//
-// The rule "a certificate from another authority cannot renew" is enforced
-// today inside the TLS handshake, so a machine holding one never reaches a
-// handler and never sees a status — it sees a connection error. Enforcing it in
-// the handler instead produces a 403 on a connection that succeeded.
-//
-// Both are correct. A test pinned to either one would have to be rewritten to
-// move the check, and a test that gets rewritten alongside the code it guards
-// is not a guard. So these assert what must be true in both worlds: the
-// renewal does not succeed, and no certificate is issued.
+// No status code is asserted. "A certificate from another authority cannot
+// renew" is enforced inside the TLS handshake, so a machine holding one never
+// reaches a handler and sees a connection error rather than a status; enforced
+// in the handler instead it is a 403 on a connection that succeeded. Both are
+// correct, and a test pinned to either has to be rewritten to move the check.
+// These assert what holds in both: the renewal does not succeed, and no
+// certificate is issued.
 //
 // That distinction is not academic here. Before this file, the chain rule had
 // NO test at all — the only negative renewal cases were "no certificate" and "a
@@ -133,12 +129,11 @@ func TestASelfSignedCertificateCannotRenew(t *testing.T) {
 
 // The refusal reaches the handler, and says why.
 //
-// This one DOES pin the mechanism, on purpose and only now: it is what proves
-// the check actually moved. Under the old listener the connection never
-// completed, so there was no status and no message — a refusal nobody could see
-// from either end. If this ever goes back to a transport error, verification
-// has silently returned to the handshake, where it cannot cover more than one
-// organisation.
+// This one pins the mechanism, because it is what proves the check sits in the
+// handler. A listener that refuses during the handshake never completes the
+// connection, so there is no status and no message from either end. A transport
+// error here means verification has returned to the handshake, where it cannot
+// cover more than one organisation.
 func TestTheRefusalIsAnAnswerRatherThanADroppedConnection(t *testing.T) {
 	f := newEnrolmentFixture(t)
 	base := f.startEnrolListener(t)

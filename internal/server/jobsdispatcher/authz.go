@@ -7,17 +7,16 @@
 // field, opposite direction. Permissive default: a job without an
 // explicit visible_to is handleable by any authenticated worker.
 //
-// We check at two points:
+// Checked at two points:
 //
 //  1. At Open: every job name in the worker's declared JobNames list
-//     must be in scope. Rejecting at Open prevents a worker from ever
-//     entering the dispatch rotation for jobs it can't handle.
+//     must be in scope, so a worker never enters the dispatch rotation
+//     for jobs it cannot handle.
 //
-//  2. At dispatch: when we're about to push a claimed row, re-check.
-//     Defense-in-depth — between Open and dispatch the IR could have
-//     been re-applied with a tighter visible_to that revokes this
-//     worker. Without the re-check we'd silently keep dispatching
-//     to a now-unauthorized worker until the next reconnect.
+//  2. At dispatch, before a claimed row is pushed. Between Open and
+//     dispatch the IR can be re-applied with a tighter visible_to that
+//     revokes this worker, and without the re-check dispatch continues
+//     to it until the next reconnect.
 
 package jobsdispatcher
 
@@ -35,17 +34,13 @@ import (
 // gRPC status error on the first mismatch so the streaming handler
 // can `return err` to close the stream with the right code.
 //
-// callerCN is the cert CN ("anonymous" in insecure dev mode).
-// aliases is the operator-configured alias set for that caller from
-// caller_identities.aliases. A nil/empty aliases slice degenerates to
-// the previous CN-only matching behavior — fully back-compat for
-// callers without aliases set.
+// callerCN is the cert CN, "anonymous" in insecure dev mode. aliases is the
+// operator-configured alias set for that caller from caller_identities.aliases;
+// an empty slice matches on the CN alone.
 //
-// When dev mode is enabled, the caller still has to declare which
-// jobs they handle — we don't auto-allow everything for anonymous,
-// since that would let a misconfigured prod deploy silently bypass
-// authz. Operators wanting dev-mode workers can configure their jobs
-// with `visible_to "anonymous"` or `visible_to "*"`.
+// Dev mode does not auto-allow everything for anonymous, which would let a
+// mis-configured production deploy bypass authz. A dev-mode worker's jobs
+// declare `visible_to "anonymous"` or `visible_to "*"`.
 func CheckWorkerAuthz(callerCN string, aliases []string, jobNames []string, ir *dsl.IR) error {
 	if ir == nil {
 		return status.Error(codes.FailedPrecondition, "no IR loaded; cannot authorize workers")
@@ -82,10 +77,9 @@ func CheckSingleAuthz(callerCN string, aliases []string, jobName string, ir *dsl
 }
 
 // lookupJob finds a Job by its canonical "namespace.Name" id. The IR
-// keeps jobs in a sorted slice (see internal/dsl/ir.go's Lower path);
-// linear scan is fine for the typical job-count of tens-per-IR. If
-// future schemas push this into the thousands we'll add a built-in
-// map to *dsl.IR.
+// keeps jobs in a sorted slice (see internal/dsl/ir.go's Lower path), and a
+// linear scan suits the tens-per-IR job count. Thousands would need a map on
+// *dsl.IR.
 func lookupJob(ir *dsl.IR, id string) *dsl.Job {
 	for i := range ir.Jobs {
 		if ir.Jobs[i].ID() == id {
@@ -100,17 +94,13 @@ func lookupJob(ir *dsl.IR, id string) *dsl.Job {
 // Empty or "*" means any caller; otherwise the value must equal the caller's
 // CN or one of its configured aliases. Migration 0017 states those three rules
 // as the semantics of the feature, and they are written once here because two
-// places need them and they had drifted.
+// gates need them.
 //
-// # Why this is exported
-//
-// SubmitJob had its own copy that implemented only the first two, so a caller
-// renamed from `vendor` to `vendor-v2` with aliases={'vendor'} could still
-// HANDLE a job declared `visible_to "vendor"` and could no longer ENQUEUE it.
-// The gradual CN rename that aliases exist to enable was impossible in one
-// direction, and the two gates disagreed about who a caller is — which is the
-// worst shape for an authorization rule, because each side looks correct on
-// its own.
+// Exported so SubmitJob shares it. A second copy implementing only the first
+// two rules lets a caller renamed from `vendor` to `vendor-v2` with
+// aliases={'vendor'} still handle a job declared `visible_to "vendor"` while no
+// longer being able to enqueue it, so the two gates disagree about who a caller
+// is and each looks correct alone.
 func VisibleToMatches(visibleTo, callerCN string, aliases []string) bool {
 	if visibleTo == "" || visibleTo == "*" {
 		return true

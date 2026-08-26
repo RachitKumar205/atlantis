@@ -44,10 +44,10 @@ func TestEveryChangeKindIsClassified(t *testing.T) {
 	// which is what the default already says, so enumerating them would be
 	// duplication that drifts.
 	//
-	// A future kind named _added that is really a tightening still lands here:
-	// the test demands it be mentioned, and whoever mentions it chooses the arm.
-	// That is the whole point — an expectation derived from the suffix would
-	// have made "addition" mandatory and removed the choice.
+	// A kind named _added that is really a tightening still lands here: the
+	// test demands it be mentioned, and the arm is chosen at that point. An
+	// expectation derived from the suffix would make "addition" mandatory and
+	// remove the choice.
 	src := adoptSource(t)
 	for _, k := range kinds {
 		if !strings.HasSuffix(k, "_added") && !strings.HasSuffix(k, "_removed") {

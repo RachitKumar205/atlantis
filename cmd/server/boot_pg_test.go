@@ -25,29 +25,21 @@ import (
 
 // Boot the real run() and watch what it does about tenant isolation.
 //
-// # Why this exists when TestPartitionGate already passes
-//
-// TestPartitionGate proves the DECISION: given problems and require=true, an
-// error comes back. The AST test proves the call sites exist and return on the
-// error. Neither reads the ARGUMENTS, and a review found six mutations that
-// survive the whole suite because of it — every one the same shape, a correct
-// function handed the wrong value:
+// TestPartitionGate covers the decision: given problems and require=true, an
+// error comes back. The AST test covers the call sites existing and returning
+// on that error. Neither reads the arguments, so six mutations survive both —
+// each one a correct function handed the wrong value:
 //
 //	partitionGate(policyProblems, perr, cfg.RequireTenantIsolation, partitionedTables)
-//	  cfg.RequireTenantIsolation -> false    SURVIVES
-//	  policyProblems             -> nil      SURVIVES
+//	  cfg.RequireTenantIsolation -> false    survives
+//	  policyProblems             -> nil      survives
 //
-// Both are caught here, because the only input is a database and an
-// environment, and the only output is whether the process starts.
+// Here the input is a database and an environment and the output is whether the
+// process starts, so both die.
 //
-// # Why not a fifth AST rule
-//
-// That loop has run four times. Each round hardened the source rules against
-// the escape the previous review demonstrated, and each round a review found
-// another. The limit is structural: a rule strict enough to catch
+// A source rule cannot close this. One strict enough to catch
 // `if false && cfg.RequireTenantIsolation && ...` also rejects legitimate
-// compound conditions. Reading the source cannot answer a question about
-// values. Running the thing can.
+// compound conditions; the question is about values, not shape.
 func TestServerRefusesToBootWhenAPartitionedTableHasNoPolicy(t *testing.T) {
 	// The child half. Boot once, say what happened, exit.
 	//
@@ -270,11 +262,10 @@ func quietBootLogger() *slog.Logger {
 // bootProbeRole creates a role the boot sequence will accept — no superuser, no
 // BYPASSRLS — grants it what a running server touches, and returns a DSN for it.
 //
-// The grants are broad on purpose. Narrowing them to the exact set run() uses
-// would make this test fail whenever the server starts reading a new table,
-// which tells you nothing about tenant isolation and everything about the
-// fixture. The one privilege that matters here is the one deliberately NOT
-// granted: this role cannot see through row-level security.
+// The grants are broad. Narrowed to the exact set run() touches, this fails
+// whenever the server reads a new table, which is a fact about the fixture. The
+// privilege that matters is the one not granted: this role cannot see through
+// row-level security.
 func bootProbeRole(t *testing.T, dsn string) string {
 	t.Helper()
 	drop := func() {
@@ -363,41 +354,28 @@ ON CONFLICT (id) DO UPDATE SET ir = EXCLUDED.ir`, raw); err != nil {
 	}
 }
 
-// The gate must refuse when it could not ASK, not only when the answer was bad.
+// The gate refuses when it could not ask, not only when the answer was bad.
 //
-// # What is uncovered without this
+// TestPartitionGate covers the decision and two boot tests cover the call sites
+// being reached; none reads the arguments. Replacing `perr` with nil at either
+// call site leaves the whole suite green, and the gate then sees no error and
+// no problems and starts the server with ATL_REQUIRE_TENANT_ISOLATION set and
+// nothing verified. A locked-down catalogue, a pooler rewriting current_user,
+// and a statement timeout each produce that errored probe.
 //
-// partitionGate's decision is proved by TestPartitionGate, and both call sites
-// are proved to be reached by TestServerRefusesToBootWhenAPartitionedTableHasNoPolicy
-// and TestReloadRefusesASchemaTheDatabaseIsNotEnforcing. None of them checks the
-// ARGUMENTS. Replacing `perr` with nil at either call site left the whole suite
-// green — the gate would then see "no error, no problems" and start the server
-// with tenant isolation nominally required and never actually verified.
-//
-// That is not a theoretical mutation. A locked-down catalogue, a pooler that
-// rewrites current_user, or a statement timeout all produce exactly this: a
-// probe that errors. The operator set ATL_REQUIRE_TENANT_ISOLATION and would be
-// served a database nobody checked.
-//
-// # How the probe is made to fail
-//
-// SELECT on pg_catalog.pg_policy is revoked. VerifyPartitionPolicies reads
-// pg_class, pg_namespace and pg_policy in one query, so the role keeps
+// SELECT on pg_catalog.pg_policy is revoked to reach it. VerifyPartitionPolicies
+// reads pg_class, pg_namespace and pg_policy in one query, so the role keeps
 // answering the first two and errors on the third — the shape a locked-down
-// catalogue actually has, rather than a broken connection that would fail
-// everything and prove nothing about this branch specifically.
+// catalogue has, where a broken connection would fail everything and separate
+// nothing.
 //
-// Verified before this test was written: the revoke yields `permission denied
-// for table pg_policy`, pg_class stays readable, and because pg_policy is a
-// per-database catalogue (relisshared = false) the revoke cannot escape this
-// throwaway database into the shared one or a parallel package.
+// The revoke yields `permission denied for table pg_policy`, pg_class stays
+// readable, and pg_policy is per-database (relisshared = false), so the revoke
+// cannot reach the shared database or a parallel package.
 //
-// # Why the fixture carries a VALID policy
-//
-// If the probe could run, it would find nothing wrong and the server would
-// start. So a refusal here can only have come from the probe failing. A fixture
-// with a broken policy would refuse for two possible reasons and distinguish
-// neither.
+// The fixture's policy is valid: a probe that could run would find nothing
+// wrong and the server would start, so a refusal here has one possible cause. A
+// broken policy would refuse for two and separate neither.
 func TestServerRefusesToBootWhenThePolicyProbeCannotRun(t *testing.T) {
 	// Shares the child with the other boot test: -test.run in bootOnce names
 	// that test, and the child dispatches on the env var rather than the name.

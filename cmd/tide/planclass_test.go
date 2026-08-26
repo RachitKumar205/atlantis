@@ -9,14 +9,11 @@ import (
 
 // TestPlanExitCodesAreTheDocumentedContract pins the mapping CI branches on.
 //
-// docs/reference/cli-tide.md documents these codes and
-// docs/guides/set-up-caller-ci.md tells readers to gate merges on them, so a
-// change here changes whether other people's pull requests can merge. The
-// mapping just went through a mechanical string-to-enum rewrite, which is
-// exactly the kind of edit that silently renumbers one case.
+// docs/reference/cli-tide.md documents these codes and shows a CI script
+// branching on them, so a change here changes which pull requests merge.
 //
-// It calls the function cmdPlan calls. A copy of the switch living here would
-// pass while cmdPlan disagreed with it, which is the failure this is for.
+// It calls the function cmdPlan calls. A copy of the mapping here would pass
+// while cmdPlan disagreed with it.
 func TestPlanExitCodesAreTheDocumentedContract(t *testing.T) {
 	for _, tc := range []struct {
 		class adminpb.PlanClass
@@ -51,9 +48,9 @@ func TestPlanExitCodesAreTheDocumentedContract(t *testing.T) {
 // list of classes maintained beside it. A parallel list is a second thing to
 // forget.
 func TestEveryDeclaredClassIsHandled(t *testing.T) {
-	// Classes that deliberately have no classExitCode entry and so fall to 3.
-	// Both mean "there is no plan outcome to act on": one is a schema that did
-	// not compile, the other is a server that sent no class at all.
+	// Classes with no classExitCode entry, which fall to 3. Neither carries a
+	// plan outcome to act on: one is a schema that did not compile, the other a
+	// server that sent no class.
 	exit3ByDesign := map[adminpb.PlanClass]bool{
 		adminpb.PlanClass_PLAN_CLASS_UNSPECIFIED: true,
 		adminpb.PlanClass_PLAN_CLASS_UNPARSEABLE: true,

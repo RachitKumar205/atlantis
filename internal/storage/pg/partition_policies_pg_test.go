@@ -37,13 +37,13 @@ func TestVerifyPartitionPolicies(t *testing.T) {
 	drop()
 	t.Cleanup(drop)
 
-	// Every fixture is built in the CURRENT model: the tenant boundary is a
-	// RESTRICTIVE policy, and a PERMISSIVE grant sits beside it so the table
+	// Every fixture is built in the current model: the tenant boundary is a
+	// restrictive policy, and a permissive grant sits beside it so the table
 	// admits anything at all.
 	//
-	// The set is chosen so each entity trips exactly ONE condition. ppv_none
-	// trips three at once and ppv_disabled two, which is how deleting a
-	// diagnostic used to go unnoticed — a surviving branch covered for it.
+	// Each entity trips exactly one condition. ppv_none trips three at once and
+	// ppv_disabled two, so deleting a diagnostic leaves them still reported by
+	// a surviving branch.
 	if _, err := pool.Exec(ctx, `
 -- Correct. Restrictive boundary on both halves, plus the replaceable grant.
 CREATE TABLE atlantis.ppv_good (id bigint primary key, tenant text not null);

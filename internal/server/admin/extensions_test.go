@@ -136,9 +136,9 @@ func TestClassifyExtensions(t *testing.T) {
 }
 
 func TestExtensionsMissingError_LayoutSurvivesCopyPaste(t *testing.T) {
-	// The error is what operators paste into a runbook. Format should
-	// include the trigger AND the install hint per extension, plus the
-	// promise that atlantis auto-enables once the OS package lands.
+	// The error is what gets pasted into a runbook, so it carries the trigger
+	// and the install hint per extension, plus the note that atlantis enables
+	// the extension once the OS package lands.
 	missing := []extensionStatus{
 		{
 			Name:        "timescaledb",
@@ -175,9 +175,8 @@ func TestOsInstallHint_KnownNamesReturnSpecific(t *testing.T) {
 }
 
 func TestQuoteIdent_RejectsEmbeddedQuote(t *testing.T) {
-	// Defensive: extension names come from our closed set today, but if
-	// a future addition slipped a literal quote into the list, quoteIdent
-	// must double it.
+	// Extension names come from a closed set, but an addition carrying a
+	// literal quote has to be doubled rather than passed through.
 	if got := quoteIdent(`vec"tor`); got != `"vec""tor"` {
 		t.Errorf("quoteIdent embedded quote: got %q want %q", got, `"vec""tor"`)
 	}

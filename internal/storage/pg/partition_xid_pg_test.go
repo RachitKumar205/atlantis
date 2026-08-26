@@ -15,19 +15,18 @@ import (
 // atlantis.current_partition() runs inside every row-level security policy, so
 // it executes on every read of every partitioned entity. Scoping it with
 // txid_current() had a side effect that is invisible until it is catastrophic:
-// txid_current() ASSIGNS a transaction ID when the transaction has none, and
-// PostgreSQL deliberately withholds IDs from read-only transactions precisely
-// because the 32-bit space is consumable. Exhaust it and the database stops
-// accepting writes until an anti-wraparound vacuum finishes.
+// txid_current() assigns a transaction ID when the transaction has none, and
+// PostgreSQL withholds IDs from read-only transactions because the 32-bit space
+// is consumable. Exhausting it stops the database accepting writes until an
+// anti-wraparound vacuum finishes.
 //
-// Measured before the fix: 100 reads consumed 100 IDs, against 0 for the same
-// reads on a non-RLS table. At ten thousand reads per second that is the whole
-// space in about five days.
+// Measured with txid_current(): 100 reads consumed 100 IDs, against 0 for the
+// same reads on a non-RLS table. At ten thousand reads per second that is the
+// whole space in about five days.
 //
-// This is a regression test rather than a benchmark. The correctness argument
-// is that set_partition() writes, so a transaction with no ID assigned cannot
-// have called it, so NULL is the right answer for exactly those transactions —
-// which is why asking instead of demanding costs nothing.
+// set_partition() writes, so a transaction with no ID assigned cannot have
+// called it and NULL is the answer for exactly those transactions. Asking costs
+// nothing that demanding saves.
 //
 //	ATLANTIS_TEST_PG=... go test ./internal/storage/pg/ -run PartitionRead -v
 func TestPartitionReadDoesNotConsumeTransactionIDs(t *testing.T) {
@@ -66,11 +65,10 @@ func TestPartitionReadDoesNotConsumeTransactionIDs(t *testing.T) {
 		`ALTER TABLE atlantis.xidburn FORCE ROW LEVEL SECURITY`,
 		`CREATE POLICY xidburn_pol ON atlantis.xidburn
 		   USING (tenant = atlantis.current_partition())`,
-		// The reads MUST run as a role row-level security applies to. Measured
-		// as the pool's own role — a superuser — the policy never evaluates,
-		// current_partition() is never called, and the measurement is zero
-		// whether or not the bug is present. That is not a hypothetical: the
-		// first version of this test passed with the defect reintroduced.
+		// The reads run as a role row-level security applies to. Measured as
+		// the pool's own role — a superuser — the policy never evaluates,
+		// current_partition() is never called, and the count is zero whether or
+		// not the defect is present.
 		`GRANT SELECT ON atlantis.xidburn TO xidburn_reader`,
 	} {
 		if _, err := pool.Exec(ctx, sql); err != nil {
@@ -89,12 +87,10 @@ func TestPartitionReadDoesNotConsumeTransactionIDs(t *testing.T) {
 	// Asked of each transaction directly rather than measured against the
 	// cluster's transaction-ID horizon.
 	//
-	// The horizon is cluster-wide. The first version of this test read it
-	// before and after the loop and allowed reads/2 of slack for "anything else
-	// touching this database" — which held until `go test` ran enough packages
-	// in parallel to burn 90 IDs of somebody else's work during the run, and
-	// the test failed on a defect that was not there. A measurement that other
-	// processes can move is not a measurement of this code.
+	// The horizon is cluster-wide. Reading it before and after the loop with
+	// reads/2 of slack for anything else touching the database holds until
+	// `go test` runs enough packages in parallel to burn 90 IDs during the run,
+	// and then reports a defect that is not there.
 	//
 	// txid_current_if_assigned() returns NULL when the calling transaction has
 	// been assigned no ID, which is precisely the property: it is local, exact,

@@ -96,8 +96,8 @@ func assertionFrom(t *testing.T, rec *httptest.ResponseRecorder) (token, destina
 
 // claimsOf reads an assertion without verifying it.
 //
-// Unverified on purpose: what is under test is what Cloud PUT in the token, and
-// internal/console/cloudauth already covers whether a console accepts it.
+// Unverified: what is under test is what Cloud put in the token.
+// internal/console/cloudauth covers whether a console accepts it.
 func claimsOf(t *testing.T, token string) (jwt.Claims, identity.Private) {
 	t.Helper()
 	parsed, err := jwt.ParseSigned(token, allowedTestAlgorithms)
@@ -111,8 +111,6 @@ func claimsOf(t *testing.T, token string) (jwt.Claims, identity.Private) {
 	}
 	return registered, private
 }
-
-// ── The gate ────────────────────────────────────────────────────────────────
 
 // Membership decides, and the assertion carries the role from the row.
 func TestAuthorizeMintsTheRoleFromTheMembershipRow(t *testing.T) {
@@ -153,7 +151,7 @@ func TestAuthorizeMintsTheRoleFromTheMembershipRow(t *testing.T) {
 	}
 }
 
-// Somebody with no membership gets no assertion.
+// No membership, no assertion.
 func TestAuthorizeRefusesANonMember(t *testing.T) {
 	f := newFixture(t)
 	f.member(t, "member@example.com", "acme", testConsole, identity.RoleAdmin)
@@ -221,14 +219,11 @@ func TestAuthorizeNeedsASession(t *testing.T) {
 	}
 }
 
-// ── The destination ─────────────────────────────────────────────────────────
-
 // A console parameter is ignored, not honoured.
 //
-// The whole design of this route is that the destination comes from a row. This
-// asserts the property directly, because "the parameter is ignored" and "the
-// parameter is not implemented yet" look identical from outside and only one of
-// them stays true after somebody adds a feature request for it.
+// The destination comes from a row. Asserted directly, because a parameter that
+// is ignored and one that is unimplemented look identical from outside, and
+// only the first survives the parameter being implemented.
 func TestAuthorizeIgnoresACallerSuppliedConsole(t *testing.T) {
 	f := newFixture(t)
 	session := f.member(t, "member@example.com", "acme", testConsole, identity.RoleAdmin)
@@ -291,8 +286,6 @@ func TestTheAssertionTravelsInTheFragment(t *testing.T) {
 	}
 }
 
-// ── Step-up ─────────────────────────────────────────────────────────────────
-
 // prompt=reauth does not redirect. It asks for a factor first.
 func TestReauthDemandsAFactorEvenWithASession(t *testing.T) {
 	f := newFixture(t)
@@ -351,12 +344,10 @@ func TestTheReauthPageAllowsItsOwnRedirect(t *testing.T) {
 		}
 	}
 
-	// The RETRY screen, which is the one the operator was actually stranded on.
-	//
-	// serveReauthPage has two callers — the GET above and the wrong-code
-	// re-render. A fix applied to only the first passes everything above while
-	// leaving the second broken, and the second is where somebody lands after
-	// the attempt that silently did nothing.
+	// The retry screen. serveReauthPage has two callers, the GET above and the
+	// wrong-code re-render, and a fix applied to only the first passes
+	// everything above while leaving the screen reached after a failed attempt
+	// broken.
 	retry := f.postFormWithCookie(t, "/authorize/reauth",
 		url.Values{"org": {"acme"}, "code": {"000000"}}, sessionCookie, session)
 	if retry.Code != http.StatusOK {

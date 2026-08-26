@@ -1,20 +1,10 @@
 // Package authn holds Atlantis Cloud's password handling.
 //
-// # Why this is its own package
+// Separate from the store, because hashing needs no database and is therefore
+// testable without one.
 //
-// The console deleted its password code along with console.users, so nothing in
-// this repository hashes a password any more. This is a fresh start rather than
-// a move, and it is deliberately separated from the store: hashing has no
-// database and one job, which makes it testable without one and hard to get
-// subtly wrong in the company of unrelated code.
-//
-// # What a password is worth here
-//
-// It is one factor of two. Cloud requires a second (see the 2FA package), so a
-// leaked password alone does not reach an organisation's console. That is the
-// reason this package can be conservative rather than paranoid — but it is not
-// a reason to be careless, because the second factor is exactly what an
-// attacker who has the password will go after next.
+// A password here is one factor of two: Cloud requires a second factor, so a
+// leaked password alone does not reach an organisation's console.
 package authn
 
 import (
@@ -31,13 +21,10 @@ import (
 // Argon2id parameters.
 //
 // OWASP's current recommendation: 19 MiB of memory, two iterations, one degree
-// of parallelism. Memory-hard by design — the cost to an attacker with a GPU
-// scales with memory rather than with arithmetic, which is the whole reason to
-// prefer this over bcrypt for something written today.
+// of parallelism.
 //
-// These are the parameters used for NEW hashes. They are not what verification
-// uses: every stored hash carries the parameters it was made with, so raising
-// these is safe and takes effect as people sign in. See Verify's needsRehash.
+// These apply to new hashes only. Every stored hash carries the parameters it
+// was made with, so raising these is safe; see Verify's needsRehash.
 const (
 	argonMemory  = 19 * 1024 // KiB
 	argonTime    = 2
@@ -48,19 +35,16 @@ const (
 
 // ErrMalformedHash reports a stored hash this package cannot read.
 //
-// Distinct from "wrong password", and the distinction is load-bearing: a
-// malformed hash means the row is corrupt or was written by something else, and
-// treating it as a failed sign-in would leave an account permanently unable to
-// authenticate with nothing in the logs explaining why.
+// Distinct from a wrong password: the row is corrupt or was written by
+// something else, and reporting it as a failed sign-in leaves the account
+// permanently unable to authenticate with nothing in the logs.
 var ErrMalformedHash = errors.New("password hash is not in the expected format")
 
 // Hash returns a PHC-format argon2id hash of password.
 //
-// The format is the standard one — $argon2id$v=19$m=..,t=..,p=..$salt$hash —
-// because it carries the parameters alongside the digest. That is what makes
-// the constants above adjustable later without a migration or a column: an old
-// hash verifies against its own parameters, and Verify reports that it should
-// be rewritten.
+// $argon2id$v=19$m=..,t=..,p=..$salt$hash carries the parameters alongside the
+// digest, so an old hash verifies against its own and Verify reports that it
+// should be rewritten. No migration or column is needed to raise them.
 func Hash(password string) (string, error) {
 	salt := make([]byte, argonSaltLen)
 	if _, err := rand.Read(salt); err != nil {
@@ -77,10 +61,8 @@ func Hash(password string) (string, error) {
 // Verify reports whether password matches encoded, and whether the stored hash
 // was made with parameters this build has since raised.
 //
-// needsRehash is only meaningful when ok is true. A caller acts on it by
-// rehashing during a successful sign-in, which is the only moment the plaintext
-// is available — so a parameter increase rolls forward as people use the
-// product rather than needing anyone to do anything.
+// needsRehash is meaningful only when ok is true. A successful sign-in is the
+// only moment the plaintext is available to rehash with.
 func Verify(password, encoded string) (ok bool, needsRehash bool, err error) {
 	p, salt, want, err := parse(encoded)
 	if err != nil {
@@ -89,9 +71,8 @@ func Verify(password, encoded string) (ok bool, needsRehash bool, err error) {
 
 	got := argon2.IDKey([]byte(password), salt, p.time, p.memory, p.threads, uint32(len(want)))
 
-	// Constant time, because a byte-at-a-time comparison leaks how much of a
-	// guess was right — and this runs on an attacker-supplied input by
-	// definition.
+	// Constant time: a byte-at-a-time comparison leaks how much of a guess was
+	// right, on an input that comes from the request.
 	if subtle.ConstantTimeCompare(got, want) != 1 {
 		return false, false, nil
 	}
@@ -149,9 +130,6 @@ func parse(encoded string) (params, []byte, []byte, error) {
 // for an unknown address is a real enumeration oracle: argon2id at these
 // settings takes tens of milliseconds, which is trivially measurable from
 // outside, and the response body says nothing.
-//
-// This was deliberately absent through C2, when nothing signed in and so
-// nothing called it. It arrives with the route that uses it.
 var dummyHash = mustHash("atlantis: no account matches, and this exists so " +
 	"that fact costs the same as one that does")
 

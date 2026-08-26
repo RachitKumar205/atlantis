@@ -37,54 +37,34 @@ var safeBackfillFunctions = map[string]bool{
 	"to_char":     true,
 }
 
-// ValidateBackfillExpression parses the user-supplied SQL expression
-// behind a field's `backfill "<expr>"` modifier and rejects it if any of:
+// ValidateBackfillExpression parses the SQL behind a field's
+// `backfill "<expr>"` modifier and rejects it if any of:
 //
-//   - it does not parse as a valid scalar SQL expression
-//   - it contains a subquery (SubLink) — would let the expression read
-//     arbitrary tables, including ones the operator doesn't intend
-//   - it calls a function outside safeBackfillFunctions — would let
-//     volatile / side-effect-producing functions slip into the apply path
-//   - it references its own field (selfFieldName) — pointless and
-//     misleading
-//   - it references a column not present in allowedCols — typos or
-//     stale references that would silently break at apply time
+//   - it does not parse as the right-hand side of `SET <col> = <expr>`
+//   - it contains a subquery (SubLink), which reads arbitrary tables
+//   - it calls a function outside safeBackfillFunctions, which admits volatile
+//     and side-effecting ones to the apply path
+//   - it references its own field, selfFieldName
+//   - it references a column absent from allowedCols
 //
-// allowedCols should be the column set of the entity carrying the field,
-// minus any columns being added in the same plan (those aren't populated
-// yet when the backfill runs).
-//
-// The parser sees `SELECT (<expr>)` so the expression position matches
-// its real apply-time context (the RHS of `SET <col> = <expr>` in the
-// chunked UPDATE). Wrapping in SELECT not UPDATE keeps the validator
-// independent of schema layout — it doesn't need a real table to parse.
+// allowedCols is the column set of the entity carrying the field, minus the
+// columns being added in the same plan; those hold no values when the backfill
+// runs.
 func ValidateBackfillExpression(expr string, allowedCols map[string]bool, selfFieldName string) error {
 	if strings.TrimSpace(expr) == "" {
 		return errors.New("backfill expression is empty")
 	}
-	// Parsed in the shape it is SPLICED into, not a shape that resembles it.
-	//
-	// This was `SELECT (%s)`, and the comment above claimed that matched "the
-	// RHS of SET <col> = <expr>". It does not: the parentheses are not in the
-	// SET list, and they are what makes the difference. `internal/backfill`
-	// writes `SET %[3]s = %[4]s` with no wrapper, so a comma in the expression
-	// starts a NEW ASSIGNMENT, and the probe swallowed it inside the parens as
-	// a row constructor. Executed against a live table:
+	// Parsed inside the statement the emitter builds. internal/backfill's
+	// ChunkSQL writes `SET %[3]s = %[4]s` with no wrapper, so a comma in the
+	// expression starts a new assignment:
 	//
 	//	'n', tenant = 'attacker', secret = 'clobbered'
 	//
-	// passed this gate, and rewrote the tenant discriminator of every row in
-	// the table at apply time. A backfill that reads as "populate the new
-	// nickname column" moved rows between tenants.
+	// A `SELECT (<expr>)` probe accepts that, the parentheses making it a row
+	// constructor, and it rewrites the tenant discriminator of every row at
+	// apply time.
 	//
-	// The same defect was found and fixed twice before this — in the CHECK
-	// gate, which probed `SELECT (expr)` while codegen emitted `CONSTRAINT c
-	// CHECK (expr)`, and in the index-expression gate. It was not carried here.
-	// The rule is now general: a validator MUST parse the expression inside the
-	// exact statement the emitter builds, or it is testing a different grammar.
-	//
-	// The probe table and column are placeholders; nothing resolves them,
-	// because parsing does not consult a catalog.
+	// The probe table and column are placeholders; parsing consults no catalog.
 	src := fmt.Sprintf("UPDATE atlantis_backfill_probe t SET atlantis_probe_col = %s", expr)
 	tree, err := pg.Parse(src)
 	if err != nil {
@@ -99,7 +79,8 @@ func ValidateBackfillExpression(expr string, allowedCols map[string]bool, selfFi
 			"side of an assignment. It is spliced into `SET <column> = <expr>`")
 	}
 	// Exactly one assignment, or the expression closed the one it was given and
-	// opened others. This is the check the parentheses used to hide.
+	// opened others. A `SELECT (<expr>)` probe hides this: the parentheses turn
+	// the comma list into a row constructor.
 	if n := len(upd.TargetList); n != 1 {
 		return fmt.Errorf("backfill expression sets %d columns; it may only "+
 			"produce a value for its own. An expression containing a comma at "+
@@ -157,23 +138,16 @@ func ValidateBackfillExpression(expr string, allowedCols map[string]bool, selfFi
 
 	// Subqueries and column references, found the same exhaustive way.
 	//
-	// These two were a hand-written permit-list of node types while the function
-	// check three lines above was reflective — in the SAME function, with a
-	// comment explaining exactly why a permit-list is inadequate. The list had
-	// no case for MinMaxExpr, A_Indirection, CollateClause or BooleanTest, so
-	// every one of these was accepted:
+	// A permit-list of node types with no case for MinMaxExpr, A_Indirection,
+	// CollateClause or BooleanTest accepts every one of these:
 	//
 	//	GREATEST('a', (SELECT ir::text FROM atlantis.ir_checkpoint LIMIT 1))
 	//	((SELECT ir::text FROM atlantis.ir_checkpoint LIMIT 1))[1]
 	//	(SELECT ir::text FROM atlantis.ir_checkpoint LIMIT 1) COLLATE "C"
 	//	(SELECT true) IS TRUE
 	//
-	// spliced into a live UPDATE — read any table, write it into a column.
-	//
-	// Adding the four missing cases would have been the third time this package
-	// patched a walk instead of replacing it. A reflection pass cannot have a
-	// missing case, so there is nothing left to keep in sync as pg_query's node
-	// set grows.
+	// spliced into a live UPDATE: read any table, write it into a column. A
+	// reflection pass has nothing to keep in sync as pg_query's node set grows.
 	walkMessages(exprNode.ProtoReflect(), func(m protoreflect.Message) {
 		switch node := m.Interface().(type) {
 		case *pg.SubLink:

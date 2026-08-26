@@ -7,22 +7,17 @@
 //	tide sandbox shell <path>        # interactive SQL REPL in-process
 //	tide sandbox spawn <path> -n N   # fork N children, time it, exit
 //
-// path is either a single .atl file or a directory containing .atl
-// files. The CLI compiles them via dsl.Parse + dsl.Lower, hands the
-// IR to sandbox.New, and either serves HTTP or drops into a REPL.
+// path is a single .atl file or a directory of them. The CLI compiles them
+// through dsl.Parse and dsl.Lower, hands the IR to sandbox.New, and either
+// serves HTTP or drops into a REPL.
 //
-// Boot prints connection info to stdout and blocks until SIGINT. The
-// HTTP routes are the same set exercised by internal/runtime/sandbox/http_test.go.
+// Boot prints connection details to stdout and blocks until SIGINT. Its routes
+// are the set internal/runtime/sandbox/http_test.go exercises.
 //
-// Shell uses the in-process Sandbox directly (no HTTP) so a single
-// missing key on the keyboard doesn't time out — the simulator's
-// <1ms response budget matters most here.
+// Shell drives the in-process Sandbox directly, with no HTTP in the path.
 //
-// Spawn is the fan-out drill: one parent + N forks in a single
-// process, with per-fork and total timings printed. Useful for the
-// "100 sandboxes alive in <50ms" demo, for benchmarking fork cost,
-// and for sanity-checking that pointer-sharing CoW behaves on a
-// production-sized schema.
+// Spawn forks N children from one parent in a single process and prints
+// per-fork and total timings.
 package main
 
 import (
@@ -232,13 +227,12 @@ func cmdSandboxShell(args []string) int {
 // per-child amortised cost. Exits when the report is printed — the
 // children fall out of scope and the GC reclaims them.
 //
-// Used in the Off Season demo to render the "100 sandboxes alive in
-// <50ms" frame. Also a poor-man's perf regression check: if forking
-// 100 sandboxes against a 50-entity schema starts taking seconds, the
-// CoW pointer-sharing path probably regressed and we want to know.
+// The timings are a coarse regression check on the copy-on-write path: forking
+// 100 sandboxes against a 50-entity schema takes milliseconds, and seconds
+// means the pointer-sharing stopped.
 //
-// Forking is sim-only because shared CoW makes no sense across two
-// independent Postgres processes; --backend=embedded is rejected.
+// Forking is sim-only. Copy-on-write does not cross two independent Postgres
+// processes, so --backend=embedded is rejected.
 func cmdSandboxSpawn(args []string) int {
 	fs := flag.NewFlagSet("sandbox spawn", flag.ContinueOnError)
 	n := fs.Int("n", 100, "number of forks to create from the parent sandbox")

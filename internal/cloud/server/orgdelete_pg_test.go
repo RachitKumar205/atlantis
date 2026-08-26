@@ -36,11 +36,11 @@ func decodeOrg(t *testing.T, rec *httptest.ResponseRecorder) orgResponse {
 	return o
 }
 
-// The confirmation is checked on the server, and that is the whole point.
+// The confirmation is checked on the server.
 //
-// A dialog in the browser defends against a misclick and nothing else — this
-// request is four lines of JavaScript to issue directly. If the check lived
-// only in the client, a delete with the wrong name would succeed.
+// A browser dialog defends against a misclick alone; the request is four lines
+// of JavaScript to issue directly. Checked only in the client, a delete naming
+// the wrong organisation succeeds.
 func TestDeletingNeedsTheOrganisationName(t *testing.T) {
 	f := newFixture(t)
 	session := f.signedIn(t, "deleter@example.com")

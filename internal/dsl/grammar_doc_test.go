@@ -9,15 +9,13 @@ import (
 
 // The grammar reference's reserved-word list must name only real keywords.
 //
-// It named three that do not exist: `composite_pk` (the parser spells composite
-// primary keys `primary by`) and `no` / `action` (from an `on delete no action`
-// form the parser rejects — it accepts only cascade, set null, restrict). All
-// three were documented in the production rules and the prose as well, so a
-// reader following the reference got a parse error with no hint that the
-// document was wrong.
+// Three names it has carried do not exist: `composite_pk`, where the parser
+// spells composite primary keys `primary by`, and `no` / `action`, from an
+// `on delete no action` form the parser rejects — it takes cascade, set null
+// and restrict only.
 //
-// This is cheap to check and the document is otherwise unverifiable, which is
-// the combination that lets it rot.
+// Nothing else compiles the document, so a name in it that the lexer does not
+// know produces a parse error and no hint that the reference is wrong.
 func TestDocumentedReservedWordsExist(t *testing.T) {
 	b, err := os.ReadFile("../../docs/reference/dsl-grammar.md")
 	if err != nil {

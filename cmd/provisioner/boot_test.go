@@ -14,14 +14,12 @@ import (
 // best, and not at all from inside the package. cmd/signer and cmd/server are
 // split the same way.
 //
-// These are hermetic on purpose — no database, no cluster, no ATLANTIS_TEST_*
-// guard — because the tests that skip themselves are the tests nobody notices
-// have stopped running. cmd/signer's suite is hermetic for the same reason, and
-// it still went its entire life without CI compiling it once.
+// Hermetic: no database, no cluster, no ATLANTIS_TEST_* guard. A test that
+// skips itself reports the same as one that passes.
 
-// bootEnv is a complete configuration whose database is deliberately
-// unreachable: port 1 on loopback refuses immediately, so a test asserting on
-// the connection error is fast and does not depend on a timeout.
+// bootEnv is a complete configuration whose database is unreachable. Port 1 on
+// loopback refuses immediately, so a test asserting on the connection error
+// does not wait out a timeout.
 var bootEnv = map[string]string{
 	"CLOUD_PG_URL":     "postgres://nobody@127.0.0.1:1/nothing?sslmode=disable",
 	"CONSOLE_PG_URL":   "postgres://nobody@127.0.0.1:1/nothing?sslmode=disable",

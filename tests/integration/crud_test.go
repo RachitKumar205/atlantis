@@ -11,23 +11,20 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/runtime"
 )
 
-// TestCRUD_Account exercises the full life cycle of a representative
-// single-PK entity (Account) end-to-end:
+// TestCRUD_Account drives one single-PK entity end to end:
 //
-//	bring up containers → apply 0000+0001+0002 migrations → INSERT a row
-//	directly via the pool → assert the outbox row landed → wait for the
-//	worker to drain it → SELECT the row back.
+//	bring up containers → apply the migrations → INSERT through the pool →
+//	assert the outbox row landed → wait for the worker to drain it →
+//	SELECT the row back.
 //
-// We don't dial through gRPC here; the generated handlers are exercised
-// in their own unit tests (codegen `go/parser` validates syntactic
-// validity). The integration harness covers the *runtime tier* — pool +
-// cache + outbox + worker — against the migration the codegen emitted.
+// Nothing dials gRPC. The generated handlers have their own unit tests; this
+// covers the runtime tier — pool, cache, outbox, worker — against the migration
+// codegen emitted, which catches:
 //
-// This is the test that catches:
-//   - A migration that doesn't apply cleanly (bad SQL).
-//   - An outbox trigger that doesn't fire on INSERT.
-//   - A worker that doesn't drain the outbox.
-//   - A schema where a column type mismatches what the codegen expected.
+//   - a migration that does not apply cleanly
+//   - an outbox trigger that does not fire on INSERT
+//   - a worker that does not drain the outbox
+//   - a column type that does not match what codegen expected
 func TestCRUD_Account(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in -short mode")

@@ -7,9 +7,9 @@ import (
 )
 
 // proxySvc builds a Service wired for the trusted-proxy admin-plane gates.
-// Capability is not in play here — that is the interceptor's job — so these
-// tests isolate the transport restriction: whether a request that reached us
-// through an edge may exercise a given plane at all.
+// Capability is the interceptor's job, so these isolate the transport
+// restriction: whether a request that arrived through an edge may exercise a
+// given plane at all.
 func proxySvc(forwarded, mayApply, mayOperate bool) *Service {
 	return New(nil, Config{
 		AllowApplyMutation:        true,

@@ -14,28 +14,18 @@ import (
 // extensions the migration tree references, and returns a DSN addressing it.
 // It is dropped when the test ends.
 //
-// # Why tests want a private database rather than the shared one
+// Anything driving a real apply writes atlantis.ir_checkpoint, one row for the
+// whole deployment. Against a shared database the checkpoint keeps the test
+// entities and every later `tide plan` proposes dropping them.
 //
-// Anything that drives a real apply writes atlantis.ir_checkpoint, which is one
-// row for the whole deployment. Run against the developer's database, the
-// checkpoint is left holding test entities and every later `tide plan` proposes
-// dropping them.
-//
-// # Why this is a helper and not four copies
-//
-// It was four copies, and each one silently reused a stale database. They all
-// terminated the other backends and dropped in two separate statements —
-// pg_terminate_backend signals a backend, it does not wait for it to exit, so
-// under load the DROP that follows still saw connections and failed with
-// SQLSTATE 55006. Three of the four routed that through [Exec], which logs
-// rather than fails, so the CREATE that followed hit "already exists", also
-// logged, and the test then ran against the PREVIOUS test's database. What the
-// developer saw was a parse error naming a duplicate entity — two layers away
-// from the connection that had not finished draining.
-//
-// DROP DATABASE ... WITH (FORCE) is PostgreSQL doing the terminate and the drop
-// as one operation, which is the whole race. It has been available since
-// PostgreSQL 13; the pinned image is 17.
+// The drop is DROP DATABASE ... WITH (FORCE), one statement, available since
+// PostgreSQL 13 and the pinned image is 17. Terminating backends and dropping
+// separately reuses a stale database instead: pg_terminate_backend signals a
+// backend without waiting for it to exit, so under load the DROP still sees
+// connections and fails with SQLSTATE 55006. Through [Exec], which logs rather
+// than fails, the following CREATE hits "already exists" — also logged — and
+// the test runs against the previous test's database, surfacing as a parse
+// error naming a duplicate entity.
 func PrivateDatabase(t *testing.T, adminDSN, name string) string {
 	t.Helper()
 
@@ -83,12 +73,12 @@ func PrivateDatabase(t *testing.T, adminDSN, name string) string {
 
 // dropDatabase removes name, waiting out the cases FORCE does not cover.
 //
-// FORCE terminates ordinary backends, but it declines when the database holds a
+// FORCE terminates ordinary backends. It declines on a database holding a
 // prepared transaction or a logical replication slot, and it cannot stop a
-// connection opened after it took its snapshot. Neither is expected here, so the
-// retry is a backstop with a deadline rather than a routine path — and when the
-// deadline passes the error is returned, because a database left behind is
-// inherited by the next run.
+// connection opened after it took its snapshot.
+//
+// The retry runs to a 30s deadline, after which the error is returned: a
+// database left behind is inherited by the next run.
 func dropDatabase(conn *pgx.Conn, name string) error {
 	ctx := context.Background()
 	sql := `DROP DATABASE IF EXISTS ` + pgx.Identifier{name}.Sanitize() + ` WITH (FORCE)`

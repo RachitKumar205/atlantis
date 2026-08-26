@@ -403,8 +403,6 @@ callers:
 	}
 }
 
-// ---- test helpers ----
-
 // writeManifest writes content to a fresh temp file and returns its path.
 func writeManifest(t *testing.T, body string) string {
 	t.Helper()

@@ -83,8 +83,7 @@ var (
 	//
 	// A separate series from rows_swept_total rather than a conversion into it:
 	// the two are different units, and a chunk holds an unknown number of rows.
-	// Adding an estimate would put a number nobody measured onto a dashboard,
-	// which is the shape of defect this sweeper has already had twice.
+	// An estimate would put an unmeasured number on a dashboard.
 	//
 	// Added by zero on every sweep, for the same reason rows_swept_total is —
 	// see its comment. `rate() == 0` on a hypertable that should be aging out

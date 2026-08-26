@@ -20,35 +20,21 @@ import (
 
 // Automatic renewal.
 //
-// # When
+// Triggers at two thirds of the certificate's life, which is step-ca's rule and
+// the one `tide login` prints. Computed from the certificate's own NotBefore and
+// NotAfter, so changing certTTL moves the threshold with it.
 //
-// At two thirds of the certificate's life, which is step-ca's rule and the one
-// `tide login` prints. With a seven-day certificate that is around day five,
-// leaving two days of slack before anything stops working.
+// Runs once per process. A single `tide plan` dials twice, once to refresh the
+// cache and once to plan, and renewing per dial would issue two certificates
+// and two audit rows for one command.
 //
-// Computed from the certificate's own NotBefore and NotAfter rather than from a
-// constant, so shortening or lengthening certTTL moves the threshold with it and
-// there is no second place to keep in step.
+// No lock. Two tide processes in one repository can renew concurrently; both
+// get a valid certificate, both write by atomic rename, and the loser still
+// holds a certificate for the same caller, since migration 0032 stopped pinning
+// a caller to one certificate.
 //
-// # Once per process
-//
-// A single `tide plan` dials twice — once to refresh the cache, once to plan —
-// and `tide rollback` dials twice as well. Renewing per dial would mean two
-// certificates issued, two audit rows, and two supersessions for one command.
-//
-// # No lock, and that is not an oversight
-//
-// Two tide processes in one repository can renew concurrently. Both get a valid
-// certificate, both write by atomic rename, and one wins — which is harmless,
-// because atlantis no longer pins a caller to a single certificate and the loser
-// is still a certificate for the same caller. Before migration 0032 this needed
-// a lock; the same change that removed the lockout removed the race.
-//
-// # A failure is a warning
-//
-// The certificate is not expired yet, so refusing to run because a refresh
-// failed would turn a console outage into a caller outage. tide says so on
-// stderr and carries on with what it has.
+// A failure is a warning. The certificate has not expired, so refusing to run
+// would turn a console outage into a caller outage.
 var renewOnce sync.Once
 
 // renewalFraction is how much of a certificate's life must elapse before tide
@@ -57,12 +43,10 @@ const renewalFraction = 2.0 / 3.0
 
 // renewIfDue replaces store-held credentials that are close to expiry.
 //
-// Only credentials tide itself wrote. Anything supplied through tide.yaml or the
-// environment is somebody else's to manage: tide cannot write back to an
-// environment variable, so renewing that material would rotate the identity and
-// throw the replacement away — locking the caller out on its next run. That is
-// exactly the shape of the CI case, and it is why this is scoped rather than
-// unconditional.
+// Only credentials tide itself wrote. tide cannot write back to an environment
+// variable, so renewing material supplied that way rotates the identity and
+// discards the replacement, locking the caller out on its next run. That is the
+// CI case.
 func renewIfDue(c *tideConfig) {
 	renewOnce.Do(func() {
 		if c.storeDir == "" || c.storeEnrollURL == "" {

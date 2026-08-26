@@ -3,16 +3,10 @@ package console
 // adminClient dials the atlantis admin gRPC service over protobuf, wrapping
 // the generated AdminServiceClient with the connection it owns.
 //
-// This was the last of four hand-maintained copies of the admin wire shapes —
-// the others were the server, cmd/tide, and cmd/tidectl. Nothing checked that
-// they agreed, so a field added on one side and forgotten on another was a
-// silent mismatch that compiled. They are now all generated from
-// atlantis/admin/v1/admin.proto.
-//
-// Responses reach the browser as canonical proto JSON via clients/go/adminjson,
-// the same dialect tide and tidectl emit. See that package for what changes
-// versus the old hand-marshalled shape — notably 64-bit integers are quoted and
-// enums are their full names.
+// Wire shapes are generated from atlantis/admin/v1/admin.proto, shared with the
+// server, cmd/tide and cmd/tidectl. Responses reach the browser as canonical
+// proto JSON via clients/go/adminjson: 64-bit integers are quoted and enums are
+// their full names.
 
 import (
 	"crypto/tls"
@@ -30,33 +24,21 @@ type adminClient struct {
 	conn *grpc.ClientConn
 }
 
-// dialOrg opens an mTLS channel to one organisation's atlantis.
+// dialOrg opens an mTLS channel to one organisation's atlantis. Credentials
+// come from its registry row, not from disk; the key has just been decrypted by
+// internal/secrets and should not outlive the tls.Certificate it becomes.
 //
-// Credentials come from the organisation's registry row rather than from files
-// on disk, because there is now one set per organisation and they arrive while
-// the process is running. The certificate and CA are PEM text from the row; the
-// private key has just been decrypted by internal/secrets and should
-// not outlive this call by any longer than the tls.Certificate it becomes.
-//
-// The CA is the boundary this whole step rests on. Each organisation's atlantis
-// has its own trust root, so credentials issued for one do not chain at
-// another: the mismatch is refused inside the TLS handshake, before any
-// atlantis code runs and long before anything could return the wrong
-// organisation's data.
-//
-// ServerName is deliberately left unset, so verification uses the authority
-// derived from the endpoint — which means an organisation's server leaf must
-// carry a SAN matching the address in its row. That is a provisioning
-// requirement, and getting it wrong surfaces as a handshake failure naming the
-// host, which is the right place to find out.
+// The CA is the boundary: each organisation has its own trust root, so
+// credentials issued for one do not chain at another. ServerName is left unset,
+// so the server leaf must carry a SAN matching the address in its row.
 func dialOrg(creds *orgCredentials) (*adminClient, error) {
 	tlsCreds, err := buildOrgTLS(creds)
 	if err != nil {
 		return nil, err
 	}
-	// No ForceCodecV2: the default proto codec applies. That option set the
-	// content-subtype connection-wide, which is why a client could never mix
-	// the JSON and protobuf paths per-RPC and had to move all at once.
+	// No ForceCodecV2, so the default proto codec applies. That option sets the
+	// content-subtype connection-wide, which is why a client cannot mix codecs
+	// per RPC and has to move every call on a dial at once.
 	//
 	// grpc.NewClient does not connect here — the first RPC does. So building a
 	// channel for an organisation costs a key parse and nothing on the network,

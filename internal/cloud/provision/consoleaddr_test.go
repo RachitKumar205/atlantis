@@ -15,25 +15,21 @@ import (
 
 // Which address the console is given for an organisation.
 //
-// # The failure this exists to stop
-//
-// Status has always kept Endpoint and PublicEndpoint apart, and its comment says
-// they "differ once the console is inside the cluster and callers are not".
-// Nothing made them differ: both were the external host and a NodePort. That was
-// correct while the console ran on somebody's machine, and became wrong the day
-// it moved into the cluster — an in-cluster console asked cluster DNS for a name
-// that only resolves outside and every page failed with
+// Endpoint and PublicEndpoint differ once the console is inside the cluster and
+// callers are not. If both are the external host and a NodePort, an in-cluster
+// console asks cluster DNS for a name that only resolves outside and every page
+// fails with
 //
 //	dns: A record lookup error: lookup atl-dev.test on 10.96.0.10:53: server misbehaving
 //
 // which reads as a broken organisation and is really a question about where the
-// console happens to be running.
+// console is running.
 
 // svcWithNodePorts builds the two Services addresses() reads.
 //
-// The NodePorts matter: an address is deliberately withheld until one is
-// allocated, and a fixture without them would make every assertion below pass
-// against a Status full of empty strings.
+// The NodePorts matter: an address is withheld until one is allocated, so a
+// fixture without them would make every assertion below pass against a Status
+// full of empty strings.
 func svcWithNodePorts(ns string) []ctrlclient.Object {
 	return []ctrlclient.Object{
 		&corev1.Service{
@@ -95,18 +91,15 @@ func TestAnInClusterConsoleGetsServiceNames(t *testing.T) {
 	if st.PublicEndpoint != "atl-dev.test:31111" {
 		t.Errorf("PublicEndpoint is %q, want the node address", st.PublicEndpoint)
 	}
-	// And the two must actually differ, which is the whole point. Equal values
-	// are how this went unnoticed.
+	// The two must differ.
 	if st.Endpoint == st.PublicEndpoint {
 		t.Error("Endpoint and PublicEndpoint are identical; the console and a " +
 			"caller are being told to dial the same address from different networks")
 	}
 }
 
-// A console outside the cluster still gets the node address.
-//
-// `make dev-console-app` runs one. Switching this on unconditionally would have
-// fixed the deployed console by breaking the one on the developer's machine.
+// `make dev-console-app` runs a console outside the cluster. Handing out
+// Service names unconditionally breaks it.
 func TestAConsoleOutsideTheClusterGetsTheNodeAddress(t *testing.T) {
 	st := statusFor(t, false)
 
@@ -123,13 +116,10 @@ func TestAConsoleOutsideTheClusterGetsTheNodeAddress(t *testing.T) {
 	}
 }
 
-// The address the console is handed must be one the certificate covers.
-//
-// This is what makes the switch safe without reissuing anything, and it is not
-// obvious: the console leaves tls.Config.ServerName unset on purpose, so the
-// leaf has to match whatever address was dialled. A Service name absent from the
-// SANs would fail the handshake with a certificate error rather than a DNS one —
-// harder to trace, and only at the moment somebody opens a page.
+// The console leaves tls.Config.ServerName unset, so the leaf has to match
+// whatever address was dialled. A Service name absent from the SANs fails the
+// handshake with a certificate error rather than a DNS one, on the first page
+// load.
 func TestTheConsolesAddressIsCoveredByTheServerCertificate(t *testing.T) {
 	const ns = "org-acme"
 	k := newTestKube(t, svcWithNodePorts(ns)...)
@@ -179,8 +169,6 @@ func TestTheConsolesAddressIsCoveredByTheServerCertificate(t *testing.T) {
 	}
 }
 
-// No address is reported before its NodePort exists, in either mode.
-//
 // Readiness is the conjunction of these fields being non-empty. A Service name
 // resolves as soon as the Service exists, so letting the in-cluster form fill in
 // early would report an organisation ready while no caller could reach it.
@@ -225,19 +213,15 @@ func TestNoAddressIsReportedBeforeItsPortIsAllocated(t *testing.T) {
 	}
 }
 
-// The console is allowed through the tenant isolation rule, and nothing else is.
-//
-// # Why this needs its own policy
-//
-// The external-access rule admits "everything except the pod network", which was
-// how a caller was distinguished from another tenant's pod while the console was
-// also outside. Once the console moved into the cluster its traffic came from
-// inside that CIDR, so the rule excluded it — and a NetworkPolicy drops rather
-// than rejects, so the page loaded forever and then reported
+// The external-access rule admits "everything except the pod network", which is
+// how a caller is distinguished from another tenant's pod. An in-cluster
+// console's traffic comes from inside that CIDR, so that rule excludes it — and
+// a NetworkPolicy drops rather than rejects, so the page loads forever and then
+// reports
 //
 //	dial tcp 10.104.217.247:9090: i/o timeout
 //
-// after DNS had resolved perfectly well.
+// after DNS resolved.
 func TestTheConsoleIsAllowedThroughTheTenantIsolationRule(t *testing.T) {
 	k := newTestKube(t)
 	var console *networkingv1.NetworkPolicy
@@ -292,8 +276,6 @@ func TestTheConsoleIsAllowedThroughTheTenantIsolationRule(t *testing.T) {
 	}
 }
 
-// The isolation rule that keeps tenants apart is untouched.
-//
 // The console policy is additive. If external-access ever stopped excluding the
 // pod network, every tenant would reach every other tenant's admin port and the
 // console policy above would look like the thing that permitted it.

@@ -11,23 +11,18 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 )
 
-// ── The provisioning queue ──────────────────────────────────────────────────
+// The provisioning queue: what decides an organisation should have an atlantis,
+// and what records how that went. Migration 0005 holds the table.
 //
-// What decides an organisation should have an atlantis, and what remembers how
-// that went. Migration 0005 has the table and the reasoning; this is the Go
-// side of it.
+// It follows the shape of atlantis.jobs:
 //
-// The shape is atlantis.jobs', deliberately, because that is the lease queue
-// this codebase already runs and getting a second one subtly different helps
-// nobody. Two properties are load-bearing and neither is obvious:
+//   - The claim is one statement. A select followed by an update leaves a
+//     window in which another provisioner takes the same row; a CTE holding
+//     FOR UPDATE SKIP LOCKED and feeding the update does not.
 //
-//   - The claim is ONE statement. A select followed by an update has a window
-//     between them in which another provisioner can take the same row; a CTE
-//     holding FOR UPDATE SKIP LOCKED feeding the update has none.
-//
-//   - A lease, not a flag. What makes a row claimable again is claimed_until
-//     passing, so a provisioner that dies mid-work frees its row by doing
-//     nothing at all. There is no sweeper to write, and none to forget to run.
+//   - Claimability is a lease, not a flag. A row becomes claimable again when
+//     claimed_until passes, so a provisioner that dies mid-work frees its row
+//     without a sweeper.
 
 // ProvisioningState is where an organisation has got to.
 type ProvisioningState string
@@ -47,10 +42,8 @@ const (
 	// StateDeleted is soft-deleted: not serving, hidden from the organisation
 	// list, and restorable until purge_after passes.
 	//
-	// The namespace is UNTOUCHED in this state. That is the whole point — there
-	// are no database backups yet, so destroying on the button press would be
-	// unrecoverable in the strongest sense, and this window is the only safety
-	// net the system has.
+	// The namespace is untouched in this state. There are no database backups,
+	// so this window is the only recovery path.
 	StateDeleted ProvisioningState = "deleted"
 
 	// StatePurging is claimed by a provisioner that is tearing the organisation
@@ -58,17 +51,10 @@ const (
 	StatePurging ProvisioningState = "purging"
 )
 
-// Two guards fall out of these states rather than being written, and both are
-// load-bearing enough to say out loud.
-//
-// ReadyOrgs and Requeue below both filter on state = 'ready'. So a soft-deleted
+// ReadyOrgs and Requeue below both filter on state = 'ready', so a soft-deleted
 // organisation is invisible to the reconcile loop, which would otherwise
-// re-Ensure the namespace it is about to destroy — a bug that would present as
-// "the data came back", which is worse than either deleting or not deleting —
-// and invisible to Requeue, which would otherwise resurrect it.
-//
-// Neither needed a new condition. Both are asserted in the tests anyway,
-// precisely because nothing in either query mentions deletion.
+// re-Ensure the namespace it is about to destroy, and to Requeue, which would
+// otherwise resurrect it. Neither query mentions deletion; the tests assert it.
 
 // Provisioning is one organisation's queue row.
 type Provisioning struct {
@@ -76,9 +62,8 @@ type Provisioning struct {
 	State    ProvisioningState
 	Attempts int
 
-	// LastError is the message from the most recent failure, kept after a
-	// later success rather than cleared: "this took four goes and here is what
-	// was wrong" is worth more than a tidy row.
+	// LastError is the message from the most recent failure. A later success
+	// does not clear it, so the row still shows what went wrong on the way.
 	LastError string
 
 	ClaimedBy        string
@@ -100,29 +85,19 @@ type Claimed struct {
 
 // ErrNothingToProvision reports an empty queue.
 //
-// A sentinel rather than a nil result, because "nothing to do" and "something
-// went wrong" are answers a worker loop must tell apart, and a nil-check is the
-// easiest thing in the world to get the wrong way round.
+// A sentinel rather than a nil result, so a worker loop tells "nothing to do"
+// from "something went wrong".
 var ErrNothingToProvision = errors.New("nothing to provision")
 
 // CreateOrgWithOwner records an organisation, grants its first member, and
 // queues it for provisioning — all or none of them.
 //
-// # Why these three are one write
+// All three rows are written in one transaction. Without the queue row nothing
+// provisions the organisation and nothing reports it, because every status view
+// reads the queue; without the membership /authorize answers 403 to everyone.
 //
-// Each pair without the third is a state the product cannot recover from on its
-// own:
-//
-//   - An organisation with no queue row is provisioned by nobody, for ever, and
-//     nothing anywhere reports it. There is no row on any screen to show it,
-//     because the screen reads the queue.
-//   - An organisation with no member cannot be entered by anyone. /authorize
-//     checks membership before it checks anything else, so a perfectly
-//     provisioned organisation still answers 403.
-//
-// The owner must already have an account. That is the same constraint `cloud
-// member add` has, and the right one: an organisation owned by an address
-// nobody has verified is an organisation nobody can enter.
+// The owner must already have an account, the same constraint `cloud member
+// add` has.
 func (s *Store) CreateOrgWithOwner(
 	ctx context.Context, org, displayName, ownerUserID string, role identity.Role,
 ) error {
@@ -151,10 +126,9 @@ func (s *Store) CreateOrgWithOwner(
 			return err
 		}
 
-		// DO NOTHING, not DO UPDATE. Re-running this for an existing
-		// organisation must not reset a row that is already `ready` back to
-		// `pending` — that would re-provision a working organisation, and
-		// `cloud org create` is documented as safe to re-run.
+		// DO NOTHING, not DO UPDATE. `cloud org create` is documented as safe
+		// to re-run, and an update would reset a row that is already `ready`
+		// back to `pending`, re-provisioning a working organisation.
 		_, err := tx.Exec(ctx, `
 			INSERT INTO cloud.org_provisioning (org) VALUES ($1)
 			ON CONFLICT (org) DO NOTHING
@@ -166,25 +140,21 @@ func (s *Store) CreateOrgWithOwner(
 // ClaimForProvisioning takes the oldest claimable organisation and leases it.
 //
 // Returns ErrNothingToProvision when the queue is empty, which is the ordinary
-// case and not a failure.
+// case.
 //
-// # Reading the predicate
+// A row is claimable in three states:
 //
-// Three things make a row claimable, and the third is the one that is easy to
-// leave out:
-//
-//   - pending — queued, never attempted.
-//   - failed — attempted and did not finish, once its backoff has passed.
-//   - provisioning WITH AN EXPIRED LEASE — claimed by a provisioner that is no
-//     longer running. Omitting this state looks harmless and means a process
-//     that dies mid-work wedges its organisation for ever, because claiming is
-//     what put it in the state the predicate then refuses to look at.
+//   - 'pending': queued, never attempted.
+//   - 'failed': attempted, once its backoff has passed.
+//   - 'provisioning' under an expired lease, left by a provisioner that is no
+//     longer running. Without this state a process that dies mid-work wedges
+//     its organisation permanently, since claiming is what moved the row into
+//     the state the predicate would then skip.
 func (s *Store) ClaimForProvisioning(
 	ctx context.Context, claimedBy string, lease time.Duration,
 ) (*Claimed, error) {
 	if claimedBy == "" {
-		// Not load-bearing for correctness — the lease is — but an unnamed
-		// claim is one an operator staring at a wedged queue cannot trace.
+		// An unnamed claim is untraceable in a wedged queue.
 		return nil, errors.New("a claimant name is required")
 	}
 
@@ -220,8 +190,7 @@ func (s *Store) ClaimForProvisioning(
 // ExtendLease pushes a claim further out, for work that outlives one lease.
 //
 // Guarded on claimed_by, so a provisioner cannot extend a lease that has
-// already expired and been taken by somebody else — which is precisely when it
-// would most want to.
+// already expired and been taken by somebody else.
 func (s *Store) ExtendLease(ctx context.Context, org, claimedBy string, lease time.Duration) error {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE cloud.org_provisioning
@@ -262,17 +231,13 @@ func (s *Store) MarkProvisioned(ctx context.Context, org string) error {
 //
 // The caller computes the delay because the caller knows what failed: a missing
 // image is worth waiting longer over than a cluster that was briefly
-// unreachable. What this refuses to do is leave next_attempt_after unset —
-// atlantis.jobs does exactly that, writing last_error_at and never reading it,
-// and the result is a failed row eligible again on the very next tick. A
-// permanent fault then becomes a loop that provisions nothing and fills the log.
+// unreachable. next_attempt_after is always set — left unset, the row is
+// eligible again on the next tick and a permanent fault becomes a busy loop.
 func (s *Store) MarkProvisioningFailed(
 	ctx context.Context, org, reason string, retryIn time.Duration,
 ) error {
-	// Checked after conversion, not before. The query works in milliseconds, so
-	// anything under one rounds to zero and means "claimable immediately" —
-	// which is the busy loop this guard exists to prevent, arrived at through a
-	// value that looked positive.
+	// Checked after conversion. The query works in milliseconds, so a positive
+	// duration under one rounds to zero and means "claimable immediately".
 	if retryIn.Milliseconds() <= 0 {
 		return errors.New("a retry delay of at least a millisecond is required: " +
 			"without one a permanent failure becomes a busy loop")
@@ -314,14 +279,12 @@ func (s *Store) ProvisioningFor(ctx context.Context, org string) (*Provisioning,
 
 // ReadyOrgs lists organisations the queue believes are serving.
 //
-// The input to reconciliation. Nothing else reads this state: the claim
-// predicate deliberately ignores 'ready', so without a caller here an
-// organisation that stops existing stays ready for ever.
+// The input to reconciliation, and the only reader of state 'ready': the claim
+// predicate skips it, so without this an organisation that stopped existing
+// would stay ready permanently.
 //
-// Ordered by name rather than by time so a reconciliation pass that is
-// interrupted and repeated covers the same organisations in the same order,
-// which makes "it always gets stuck on the same one" a visible symptom rather
-// than a coincidence.
+// Ordered by name so a reconciliation pass that is interrupted and repeated
+// covers the same organisations in the same order.
 func (s *Store) ReadyOrgs(ctx context.Context) ([]string, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT org FROM cloud.org_provisioning
@@ -346,17 +309,13 @@ func (s *Store) ReadyOrgs(ctx context.Context) ([]string, error) {
 
 // Requeue puts a ready organisation back in the queue to be rebuilt.
 //
-// # Why this is guarded on the ready state
+// Guarded on state = 'ready'. Reconciliation reads a list, checks each
+// organisation against the cluster, then writes; between the read and the write
+// the organisation may have been deleted or claimed. Without the guard this
+// would stamp 'pending' over an active claim and two provisioners would build
+// the same organisation.
 //
-// Reconciliation reads a list, then checks each organisation against the
-// cluster, then writes. Between the read and the write an operator may have
-// deleted the organisation, or a provisioner may have claimed it after somebody
-// reset it by hand. Without `state = 'ready'` in the predicate this would
-// stamp 'pending' over a claim that is actively being worked, and two
-// provisioners would build the same organisation.
-//
-// attempts is deliberately not reset. A row that has been rebuilt four times is
-// telling you something, and clearing the count hides it.
+// attempts is not reset, so a row rebuilt repeatedly still shows its count.
 func (s *Store) Requeue(ctx context.Context, org, reason string) error {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE cloud.org_provisioning
@@ -369,9 +328,8 @@ func (s *Store) Requeue(ctx context.Context, org, reason string) error {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		// Not an error worth failing a reconciliation pass over: it means the
-		// row moved while we were looking at the cluster, which is the case the
-		// predicate exists to lose safely.
+		// The row moved between the read and here. Callers treat this
+		// ErrNotFound as a pass that lost a race, not as a failure.
 		return fmt.Errorf("%s: %w", org, ErrNotFound)
 	}
 	return nil

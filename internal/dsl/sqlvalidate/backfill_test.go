@@ -174,14 +174,10 @@ func TestBackfill_NullTestAndArithmetic_OK(t *testing.T) {
 // A backfill expression is spliced verbatim into a live UPDATE, so it is one of
 // the seven caller-authored SQL surfaces.
 //
-// The cases below are the ones that DISTINGUISH the exhaustive pass from the
-// hand-written walk it was added ahead of. An earlier version of this test used
-// BoolExpr, NullTest, CaseExpr, A_Expr, TypeCast and CoalesceExpr — all of which
-// the old walk already descended into, so every case passed against the code
-// this test was written to replace. It demonstrated nothing.
-//
-// Each shape here hosts a FuncCall in a node the old walk had no case for, and
-// each was measured accepted by it and rejected now.
+// Each case hosts a FuncCall in a node a typed walk has no case for, and each
+// is measured accepted by one and rejected by the exhaustive pass. BoolExpr,
+// NullTest, CaseExpr, A_Expr, TypeCast and CoalesceExpr separate nothing: a
+// typed walk descends into all six.
 func TestValidateBackfillExpression_RejectsCallsTheOldWalkMissed(t *testing.T) {
 	cols := map[string]bool{"status": true, "total": true}
 	const evil = `set_config('atlantis.tenant','victim',true)`
@@ -246,14 +242,13 @@ func TestValidateBackfillExpression_AcceptsOrdinary(t *testing.T) {
 // The expression is spliced into `SET <col> = <expr>` with no wrapper, so an
 // assignment-level comma ends its own assignment and starts another.
 //
-// The probe used to be `SELECT (<expr>)`, whose parentheses turned these into
-// row constructors and accepted them. Executed against a live table with the
-// real ChunkSQL, the first case below produced
+// A probe of `SELECT (<expr>)` accepts them: the parentheses turn a comma list
+// into a row constructor. Run against a live table with the real ChunkSQL, the
+// first case below produces
 //
 //	SET "nickname" = 'n', tenant = 'attacker', secret = 'clobbered'
 //
-// and rewrote the tenant discriminator of every row. A backfill that reads as
-// "populate the new nickname column" moved rows between tenants at apply time.
+// and rewrites the tenant discriminator of every row.
 func TestBackfill_AssignmentEscape_Rejected(t *testing.T) {
 	cols := map[string]bool{"email": true, "nickname": true, "tenant": true}
 	for _, expr := range []string{

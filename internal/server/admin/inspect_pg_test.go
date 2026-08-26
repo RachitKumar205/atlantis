@@ -44,11 +44,10 @@ func TestInspectSchemaWritesNothing(t *testing.T) {
 	ctx := context.Background()
 	createUnisolatedTable(t, svc)
 
-	// Adopt FIRST, so the tables inspect could damage actually have rows in
-	// them. Run against a fresh database this test is close to vacuous: there
-	// is no checkpoint row to update, no history to append to, and a probe
-	// write lands on nothing. Two deliberately planted writes survived this
-	// test before the adopt was added, for exactly that reason.
+	// Adopt first, so the tables inspect could damage hold rows. Against a
+	// fresh database this test is close to vacuous: no checkpoint row to
+	// update, no history to append to, and a probe write landing on nothing,
+	// so a planted write survives it.
 	if _, err := svc.AdoptBaseline(ctx, &adminpb.AdoptBaselineRequest{
 		Caller:    "adoptp",
 		Files:     depScopeFiles("doc.atl", adoptPartitionSchema),

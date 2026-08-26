@@ -1,34 +1,18 @@
 // Package atlemit renders a dsl.Entity back into .atl source text.
 //
-// # Why this is not internal/dsl/atlprint
+// The IR→.atl printer, used for onboarding: declarations describing an existing
+// database, as a starting point to review and commit. internal/dsl/atlprint
+// solves the opposite problem, splicing a change into .atl text that already
+// exists.
 //
-// atlprint splices a change into .atl text that already exists, preserving
-// every byte it did not touch. Its package doc opens by stating the constraint
-// this package exists to lift: "There is no IR→.atl printer." The two solve
-// opposite problems — atlprint keeps a human's formatting, this one has no
-// human formatting to keep — and merging them would blur a boundary that doc
-// defends at length.
+// A generated file understates the database. Introspection does not read
+// indexes, uniques or CHECK predicates back from the catalogue; FromPostgres
+// carries those over from the declaration it was given, which here is a stub
+// with none. Columns, types, keys, defaults and foreign keys are real, and a
+// missing `index by` line means "not discovered", not "not present".
 //
-// # What this is for
-//
-// Onboarding. Somebody points atlantis at a database they already have, and
-// atlantis writes the declarations describing it, so they are not asked to
-// hand-write a file per table before they can adopt. The output is a starting
-// point they review and commit, not an answer.
-//
-// # What it cannot tell them
-//
-// Introspection does not read indexes, uniques or CHECK predicates back from
-// the catalogue — FromPostgres carries those over from whatever declaration it
-// was given, and here it is given a stub with none. So a generated file
-// UNDERSTATES the database: the columns, types, keys, defaults and foreign
-// keys are real, and the absence of an `index by` line means "not discovered",
-// never "not present".
-//
-// That is why Entity carries a header comment saying so. A customer who
-// commits this file believing it complete will later add an index the database
-// already has, and atlantis will emit a CREATE INDEX that fails or duplicates.
-// Saying it in the file is cheaper than saying it in a postmortem.
+// Entity therefore emits a header comment saying so: a file committed as
+// complete produces a later CREATE INDEX for an index the database already has.
 package atlemit
 
 import (
@@ -163,39 +147,31 @@ func modifiers(f *dsl.Field) []string {
 // renderType turns a resolved type back into its .atl surface spelling, and
 // reports whether it could.
 //
-// # Why it refuses rather than guessing
+// Returning the introspected Postgres spelling for anything unrecognised emits
+// files that do not parse:
 //
-// The first version returned t.Name for anything it did not recognise, which
-// is the introspected Postgres spelling. Three of those do not parse, and an
-// adversarial review reproduced all three end to end:
+//   - float8 canonicalises to "double precision", two tokens. The parser takes
+//     one identifier, so `lat double precision not null` reads `double` as the
+//     type and `precision` as the next field's name. canonicalUDT returns the
+//     .atl spelling, since every other consumer compares that name as a raw
+//     string.
+//   - Arrays come back as `text[]`, the Postgres suffix form. The grammar is
+//     the prefix form `[]text`.
+//   - An unbounded varchar has no spelling where the parser demands varchar(N).
+//     `text` parses and is wrong: text and varchar are different Postgres
+//     types, so the generated file disagrees permanently with the catalogue it
+//     came from. The grammar accepts bare `varchar`.
 //
-//   - float8 canonicalised to "double precision", TWO tokens. The parser takes
-//     one identifier, so `lat double precision not null` parsed `double` as
-//     the type and `precision` as the next field's name. Fixed at the source —
-//     canonicalUDT now returns the .atl spelling — rather than translated
-//     here, because every OTHER consumer of that name compares it as a raw
-//     string too, and a translation here would have left them all broken.
-//   - Arrays came out `text[]`, the Postgres suffix form. The grammar is the
-//     prefix form `[]text`; the suffix spelling is a syntax error.
-//   - An unbounded varchar had no .atl spelling at all: the parser required
-//     varchar(N) unconditionally. The first fix here emitted `text`, which
-//     parses and is WRONG — text and varchar are different Postgres types, so
-//     the generated file disagreed with the catalogue it was generated from,
-//     permanently. The round trip caught it. The grammar now accepts bare
-//     `varchar`, so this renders the type the column actually has.
-//
-// Every one produced a file the customer could not commit, and the error named
-// a generated file rather than the table it came from. So this now emits only
-// spellings it can guarantee, and the caller drops what it cannot render and
-// says so. A missing column in a generated starting point is recoverable; a
-// file that will not parse is not usable at all.
+// A spelling this cannot guarantee returns false and the caller drops the
+// column, naming it. A missing column in a generated starting point is
+// recoverable; a file that does not parse is not.
 func renderType(t *dsl.FieldType) (string, bool) {
 	if t.Array {
 		if t.Elem == nil {
 			return "", false
 		}
-		// Prefix form. docs/reference/dsl-grammar.md maps []T (.atl) to T[]
-		// (Postgres); the first version emitted the right-hand column.
+		// Prefix form: docs/reference/dsl-grammar.md maps []T in .atl to T[] in
+		// Postgres.
 		elem, ok := renderType(t.Elem)
 		if !ok {
 			return "", false
@@ -217,11 +193,9 @@ func renderType(t *dsl.FieldType) (string, bool) {
 		if t.VecDim > 0 {
 			return "vector(" + strconv.Itoa(t.VecDim) + ")", true
 		}
-		// pgvector allows `vector` with no dimension; the .atl parser does
-		// not — parseType calls p.expect(TokLParen) for this name with no
-		// optional branch, exactly as it used to for varchar. Emitting bare
-		// `vector` produced a file that would not parse, which is the same
-		// defect this function's doc describes and one it still had.
+		// pgvector allows `vector` with no dimension. parseType calls
+		// p.expect(TokLParen) for this name with no optional branch, so bare
+		// `vector` does not parse.
 		return "", false
 	}
 	if toolchainHandles(t) {
@@ -233,25 +207,17 @@ func renderType(t *dsl.FieldType) (string, bool) {
 // toolchainHandles reports whether the whole pipeline can carry a column of
 // this type, not merely whether the parser accepts the spelling.
 //
-// # Why it asks coltype instead of consulting a list
+// It asks coltype rather than consulting a list. The parser accepts any
+// identifier as a type name, so a whitelist testing whether a spelling lexes as
+// one token admits everything; one such list drifted to hold six names the rest
+// of the toolchain does not implement — integer, bool, timestamp, time, json,
+// inet — each a spelling canonicalUDT hands back verbatim for an ordinary
+// legacy column.
 //
-// This was a hand-written whitelist, and the property it tested was the wrong
-// one. Its comment justified itself as guarding against "a name that lexes as
-// one token and still is not a type the parser accepts" — but the parser
-// accepts ANY identifier as a type name, so that test admits everything, and
-// the list quietly drifted to include six names the rest of the toolchain does
-// not implement: integer, bool, timestamp, time, json and inet. Every one is a
-// spelling canonicalUDT hands back verbatim for an ordinary legacy column.
-//
-// The consequence landed at the worst possible step. schema.SQLType renders
-// TIMESTAMP, JSON, INET and TIME — all valid Postgres — so parse, lower, plan
-// and apply were clean and the checkpoint was written. `tide codegen` was the
-// first thing to fail, with `unsupported type "timestamp" for proto`, after
-// the customer had committed the file and migrated the database.
-//
-// Asking coltype makes the question "can codegen emit this column" rather than
-// "does this name look like one token", and there is then one list rather than
-// two that drift.
+// That failure lands late. schema.SQLType renders TIMESTAMP, JSON, INET and
+// TIME, so parse, lower, plan and apply are clean and the checkpoint is
+// written; `tide codegen` is the first step to fail, with
+// `unsupported type "timestamp" for proto`.
 func toolchainHandles(t *dsl.FieldType) bool {
 	pt, err := coltype.ProtoType(*t)
 	if err != nil {
@@ -263,19 +229,14 @@ func toolchainHandles(t *dsl.FieldType) bool {
 	if coltype.GoType(*t, true) == "any" {
 		return false
 	}
-	// A well-known type is only usable if the .proto emitter imports its
+	// A well-known type is usable only if the .proto emitter imports its
 	// definition, and it imports timestamp.proto and nothing else.
 	//
-	// `interval` is the case that proved asking coltype alone is not enough.
-	// coltype.ProtoType returns google.protobuf.Duration with a nil error and
-	// GoType returns time.Duration, so an earlier version of this function
-	// declared the column — and the emitted .proto then failed protoc with
-	// `"google.protobuf.Duration" is not defined`, because duration.proto
-	// appears nowhere in internal/codegen. That put the failure at the worst
-	// step again: plan and apply clean, checkpoint written, `tide generate`
-	// dead. Which wire type interval should use is a product decision and is
-	// tracked separately; until it is settled, generation must not propose the
-	// column.
+	// coltype alone is not enough to see this. For `interval` ProtoType returns
+	// google.protobuf.Duration with a nil error and GoType returns
+	// time.Duration, and the emitted .proto then fails protoc with
+	// `"google.protobuf.Duration" is not defined` — duration.proto appears
+	// nowhere in internal/codegen.
 	if strings.HasPrefix(pt, wellKnownPrefix) && pt != wellKnownTimestamp {
 		return false
 	}

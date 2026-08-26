@@ -8,11 +8,8 @@ import (
 
 // Where an organisation's console lives, and what happens when nobody has said.
 
-// An organisation starts with no console and says so.
-//
-// The distinction matters at /authorize: "no such organisation" and "nothing
-// registered for it" send an operator to different places, and one error for
-// both would send them to the wrong one.
+// ErrNoConsole and ErrNotFound are different answers: "nothing registered for
+// it" and "no such organisation" send an operator to different places.
 func TestAnOrganisationStartsWithNoConsole(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -64,11 +61,9 @@ func TestRegisteringAConsoleIsReadableAndReplaceable(t *testing.T) {
 	}
 }
 
-// A trailing slash is trimmed before it is stored.
-//
 // The value is compared against a console's CLOUD_AUDIENCE for exact equality
 // and concatenated with a path to build a redirect, so a stray slash is every
-// sign-in for that organisation failing over a character nobody can see.
+// sign-in for that organisation failing.
 func TestAConsoleURLIsStoredWithoutATrailingSlash(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -88,10 +83,8 @@ func TestAConsoleURLIsStoredWithoutATrailingSlash(t *testing.T) {
 	}
 }
 
-// Setting a console for an organisation that does not exist is refused.
-//
-// Otherwise a typo in the name would write nothing, report success, and leave
-// an operator believing the organisation was provisioned.
+// A typo in the name would otherwise write nothing, report success, and leave
+// an operator believing the organisation was registered.
 func TestSettingAConsoleForANonexistentOrgIsRefused(t *testing.T) {
 	db := newTestStore(t)
 
@@ -101,13 +94,9 @@ func TestSettingAConsoleForANonexistentOrgIsRefused(t *testing.T) {
 	}
 }
 
-// The database refuses a console URL that is not absolute.
-//
-// Deliberately going around SetConsoleURL, the same way
-// TestTheDatabaseRefusesAnUnfoldedEmail goes around NormalizeEmail. The Go side
-// validates too, and this asserts the two agree — a relative value would
-// resolve against Cloud's own origin in a Location header and send a browser
-// carrying an assertion to a Cloud path.
+// Written straight to the table, around SetConsoleURL, so the CHECK constraint
+// is what is under test. A relative value resolves against Cloud's own origin
+// in a Location header, sending a browser carrying an assertion to a Cloud path.
 func TestTheDatabaseRefusesARelativeConsoleURL(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -132,7 +121,6 @@ func TestTheDatabaseRefusesARelativeConsoleURL(t *testing.T) {
 	}
 }
 
-// Deleting an organisation takes its console with it.
 func TestDeletingAnOrgRemovesItsConsole(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()

@@ -7,10 +7,10 @@ import (
 )
 
 // Row holds one row's column values, indexed parallel to TableDesc.Cols.
-// We deliberately keep it []any not a typed struct: codegen-emitted SQL
-// names columns by string, and the executor binds Go scan targets per
-// column at result time, so a positional slice indexed by ColIndex is
-// the simplest representation that supports both reads and updates.
+//
+// A []any rather than a typed struct: codegen-emitted SQL names columns by
+// string and the executor binds scan targets per column at result time, so a
+// positional slice indexed by ColIndex serves both reads and updates.
 //
 // Nil entries are NULL. The executor only stores int64 / string / bool /
 // time.Time / []byte / []float32; everything else is rejected at bind
@@ -94,10 +94,10 @@ func (t *Table) ReplaceRows(rm *RowMap) {
 // PKKey builds the canonical key for a row by reading the PK columns
 // out of the row in declared order. Used for both insert and lookup.
 //
-// Encoding: each PK value is stringified via fmt.Sprintf("%v") and
-// joined with "\x00". The zero byte can't appear in valid UTF-8
-// string columns, and our integer/bool stringifications don't produce
-// one either, so distinct PK tuples never collide.
+// Each PK value is stringified through fmt.Sprintf("%v") and joined with
+// "\x00". A zero byte cannot appear in a valid UTF-8 string column, and no
+// integer or bool stringification produces one, so distinct PK tuples never
+// collide.
 func (t *Table) PKKey(r Row) (string, error) {
 	parts := make([]string, len(t.Desc.PKCols))
 	for i, pk := range t.Desc.PKCols {
@@ -171,12 +171,12 @@ func (t *Table) Get(key string) Row {
 	return t.rows.Load().m[key]
 }
 
-// Update applies a column → new-value patch to the row at key.
-// Returns 0 if the key doesn't exist, 1 otherwise — matching the
-// CommandTag.RowsAffected() semantics generated code reads. Because
-// we treat stored rows as immutable, an in-place mutation would
-// corrupt any snapshot that captured this map. So we copy the row
-// before patching it.
+// Update applies a column-to-value patch to the row at key, returning 0 for an
+// absent key and 1 otherwise, which is the CommandTag.RowsAffected() generated
+// code reads.
+//
+// Stored rows are immutable: the row is copied before patching, since an
+// in-place mutation would reach every snapshot holding this map.
 func (t *Table) Update(key string, set map[string]any) int64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()

@@ -26,9 +26,8 @@ type GoFile struct {
 //	gen/go/server/consumer/account_server.go   package consumer
 //	gen/go/server/vendor/product_variant_server.go   package vendor
 //
-// Per-namespace packages fix the historical collision where
-// `consumer.CartItem` and `vendor.CartItem` both emitted to
-// `package server` with identical Go names.
+// Per-namespace packages keep `consumer.CartItem` and `vendor.CartItem` from
+// colliding as identical Go names in one `package server`.
 //
 // The emitted code depends on:
 //   - github.com/rachitkumar205/atlantis/internal/runtime          — Pool, Cache, Outbox interfaces + conv helpers
@@ -37,9 +36,8 @@ type GoFile struct {
 //   - standard library (context, database/sql, errors, fmt, time)
 //
 // SQL constants are baked into the file, one per query shape (Get / List /
-// BatchGet / Insert / Update / Delete / vector search). Per-entity
-// scan/bind helpers are inlined (no reflection on the hot path), matching
-// sqlc / Ent / Stripe-internal codegen practice.
+// BatchGet / Insert / Update / Delete / vector search). Per-entity scan and
+// bind helpers are inlined, so nothing reflects on the hot path.
 
 // EmittedGoServer is the collected Go source output of one server-emit pass.
 type EmittedGoServer struct {
@@ -50,12 +48,11 @@ type EmittedGoServer struct {
 // one top-level `gen/go/server/register.go` aggregator that mounts every
 // service onto a `*grpc.Server` in one call.
 //
-// Adding an entity to the schema → next `make codegen` picks it up, the
-// per-entity file appears under gen/go/server/<ns>/, and the aggregator
-// rewires automatically. Caller code (`cmd/server/main.go`) imports
-// `entityserver "github.com/rachitkumar205/atlantis/gen/go/server"` and calls
-// `entityserver.Register(srv, entityserver.ServerDeps{...})` — that line
-// never changes.
+// An entity added to the schema appears under gen/go/server/<ns>/ on the next
+// codegen run and the aggregator rewires itself. The serving binary imports
+// that aggregator by GenConfig.ServerPkgPrefix and calls
+// `Register(srv, ServerDeps{...})`, which does not change as entities come and
+// go.
 func EmitGoServer(newIR *dsl.IR, cfg GenConfig) ([]GoFile, error) {
 	if newIR == nil {
 		return nil, fmt.Errorf("EmitGoServer: newIR is required")
@@ -382,31 +379,16 @@ func pkEntityAccess(spec *pkSpec) string {
 	return strings.Join(parts, ", ")
 }
 
-// predicateGoName returns the Go type name for the typed predicate that
-// matches a DSL field type. Used by the back-compat Get/BatchGet shims
-// to build filter messages from caller-supplied PK values. Returns the
-// empty string for unfilterable types (vector, array, interval) — those
-// can never appear as a PK in the schema, so the shim emitters never
-// need to handle them.
-//
-// Keep in sync with predicateMessageForField (query_emit.go) and
-// predicateKindForField (query_emit_server.go) — adding a new filterable
-// type means a new arm in all three.
 // checkPKPredicates refuses an entity whose primary key has no predicate type,
 // before anything is written.
 //
 // emitPKEqFilter interpolates predicateGoName's result unguarded, so a PK type
-// with no arm produced `Value: &commonpb.{Op: &commonpb._Eq{...}}` — source
-// that is not valid Go. Nothing caught it: there is no format.Source anywhere
-// in this package, so the broken text was written to disk, and the caller's
-// generated package failed to compile with a syntax error pointing at
-// generated code rather than at their schema.
+// with no arm emits `Value: &commonpb.{Op: &commonpb._Eq{...}}`, which is not
+// valid Go. This package calls format.Source nowhere, so the broken text
+// reaches disk and the caller's generated package fails to compile.
 //
-// Reachable as soon as a float column can be declared, which it now can: a
-// legacy table with a float8 primary key is ordinary, and `tide inspect
-// --generate` will propose exactly that entity. Refusing here names the
-// column and the reason; the alternative is a syntax error in a file the
-// customer did not write.
+// A float8 primary key on a legacy table is ordinary, and `tide inspect
+// --generate` will propose exactly that entity.
 func checkPKPredicates(e *dsl.Entity) error {
 	for _, f := range schema.PKColumns(e) {
 		if predicateGoName(f.Type) == "" {
@@ -420,10 +402,14 @@ func checkPKPredicates(e *dsl.Entity) error {
 }
 
 // predicateGoName returns the predicate message for a filterable type, or ""
-// when there is none.
+// for vector, array and interval, which have none.
 //
 // Callers must treat "" as a refusal rather than interpolating it. See
 // checkPKPredicates.
+//
+// Keep in sync with predicateMessageForField (query_emit.go) and
+// predicateKindForField (query_emit_server.go): a new filterable type needs an
+// arm in all three.
 func predicateGoName(t dsl.FieldType) string {
 	if t.Array {
 		return ""
@@ -491,15 +477,13 @@ func emitPKEqFilter(b *strings.Builder, e *dsl.Entity, spec *pkSpec, varName str
 }
 
 func emitProtoGetMethod(b *strings.Builder, e *dsl.Entity, srv string, spec *pkSpec) {
-	// Get is a back-compat shim over QueryX so callers using the legacy
-	// RPC name still work while we migrate them to QueryX directly. The
-	// shim delegates the heavy lifting — typed-filter validation,
-	// soft-delete extras, partition-by injection, tier-2 cache — to
-	// QueryX, paying one extra hash + memcached round trip on cache
-	// misses compared to the previous direct-PG path. The trade is
-	// deliberate: one canonical read path means cache invariants are
-	// exercised uniformly, and removing this shim later is a single
-	// emitter delete.
+	// Get is a back-compat shim over QueryX, so callers using the legacy RPC
+	// name keep working while they migrate to QueryX directly. It delegates
+	// typed-filter validation, soft-delete extras, partition-by injection and
+	// the tier-2 cache to QueryX, paying one extra hash and memcached round
+	// trip on a cache miss against a direct-PG path. One canonical read path
+	// exercises the cache invariants uniformly, and removing this shim later is
+	// a single emitter delete.
 	fmt.Fprintf(b, `// Get%s implements pb.%sServiceServer.
 //
 // Deprecated: thin wrapper around Query%s for backwards compatibility. New
@@ -527,15 +511,12 @@ func (s *%s) Get%s(ctx context.Context, req *pb.Get%sRequest) (*pb.Get%sResponse
 }
 
 func emitProtoListMethod(b *strings.Builder, e *dsl.Entity, srv string) {
-	// List is a back-compat shim over QueryX. The shim deliberately
-	// rejects req.offset > 0 with InvalidArgument: offset-based
-	// pagination cannot be mapped onto QueryX's opaque keyset cursor
-	// without re-scanning to the offset boundary (slow) or silently
-	// returning unstable results under concurrent writes (wrong). This
-	// is the Google AIP-158 / Stripe / Supabase pattern: list APIs
-	// expose page_token only. Callers using offset must migrate to
-	// next_page_token, which the response now carries alongside the
-	// legacy total count.
+	// List is a back-compat shim over QueryX. It rejects req.offset > 0 with
+	// InvalidArgument: offset-based pagination cannot be mapped onto QueryX's
+	// opaque keyset cursor without re-scanning to the offset boundary, or
+	// returning unstable results under concurrent writes. AIP-158 has list APIs
+	// expose page_token only. Callers using offset migrate to next_page_token,
+	// which the response carries alongside the legacy total count.
 	//
 	// The total field stays populated when QueryX returned a count
 	// (limit <= 100). For limit > 100 the count is omitted and total is

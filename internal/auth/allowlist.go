@@ -1,17 +1,19 @@
-// Package auth implements caller-identity enforcement for the atlantis
-// gRPC surface. The allowlist is the union of two sources, loaded on
-// startup and refreshed on a periodic ticker:
+// Package auth implements caller-identity enforcement for the atlantis gRPC
+// surface. The allowlist is atlantis.active_callers, loaded at startup and
+// refreshed on a ticker. That view (migration 0033) is:
 //
-//   - atlantis.caller_registrations — callers that have applied schema
-//     (a row appears on their first admin.ApplyMigration).
-//   - atlantis.caller_identities — callers an operator pre-registered
-//     (console / RegisterCaller), including read-only runtime CNs that
-//     only ever open a typed client connection and never apply schema.
+//   - atlantis.caller_registrations — callers that have applied schema; a row
+//     appears on their first admin.ApplyMigration
+//   - UNION atlantis.caller_identities — callers an operator pre-registered
+//     through RegisterCaller, read-only runtime CNs among them
+//   - EXCEPT the caller_identities rows carrying a revoked_at
 //
-// A caller becomes callable within one refresh interval of landing in
-// either table. This gate only decides whether a caller may open the
-// gRPC surface at all; mutation is gated separately
-// (a CAPABILITY_SCHEMA_APPLY grant in caller_capabilities).
+// A caller becomes callable within one refresh interval of landing in either
+// table, and stops within one of being revoked.
+//
+// This gate decides only whether a caller may open the gRPC surface. Mutation
+// is gated separately, by a CAPABILITY_SCHEMA_APPLY grant in
+// caller_capabilities.
 package auth
 
 import (
@@ -24,11 +26,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// CallerAllowlist is a snapshot of the distinct callers known to the
-// server — the union of atlantis.caller_registrations and
-// atlantis.caller_identities. The auth interceptor checks every
-// non-exempt RPC against this set. Reload swaps the set atomically;
-// readers never see a partial state.
+// CallerAllowlist is a snapshot of atlantis.active_callers. The auth
+// interceptor checks every non-exempt RPC against this set. Reload swaps it
+// atomically, so a reader never sees a partial state.
 type CallerAllowlist struct {
 	pool *pgxpool.Pool
 	log  *slog.Logger
@@ -55,12 +55,9 @@ func New(pool *pgxpool.Pool, log *slog.Logger) *CallerAllowlist {
 // in atomically. Errors propagate so the caller can decide whether to abort
 // startup or log and continue with the previous snapshot.
 //
-// The set is caller_registrations (applied schema) UNION caller_identities
-// (operator pre-registered, including read-only runtime CNs), minus anything
-// revoked. That subtraction is inside atlantis.active_callers rather than
-// written here — see migration 0033. Reading the two tables directly is what
-// this used to do, and it would readmit a revoked caller on its next `tide
-// apply`, because that writes caller_registrations.
+// The revocation subtraction lives in atlantis.active_callers, not here.
+// Reading the two tables directly readmits a revoked caller on its next
+// `tide apply`, since that writes caller_registrations.
 func (a *CallerAllowlist) Reload(ctx context.Context) error {
 	rows, err := a.pool.Query(ctx, `SELECT caller FROM atlantis.active_callers`)
 	if err != nil {

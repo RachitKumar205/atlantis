@@ -10,7 +10,7 @@
 -- migrations/infra/0024 and 0025 for the reasoning behind each of those
 -- choices; the notes below cover only what differs here.
 
--- ── The registry ────────────────────────────────────────────────────────────
+-- The registry.
 --
 -- Deliberately NOT org-scoped: it is the list of organisations, so a policy
 -- keyed on the organisation would make it unreadable by design. Nothing
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS console.orgs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- ── The discriminator ───────────────────────────────────────────────────────
+-- The discriminator.
 --
 -- A transaction-local GUC, read through a function.
 --
@@ -76,7 +76,7 @@ $$;
 GRANT EXECUTE ON FUNCTION console.current_org() TO PUBLIC;
 GRANT EXECUTE ON FUNCTION console.set_org(text) TO PUBLIC;
 
--- ── The boundary on console.audit_log ───────────────────────────────────────
+-- The boundary on console.audit_log.
 
 ALTER TABLE console.audit_log ADD COLUMN IF NOT EXISTS org TEXT NOT NULL DEFAULT '';
 
@@ -153,7 +153,7 @@ CREATE POLICY audit_log_default_access ON console.audit_log
 
 CREATE INDEX IF NOT EXISTS console_audit_log_org_idx ON console.audit_log (org);
 
--- ── The partitions ──────────────────────────────────────────────────────────
+-- The partitions.
 --
 -- Measured on PostgreSQL 17, because this is not what one would assume: a
 -- child created by CREATE TABLE … PARTITION OF inherits NOTHING. Not

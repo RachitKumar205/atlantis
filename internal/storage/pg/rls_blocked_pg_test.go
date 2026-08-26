@@ -13,23 +13,18 @@ import (
 
 // Which tables would hide their rows from a statement that binds no tenant.
 //
-// # Why this needs a restricted role
-//
-// The question is about the TABLE and the ROLE together. Run as a superuser —
-// which is what the `atlantis` role is on a development database — the answer
-// is always "none", because row-level security does not apply. A test that
-// connected as the default role would pass with the whole function deleted.
-//
-// # What this is for
+// The question is about the table and the role together, so this runs as a
+// restricted role. A superuser — which is what the `atlantis` role is on a
+// development database — is never blocked, so the answer is always "none" and
+// the test passes with the whole function deleted.
 //
 // The backfill worker issues a chunked UPDATE with no tenant bound. Where the
 // answer here is "blocked", that UPDATE matches zero rows, reports success, and
 // the follow-on SET NOT NULL fails on rows nothing ever touched.
 //
-// A first version of that guard asked the SCHEMA instead — `partition by`
-// declared or not — and a review executed three cases where the two answers
-// disagree. Cases 2 and 3 below are two of them; case 4 is the mirror the
-// schema test missed entirely.
+// Asking the schema instead — `partition by` declared or not — disagrees with
+// the role-and-table answer in three cases. Cases 2 and 3 below are two of
+// them; case 4 is the mirror.
 func TestRLSBlockedTables(t *testing.T) {
 	dsn := os.Getenv("ATLANTIS_TEST_PG")
 	if dsn == "" {
@@ -90,10 +85,10 @@ GRANT SELECT, UPDATE ON atlantis.rlsb_forced, atlantis.rlsb_nopolicy,
                         atlantis.rlsb_noforce, atlantis.rlsb_orphan TO rlsb_probe;`)
 		return err
 	})
-	// The probing role must OWN the tables, which is the production shape:
-	// atlantis creates the tables it serves and connects as their owner. It is
-	// also what makes FORCE load-bearing — without ownership, case 3 would be
-	// indistinguishable from case 1.
+	// The probing role owns the tables, which is the production shape: atlantis
+	// creates the tables it serves and connects as their owner. Ownership is
+	// also what FORCE acts on — without it, case 3 is indistinguishable from
+	// case 1.
 	for _, tbl := range []string{"rlsb_forced", "rlsb_nopolicy", "rlsb_noforce", "rlsb_orphan"} {
 		if _, err := admin.Exec(ctx, `ALTER TABLE atlantis.`+tbl+` OWNER TO rlsb_probe`); err != nil {
 			t.Fatalf("hand %s to the probing role: %v", tbl, err)

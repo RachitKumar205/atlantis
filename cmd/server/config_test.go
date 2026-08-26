@@ -153,24 +153,18 @@ func TestSplitCSV(t *testing.T) {
 
 // Nothing is exempt from cert binding unless an operator says so.
 //
-// # Why this is pinned rather than left to the code
+// A default of "atlantis-console" made sense while binding meant a stored leaf
+// fingerprint the console had none of. Migration 0032 deleted the fingerprints,
+// so that default now exempts the console from the only question the check
+// still asks: does this caller have an identity row.
 //
-// This defaulted to "atlantis-console" for the whole of the cert-binding
-// rollout, and the reason it did was real at the time: binding meant a stored
-// leaf fingerprint, and the console had none. Migration 0032 deleted the
-// fingerprints, which left the default exempting the console from the only
-// question the check still asks — does this caller have an identity row.
+// The result is not a weaker check but no revocation. RevokeCaller deletes the
+// row and the interceptor refuses within five seconds; an exempt caller skips
+// that and cannot be cut off. The console holds an admin credential for every
+// organisation.
 //
-// The consequence is not a weaker check, it is no revocation. RevokeCaller
-// deletes the row and the interceptor refuses within five seconds; an exempt
-// caller skips that, so it cannot be cut off at all. The console holds an admin
-// credential for every organisation, which makes it the worst caller to have
-// been holding that exemption.
-//
-// Restoring the default is a one-word edit that breaks nothing and is caught by
-// nothing else in the tree — there was no test here before, so removing the
-// default passed on the first run and would have passed just as well if it had
-// been left in place. That is what this exists to stop.
+// Reintroducing the default is a one-word edit that nothing else in the tree
+// catches.
 func TestNoCallerIsExemptFromCertBindingByDefault(t *testing.T) {
 	setBootEnv(t)
 	c, err := loadConfig()

@@ -1,18 +1,16 @@
 // Package authz enforces the capability each Admin RPC declares in the proto.
 //
-// The previous design placed authorization inside method bodies, and because
-// the admin prefix is exempt from the caller allowlist, a method whose author
-// forgot the check was reachable by anyone who could open a connection. The
-// checks that did exist also disagreed with each other: one of them fell back
-// to a global wildcard whenever an env var was unset, which was the shipped
-// default, so every mutation-capable caller was silently also an operator.
+// The admin prefix is exempt from the caller allowlist, so authorization
+// written inside a method body leaves any method whose author forgot the check
+// reachable by anyone who can open a connection. Per-method checks also
+// disagree with each other: one falling back to a global wildcard when an env
+// var is unset — the shipped default — makes every mutation-capable caller an
+// operator too.
 //
-// Both problems come from the same place — authorization was a thing you had
-// to remember. Here it is a thing you cannot omit. Requirements are read from
-// the service descriptor, so they live in the same file that defines the
-// method; a single interceptor applies them to every call; and BuildPolicy
-// fails when any method declares nothing, which callers wire into startup so
-// the server refuses to boot rather than serving an open endpoint.
+// Requirements are read from the service descriptor, so they live in the file
+// that defines the method; one interceptor applies them to every call; and
+// BuildPolicy fails when any method declares nothing, which callers wire into
+// startup so the server refuses to boot rather than serving an open endpoint.
 package authz
 
 import (
@@ -37,12 +35,9 @@ import (
 type Policy struct {
 	// prefixes are the "/<service full name>/" strings this policy governs.
 	//
-	// It stays a slice although only one entry is used today. During the proto
-	// migration the Admin service answered on two paths at once and both had to
-	// be governed — enforcing on only the path that was not in production would
-	// have been authorization theatre. That is the shape a future dual-serve
-	// window would take again, and BuildPolicy's alsoGovern parameter is how it
-	// gets expressed.
+	// A slice although one entry is used today: a service answering on two
+	// paths at once needs both governed, or the ungoverned path is an open
+	// endpoint. BuildPolicy's alsoGovern parameter expresses that.
 	prefixes []string
 	byName   map[string]adminpb.Capability
 }
@@ -63,16 +58,15 @@ func (p *Policy) requirement(fullMethod string) (adminpb.Capability, bool, bool)
 // BuildPolicy reads every method's required_capability from the descriptor.
 //
 // alsoGovern lists additional "/<service>/" prefixes this policy answers for,
-// beyond the descriptor's own. It exists for the Admin service's migration —
-// see AdminPolicy — and is a parameter rather than a constant so that building
-// a policy for some other service does not silently claim a path that service
-// does not serve, denying every call on it.
+// beyond the descriptor's own. A parameter rather than a constant, so building
+// a policy for another service does not claim a path that service does not
+// serve and deny every call on it.
 //
 // A method that declares nothing is an error, not a default: the zero value of
-// the enum is CAPABILITY_UNSPECIFIED precisely so that omitting the option is
-// indistinguishable from writing it wrong, and both stop the server. Callers
-// are expected to treat the error as fatal at startup — that is the whole
-// mechanism, and downgrading it to a warning restores the bug this replaces.
+// the enum is CAPABILITY_UNSPECIFIED, so omitting the option is
+// indistinguishable from writing it wrong and both stop the server. Callers
+// treat the error as fatal at startup; downgraded to a warning it serves the
+// undeclared method.
 //
 // The error names every offending method rather than the first, so adding a
 // batch of RPCs surfaces all the missing declarations in one run.
@@ -159,9 +153,8 @@ func NewSet(caps ...adminpb.Capability) Set {
 }
 
 // Has reports whether the set contains c. There is no hierarchy: SCHEMA_APPLY
-// does not imply SCHEMA_READ. Implication would mean the grant recorded on an
-// identity differs from the access it confers, and the difference is exactly
-// where cross-caller reads hid last time.
+// does not imply SCHEMA_READ. Implication would make the grant recorded on an
+// identity differ from the access it confers.
 func (s Set) Has(c adminpb.Capability) bool {
 	_, ok := s[c]
 	return ok
@@ -181,15 +174,16 @@ func (f GrantsFunc) For(ctx context.Context) (Set, error) { return f(ctx) }
 
 // UnaryInterceptor enforces the policy on every call.
 //
-// Three outcomes are deliberate. A method outside this service's prefix passes
-// through untouched, because the interceptor is installed server-wide and the
-// generated entity services have their own authorization. A method inside the
-// prefix that is absent from the policy is denied: BuildPolicy already
-// guarantees this cannot happen, so reaching it means the server's registered
-// methods and its descriptor have diverged, and failing closed on that is
-// worth the dead branch. And a grant lookup that errors denies rather than
-// falling back to any default — an unreachable identity store must not widen
-// access.
+// A method outside this service's prefix passes through untouched: the
+// interceptor is installed server-wide and the generated entity services carry
+// their own authorization.
+//
+// A method inside the prefix and absent from the policy is denied. BuildPolicy
+// makes that unreachable, so arriving here means the server's registered
+// methods and its descriptor have diverged.
+//
+// A grant lookup that errors denies rather than falling back to a default: an
+// unreachable identity store must not widen access.
 func (p *Policy) UnaryInterceptor(grants Grants) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		required, known, governed := p.requirement(info.FullMethod)

@@ -9,11 +9,10 @@ import (
 
 // The server must actually register its built-in jobs.
 //
-// jobs.Builtins() lists them and jobs/builtins_test.go proves the list is
-// complete, but a complete list nobody consults is exactly the failure it was
-// written about: RegisterSweeper's own doc comment said "Called from
-// cmd/server/main.go" and no such call existed. The list and the call site are
-// two separate things to forget, so both are pinned.
+// jobs.Builtins() lists them and jobs/builtins_test.go covers that list being
+// complete. A complete list nothing calls is still no registration:
+// RegisterSweeper's doc comment named cmd/server/main.go as its caller while no
+// such call existed. Both are pinned.
 //
 // Read from source because there is nothing else to read. Whether main()
 // registered its jobs is not observable without booting a server against a

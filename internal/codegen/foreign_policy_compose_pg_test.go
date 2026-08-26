@@ -15,18 +15,14 @@ import (
 // A foreign permissive policy must COMPOSE with tenant isolation, not defeat it
 // and not block the migration.
 //
-// # This test used to assert the opposite
+// With the boundary as a PERMISSIVE policy, PostgreSQL ORs permissive policies,
+// so a table carrying `USING (true)` applies the migration cleanly and isolates
+// nothing. The only defence available then is to abort the migration whenever
+// another permissive policy exists.
 //
-// It was TestMigrationRefusesWhenAnotherPermissivePolicyExists, and it was
-// right about the old design. The boundary was a PERMISSIVE policy, PostgreSQL
-// ORs permissive policies, so a table carrying `USING (true)` applied the
-// migration cleanly and isolated nothing — a review executed exactly that and
-// read every tenant's rows. The only available defence was emitForeignPolicyGuard,
-// which aborted the migration whenever another permissive policy existed.
-//
-// That defence made user-defined access control impossible. A permissive policy
-// is what an RBAC grant IS, so the first one anyone wrote stopped `tide apply`
-// working on that table — and the refusal's advice, make them RESTRICTIVE,
+// That defence makes user-defined access control impossible. A permissive
+// policy is what an RBAC grant is, so the first one anyone writes stops `tide
+// apply` working on that table — and the advice to make them RESTRICTIVE
 // inverts the logic, because restrictive policies AND and cannot express
 // "admins OR auditors may read this".
 //
@@ -103,7 +99,7 @@ CREATE POLICY legacy_app_access ON atlantis.pguard_doc FOR ALL USING (true) WITH
 			"grant must not stop `tide apply` working on their table.\n%s", err, scripts.Up)
 	}
 
-	// A restricted role that OWNS the table, so FORCE is load-bearing. As a
+	// A restricted role that owns the table, so FORCE applies to it. As a
 	// superuser every policy here is inert and this passes with the boundary
 	// deleted.
 	pgcatalog.Do(t, dsn, func(conn *pgx.Conn) error {

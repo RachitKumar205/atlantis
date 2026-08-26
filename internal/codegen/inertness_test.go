@@ -14,12 +14,10 @@ import (
 // Proves, rather than argues, which DSL clauses have no effect on anything
 // atlantis generates.
 //
-// A clause that parses and validates while producing no output is the worst
-// failure mode this grammar has, and it is worse for an agent than for a
-// person: the author writes a statement, gets no warning, and is rewarded with
-// a clean plan. Greping for a field name cannot settle it — `Cache.Invalidate`
-// has readers, and every one of them is either the differ comparing it or an
-// unrelated method of the same name.
+// A clause that parses and validates while producing no output gives its
+// author no warning and a clean plan. Grepping for a field name cannot settle
+// it: `Cache.Invalidate` has readers, and every one is either the differ
+// comparing it or an unrelated method of the same name.
 //
 // So the test runs every emitter over two IRs differing only in the clause and
 // compares the bytes. Identical output means the clause is inert, whatever the

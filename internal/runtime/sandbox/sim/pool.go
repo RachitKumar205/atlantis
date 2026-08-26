@@ -393,9 +393,8 @@ type simRow struct {
 
 func (r *simRow) Scan(dest ...any) error { return scanProjected(r.desc, r.projs, r.row, dest) }
 
-// returningRow is a single-row result for INSERT ... RETURNING. The
-// RETURNING list is `[]string` (column names) so we reuse the simpler
-// scanInto path.
+// returningRow is a single-row result for INSERT ... RETURNING. Its RETURNING
+// list is column names, so it takes the simpler scanInto path.
 type returningRow struct {
 	cols []string
 	row  Row

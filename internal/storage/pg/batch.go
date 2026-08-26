@@ -11,10 +11,9 @@ import (
 
 // Batch wraps pgx.Batch with a small ergonomic shell.
 //
-// Why this exists: per-row inserts in bulk paths (e.g. 5k-row imports
-// issuing 5k round-trips) need a single batched round trip. Generated
-// batch-insert handlers use this wrapper so they never have to know
-// whether the underlying driver is pgx, some future pq, or a fake in tests.
+// A bulk path doing per-row inserts issues one round trip per row: a 5k-row
+// import costs 5k of them. Generated batch-insert handlers queue through this
+// wrapper and so never name pgx.
 //
 // Usage:
 //
@@ -40,13 +39,12 @@ func (b *Batch) Queue(sql string, args ...any) { b.inner.Queue(sql, args...) }
 // decide between SendBatch and a single multi-row INSERT.
 func (b *Batch) Len() int { return b.inner.Len() }
 
-// SendBatch dispatches a batch on the pool. It iterates results and drains
-// any error. Callers that need the per-statement Result (e.g. RETURNING
-// values) should reach for SendBatchResults instead.
+// SendBatch dispatches a batch on the pool, iterating results and returning the
+// first error. A caller needing the per-statement Result — RETURNING values —
+// calls SendBatchResults.
 //
-// The default behavior is fire-and-check: every queued Exec or Query must
-// succeed; the first error short-circuits the rest. Generated code uses this
-// for bulk inserts where the caller only needs "all-or-nothing" semantics.
+// Every queued Exec or Query must succeed; the first error short-circuits the
+// rest.
 func (p *Pool) SendBatch(ctx context.Context, b *Batch) error {
 	if b == nil || b.Len() == 0 {
 		return nil
@@ -61,32 +59,28 @@ func (p *Pool) SendBatch(ctx context.Context, b *Batch) error {
 	return nil
 }
 
-// SendBatchResults gives the caller raw access to the pgx.BatchResults so
-// they can pull RETURNING values one statement at a time. Use only when you
-// genuinely need each statement's response — most code wants SendBatch.
+// SendBatchResults returns the raw pgx.BatchResults, so RETURNING values can be
+// pulled one statement at a time. The caller closes it.
 func (p *Pool) SendBatchResults(ctx context.Context, b *Batch) pgx.BatchResults {
 	return p.pool.SendBatch(ctx, b.inner)
 }
 
-// RunInTx executes fn inside a transaction. It begins, runs fn, and commits
-// if fn returns nil; otherwise it rolls back. The same context is threaded
-// through so query deadlines flow uniformly.
+// RunInTx executes fn inside a transaction, committing if fn returns nil and
+// rolling back otherwise. ctx is threaded through, so one deadline covers the
+// whole transaction.
 //
-// This matches the pattern the generated server handlers use today, but
-// centralizes the begin/defer/commit dance so future callers (e.g., the
-// outbox sweeper, integration tests) don't reinvent it.
+// Generated code enqueues cache invalidation inside fn through
+// runtime.Outbox.Enqueue, so the invalidation row commits with the data write.
 //
-// Invariant the codegen relies on: cache invalidation work happens INSIDE
-// the tx (via runtime.Outbox.Enqueue) so the invalidation outbox row is
-// written atomically with the data write. Anything that needs to run AFTER
-// commit must do so outside fn — RunInTx itself does no post-commit work.
+// RunInTx does no post-commit work; anything that has to run after the commit
+// runs outside fn.
 func (p *Pool) RunInTx(ctx context.Context, fn func(ctx context.Context, tx runtime.Tx) error) error {
 	tx, err := p.BeginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
-	// Best-effort rollback: pgx returns ErrTxClosed after Commit; we discard
-	// that specific error because it's expected.
+	// Best-effort rollback. pgx returns ErrTxClosed on a transaction that
+	// already committed, which is the ordinary path here.
 	defer func() {
 		_ = tx.Rollback(ctx)
 	}()

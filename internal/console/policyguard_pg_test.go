@@ -12,9 +12,8 @@ import (
 // the ways it can be broken and require the check to say so.
 //
 // They run against the fixture's real, migrated database and manipulate the
-// catalogue directly through the superuser pool — the point is what Postgres
-// ended up with, which is exactly what reading the migration files cannot tell
-// you.
+// catalogue directly through the superuser pool, so what is asserted is what
+// Postgres ended up with rather than what the migration files say.
 
 func TestPolicyGuardAcceptsACorrectlyIsolatedSchema(t *testing.T) {
 	f := newConsoleFixture(t)

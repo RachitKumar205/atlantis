@@ -209,19 +209,18 @@ SELECT coalesce(string_agg(body, ','), '(none)') FROM atlantis.rlst_doc;`); got 
 	// re-verified on 17.8. So one attack below DOES breach when the database is
 	// the only thing between it and the data.
 	//
-	// It is asserted as a breach rather than deleted. A suite that only lists
-	// what the database stops reads as though the database stops everything,
-	// and the layer that actually stops this one — sqlvalidate, see
-	// TestValidateCustomQuery_RejectsSetConfig — would then have nothing here
-	// pointing at it. If PostgreSQL ever gains a way to lock the parameter,
-	// this case fails and whoever sees it can move the defence down a layer.
+	// It is asserted as a breach rather than deleted. A suite listing only what
+	// the database stops reads as though the database stops everything, with
+	// nothing pointing at the layer that does stop this one — sqlvalidate, see
+	// TestValidateCustomQuery_RejectsSetConfig. If PostgreSQL ever gains a way
+	// to lock the parameter, this case fails.
 	for _, tc := range []struct {
 		name        string
 		script      string
 		wantRead    string
 		wantRefusal string
 		// wantDBLeak names the layer that stops an attack the database does
-		// not. Set only where the breach is real and deliberate.
+		// not. Set only where the database really does admit the read.
 		wantDBLeak string
 	}{
 		{
@@ -359,29 +358,24 @@ INSERT INTO atlantis.rlst_doc VALUES (99,'victim','planted');`)
 // Demonstrates that a GUC-based policy leaks when nothing but PostgreSQL
 // stands behind it.
 //
-// It builds its OWN policy on its OWN parameter — atlantis.partition, USING
+// It builds its own policy on its own parameter — atlantis.partition, USING
 // only, never touching atlantis.current_partition() — so it is a statement
-// about PostgreSQL, not about the shipped mechanism. That distinction was got
-// wrong once already: an earlier version of this comment claimed the test
-// executed a property of production, and a reviewer disproved it by replacing
-// atlantis.current_partition() with a constant, neutering the real mechanism
-// entirely, while this test carried on passing.
+// about PostgreSQL and not about the shipped mechanism. Replacing
+// atlantis.current_partition() with a constant leaves this test passing.
 //
-// What it does establish is the premise everything else rests on: PostgreSQL
-// alone does not stop caller SQL from rebinding a custom parameter, and cannot
-// be made to — a custom GUC is PGC_USERSET and `REVOKE SET ON PARAMETER` does
-// not create so much as an ACL row for one.
+// The premise it establishes: PostgreSQL alone does not stop caller SQL from
+// rebinding a custom parameter, and cannot be made to. A custom GUC is
+// PGC_USERSET, and `REVOKE SET ON PARAMETER` does not create so much as an ACL
+// row for one.
 //
-// What stops it is internal/dsl/sqlvalidate, which refuses set_config and
+// internal/dsl/sqlvalidate is what stops it, by refusing set_config and
 // set_partition in every caller-authored SQL surface: query bodies, procedure
-// steps, CHECK expressions and partial-index predicates. This test is the
-// standing evidence for why that validator may not be weakened or narrowed —
-// the first version of it covered only query bodies, and an adversarial review
-// walked a set_config through a CHECK expression in minutes.
+// steps, CHECK expressions and partial-index predicates. Narrowing that
+// validator to query bodies alone leaves set_config reachable through a CHECK
+// expression.
 //
-// If PostgreSQL ever changes so that a custom GUC can be locked, this test
-// fails — and that failure is the signal that the defence can move down a
-// layer, into the database where it belongs.
+// If PostgreSQL ever allows a custom GUC to be locked, this test fails, and the
+// defence can move into the database.
 func TestTheGUCBasedPolicyLeaksAcrossTenants(t *testing.T) {
 	url := os.Getenv("ATLANTIS_TEST_PG")
 	if url == "" {

@@ -21,27 +21,19 @@ import (
 // The provisioner running as a pod, under its own ServiceAccount, provisions a
 // real organisation.
 //
-// # Why this exists when the impersonation test already passes
-//
-// TestK8sTheProvisionerRoleIsSufficientAndConfined proves the ClusterRole is
-// enough, by asking the API server to evaluate a provisioning cycle as the
-// service account. That is a statement about RBAC and nothing else. It holds
-// exactly as well on a cluster where the provisioner is not deployed, where the
+// TestK8sTheProvisionerRoleIsSufficientAndConfined is a statement about RBAC
+// alone: it holds on a cluster where the provisioner is not deployed, where the
 // image does not build, where the token is never mounted, and where GetConfig
-// quietly falls back to a developer's kubeconfig.
+// falls back to a developer's kubeconfig. Each of those leaves the fleet running
+// as cluster-admin with a green suite.
 //
-// Every one of those leaves the fleet running as cluster-admin with a green
-// suite. Only the process itself, in a pod, doing the work, rules them out.
-//
-// # What it needs
-//
-// A cluster and Cloud's database, because it is the seam between them: the
+// This needs a cluster and Cloud's database, being the seam between them: the
 // queue row is written here, the namespace appears there, and nothing in this
 // test speaks to the pod in between.
 //
-// CLOUD_PG_URL is deliberately the variable the Makefile already hands the
-// provisioner. This has to write to the database the pod is polling; an
-// isolated one, as the store's own tests use, would be a queue nothing reads.
+// CLOUD_PG_URL is the variable the Makefile already hands the provisioner. This
+// has to write to the database the pod is polling; an isolated one, as the
+// store's own tests use, would be a queue nothing reads.
 func TestK8sTheProvisionerPodProvisionsAnOrganisation(t *testing.T) {
 	if os.Getenv("ATLANTIS_TEST_K8S") == "" {
 		t.Skip("set ATLANTIS_TEST_K8S to exercise the deployed provisioner")

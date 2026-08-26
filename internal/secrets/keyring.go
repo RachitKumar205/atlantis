@@ -1,44 +1,15 @@
 // Package secrets encrypts secrets that have to be stored reversibly.
 //
-// # Who uses it
+// Used by the console for each organisation's client private key, and by Cloud
+// for each account's TOTP secret.
 //
-// Two processes, which is why it lives here rather than under either of them:
+// The key-encrypting key is not in the database, so a dump alone yields
+// nothing. It does not defend a compromised process, which holds that key in
+// memory.
 //
-//   - The console seals one client private key per organisation in
-//     console.orgs, so that dialling the wrong organisation's atlantis fails at
-//     the TLS handshake rather than returning somebody else's data.
-//   - Cloud seals each account's TOTP secret in cloud.totp_secrets. A second
-//     factor must be recomputable, so unlike the argon2id password hash beside
-//     it, it cannot be hashed.
-//
-// Both are the same shape of problem: a value that cannot be one-way hashed
-// because it has to be used again, living in a database that gets backed up,
-// replicated, and read by anything that can reach it.
-//
-// # What this defends, and what it does not
-//
-// **A database dump alone yields nothing.** A leaked backup, a replica, a broad
-// SELECT over either table — none of them produce a usable key or a working
-// second factor, because the key-encrypting key is not in the database.
-//
-// It does **not** defend a compromised process. Each of them must be able to
-// decrypt in order to serve anybody, so the key-encrypting key is in memory by
-// necessity. Nothing at this layer changes that, and saying otherwise would be
-// worse than the gap itself — an operator who believes the secrets are safe
-// from a compromised process would make different decisions about how that
-// process is run.
-//
-// # Why Tink rather than crypto/cipher
-//
-// The parts of authenticated encryption that go wrong are quiet: a reused
-// nonce, a mismatched key type, a ciphertext framing that loses the key id.
-// Tink does not expose those choices.
-//
-// Rotation is the other reason, and it is the one that shows up in the schema.
-// A Tink keyset holds several keys at once: the primary encrypts, and any
-// member can decrypt, with the key id carried in the ciphertext prefix. Adding
-// a key and promoting it rotates everything forward with no re-encryption pass
-// and no key-version column — the ciphertext says which key it needs.
+// Tink rather than crypto/cipher: a Tink keyset holds several keys, the primary
+// encrypts, any member decrypts, and the key id travels in the ciphertext
+// prefix, so rotation needs no re-encryption pass and no key-version column.
 package secrets
 
 import (
@@ -73,11 +44,9 @@ type tinkKeyring struct{ aead tink.AEAD }
 
 // FromEnvKeyset builds a Keyring from a base64-encoded Tink keyset.
 //
-// The keyset is binary-serialised and read through insecurecleartextkeyset —
-// "insecure" naming the one true thing about it, which is that the keyset is
-// not itself wrapped by a key management service. That is the property the KMS
-// implementation changes, and it is why the import is deliberately hard to read
-// past.
+// The keyset is binary-serialised and read through insecurecleartextkeyset.
+// "insecure" names one true property: the keyset is not itself wrapped by a key
+// management service, which is what a KMS implementation would change.
 //
 // Refuses an empty value rather than defaulting to anything. A console that
 // generated its own key on first boot would encrypt every organisation's
@@ -110,12 +79,11 @@ func FromEnvKeyset(encoded string) (Keyring, error) {
 
 // Encrypt seals plaintext against associatedData.
 //
-// The associated data is the load-bearing argument. It is authenticated but not
-// stored in the ciphertext, so opening the result requires supplying the same
-// value again — and callers supply the organisation name. That converts a write
-// primitive into a non-attack: somebody who can UPDATE console.orgs cannot lift
-// one organisation's encrypted key onto another's row, because the row they
-// move it to decrypts under a different organisation and the open fails.
+// associatedData is authenticated and not stored in the ciphertext, so opening
+// the result needs the same value again, and callers pass the organisation
+// name. An UPDATE on console.orgs therefore cannot lift one organisation's
+// encrypted key onto another's row: the destination decrypts under a different
+// organisation and the open fails.
 //
 // Without it, the same UPDATE hands the attacker a working credential for
 // whichever organisation they copied from, and every layer downstream —
@@ -146,10 +114,9 @@ func (k *tinkKeyring) Decrypt(ciphertext, associatedData []byte) ([]byte, error)
 // NewKeyset mints a fresh AES-256-GCM keyset, base64-encoded in the form
 // FromEnvKeyset accepts.
 //
-// Not a test helper, despite being what the tests use. `cloud data-key` calls
-// this to produce the value an operator exports as CONSOLE_DATA_KEY, and it is
-// deliberately the same code path, so a keyset that works in a test is the same
-// artefact that works in a deployment.
+// Not a test helper, though the tests use it. `cloud data-key` calls this to
+// produce the value exported as CONSOLE_DATA_KEY, so a keyset that works in a
+// test is the artefact that works in a deployment.
 //
 // It mints a keyset with one key in it. Rotation adds a second and promotes it,
 // which is a keyset operation rather than a data migration — see the package

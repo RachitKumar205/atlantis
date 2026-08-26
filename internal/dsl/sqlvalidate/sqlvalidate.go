@@ -1,39 +1,23 @@
-// Package sqlvalidate is the pg_query_go-backed validator for the raw
-// SQL embedded in `query` and `procedure` declarations. It runs at
-// tidectl plan time (or any caller-side build that wants deep validation),
-// not on every codegen pass — pg_query_go is a CGO dep and we keep it
-// off the hot codegen path. The dep-free pre-checks in
-// internal/dsl/ir.go cover the most common failures ($arg references,
-// touches() resolution, typed-step column existence); this package
-// adds the deeper, PG-aware checks.
+// Package sqlvalidate is the pg_query_go-backed validator for the raw SQL
+// embedded in `query` and `procedure` declarations.
 //
-// Checks performed:
+// It runs at tidectl plan time, not on every codegen pass: pg_query_go is a CGO
+// dependency. The dependency-free pre-checks in internal/dsl/ir.go cover $arg
+// references, touches() resolution and typed-step column existence.
 //
-//   - SQL parses with the same grammar Postgres uses (pg_query is a
-//     fork of the PG parser).
-//   - Every table referenced in a FROM / JOIN / UPDATE / DELETE /
-//     INSERT clause resolves to an entity in the merged IR. Caller
-//     queries cannot reference tables that do not exist in the
-//     schema — typos and stale references surface at plan time
-//     rather than at first execution.
-//   - Statement shape matches the declaration form: queries must use
-//     a SELECT statement (or a CTE that resolves to one); procedure
-//     raw-SQL steps may use SELECT, INSERT, UPDATE, or DELETE, but
-//     not DDL (CREATE, ALTER, DROP, GRANT, etc.) — DDL must flow
-//     through the autogen migration path so atlantis retains
-//     authority over the schema.
+// Three checks:
 //
-// Future checks (deferred until a callsite demands them):
+//   - The SQL parses under the grammar Postgres uses; pg_query is a fork of the
+//     PG parser.
+//   - Every table in a FROM / JOIN / UPDATE / DELETE / INSERT clause resolves
+//     to an entity in the merged IR, so a typo or a stale reference fails at
+//     plan time rather than at first execution.
+//   - A query body is a SELECT; a procedure raw-SQL step is SELECT, INSERT,
+//     UPDATE or DELETE. Every other statement kind, DDL included, is rejected
+//     in both.
 //
-//   - Column-existence validation. Walking pg_query's expression tree
-//     to extract every ColumnRef and binding it back to entity fields
-//     means handling aliases, sub-selects, lateral joins, and column
-//     ambiguity — non-trivial. The IR-level `touches()` check + the
-//     test pass at tidectl plan time catches most regressions in
-//     practice. When a callsite needs tighter column validation, we
-//     add it here.
-//   - Cost estimation via EXPLAIN. Requires a live PG connection and
-//     belongs in tidectl plan rather than here.
+// Column existence is not checked. Binding every ColumnRef back to an entity
+// field means resolving aliases, sub-selects, lateral joins and ambiguity.
 package sqlvalidate
 
 import (
@@ -101,12 +85,12 @@ func ValidateCustomProcedure(ir *dsl.IR, p *dsl.CustomProcedure) error {
 // validateBlock runs the parser pass + statement-kind + table-reference
 // checks against one raw SQL body.
 //
-// The body uses DSL-style named placeholders (`$consumer_id`), but
-// pg_query_go's parser requires PG positional shape (`$1`, `$2`, ...).
-// We normalize before parsing so pg_query sees syntactically valid
-// PG. The IR layer already validated that every $name resolves to a
-// declared input, so this rewrite is purely syntactic — it does not
-// change semantics or table/column references.
+// The body carries DSL named placeholders, `$consumer_id`, and pg_query_go's
+// parser requires the positional shape, `$1`. normalizeNamedParams rewrites
+// them first.
+//
+// The IR layer has already resolved every $name to a declared input, so the
+// rewrite is syntactic: it moves no table or column reference.
 func validateBlock(sql string, mode Mode, tables map[string]string, context string, touches []string) error {
 	tree, err := pg.Parse(normalizeNamedParams(sql))
 	if err != nil {
@@ -191,17 +175,16 @@ func statementName(n any) string {
 
 // collectTableRefs returns every table name a parsed statement references.
 //
-// # Why this walks by reflection
+// Walks the protobuf message graph by reflection and collects every RangeVar,
+// wherever it sits. A RangeVar is precisely a table reference: subquery aliases
+// are RangeSubselect and never appear, CTE references do, and the caller
+// filters those against collectCTENames.
 //
-// It used to walk by hand, descending only into the node types it named:
-// FromClause, TargetList, WhereClause, HavingClause, CTEs, set-op arms, and a
-// handful of others. Anything composite stopped it. There was no case for
-// BoolExpr, A_Expr, FuncCall, CaseExpr, SortClause, GroupClause, LimitCount or
-// ValuesLists, so a table referenced through any of them was invisible.
-//
-// Measured against 16 ordinary SQL shapes on pg_query_go v6.2.2: the
-// hand-written walk found the table in 2 of them and missed 14. Only a plain
-// FROM and a bare IN-subquery survived. Among the misses:
+// A walk that names its node types stops at anything composite — BoolExpr,
+// A_Expr, FuncCall, CaseExpr, SortClause, GroupClause, LimitCount, ValuesLists.
+// Measured against 16 ordinary SQL shapes on pg_query_go v6.2.2, a typed walk
+// finds the table in 2 and misses 14; only a plain FROM and a bare IN-subquery
+// survive. Among the misses:
 //
 //	WHERE active AND id IN (SELECT ... FROM orders)
 //	WHERE id = (SELECT max(...) FROM orders)
@@ -209,33 +192,23 @@ func statementName(n any) string {
 //	ORDER BY (SELECT ... FROM orders)
 //	UPDATE ... SET x = (SELECT ... FROM orders)
 //
-// That is not only a stale cache. checkTouchesCoverage uses this list to decide
-// whether the author's `touches()` is complete, and internal/server/entity
-// derives from `touches()` whether a custom query needs the caller's tenant
-// bound. A missed table meant a query joining a partitioned entity ran with no
-// tenant bound at all — returning nothing on a role row-level security applies
-// to, and every tenant's rows on a role that bypasses it.
+// checkTouchesCoverage decides from this list whether `touches()` is complete,
+// and internal/server/entity derives from `touches()` whether a custom query
+// needs a tenant bound. A missed table leaves a query over a partitioned entity
+// running unbound: no rows on a role row-level security applies to, every
+// tenant's rows on a role that bypasses it.
 //
-// So this walks the protobuf message graph and collects every RangeVar it
-// finds, wherever it sits. A RangeVar is precisely a table reference; subquery
-// aliases are RangeSubselect and do not appear. CTE references do appear and
-// are filtered by the caller against collectCTENames — which had to become
-// reflective too, or the two walks disagree and legal SQL is rejected.
-//
-// Same remedy, and same reason, as the walk in forbidden_calls.go: a check
-// derived from the structure cannot fall behind the structure.
+// collectCTENames walks reflectively for the same reason. Two walks that
+// disagree reject legal SQL.
 func collectTableRefs(stmt *pg.Node) []string {
-	// Two node types hold a RangeVar that is not a table reference, and both
-	// have to be skipped or ordinary SQL stops applying:
+	// Two node types hold a RangeVar that is not a table reference:
 	//
-	//   FOR UPDATE OF o      LockingClause.lockedRels holds the ALIAS `o`
-	//   SELECT ... INTO t    IntoClause.rel names a table being CREATED
+	//	FOR UPDATE OF o      LockingClause.lockedRels holds the alias `o`
+	//	SELECT ... INTO t    IntoClause.rel names a table being created
 	//
-	// The first is the canonical read-modify-write procedure step. Collecting
-	// it reported `unknown table "o"`, so a schema that applied yesterday
-	// failed today and the obvious fix was to delete the row lock. Found by
-	// review, after the exhaustive walk replaced a hand-written one that had
-	// never descended far enough to see either.
+	// Collecting the first reports `unknown table "o"` on a read-modify-write
+	// procedure step, and the remedy that reads as obvious is deleting the row
+	// lock.
 	skip := nonTableRangeVars(stmt)
 
 	var out []string
@@ -249,26 +222,6 @@ func collectTableRefs(stmt *pg.Node) []string {
 	return out
 }
 
-// collectCTENames walks a parsed statement and returns the set of
-// names defined by WITH clauses anywhere in the tree (including
-// nested SELECTs and DML statements). Names are lower-cased because
-// PG identifiers are case-insensitive by default. The resulting set
-// is consulted before reporting an "unknown table" error so a CTE
-// alias used downstream in the same statement doesn't surface as a
-// schema gap.
-// collectCTENames returns every name bound by a WITH clause anywhere in a
-// statement, so the caller can tell a CTE reference from a missing table.
-//
-// Reflective, and it has to be: collectTableRefs became reflective and this did
-// not, so the two stopped agreeing. A CTE referenced from behind a BoolExpr —
-//
-//	SELECT id FROM products WHERE active AND id IN
-//	  (WITH recent AS (SELECT product_id FROM orders) SELECT product_id FROM recent)
-//
-// — had its REFERENCE collected as a table while its NAME was not collected as
-// a CTE, so validation rejected `unknown table "recent"` on SQL that applied
-// before the change. Two walks over the same tree have to descend equally far
-// or the difference between them becomes a false rejection.
 // nonTableRangeVars marks the RangeVars that do not denote a table reference.
 func nonTableRangeVars(stmt *pg.Node) map[protoreflect.Message]bool {
 	skip := map[protoreflect.Message]bool{}
@@ -292,33 +245,26 @@ func nonTableRangeVars(stmt *pg.Node) map[protoreflect.Message]bool {
 // realTableRefs returns every reference in stmt that denotes an actual table,
 // resolving CTE names the way PostgreSQL does rather than by flat name.
 //
-// # Why a flat name set is not enough
-//
-// collectCTENames gathers every CTE name anywhere in the statement into one
-// set, and a reference matching any of them was skipped. PostgreSQL scopes a
-// CTE name to the WITH that declares it. Two shapes got through, both executed
-// against a live database as the atlantis role:
+// collectCTENames gathers every CTE name in the statement into one set.
+// PostgreSQL scopes a CTE name to the WITH that declares it, so two shapes pass
+// a flat check:
 //
 //	SELECT ir FROM ir_checkpoint WHERE id = 1
 //	  AND EXISTS (WITH ir_checkpoint AS (SELECT 1) SELECT 1 FROM ir_checkpoint);
 //
-// The dummy CTE is declared inside an unrelated subquery and cannot shadow the
-// top-level reference, but the flat set did not know that — so the read of the
-// real IR checkpoint was skipped. And:
-//
 //	WITH ir_checkpoint AS (SELECT 1) UPDATE ir_checkpoint SET ir = $payload;
 //
-// PostgreSQL forbids a CTE as an UPDATE/DELETE/INSERT target, so the name
-// resolves to the REAL relation while the validator saw a CTE.
+// In the first the dummy CTE sits inside an unrelated subquery and cannot
+// shadow the top-level reference. In the second PostgreSQL forbids a CTE as an
+// UPDATE/DELETE/INSERT target, so the name resolves to the real relation.
 //
 // A skipped reference never reaches refTables, so checkTouchesCoverage stops
 // requiring the entity in `touches()`, and internal/server/entity derives from
-// `touches()` whether a custom query binds the caller's tenant. The shadowed
-// statement then runs UNBOUND, on the bare pool. Both shapes passed
-// ValidateCustomQuery and ValidateCustomProcedure.
+// `touches()` whether a custom query binds the caller's tenant. The statement
+// then runs unbound, on the bare pool.
 //
-// So scope is carried down the tree: a WITH extends it for that statement's
-// subtree only, and a DML target never consults it at all.
+// Scope is carried down the tree: a WITH extends it for that statement's
+// subtree only, and a DML target never consults it.
 func realTableRefs(stmt *pg.Node) []string {
 	skip := nonTableRangeVars(stmt)
 	targets := dmlTargetRangeVars(stmt)
@@ -423,6 +369,18 @@ func dmlTargetRangeVars(stmt *pg.Node) map[protoreflect.Message]bool {
 	return out
 }
 
+// collectCTENames returns every name bound by a WITH clause anywhere in stmt,
+// including nested SELECTs and DML, so the caller can tell a CTE reference from
+// a missing table. Names are lower-cased, since PG identifiers fold to lower.
+//
+// The walk is reflective so that it descends as far as collectTableRefs. When
+// the two disagreed, a CTE behind a BoolExpr —
+//
+//	SELECT id FROM products WHERE active AND id IN
+//	  (WITH recent AS (SELECT product_id FROM orders) SELECT product_id FROM recent)
+//
+// — had its reference collected as a table while its name was not collected as
+// a CTE, and validation rejected `unknown table "recent"`.
 func collectCTENames(stmt *pg.Node) map[string]struct{} {
 	out := map[string]struct{}{}
 	walkMessages(stmt.ProtoReflect(), func(m protoreflect.Message) {
@@ -544,41 +502,33 @@ func checkTouchesCoverage(declared []string, referenced []string, context string
 }
 
 // normalizeNamedParams replaces DSL-style `$ident` placeholders with PG
-// positional `$1` so pg_query_go's parser accepts the body. The
-// validator only cares about table / column / statement-kind
-// resolution; the positional index doesn't matter for that. The
-// rewrite is intentionally crude — it does not track which name maps
-// to which positional index, because the IR layer already validated
-// argument names against the declared input list, and the codegen
-// layer does the real index assignment at SQL emit time.
+// positional `$1` so pg_query_go's parser accepts the body.
 //
-// Skipped contexts:
+// Which name maps to which index is not tracked. The IR layer already checked
+// argument names against the declared input list, and codegen assigns the real
+// indices at emit time; this validator resolves tables, columns and statement
+// kind, none of which read the index.
 //
-//   - Inside single-quoted SQL strings (`'...'`). `'$foo'` is a literal
-//     value, not a parameter. Same for embedded `”` escapes.
+// Five contexts are skipped, because a `$` inside them is not a placeholder:
 //
-//   - Inside double-quoted SQL identifiers (`"...$foo..."`). Real PG
-//     identifiers can contain `$` so we leave them untouched.
+//   - single-quoted strings, `'$foo'`, including doubled-quote escapes
+//   - double-quoted identifiers, `"...$foo..."`, since a PG identifier may
+//     hold a `$`
+//   - already-numeric `$<digit>`
+//   - dollar-quoted strings, `$tag$ ... $tag$` and `$$ ... $$`
+//   - `--` line comments and `/* */` block comments, which PostgreSQL nests
 //
-//   - Already-numeric `$<digit>` shapes pass through unchanged.
-//
-//   - Inside dollar-quoted strings (`$tag$ ... $tag$`, `$$ ... $$`).
-//
-//   - Inside `--` line comments and `/* */` block comments, which PostgreSQL
-//     nests.
-//
-// The last two were the note "if a real callsite hits this we'll add
-// handling", and a callsite hit it. `check` and `index by expr` are audited
-// against the ALREADY-STORED IR at boot, and the audit is fatal under
-// ATL_REQUIRE_TENANT_ISOLATION. So a declaration PostgreSQL has been enforcing
-// for months stopped the server starting:
+// The last two are reachable from a stored declaration. `check` and
+// `index by expr` are audited against the already-stored IR at boot, and the
+// audit is fatal under ATL_REQUIRE_TENANT_ISOLATION, so these refuse to start a
+// server over a schema PostgreSQL has been enforcing:
 //
 //	check "position($tag$@$tag$ in email) > 0"   -- $tag rewritten to $1
-//	check "x > 0 -- don''t allow zero"           -- apostrophe opened a string
+//	check "x > 0 -- don''t allow zero"           -- apostrophe opens a string
 //
-// The first rewrote `$tag` to `$1` and destroyed the dollar-quote; the second
-// let an apostrophe inside a comment swallow the wrapper's closing parens. Both
-// produced a syntax error, and the gate treats a syntax error as a refusal.
+// The first destroys the dollar-quote, the second lets the apostrophe swallow
+// the wrapper's closing parens. Both are syntax errors, and the gate refuses on
+// a syntax error.
 func normalizeNamedParams(sql string) string {
 	var b strings.Builder
 	b.Grow(len(sql))

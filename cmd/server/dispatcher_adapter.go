@@ -2,12 +2,11 @@
 // *jobsdispatcher.Dispatcher as an admin.WorkerDispatcher without
 // admin importing jobsdispatcher.
 //
-// The admin package owns a `WorkerDispatcher` interface scoped to
-// the four console-facing operations (Snapshot, Get, Drain, Evict).
-// jobsdispatcher.Dispatcher already exposes those methods with its
-// own DTO types; we adapt by translating between the two struct
-// shapes. The structs are intentionally identical field-for-field
-// so the translation is mechanical.
+// The admin package owns a `WorkerDispatcher` interface over the four
+// console-facing operations: Snapshot, Get, Drain, Evict.
+// jobsdispatcher.Dispatcher exposes those methods with its own DTO types, and
+// the two structs are identical field-for-field, so this translates between
+// them.
 
 package main
 

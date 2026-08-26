@@ -15,17 +15,15 @@ import (
 // them as drift to be added.
 //
 // FromPostgres supplies column facts and carries everything else across from
-// the declaration — entity-level Checks have always been copied that way. Field
-// checks were not, so once diffChecks existed the two sides differed by
-// construction: every declared field check produced a permanent check_added
-// item on every adopt, of a constraint that was already in the database. The
-// same run also emitted "N declared CHECK constraint(s) ... not verified", so
-// the report contradicted itself.
+// the declaration, entity-level and field-level Checks included. Carrying only
+// one of the two makes diffChecks compare sides that differ by construction:
+// every declared field check becomes a permanent check_added item on every
+// adopt, for a constraint already in the database, while the same run emits
+// "N declared CHECK constraint(s) ... not verified".
 //
-// The honest fix is expression normalisation — comparing an author's
-// `total > 0` against Postgres's `((total > 0))` — which is a separate piece of
-// work. Until then, not comparing beats comparing wrongly, and the warning is
-// what tells the truth.
+// Carrying is not comparing. DetectCheckConstraintDrift is what compares the
+// two, by normalized expression — an author's `total > 0` against Postgres's
+// `((total > 0))` — and unverifiedWarnings reports that adopt itself did not.
 //
 //	ATLANTIS_TEST_PG=postgres://atlantis:atlantis@localhost:5432/atlantis?sslmode=disable \
 //	  go test ./internal/introspect/ -run CheckCarry -v

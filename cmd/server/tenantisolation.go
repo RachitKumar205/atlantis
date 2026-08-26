@@ -83,23 +83,13 @@ func partitionedEntities(ir *dsl.IR) []string {
 // partitionGate answers the one question the boot check and the hot-reload hook
 // both ask: may this schema be served?
 //
-// # Why this is a function and not two inline blocks
+// A function rather than two inline blocks in main, so a test can call it.
+// Reading main.go's AST shows a call site exists, not that it works: seven
+// mutations leave the gate inert with such a test green, deleting the boot
+// block among them.
 //
-// It was two inline blocks, and they were verified by a test that read main.go's
-// AST — it looked for the call, then for a return, then for the condition, then
-// for the returned value, and a review defeated it at every stage. Seven
-// mutations made the whole gate inert with the suite green, including deleting
-// the boot block outright. Each round of hardening was aimed at the escape the
-// previous round had used.
-//
-// An AST test proves a call site EXISTS. It cannot prove the call WORKS, and
-// four attempts to make it do so produced a test nobody could reason about. So
-// the decision moved here, where it is a pure function of its inputs and every
-// branch is reachable from a test that asserts behaviour. What is left for the
-// source-level test is only "is this reached from both places", which is the
-// one thing an AST test is actually good at.
-//
-// # The rules
+// Here every branch is a pure function of its inputs. What the source-level
+// test still covers is whether this is reached from both places.
 //
 // A probe that FAILED is not a probe that passed. A locked-down pg_class, a
 // statement timeout or a name mismatch would otherwise let the server boot with

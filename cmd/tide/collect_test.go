@@ -9,14 +9,14 @@ import (
 
 // What collectPCFiles must not pick up.
 //
-// The failure this guards: `tide plan` runs a pull first, which writes the
-// organisation's merged schema into .tide-cache/schema/. With the documented
-// `schema_paths: ["."]` the next plan submitted the caller's own entities
-// twice and the server refused with "duplicate entity app.Note (first declared
-// at backend:.tide-cache/schema/schema.atl)" — a path the author never wrote.
+// `tide plan` pulls first, writing the organisation's merged schema into
+// .tide-cache/schema/. Under the documented `schema_paths: ["."]` the next plan
+// submits this caller's entities twice, and the server refuses with
 //
-// The shape that makes it expensive: the first apply in a fresh workspace
-// works, and every one after it fails.
+//	duplicate entity app.Note (first declared at backend:.tide-cache/schema/schema.atl)
+//
+// naming a path nothing in the repository wrote. The first apply in a fresh
+// workspace succeeds and every one after it fails.
 func TestTheSchemaWalkerSkipsHiddenDirectories(t *testing.T) {
 	dir := t.TempDir()
 	write := func(rel, body string) {
@@ -74,9 +74,9 @@ func TestTheSchemaWalkerSkipsHiddenDirectories(t *testing.T) {
 
 // A hidden directory named as a schema path explicitly is still read.
 //
-// Skipping is about walking into hidden directories, not about refusing a path
-// somebody deliberately configured. Without this the fix would silently ignore
-// a caller whose schema really does live somewhere hidden.
+// The skip covers walking into a hidden directory, not naming one in
+// schema_paths. Otherwise a caller whose schema lives in a hidden directory is
+// read as having none.
 func TestAHiddenDirectoryNamedExplicitlyIsStillRead(t *testing.T) {
 	dir := t.TempDir()
 	hidden := filepath.Join(dir, ".schema")

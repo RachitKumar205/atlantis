@@ -4,23 +4,20 @@
 // memcached. Build tag `integration` keeps Docker dependencies out of
 // the default `go test ./...` pass — invoke with `make test-integration`.
 //
-// Architecture (PLAN.md §B.9 + §C.4):
-//
 //	Test process
-//	  ├─ testcontainers Postgres (TimescaleDB image, same as docker-compose)
-//	  ├─ testcontainers memcached (Grafana fork) — real wire protocol, real
-//	  │   eviction. We use real memcached over an in-memory fake because
-//	  │   PLAN §B.4's invalidation semantics depend on actual SET ordering;
-//	  │   the in-memory fake stays available in fake_cache.go for unit-shape
-//	  │   tests that don't exercise invalidation.
-//	  └─ in-process atlantis (Embed): pool + reader + outbox + worker
-//	      linked directly into the test binary, bypassing gRPC. The same
-//	      runtime interfaces (Pool / Cache / Outbox) the generated handlers
-//	      depend on are wired exactly as cmd/server does.
+//	  ├─ testcontainers Postgres, the TimescaleDB image docker-compose uses
+//	  ├─ testcontainers memcached (Grafana fork), for the real wire protocol
+//	  │   and real eviction: invalidation depends on actual SET ordering,
+//	  │   which fake_cache.go does not reproduce. That fake stays for tests
+//	  │   that do not exercise invalidation.
+//	  └─ in-process atlantis (Embed): pool, reader, outbox and worker linked
+//	      into the test binary, bypassing gRPC. The runtime interfaces the
+//	      generated handlers depend on — Pool, Cache, Outbox — are wired as
+//	      cmd/server wires them.
 //
-// Each test grabs a fresh Harness, applies all three migrations, and
-// receives a ready-to-use Embed value. Cleanup runs via t.Cleanup so
-// containers are torn down even on test failure.
+// Each test takes a fresh Harness, which applies every migration under
+// migrations/infra and migrations/tidectl and returns a ready Embed. Cleanup
+// runs through t.Cleanup, so containers are torn down on failure too.
 package integration
 
 import (
@@ -206,8 +203,6 @@ func (h *Harness) Close() {
 	}
 }
 
-// ----- container bootstrap -----
-
 func startPostgres(t *testing.T, ctx context.Context) (testcontainers.Container, string) {
 	t.Helper()
 	// timescaledb-ha includes pgvector + timescaledb out of the box, matching
@@ -262,16 +257,13 @@ func startMemcached(t *testing.T, ctx context.Context) (testcontainers.Container
 	return c, fmt.Sprintf("%s:%s", host, port.Port())
 }
 
-// ----- migration runner -----
-
 // applyMigrations applies every .up.sql under root, walking infra/ before
 // tidectl/ so the hand-written infra schema (outbox + bookkeeping) lands
 // before the codegen-emitted entity schema (whose trigger functions
 // reference the infra-defined cache_invalidations table).
 //
-// We don't use golang-migrate here because we want the test process to
-// control transaction boundaries precisely; for the integration harness,
-// applying each migration as plain SQL is enough.
+// Plain SQL rather than golang-migrate, so the test process owns the
+// transaction boundaries. The harness needs no version table.
 func applyMigrations(ctx context.Context, pool *pgxpool.Pool, root string) error {
 	for _, sub := range []string{"infra", "tidectl"} {
 		if err := applyMigrationsDir(ctx, pool, filepath.Join(root, sub)); err != nil {

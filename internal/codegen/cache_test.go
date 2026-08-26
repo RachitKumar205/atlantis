@@ -16,13 +16,11 @@ func TestEmitGoCacheKeys_BodyAndPointerKey(t *testing.T) {
 	c := findFile(t, files, "gen/go/keys/consumer/saved_outfit_keys.go")
 	parseAsGo(t, c)
 
-	// Body & pointer key functions both present. The CompositeID call is
-	// load-bearing: it length-prefixes the PK value before the key is
-	// built, matching the encoding the server hot path uses when writing
-	// cache entries. fmt.Sprint(id) would silently produce a different
-	// key for the same id, so any external caller computing a body key
-	// from the keys package would miss the cache; the design note in
-	// internal/codegen/cache.go records why this was a real bug.
+	// Body and pointer key functions both present. CompositeID
+	// length-prefixes the PK value before the key is built, matching the
+	// encoding the server hot path uses when writing cache entries.
+	// fmt.Sprint(id) produces a different key for the same id, so a caller
+	// computing a body key from the keys package would miss the cache.
 	assertContains(t, c, "func SavedOutfitBodyKey(id int64, version int64) string")
 	assertContains(t, c, `runtime.CacheKey("consumer.SavedOutfit", runtime.CompositeID(id), version)`)
 	assertContains(t, c, "func SavedOutfitPointerKey(id int64) string")

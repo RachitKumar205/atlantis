@@ -24,17 +24,17 @@
 //	  semantic foreground colors matching the console palette
 //
 //	Bold(s)  Dim(s)
-//	  intensity modifiers (the only non-color ANSI we emit)
+//	  intensity modifiers, the only non-color ANSI emitted
 //
 //	Red, Green, Yellow, Blue, Cyan, Grey
-//	  back-compat aliases — bound to the same semantic palette so
-//	  existing call sites pick up the new look without edits.
+//	  aliases onto the same semantic palette, so a call site named for a
+//	  colour renders the console's
 //
 //	Logo(w)  LogoInline(w)
 //	  ⊙ sigil + lowercase wordmark, stacked or horizontal
 //
 //	Header(w, label)  Rule(w, n)
-//	  section header with hairline U+2500 rule (22 cols default)
+//	  section header with a hairline U+2500 rule, 24 columns total
 //
 //	Field(w, key, val)  Row(w, state, label, meta)
 //	  aligned label/value pair and status row with bullet glyph
@@ -60,8 +60,8 @@ import (
 // $TERM at package init. Callers can flip it via a --no-color flag.
 var Enabled = detectEnabled()
 
-// trueColor reports whether the terminal accepts 24-bit color escapes.
-// When false but Enabled is true, we fall back to 4-bit ANSI.
+// trueColor reports whether the terminal accepts 24-bit color escapes. False
+// with Enabled true falls back to 4-bit ANSI.
 var trueColor = detectTruecolor()
 
 func detectEnabled() bool {
@@ -97,11 +97,8 @@ func detectTruecolor() bool {
 	return false
 }
 
-// ─────────────────────────── palette ───────────────────────────
-
-// console palette — RGB triples lifted verbatim from
-// web/console/src/styles/tokens.css. Keep these in sync if the
-// console's brand colors shift.
+// The console palette, as RGB triples taken from web/shared/tokens.css. The
+// hex in each trailing comment is that file's value.
 var (
 	sageRGB  = rgb{125, 181, 147} // --sage         #7DB593
 	brassRGB = rgb{212, 165, 116} // --accent       #D4A574
@@ -150,8 +147,6 @@ func wrapPlain(seq, s string) string {
 	return seq + s + reset
 }
 
-// ─────────────────────────── semantic colors ───────────────────────────
-
 // Sage tints text in --sage (#7DB593). Use for additive / success / healthy.
 func Sage(s string) string { return wrap(sageRGB, fbSage, s) }
 
@@ -174,8 +169,6 @@ func Mute(s string) string { return wrap(ink2RGB, fbInk2, s) }
 // state bullets, captions that shouldn't pull the eye at all.
 func Faint(s string) string { return wrap(ink3RGB, fbInk3, s) }
 
-// ─────────────────────────── intensity ───────────────────────────
-
 // Bold makes s bold. Most modern terminals render this as a heavier
 // weight rather than brighter; in older ones it brightens the color.
 func Bold(s string) string { return wrapPlain(bold, s) }
@@ -183,12 +176,9 @@ func Bold(s string) string { return wrapPlain(bold, s) }
 // Dim halves the perceived intensity of s. Subtle; use sparingly.
 func Dim(s string) string { return wrapPlain(dim, s) }
 
-// ─────────────────────────── back-compat aliases ───────────────────────────
-//
-// Existing call sites use Red / Green / Yellow / Blue / Cyan / Grey.
-// Rebind to the semantic palette so they pick up the console look
-// without per-call-site edits. New code should prefer the semantic
-// names above (Sage / Brass / Coral / Slate / Mute).
+// Red, Green, Yellow, Blue, Cyan and Grey are aliases onto the semantic
+// palette, so a call site named for a colour renders the console's. The
+// semantic names above — Sage, Brass, Coral, Slate, Mute — say what they mean.
 
 // Red is Coral (breaking / error).
 func Red(s string) string { return Coral(s) }
@@ -202,17 +192,14 @@ func Yellow(s string) string { return Brass(s) }
 // Blue is Slate (FK / info).
 func Blue(s string) string { return Slate(s) }
 
-// Cyan is Slate. Cyan-as-info was the old convention; we collapse
-// onto slate so the palette stays small.
+// Cyan is Slate, collapsed onto it rather than given a colour of its own, so
+// the palette stays the console's five.
 func Cyan(s string) string { return Slate(s) }
 
 // Grey is Mute (--ink-2).
 func Grey(s string) string { return Mute(s) }
 
-// ─────────────────────────── glyphs ───────────────────────────
-
-// State glyphs match what the console renders for the same semantics.
-// Kept as constants so consumers don't pass color names to indirectors.
+// State glyphs matching what the console renders for the same semantics.
 const (
 	GlyphMuted   = "·" // U+00B7 — inactive bullet
 	GlyphFilled  = "●" // U+25CF — active, colored
@@ -225,8 +212,6 @@ const (
 	GlyphRule    = "─" // U+2500 — hairline
 	GlyphArrow   = "→" // U+2192 — flow / continuation
 )
-
-// ─────────────────────────── primitives ───────────────────────────
 
 // Logo prints the stacked logo:
 //
@@ -264,12 +249,12 @@ func LogoInline(w io.Writer, name, version string) {
 	_, _ = fmt.Fprintln(w, out)
 }
 
-// Header prints a section header in lowercase + a 22-col hairline
-// rule. Mimics the console's section banners:
+// Header prints a bold label followed by a hairline rule, padded so label plus
+// rule is 24 columns, with at least 8 rule characters:
 //
-//	plan ─────────────────────
+//	plan ───────────────────
 //
-// Wide-column tabular output should use this instead of bare Bold().
+// Wide-column tabular output uses this rather than a bare Bold().
 func Header(w io.Writer, label string) {
 	// 24 - len(label) - 1 trailing space; minimum 8 rule chars.
 	rule := max(24-len(label)-1, 8)
@@ -363,8 +348,6 @@ func displayWidth(s string) int {
 	return w
 }
 
-// ─────────────────────────── level helpers ───────────────────────────
-
 // Successf prints `✔ <msg>` to stdout in sage. printf-style.
 func Successf(format string, args ...any) {
 	fmt.Printf("%s %s\n", Sage(GlyphCheck), fmt.Sprintf(format, args...))
@@ -407,8 +390,6 @@ func Banner(w io.Writer, color, label string) {
 	}
 	_, _ = fmt.Fprintf(w, "%s %s\n", bullet, Bold(label))
 }
-
-// ─────────────────────────── Spinner ───────────────────────────
 
 // Spinner is a brass-tinted braille animation for long-running ops.
 // Frame rate is fixed at 80ms, which feels mechanical rather than

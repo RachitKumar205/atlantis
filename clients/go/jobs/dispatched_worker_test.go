@@ -9,10 +9,9 @@ import (
 	"time"
 )
 
-// newTestDispatchedWorker constructs a minimal DispatchedWorker with
-// the channel cap structure we want to exercise. No gRPC stream
-// involvement — the tests target the channel routing + checkpointer
-// contract.
+// newTestDispatchedWorker constructs a DispatchedWorker with the channel caps
+// and nothing else. No gRPC stream: the tests below cover channel routing and
+// the checkpointer contract.
 func newTestDispatchedWorker(t *testing.T) *DispatchedWorker {
 	t.Helper()
 	return &DispatchedWorker{
@@ -106,10 +105,9 @@ func waitInflightZero(t *testing.T, w *DispatchedWorker) {
 	t.Fatal("inflight did not reach 0 within 2s")
 }
 
-// TestStreamCheckpointer_RoutesViaCtrlCh pins the load-bearing
-// guarantee: Checkpoint envelopes go through the priority control
-// channel, never the data plane. If a future refactor pushes
-// Checkpoint to dataCh, the stale-heartbeat regression bites again.
+// Checkpoint envelopes go through the priority control channel, never the data
+// plane. On dataCh they queue behind job traffic, so a heartbeat arrives after
+// the lease it was meant to extend.
 func TestStreamCheckpointer_RoutesViaCtrlCh(t *testing.T) {
 	w := newTestDispatchedWorker(t)
 	c := newStreamCheckpointer(w, 42)

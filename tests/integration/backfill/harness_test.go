@@ -19,10 +19,9 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// pgHarness is a minimal Postgres-only harness for the backfill tests.
-// The broader tests/integration harness also spins up memcached + wires
-// the cache tier; the backfill worker only needs pg, so we skip the
-// extra container.
+// pgHarness is a Postgres-only harness for the backfill tests. The broader
+// tests/integration harness also starts memcached and wires the cache tier,
+// which the backfill worker does not touch.
 type pgHarness struct {
 	Pool        *pgxpool.Pool
 	pgContainer testcontainers.Container

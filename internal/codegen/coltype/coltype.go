@@ -46,16 +46,14 @@ func GoType(t dsl.FieldType, notNull bool) string {
 	case "timestamptz", "date":
 		base = "time.Time"
 	case "interval":
-		// The scan-side type, which is what this function returns (the docs
-		// page's Go column describes the proto-generated type instead).
-		// pgtype.Interval is the only Go shape that holds a Postgres interval
-		// without converting between months, days and microseconds — see
-		// runtime.IntervalToProto for why that conversion cannot be done here.
+		// The scan-side type, which is what this function returns; the docs
+		// page's Go column describes the proto-generated type instead.
 		//
-		// This used to say time.Duration while ScanFragments declared a
-		// `string`, so the two halves of the same column disagreed and the
-		// generated code did not compile. Nothing noticed, because nothing
-		// compiled it.
+		// pgtype.Interval is the only Go shape holding a Postgres interval
+		// without converting between months, days and microseconds. A
+		// time.Duration here disagrees with whatever ScanFragments declares,
+		// and the two halves of one column then emit code that does not
+		// compile.
 		base = "pgtype.Interval"
 	case "uuid":
 		base = "string"
@@ -228,27 +226,16 @@ func ScanFragments(t dsl.FieldType, notNull bool, local, protoField string) (dec
 	}`, local, protoField, local)
 		}
 	case "interval":
-		// One declaration for both nullabilities, because pgtype.Interval
-		// carries Valid itself and IntervalToProto returns nil for an invalid
-		// one — so the NULL case needs no separate shape.
+		// One declaration for both nullabilities: pgtype.Interval carries Valid
+		// itself, so the NULL case needs no separate shape.
 		//
-		// The previous version claimed "Postgres INTERVAL has no native pgx Go
-		// type". pgx v5 has pgtype.Interval, with exactly the three components
-		// Postgres stores. The old text form also assigned a `string` to a
-		// proto field the emitter declared as a message, which is why an
-		// entity with an interval column emitted code that did not compile.
-		//
-		// The message is constructed INLINE rather than by a runtime helper,
-		// and that is not a style choice. A helper would have to name a
-		// concrete Go type for atlantis.common.v1.Interval, and there is no
-		// single one: every generated tree has its own copy of the message, so
-		// runtime's commonpb.Interval and the emitted server's are different
-		// Go types that will not assign to each other. The compile fixture
-		// caught exactly that. Well-known types like timestamppb are safe
-		// because there is one of them; atlantis's own messages are not.
-		//
-		// Writing the fields here keeps the emitted code in terms of the pb
-		// package it already imports.
+		// The message is constructed inline rather than through a runtime
+		// helper. A helper has to name a concrete Go type for
+		// atlantis.common.v1.Interval and there is no single one — every
+		// generated tree carries its own copy, so runtime's commonpb.Interval
+		// and an emitted server's are different Go types that will not assign
+		// to each other. timestamppb is safe because there is exactly one of
+		// it. See internal/runtime/protoconv.go.
 		decl = fmt.Sprintf("var %s pgtype.Interval", local)
 		assign = fmt.Sprintf(`if %s.Valid {
 		%s = &commonpb.Interval{Months: %s.Months, Days: %s.Days, Microseconds: %s.Microseconds}

@@ -2,61 +2,23 @@
 //
 // It holds the signing key, publishes the public half as a JWKS document, and
 // mints the assertions consoles exchange for a session. Every console verifies
-// against this issuer and has no other source of identity — there are no local
-// accounts anywhere in the product. It also registers organisations, which is
-// the other half of the same job: Cloud says who a user is, and Cloud says
-// which atlantis that user's organisation is served by.
+// against this issuer and has no other source of identity; there are no local
+// accounts. It also registers organisations, so Cloud decides both who a user
+// is and which atlantis serves that user's organisation.
 //
-//	cloud serve          publish the key set, and serve the account routes
-//	cloud mint           sign one assertion and print it
-//	cloud org create     create an organisation and queue it for provisioning
-//	cloud org status     show how far provisioning has got
-//	cloud org register   record an organisation's atlantis and credentials
-//	cloud org rotate-console   replace the console's credentials for one org
-//	cloud org revoke-console   cut the console off from one organisation
-//	cloud org restore-console  give it back, grants intact
-//	cloud data-key       print a keyset for a console's CONSOLE_DATA_KEY
+// usage() below lists the subcommands.
 //
-// # What `serve` does not serve
+// Minting is also an HTTP route: GET /authorize takes the caller from the
+// session and reads the role from cloud.memberships rather than as a parameter.
+// `mint` covers the cases with no browser and no session — diagnosing a
+// deployment, and the first membership in a new organisation. It reads the same
+// membership row and refuses when there is none, and has no -role flag, so the
+// command and the route cannot disagree.
 //
-// Sign-in. Cloud's sign-in is two-legged — a password, then a second factor —
-// and the second factor does not exist yet. A route that issued a session on a
-// password alone would be the posture this product refuses, so it lands with
-// the factor that gates it. Nothing `serve` exposes today creates a session.
-//
-// # Minting is now a route as well, and why `mint` is still here
-//
-// This doc used to argue that minting could not be an endpoint, because "an
-// HTTP route that mints on request is a complete authentication bypass unless
-// something in front of it establishes who is asking — and Cloud does not yet
-// hold user records, so there is nothing to establish it with."
-//
-// That premise expired. Cloud holds accounts, sessions and a second factor, so
-// `GET /authorize` establishes who is asking from a session and reads the role
-// out of cloud.memberships rather than taking it as a parameter. The condition
-// the old comment set was met before the route was built, which is the order it
-// asked for.
-//
-// `mint` stays because a route needs a browser and a session, and two cases
-// have neither: an operator diagnosing a deployment, and the first membership
-// in a new one — the person who has to be let in before anybody can let anybody
-// in. It is no longer an escape hatch around the gate, though. It opens the
-// database, reads the same membership row /authorize reads, and refuses when
-// there is none. There is no `-role` flag: the row decides, so that the command
-// and the route cannot disagree about what somebody is allowed to be.
-//
-// # Why registration is not a route either
-//
-// `org register` is the same argument one layer along. Registering an
-// organisation decides which atlantis a console will hand that organisation's
-// users, so an unauthenticated route for it would let anyone who can reach the
-// console repoint an organisation at a server they control — and every request
-// afterwards would succeed, because the credentials would be genuine.
-//
-// It is here rather than in the console because Cloud is the thing that
-// provisions organisations, and because this binary already runs where an
-// operator runs it. The cost is that cmd/cloud now opens a database, which is
-// the first time anything in Cloud's neighbourhood does.
+// `org register` is a command rather than a route. Registering decides which
+// atlantis a console hands an organisation's users, so an unauthenticated route
+// would let a caller repoint an organisation at a server they control and every
+// later request would succeed with genuine credentials.
 package main
 
 import (
@@ -271,17 +233,11 @@ func serve(args []string, log *slog.Logger) error {
 
 // mint prints an assertion for a member of an organisation.
 //
-// # What changed when /authorize arrived
-//
-// It used to take -subject, -org, -role, -email and -audience and sign them.
-// That was a token saying whatever the operator typed, which was tolerable only
-// because typing it required the signing key.
-//
-// Now it takes an account and an organisation and reads the rest. The role
-// comes from cloud.memberships and the audience from cloud.orgs.console_url —
-// the same two rows /authorize consults — so an assertion from the command line
-// and one from a browser carry the same authority for the same person. A
-// -role flag would be a way for those two to disagree, so there is not one.
+// It takes an account and an organisation and reads the rest: the role from
+// cloud.memberships and the audience from cloud.orgs.console_url, the same two
+// rows /authorize consults, so an assertion minted here and one minted in a
+// browser carry the same authority. There is no -role flag, which is how the
+// two are kept from disagreeing.
 //
 // It refuses when there is no membership. That is the point: the gate is the
 // row, and a command that could skip it would mean the gate is optional.
@@ -384,8 +340,6 @@ func mint(args []string) error {
 	return nil
 }
 
-// ── Cloud's own database ────────────────────────────────────────────────────
-
 // openCloud connects to Cloud's database, applying any pending migrations
 // first.
 //
@@ -416,8 +370,6 @@ func openCloud(ctx context.Context, dbURL string, log *slog.Logger) (*store.Stor
 func cloudDBFlag(fs *flag.FlagSet) *string {
 	return fs.String("db", os.Getenv("CLOUD_PG_URL"), "Cloud's database URL (or set CLOUD_PG_URL)")
 }
-
-// ── Accounts ────────────────────────────────────────────────────────────────
 
 func user(args []string, log *slog.Logger) error {
 	if len(args) == 0 {
@@ -478,8 +430,6 @@ func userCreate(args []string, log *slog.Logger) error {
 		"until a password is set or an account is linked\n", u.Email)
 	return nil
 }
-
-// ── Membership ──────────────────────────────────────────────────────────────
 
 func member(args []string, log *slog.Logger) error {
 	if len(args) == 0 {
@@ -587,17 +537,10 @@ func org(args []string, log *slog.Logger) error {
 // orgCreate records an organisation, grants its owner, and queues it for
 // provisioning.
 //
-// # Why -owner is required rather than a second command
-//
-// It used to write the organisation row and nothing else, leaving `cloud member
-// add` to grant somebody access. That ordering produced a state the product
-// answers badly: /authorize checks membership BEFORE it checks whether an
-// atlantis is registered, so an organisation with no member is a 403 —
-// "you are not a member" — no matter how perfectly it was provisioned.
-//
-// Making the owner optional would keep that state one flag away, and the whole
-// point of this step is that it should not be reachable. `make dev-cloud-seed`
-// ran exactly these two commands in sequence and is now one call.
+// -owner is required rather than left to a following `cloud member add`.
+// /authorize checks membership before it checks whether an atlantis is
+// registered, so an organisation with no member answers 403 however well it was
+// provisioned. An optional owner leaves that state one flag away.
 //
 // The owner must already have an account, which is the same constraint `cloud
 // member add` has always had. An organisation owned by an address nobody has
@@ -665,21 +608,13 @@ func orgCreate(args []string, log *slog.Logger) error {
 // waitForProvisioning blocks until the organisation is serving, or reports why
 // it is not.
 //
-// # Why this exits non-zero
+// Exits non-zero on timeout, so a Makefile target or walkthrough step stops
+// here rather than failing later somewhere less informative.
 //
-// Because a wait that reports success for an organisation that never came up is
-// the exact failure this flag exists to detect, reproduced inside the tool built
-// to detect it. A Makefile target or a walkthrough step would carry straight on
-// and fail later, somewhere less informative.
-//
-// # Why a `failed` state stops the wait
-//
-// `failed` is not terminal — the provisioner retries it after a backoff — so
-// this could keep waiting. It does not, because the failures that reach this
-// state locally are the ones a retry does not fix: a bad image reference, a
-// cluster that is not running, a setting nobody has filled in. Reporting the
-// reason now beats reporting a timeout in ten minutes, and the message says the
-// retry is still coming.
+// State 'failed' stops the wait even though the provisioner retries it after a
+// backoff: the failures that reach it locally are a bad image reference, a
+// cluster that is not running, or an unfilled setting, none of which a retry
+// fixes. The message says the retry is still coming.
 func waitForProvisioning(ctx context.Context, db *store.Store, org string, limit time.Duration) error {
 	const poll = 2 * time.Second
 	deadline := time.Now().Add(limit)
@@ -951,26 +886,15 @@ func dataKey(args []string) error {
 
 // signingKey creates the key Cloud mints assertions with, if it does not exist.
 //
-// # Why this exists as a command
+// A separate step ahead of the deploy, like the data key. The Deployment reads
+// the key from a Secret filled from this file at deploy time, so creating it
+// lazily in `cloud serve` is circular: on a machine that has never run the
+// server the file is absent, the Secret cannot be written, and
+// `make dev-k8s-load` skips Cloud.
 //
-// The key was created lazily by `cloud serve`, on the theory that a development
-// stack has one and it appears the first time anybody runs it. That held while
-// Cloud only ever ran on the machine that owned the file.
-//
-// It stopped holding when Cloud moved into the cluster. The Deployment gets the
-// key from a Secret, and the Secret is filled from this file at deploy time —
-// so on a machine that has never run `cloud serve`, the file is absent, the
-// Secret cannot be written, and `make dev-k8s-load` skips Cloud entirely. From
-// a clean checkout that is a dead end: the thing that would create the key is
-// the thing that will not start without it.
-//
-// So the creation is its own step, ahead of the deploy, exactly as the data key
-// already is.
-//
-// Idempotent, because LoadOrCreateKey is. Running it twice keeps the first key
-// — which matters more than it sounds: replacing it invalidates every assertion
-// in flight and every session, and the failure presents as everybody being
-// signed out at once with nothing in the logs about a key.
+// Idempotent, because LoadOrCreateKey is: running it twice keeps the first key.
+// Replacing the key invalidates every assertion in flight and every session,
+// which presents as everybody being signed out at once.
 func signingKey(args []string) error {
 	fs := flag.NewFlagSet("signing-key", flag.ExitOnError)
 	path := fs.String("path", "", "where to write the key (required)")
@@ -1006,34 +930,17 @@ func envOr(name, fallback string) string {
 
 // orgPurge brings an organisation's destruction forward to immediately.
 //
-// # Why this exists
+// Deleting from the browser is reversible: it stops the organisation serving,
+// starts a thirty-day clock, and leaves the namespace alone. The row survives
+// that window, holding the name and counting against its creator's limit, so
+// reusing the name otherwise means waiting a month.
 //
-// Deleting from the browser is deliberately reversible: it stops the
-// organisation serving, starts a thirty-day clock, and leaves the namespace
-// alone. That window is the only safety net the system has while there are no
-// database backups.
+// It destroys nothing itself. It sets purge_after to now, and the provisioner
+// tears the namespace down on its next reconcile pass, being the only process
+// holding Kubernetes credentials. So this needs a database URL and no
+// kubeconfig, and the destruction appears in the provisioner's log.
 //
-// It also means the row survives for thirty days, holding the name and counting
-// against its creator's limit. So "delete it and make a fresh one with the same
-// name" is otherwise a month's wait. This is the operator's answer to that, and
-// to a customer who asks to be erased now rather than eventually.
-//
-// # What it does not do
-//
-// It does not destroy anything itself. It sets purge_after to now; the
-// provisioner tears the namespace down on its next reconcile pass, because the
-// provisioner is the only process in this system that holds Kubernetes
-// credentials — see internal/provisioner's package comment for why that
-// separation is not negotiable.
-//
-// So this needs a database URL and no kubeconfig, and the destruction is
-// visible in the provisioner's log rather than this one.
-//
-// # The guard
-//
-// -yes, and the name as -org. Two deliberate acts, because there is no
-// confirmation prompt: this is expected to run in a terminal where a
-// half-remembered shell history entry is one arrow key away.
+// Guarded by -yes as well as -org, since there is no confirmation prompt.
 func orgPurge(args []string, log *slog.Logger) error {
 	fs := flag.NewFlagSet("org purge", flag.ExitOnError)
 	name := fs.String("org", "", "organisation name")
@@ -1090,12 +997,8 @@ func orgPurge(args []string, log *slog.Logger) error {
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// org revoke-console / restore-console — the console's credential, cut off and
-// brought back
-// ---------------------------------------------------------------------------
-
-// atlDBFlag registers the flag naming ONE ORGANISATION'S atlantis database.
+// atlDBFlag registers the flag naming one organisation's atlantis database, for
+// `org revoke-console` and `org restore-console`.
 //
 // Not Cloud's, and not the console's. Both of those are control-plane databases
 // shared across the fleet; this is the per-organisation one that holds
@@ -1149,20 +1052,14 @@ SELECT revoked_at IS NOT NULL FROM atlantis.caller_identities WHERE caller = $1`
 
 // orgRevokeConsole cuts the console off from one organisation.
 //
-// # Why this exists as a command rather than a console button
+// A command rather than a console button, because the console is what is being
+// revoked: the button would work once and then remove the operator's ability to
+// press anything else in that organisation. The restore path has the same
+// problem, so both halves live outside the console.
 //
-// The console is the thing being revoked. A button would work exactly once and
-// then remove the operator's ability to press anything else in that
-// organisation, and the way back is this command's opposite — which cannot be a
-// button either, for the same reason. Both halves belong somewhere the console
-// is not.
-//
-// # What it does and does not reach
-//
-// One organisation. The console holds a separate credential per organisation,
-// so this cuts off the one whose database is named and leaves the rest serving.
-// That is usually what an incident wants; revoking the fleet means running it
-// per organisation, deliberately.
+// Reaches one organisation. The console holds a separate credential per
+// organisation, so this cuts off the one whose database is named and leaves the
+// rest serving. Revoking the fleet means running it per organisation.
 func orgRevokeConsole(args []string, log *slog.Logger) error {
 	fs := flag.NewFlagSet("org revoke-console", flag.ExitOnError)
 	name := fs.String("org", "", "organisation name; used in the printed record")
@@ -1229,13 +1126,9 @@ UPDATE atlantis.caller_identities SET revoked_at = NOW() WHERE caller = $1`,
 
 // orgRestoreConsole brings the console back for one organisation.
 //
-// # Why this cannot go through RegisterCaller
-//
-// RegisterCaller refuses 'atlantis-console' as a reserved name, and refuses a
-// revoked caller besides. That is deliberate in both cases, and it is exactly
-// what made revocation a one-way door before migration 0033: with the identity
-// row deleted, no supported command could recreate it. Marking the row instead
-// of deleting it is what turns the way back into clearing one column.
+// It cannot go through RegisterCaller, which refuses 'atlantis-console' as a
+// reserved name and refuses a revoked caller. Migration 0033 marks the identity
+// row rather than deleting it, so restoring is clearing one column.
 func orgRestoreConsole(args []string, log *slog.Logger) error {
 	fs := flag.NewFlagSet("org restore-console", flag.ExitOnError)
 	name := fs.String("org", "", "organisation name; used in the printed record")
@@ -1295,23 +1188,14 @@ UPDATE atlantis.caller_identities SET revoked_at = NULL WHERE caller = $1`,
 // orgRotateConsole asks for an organisation's console credentials to be
 // replaced.
 //
-// # Why this only records a request
+// Records a request only. The credentials are a Secret in the organisation's
+// namespace and Cloud holds no Kubernetes credentials, so the request is a
+// column, the provisioner acts on its next reconcile pass, and this returns
+// immediately. The same shape `cloud org purge` uses.
 //
-// The credentials are a Secret in the organisation's namespace, and Cloud holds
-// no Kubernetes credentials — the provisioner runs under a scoped service
-// account precisely so that one component, and not this one, can write there.
-// Widening Cloud's access so this command could do the work itself would undo
-// that separation for the sake of a synchronous exit code.
-//
-// So the request is a column, the provisioner acts on its next reconcile pass,
-// and this returns immediately. The same shape `cloud org purge` uses.
-//
-// # Why there is no -yes
-//
-// Rotation is the safe half of the pair. It replaces a credential with an
-// equivalent one and re-registers it; the console picks the new one up within
-// its refresh interval and nobody is signed out. `revoke-console` is the
-// destructive one, and that is where the confirmation lives.
+// No -yes. Rotation replaces a credential with an equivalent one and
+// re-registers it, and the console picks the new one up within its refresh
+// interval. The confirmation lives on `revoke-console`.
 func orgRotateConsole(args []string, log *slog.Logger) error {
 	fs := flag.NewFlagSet("org rotate-console", flag.ExitOnError)
 	name := fs.String("org", "", "organisation name")

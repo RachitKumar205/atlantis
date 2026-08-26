@@ -11,29 +11,15 @@ import (
 // AuditForbiddenCalls reports every forbidden call in an IR that is already
 // stored, across every surface caller SQL can occupy.
 //
-// # Why an audit, when there is already a gate
+// The gate in this package runs at plan and apply, so it is prospective: SQL
+// that entered the checkpoint before the gate existed executes with the same
+// authority as SQL that passed it. cmd/server calls this at boot, so a new
+// binary declines to serve what an older one admitted.
 //
-// The gate in this package runs at plan and apply. That makes it prospective
-// only: SQL that entered the checkpoint before the gate existed has never been
-// looked at, and it executes with exactly the same authority as SQL that has.
-// `partition by` delegates tenant isolation to a run-time parameter precisely
-// because a forgotten call site should not be able to leak — and a stored query
-// body calling set_config is a forgotten call site with a head start.
-//
-// It also closes the deploy-order window. Migration 0024 makes the discriminator
-// a PGC_USERSET parameter, and a server binary predating the gate would serve a
-// checkpoint containing a call that the gate would now refuse. Nothing can stop
-// an old binary from running, but a new one can decline to serve what the old
-// one let in — which is where this is called from (cmd/server).
-//
-// # Why this is not the full validator
-//
-// Deliberately only the forbidden-call check. Re-running table resolution or
-// touches coverage over a stored IR would resurrect the drift problem the admin
-// service documents at its own call site: content that was legal when its owner
-// applied it can stop resolving under later rules, and refusing to boot over
-// that would turn one caller's staleness into an outage. A forbidden call is
-// different in kind — it was never legal, and it is a live cross-tenant read.
+// The forbidden-call check only, not the full validator. Table resolution and
+// touches coverage re-run over a stored IR refuse to boot on content that was
+// legal when applied and stopped resolving under a later rule. A forbidden call
+// was never legal.
 func AuditForbiddenCalls(ir *dsl.IR) []error {
 	if ir == nil {
 		return nil

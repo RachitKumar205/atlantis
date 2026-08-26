@@ -15,10 +15,9 @@
 //     pending. The shared SKIP LOCKED claim picks them up on next
 //     startup.
 //
-// The reason text on Revoke and released rows distinguishes
-// graceful-drained completion ("shutdown_drained") from forced-
-// release ("shutdown_budget_exceeded") so an operator inspecting
-// last_error during an incident can tell which path fired.
+// The reason text on Revoke and released rows distinguishes graceful-drained
+// completion ("shutdown_drained") from forced release
+// ("shutdown_budget_exceeded"), so last_error names which path fired.
 
 package jobsdispatcher
 
@@ -52,8 +51,7 @@ func (d *Dispatcher) Shutdown(ctx context.Context) int {
 
 	for _, s := range sessions {
 		s.markDrained()
-		// Best-effort Goodbye push. If the outbox is wedged, we'll
-		// force-close in step 4 anyway.
+		// Best-effort Goodbye push. A wedged outbox is force-closed in step 4.
 		select {
 		case s.outbox <- &DispatchEnvelope{Goodbye: &Goodbye{Reason: "server_shutdown"}}:
 		default:

@@ -10,36 +10,26 @@ import (
 
 // Replacing the console's credentials without disturbing anything else.
 //
-// # Why only these two leaves
-//
 // The console presents a different certificate to each half of an organisation:
 // Console chains to CA, which atlantis trusts for clients, and SignerClient
 // chains to SignerCA, which the signer trusts for clients. They carry the same
-// common name and are signed by roots that share nothing — see the package
-// comment for why that separation is the whole design.
+// common name and are signed by roots that share nothing.
 //
-// Both authorities are left exactly as they are. That distinction is the
-// difference between a rotation and an outage: a new root invalidates every
-// caller certificate ever issued under the old one, which is why ensureCerts
-// refuses to regenerate rather than self-heal. Reissuing a leaf beneath a root
-// that stays put costs nothing and interrupts nobody.
+// Both authorities are left as they are. A new root invalidates every caller
+// certificate ever issued under the old one, which is why ensureCerts refuses
+// to regenerate; reissuing a leaf beneath a root that stays put interrupts
+// nobody.
 //
-// # Why the console cannot do this for itself
-//
-// It would have to ask the signer, and the signer refuses: 'atlantis-console'
-// is a reserved common name precisely so that a compromised console cannot ask
-// for one. The credential it would use to make the request chains to SignerCA
-// besides, and nothing issues from SignerCA online — so even with the reserved
-// list relaxed, the key to the door cannot be re-cut by the door. Rotation
-// belongs to whoever holds the authorities, which is the provisioner.
+// The console cannot do this for itself. 'atlantis-console' is a reserved
+// common name at the signer, so a compromised console cannot ask for one, and
+// nothing issues from SignerCA online in any case. Rotation belongs to whoever
+// holds the authorities, which is the provisioner.
 
 // mintConsoleLeaves writes the two certificates the console presents into b.
 //
-// Shared with Generate rather than copied, so there is one definition of what
-// the console's certificates are. Two copies would agree until the day one of
-// them gained a field — an extended key usage, a name constraint — and the
-// certificates a rotation produced would quietly stop matching the ones
-// provisioning produced.
+// Shared with Generate rather than copied: two copies agree until one gains a
+// field — an extended key usage, a name constraint — and a rotation stops
+// producing what provisioning produced.
 func mintConsoleLeaves(
 	b *Bundle,
 	caCert *x509.Certificate, caKey *ecdsa.PrivateKey,
@@ -125,9 +115,8 @@ func parseAuthority(a Authority, what string) (*x509.Certificate, *ecdsa.Private
 	if err != nil {
 		return nil, nil, fmt.Errorf("certs: %s: %w", what, err)
 	}
-	// Checked rather than assumed. Signing a leaf with a non-CA certificate
-	// succeeds here and fails at every handshake afterwards, which is a long way
-	// from the thing that caused it.
+	// Signing a leaf with a non-CA certificate succeeds here and fails at every
+	// handshake afterwards, a long way from the cause.
 	if !cert.IsCA {
 		return nil, nil, fmt.Errorf("certs: %s is not a certificate authority", what)
 	}

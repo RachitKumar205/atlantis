@@ -77,9 +77,8 @@ func BenchmarkRingHandler_ContendedEnd2End(b *testing.B) {
 	})
 }
 
-// BenchmarkRing_SinceLargeWindow measures the read path. This runs
-// once per console poll (~1 Hz), not on the hot writer path, so the
-// budget is much more relaxed — but we still want to know.
+// BenchmarkRing_SinceLargeWindow measures the read path, which runs once per
+// console poll at about 1 Hz rather than on the writer path.
 func BenchmarkRing_SinceLargeWindow(b *testing.B) {
 	r := NewLogRing(8192)
 	for i := 0; i < 8000; i++ {

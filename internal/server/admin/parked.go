@@ -25,16 +25,14 @@ const defaultParkedLimit = 100
 // ListParkedObjects reads the register of objects a destructive migration
 // parked instead of dropping.
 //
-// This exists because the register was reachable only by hand-written SQL
-// against atlantis.parked_objects — a table no RPC, CLI, console page or doc
-// mentioned. An operator who removed an entity by mistake had no way to learn
-// that the rows were still there, or how long they had to change their mind,
-// which made a recoverable delete indistinguishable from an unrecoverable one.
+// Without it the register is reachable only by hand-written SQL against
+// atlantis.parked_objects, a table no RPC, CLI, console page or doc mentions,
+// so an entity removed by mistake gives no sign that the rows are still there
+// or how long the window runs.
 //
-// Read-only on purpose. Extending a retention window or reaping early are
-// deliberate acts with data consequences, and they stay documented UPDATEs
-// rather than buttons: the value of the 30-day window comes from it being hard
-// to shorten by accident.
+// Read-only. Extending a retention window or reaping early has data
+// consequences, and stays a documented UPDATE rather than a button, so the
+// 30-day window is hard to shorten by accident.
 //
 // The two halves are queried separately rather than with one OR'd predicate.
 // `WHERE ($1 OR reaped_at IS NULL)` collapses to no predicate when including
@@ -62,9 +60,9 @@ func (s *Service) ListParkedObjects(ctx context.Context, req *adminpb.ListParked
 	              original_schema, original_name, parked_at, reap_after, reaped_at,
 	              attempts, coalesce(last_error, ''), next_attempt_after`
 
-	// Live registrations first, soonest to expire first: the question this
-	// answers is "what am I about to lose", so the ordering is part of the
-	// answer. Uses parked_objects_due_idx.
+	// Live registrations first, soonest to expire first: the list answers what
+	// is about to be lost, so the ordering is part of the answer. Uses
+	// parked_objects_due_idx.
 	live, liveMore, err := s.queryParked(ctx, `
 SELECT `+cols+`
   FROM atlantis.parked_objects

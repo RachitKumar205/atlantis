@@ -23,34 +23,21 @@ const PartitionHeader = "atlantis-tenant"
 // NewPartition attaches the tenant a request asserts to the request context, so
 // that `partition by` has something to bind.
 //
-// # What this trusts, and what it does not
-//
 // The tenant is asserted by the calling service in request metadata. That
-// service has already authenticated the end user and is the only party that
-// knows whose request this is. atlantis does not derive it and does not
-// second-guess it: a caller that wanted another tenant's rows could query its
-// own database directly, so a check here would protect nothing.
+// service authenticated the end user; atlantis does not derive or second-guess
+// it, since a caller wanting another tenant's rows could query its own database.
 //
-// The guarantee is narrower and more useful than "callers cannot lie". Once a
-// tenant is asserted for a request, every statement in that request's
-// transaction is confined to it — including SQL atlantis did not generate and
-// did not inspect. The failure this prevents is the accidental one: a forgotten
-// predicate, a new handler, a custom query body. That is the failure that
-// actually happens.
+// The guarantee is not that callers cannot lie. Once a tenant is asserted for a
+// request, every statement in that request's transaction is confined to it,
+// including SQL atlantis did not generate and did not inspect. What that stops
+// is a forgotten predicate, a new handler, or a custom query body.
 //
-// # Why an interceptor rather than a per-handler read
+// An interceptor rather than a per-handler read, so a handler added later
+// cannot omit it.
 //
-// The same reason the isolation itself is a database policy rather than a
-// predicate in each generated read. An interceptor cannot be forgotten by a
-// handler added later. A handler that reads the header itself can.
-//
-// # Absence is not an error here
-//
-// A request with no tenant header reaches the handler with no partition in
-// context, and the dispatcher then refuses any partitioned entity while serving
-// ordinary ones normally. Rejecting here instead would break every request to
-// every unpartitioned entity on a deployment that has one partitioned table.
-// The refusal belongs where the requirement is known.
+// A missing header is not an error here. The request reaches the handler with
+// no partition in context and the dispatcher refuses partitioned entities only,
+// so unpartitioned ones keep serving.
 func NewPartition() grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		next, err := withPartition(ctx)
@@ -86,18 +73,14 @@ func (s *partitionStream) Context() context.Context { return s.ctx }
 // reach set_partition, which rejects it — but as an error from the database
 // rather than as the missing header it is, and the two want different fixes.
 //
-// # Two different tenants is an error, not a choice
+// Two values for the tenant header are refused rather than resolved. Where an
+// intermediary appends an authoritative tenant to whatever the client sent,
+// first-wins hands the decision to the client, and nothing here can tell which
+// value came from where.
 //
-// Taking the first value is what this did, and it is wrong in the topology that
-// matters: where an intermediary appends an authoritative tenant to whatever
-// the client sent, first-wins hands the decision to the client. Nothing here
-// can tell which value came from where, so the honest answer is to refuse.
-//
-// cmd/server/proxyauth.go already refuses the same shape for the same reason —
-// "trusted proxy %q forwarded multiple client certificates" — and an isolation
-// decision should not be more permissive about ambiguity than an identity one.
-// Repeated copies of the SAME tenant are accepted: that is a duplicate, not a
-// disagreement.
+// cmd/server/proxyauth.go refuses the same shape for the same reason —
+// "trusted proxy %q forwarded multiple client certificates". Repeated copies of
+// the same tenant are accepted, being a duplicate rather than a disagreement.
 func withPartition(ctx context.Context) (context.Context, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {

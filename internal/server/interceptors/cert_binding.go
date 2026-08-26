@@ -15,16 +15,14 @@ import (
 
 // CertBinding is what a caller's row says about whether it may authenticate.
 //
-// One field, and it used to be four. Fingerprint, Previous and PreviousUntil
-// pinned a caller to a single leaf and gave a renewal an overlap window to be
-// survivable; migration 0032 removed all three when the certificate lifetime
-// dropped to seven days. See that migration for the reasoning.
+// Migration 0032 removed the Fingerprint, Previous and PreviousUntil columns
+// that pinned a caller to a single leaf, when the certificate lifetime dropped
+// to seven days. See that migration for the reasoning.
 //
-// What is left is the question the interceptor still answers faster than
-// anything else: does this caller have an identity row right now. RevokeCaller
-// deletes it, this is cached for five seconds, and the auth allowlist behind it
-// refreshes only every thirty — so this is the path a revocation takes effect
-// on.
+// What is left is the question the interceptor answers faster than anything
+// else: does this caller have an identity row right now. RevokeCaller deletes
+// it, this is cached for five seconds, and the auth allowlist behind it
+// refreshes every thirty, so this is the path a revocation takes effect on.
 type CertBinding struct {
 	// Exists reports whether a caller_identities row is present.
 	Exists bool
@@ -32,13 +30,11 @@ type CertBinding struct {
 
 // CertBindingLookup returns the binding state for a caller.
 //
-// A non-nil error fails CLOSED: the interceptor logs it and refuses the call,
-// the same answer an absent row gets. An earlier version of this comment called
-// that "fails open", which is the opposite of what the code does and the more
-// dangerous of the two to believe — a database blip refuses traffic, it does not
-// admit it.
+// A non-nil error fails closed: the interceptor logs it and refuses the call,
+// the same answer an absent row gets, so a database blip refuses traffic rather
+// than admitting it.
 //
-// Lookups MUST NOT block indefinitely; the caller is on the request hot path.
+// Lookups must not block indefinitely; this is on the request hot path.
 type CertBindingLookup func(ctx context.Context, caller string) (CertBinding, error)
 
 // CertBindingConfig parameterises the cert-binding interceptor.
@@ -57,12 +53,10 @@ type CertBindingConfig struct {
 
 	// ExemptCallers is the set of CNs that skip the check entirely.
 	//
-	// Empty by default, and the console is deliberately not in it any more.
-	// Exempting a caller now means exempting it from "do you still have an
-	// identity row", which is the only revocation this system has — so an
-	// exempt caller is one RevokeCaller cannot cut off. That is a serious
-	// thing to hand out and belongs to an operator who has a bootstrap CN
-	// authenticating by some other means, not to a default.
+	// Empty by default. Exempting a caller exempts it from "do you still have
+	// an identity row", which is the only revocation this system has, so an
+	// exempt caller is one RevokeCaller cannot cut off. For a bootstrap CN
+	// authenticating by some other means.
 	ExemptCallers []string
 
 	// CacheTTL is how long a lookup result is held in process before
@@ -92,9 +86,8 @@ type CertBindingChecker struct {
 }
 
 // NewCertBindingChecker constructs the shared checker. The supplied
-// CertBindingConfig is captured by value; subsequent mutations on
-// the original config don't affect the checker (defense against the
-// "caller secretly expanded the exempt list" footgun).
+// CertBindingConfig is captured by value, so a later mutation of the original
+// cannot widen the exempt list.
 func NewCertBindingChecker(cfg CertBindingConfig) *CertBindingChecker {
 	return &CertBindingChecker{check: buildCertBindingCheck(cfg)}
 }
@@ -166,9 +159,9 @@ func buildCertBindingCheck(cfg CertBindingConfig) func(ctx context.Context, full
 			return nil
 		}
 		caller := callerFn(ctx)
-		// Anonymous reaches us in insecure dev mode (no mTLS configured
-		// for the listener). The auth interceptor will reject it; this
-		// interceptor has nothing meaningful to check.
+		// Anonymous arrives in insecure dev mode, with no mTLS configured on
+		// the listener. The auth interceptor rejects it, and there is no
+		// certificate here to check.
 		if caller == "" || caller == "anonymous" {
 			return nil
 		}
@@ -179,14 +172,14 @@ func buildCertBindingCheck(cfg CertBindingConfig) func(ctx context.Context, full
 		// The peer certificate is still required.
 		//
 		// With Enforce=true the listener is tls.RequireAndVerifyClientCert, so a
-		// missing peer certificate here means the listener is mis-configured —
-		// fail closed rather than trust the caller name alone, which is derived
-		// from that certificate.
+		// missing peer certificate here means the listener is mis-configured.
+		// Failing closed, because the caller name is derived from that
+		// certificate.
 		//
-		// What is NOT done any more is comparing its fingerprint to a stored one.
-		// Migration 0032 removed pinning when the certificate lifetime dropped to
-		// seven days; the chain and the common name are verified by the handshake,
-		// and a certificate that should not exist stops working when it expires.
+		// Its fingerprint is not compared against a stored one: migration 0032
+		// removed pinning when the certificate lifetime dropped to seven days.
+		// The chain and the common name are verified by the handshake, and a
+		// certificate that should not exist stops working when it expires.
 		if _, ok := leafCertFromContext(ctx); !ok {
 			log.Warn("cert binding: no peer cert on enforced path", "caller", caller, "method", fullMethod)
 			return status.Error(codes.Unauthenticated, "no peer certificate")
@@ -257,23 +250,20 @@ func leafCertFromContext(ctx context.Context) (cert leafCert, ok bool) {
 	return leafCert{Raw: info.State.PeerCertificates[0].Raw}, true
 }
 
-// leafCert is a tiny shim over *x509.Certificate so the interceptor
-// only depends on the field it actually uses — the raw DER bytes. Nothing
-// hashes them now; the check is that a verified certificate was presented
-// at all, which is what distinguishes a caller from a mis-configured listener.
+// leafCert is a shim over *x509.Certificate carrying the one field the
+// interceptor uses, the raw DER bytes. Nothing hashes them: the check is that a
+// verified certificate was presented at all, which distinguishes a caller from
+// a mis-configured listener.
 type leafCert struct {
 	Raw []byte
 }
 
 // bindingCache is a per-process TTL cache of (caller → does an identity row
-// exist). One DB read per CN per TTL window under burst — at our QPS
-// floor this is the difference between "Postgres absorbs the load"
-// and "Postgres becomes the bottleneck."
+// exist), holding the database to one read per CN per TTL window under burst.
 //
-// Stale-while-revalidate is intentionally NOT implemented: the TTL is
-// short (5s default) and rotation/revoke decisions are operator-paced
-// — extra freshness machinery would be all cost, no benefit. Operators
-// who need immediate effect can restart the server or wait one TTL.
+// A miss blocks on the read rather than serving stale and revalidating behind
+// it: the TTL is 5s by default, so the window a revoke waits out is already
+// short.
 type bindingCache struct {
 	mu  sync.RWMutex
 	m   map[string]bindingEntry

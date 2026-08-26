@@ -21,8 +21,8 @@ type DBTX interface {
 }
 
 // normalizePredicate returns the pg_get_expr deparse of a declared predicate as
-// Postgres itself would store it — the SAME normalized form the live side is
-// read in. Rather than reimplement Postgres's expression canonicalization
+// Postgres stores it, which is the form the live side is read in. Rather than
+// reimplement Postgres's expression canonicalization
 // (implicit casts, operator resolution, IN→ANY, commutativity, …) in Go and risk
 // a false-accept, it renders the predicate onto a throwaway TEMP table whose
 // columns carry the entity's real types, reads the stored index predicate back,

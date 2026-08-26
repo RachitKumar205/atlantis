@@ -21,51 +21,33 @@ import (
 
 // Enrolment: how a machine gets a client certificate for a caller.
 //
-// # What this replaced, and why
+// The machine that will use the key generates it, and only the CSR travels. The
+// console never holds a caller's private key.
 //
-// handleIssueCert generated a P-256 key inside the console, built a CSR with
-// it, sent the CSR to the signer, and returned the private key to a browser for
-// download. The CSR half was always right. The key was simply born in the wrong
-// process: it crossed the network, sat in JavaScript memory, and landed in a
-// Downloads folder, for no reason anyone could name — the signer has only ever
-// wanted a CSR.
+// Two routes with different authorities. An admin mints a token on the
+// console's normal API, behind session, role, CSRF and sudo. A machine redeems
+// it on the enrolment listener, which has no session and no cookies: the token
+// is the whole of what authorises it.
 //
-// Now the machine that will use the key generates it, and only the CSR travels.
-// The console never sees a private key and cannot leak one it does not hold.
-//
-// # Two routes, two different authorities
-//
-// An admin mints a token on the console's normal API, behind session, role,
-// CSRF and sudo. A machine redeems it on the enrolment listener, which has no
-// session and no cookies — the token is the whole of what authorises it.
-//
-// The redemption route is on a separate listener carrying only these routes.
-// The console's main mux ends in a `/` catch-all serving the SPA, so mounting
-// this on it would publish the entire console API on a port every machine that
-// enrols can reach.
+// Redemption is on a separate listener. The console's main mux ends in a `/`
+// catch-all serving the SPA, so mounting these there would publish the entire
+// console API on a port every enrolling machine can reach.
 
 // buildEnrollListener prepares the second listener.
 //
-// # Its own mux, and that is the point
+// It builds its own mux. buildMux ends with a `/` catch-all serving the SPA,
+// and *Server is itself the handler for the main listener, so reusing either
+// would put the whole console API on a port every enrolling machine can reach,
+// behind none of the terminator, ingress limits or WAF the main listener sits
+// behind.
 //
-// buildMux ends with a `/` catch-all that serves the SPA, and the *Server is
-// itself the handler for the main listener. Reusing either here would put the
-// whole console API — sign-in, callers, the change policy, audit — on a port
-// that every machine needing a certificate can reach, behind none of the
-// upstream terminator, ingress limits or WAF the main listener sits behind.
-// Two routes, registered here, and nothing else can be added by accident.
+// The client certificate is requested, never required: enrolment arrives with
+// no certificate and renewal arrives with one. Each handler asserts what it
+// needs, and handleRenew checks for a peer certificate itself rather than
+// assuming the listener did.
 //
-// # Requested, never required
-//
-// Enrolment arrives with no certificate — that is what enrolment is. Renewal
-// arrives with one. The listener therefore cannot demand one, and each handler
-// asserts what it needs: handleEnroll wants a token, and handleRenew wants a
-// peer certificate and checks for it itself rather than assuming the listener
-// did.
-//
-// No browser reaches this port, so the certificate-selection prompt that
-// requesting a client certificate causes in a browser is not a concern here —
-// which is the other reason it is not on the main listener.
+// No browser reaches this port, so requesting a client certificate here does
+// not raise a certificate-selection prompt.
 func (s *Server) buildEnrollListener() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /enroll", s.handleEnroll)
@@ -73,42 +55,21 @@ func (s *Server) buildEnrollListener() error {
 
 	// RequestClientCert, and the certificate is verified in handleRenew.
 	//
-	// # Why the check moved out of the handshake
+	// The handshake cannot verify: each organisation has its own client CA, and
+	// tls.Config carries one ClientCAs pool. handleRenew resolves the
+	// organisation from the certificate's fingerprint, so the authority to
+	// verify against is known there and nowhere earlier.
 	//
-	// This listener used to hold VerifyClientCertIfGiven against ONE pool of
-	// client CAs, read from CONSOLE_ENROLL_CLIENT_CA. That works while every
-	// caller in the deployment chains to one authority, and stops working the
-	// moment each organisation has its own — which is what migration 0005 made
-	// true and 0009 finished. One pool cannot verify every organisation's
-	// callers, and the failure is the worst shape available: caller
-	// certificates live seven days and `tide` renews at two thirds of that, so
-	// every organisation but one would silently stop renewing around day five,
-	// on a machine nobody is watching, with the refusal delivered as a
-	// handshake reset that no handler ever sees and a client-side warning on
-	// stderr that is not an error.
+	// This is not fail-closed. handleRenew must verify, and a route added here
+	// that reads r.TLS without verifying trusts an unverified certificate.
+	// There are two routes and no catch-all, and
+	// TestACertificateFromAnotherAuthorityCannotRenew asserts the property
+	// rather than leaving it implied by this configuration.
 	//
-	// handleRenew already resolves the organisation from the certificate's
-	// fingerprint, so the right authority to verify against is known there and
-	// nowhere earlier. Verifying at that point costs nothing and turns the
-	// refusal into a 403 with a reason, on the server, beside the organisation
-	// it concerns.
-	//
-	// # What this gives up, and what it does not
-	//
-	// It gives up a check that fails closed automatically. handleRenew MUST now
-	// verify, and a route added to this listener that reads r.TLS without
-	// verifying would be trusting an unverified certificate. There are two
-	// routes here and there is no catch-all, which is why that is acceptable —
-	// and the property is asserted directly by
-	// TestACertificateFromAnotherAuthorityCannotRenew rather than left implied
-	// by the configuration.
-	//
-	// It does NOT give up proof of possession. A client that sends a
-	// certificate must also send CertificateVerify, and Go checks that
-	// signature against the presented public key whatever ClientAuth is set to
-	// — see crypto/tls, where the check sits inside "the client sent a
-	// certificate" and not inside "we are verifying it". So a copied
-	// certificate, which is public, still does not let anybody renew.
+	// Proof of possession still holds. A client that sends a certificate must
+	// also send CertificateVerify, and crypto/tls checks that signature against
+	// the presented public key whatever ClientAuth is set to, so a copied
+	// certificate does not permit renewal.
 	tlsCfg := &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		ClientAuth: tls.RequestClientCert,
@@ -159,10 +120,9 @@ const signerTimeout = 15 * time.Second
 
 // orgSignerClient builds a client to one organisation's own signer.
 //
-// The same shape as newSignerClient below, from PEM in the registry row rather
-// than paths on disk — the same difference, and for the same reason, as
-// buildOrgTLS versus the files the console used to load. There is one set of
-// these per organisation and they arrive while the process is running.
+// The same shape as newSignerClient below, built from PEM in the registry row
+// rather than paths on disk, as buildOrgTLS is. There is one set of these per
+// organisation and they arrive while the process is running.
 //
 // The caller has already established that all four columns are present;
 // SignerConfigured is the question, and asking it here as well would be a
@@ -219,8 +179,6 @@ func newSignerClient(cfg Config) (*http.Client, error) {
 		},
 	}, nil
 }
-
-// ── Minting, on the console's API ───────────────────────────────────────────
 
 // handleMintEnrollToken issues a token for a caller, to be carried to a
 // machine.
@@ -304,12 +262,9 @@ func (s *Server) handleMintEnrollToken(w http.ResponseWriter, r *http.Request) {
 
 // handleGetCallerCerts lists what this console has enrolled, per caller.
 //
-// # What it can and cannot say
-//
 // This is the console's own record, not atlantis's. atlantis binds a caller to
-// one certificate by fingerprint, and GetCallers does not return that
-// fingerprint — so the console cannot report "is this caller bound", only
-// "did this console enrol it, and when".
+// one certificate by fingerprint and GetCallers does not return it, so this
+// reports when the console enrolled a caller, not whether it is bound.
 //
 // The distinction matters for the warning the page shows, which is why the
 // warning is unconditional: enrolling supersedes whatever certificate that
@@ -336,8 +291,8 @@ func (s *Server) handleGetCallerCerts(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"certs": out, "enrolment_enabled": s.cfg.EnrollmentEnabled()})
 }
 
-// ── Redeeming, on the enrolment listener ────────────────────────────────────
-
+// enrollRequest is what a machine posts to the enrolment listener to redeem a
+// token.
 type enrollRequest struct {
 	Org    string `json:"org"`
 	Token  string `json:"token"`
@@ -375,9 +330,9 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	// sends a malformed CSR should get a 400 and keep its token, rather than
 	// having to go back to an admin for another one because of a typo.
 	//
-	// The CN check is deliberately NOT here: it compares against the caller on
-	// the token's row, which is not known until the row is spent. That one is an
-	// authority question, and getting it wrong does cost the token.
+	// The CN check is not here: it compares against the caller on the token's
+	// row, which is not known until the row is spent. That one is an authority
+	// question, and getting it wrong does cost the token.
 	csr, err := parseCSRPEM(req.CSRPEM)
 	if err != nil {
 		jsonError(w, "invalid CSR: "+err.Error(), http.StatusBadRequest)
@@ -439,8 +394,8 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ── Renewing, with the certificate the machine already holds ────────────────
-
+// renewRequest is a renewal, authenticated by the certificate the machine
+// already holds.
 type renewRequest struct {
 	CSRPEM string `json:"csr_pem"`
 }
@@ -448,29 +403,19 @@ type renewRequest struct {
 // handleRenew reissues a certificate for a machine that presents the one it
 // already has.
 //
-// # What authorises this, and what does not
+// The peer certificate authorises this, and nothing else. There is no token: a
+// renewal token would be a long-lived minting credential on disk.
 //
-// The peer certificate, and nothing else. There is no token: a token would be a
-// long-lived minting credential sitting on disk, which is the thing enrolment
-// exists to avoid. A machine that has a working certificate has already proved
-// it is the caller; renewal only asks it to prove that again.
+// The request names neither the organisation nor the caller. Both come from
+// console.caller_certs, looked up by the SHA-256 of the presented leaf. signCSR
+// copies only the subject, so a leaf carries a common name and nothing more,
+// and caller names such as `backend` collide across organisations. A request
+// that named its organisation would name something the console cannot check,
+// letting acme's `backend` renew into globex's atlantis.
 //
-// # The request names neither the organisation nor the caller
-//
-// Both come from console.caller_certs, looked up by the SHA-256 of the leaf the
-// peer presented. That is deliberate and it is the only shape that works. There
-// is one signing authority and signCSR copies only the subject, so a leaf
-// carries a common name and nothing more — and caller names are `backend`,
-// `api`, `worker`, which collide across organisations as a matter of course. A
-// request that named its organisation would be naming something the console
-// could not check, and acme's `backend` could renew into globex's atlantis and
-// supersede the identity working there.
-//
-// A certificate this console did not issue has no row, so it cannot renew. That
-// includes certificates minted by `make dev-caller-cert` or straight from the
-// signer: they authenticate at atlantis perfectly well and are simply not
-// renewable here, which is the honest answer rather than a guess about who they
-// belong to.
+// A certificate this console did not issue has no row and cannot renew. That
+// includes certificates from `make dev-caller-cert` or straight from the
+// signer, which authenticate at atlantis but are not renewable here.
 func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 	if ok, retry := s.loginLim.allow(clientIP(r)); !ok {
 		w.Header().Set("Retry-After", fmt.Sprintf("%d", retry))
@@ -520,27 +465,23 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Now that the organisation is known, check the certificate actually chains
-	// to ITS authority.
+	// With the organisation known, check the certificate chains to that
+	// organisation's authority.
 	//
-	// This is the check the TLS handshake used to do, moved here because it
-	// could not be done there: the listener is shared and each organisation has
-	// its own root, so the pool to verify against is not known until the
-	// fingerprint above has said whose certificate this is.
+	// The TLS handshake cannot do this: the listener is shared and each
+	// organisation has its own root, so the pool to verify against is unknown
+	// until the fingerprint above says whose certificate this is.
 	//
-	// What this catches, stated accurately rather than generously.
+	// It is not what stops a foreign certificate, which has a fingerprint this
+	// console never recorded and is refused by the lookup above. Nor a copied
+	// one: a certificate is public, and the handshake signature proving the
+	// sender holds the key is what stops a copy.
 	//
-	// It is NOT what stops a foreign certificate: one has a fingerprint this
-	// console never recorded, so the lookup above refuses it first. Nor is it
-	// what stops a copied certificate — a certificate is public, and what stops
-	// a copy is the handshake signature proving the sender holds the key.
-	//
-	// What it catches is a certificate this console really did issue, for this
-	// organisation, that its atlantis would no longer accept: the case where
-	// the organisation's authority has been rotated since. Renewing it would
-	// mint a successor from the new authority and supersede a working
-	// identity — a certificate that authenticates nowhere, produced by a
-	// request that looked entirely reasonable.
+	// It catches a certificate this console did issue, for this organisation,
+	// that its atlantis would no longer accept, the organisation's authority
+	// having been rotated since. Renewing it mints a successor from the new
+	// authority and supersedes a working identity, producing a certificate that
+	// authenticates nowhere.
 	creds, err := s.db.orgCredentials(r.Context(), rec.Org)
 	if err != nil {
 		s.log.Error("read credentials while renewing", "org", rec.Org, "err", err)
@@ -556,7 +497,7 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Expiry, which the handshake also used to answer.
+	// Expiry, which a handshake verifying against one pool would also answer.
 	//
 	// A machine whose certificate has already lapsed has to enrol again rather
 	// than renew: renewal proves identity with the credential being replaced,
@@ -613,24 +554,22 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 // enroll_token_minted row.
 const enrolmentActor = "enrolment"
 
-// ── The shared issuance path ────────────────────────────────────────────────
-
+// issuedBundle is what both the enrolment and renewal paths return, minted by
+// the shared issuance path below.
 type issuedBundle struct {
 	certPEM string
 
-	// caPEM is the root the machine verifies the SERVER against, taken from
-	// console.orgs — NOT the signer's `ca_pem`.
+	// caPEM is the root the machine verifies the server against, taken from
+	// console.orgs rather than from the signer's `ca_pem`.
 	//
-	// They are different questions and the codebase already says so: the
-	// registration guard notes that the console's CAPEM "is the root this
-	// console verifies the organisation's *server* against; the client leaf is
-	// issued by whatever root that server trusts for clients", and that the two
-	// "are the same CA in every deployment that exists today and are not
-	// required to be."
+	// The two answer different questions: console.orgs holds the root this
+	// console verifies the organisation's server against, while the client leaf
+	// is issued by whatever root that server trusts for clients. They are the
+	// same CA in every deployment today and are not required to be.
 	//
-	// Handing back the signer's root would work everywhere it has ever been
-	// tried and break the first organisation provisioned with split roots — as
-	// a handshake failure at atlantis, with nothing pointing back here.
+	// Handing back the signer's root works until the first organisation
+	// provisioned with split roots, where it is a handshake failure at atlantis
+	// with nothing pointing back here.
 	caPEM string
 
 	// Where the machine talks to atlantis, and where it renews. Neither is
@@ -656,14 +595,13 @@ func (s *Server) issueForCaller(
 	// The signer builds the certificate's subject from the caller name it is
 	// handed and takes only the public key from the request, so what a CSR asks
 	// to be called decides nothing. Refusing a mismatch would reject a harmless
-	// request, and — more to the point — `tide login` cannot know the caller
-	// name before enrolling: the token determines it, server-side, on the row
-	// spent below.
+	// request, and `tide login` cannot know the caller name before enrolling:
+	// the token determines it, server-side, on the row spent below.
 	//
-	// What is load-bearing, and is asserted by a test, is that the `caller` sent
-	// to the signer comes from that spent row and from nowhere else. Forwarding
-	// a name out of the request would hand the requester whatever identity it
-	// asked for, and nothing in the response would look wrong.
+	// A test asserts that the `caller` sent to the signer comes from that spent
+	// row and nowhere else. Forwarding a name out of the request hands the
+	// requester whatever identity it asked for, with nothing in the response
+	// looking wrong.
 	signed, err := s.callSigner(ctx, org, caller, csrPEM)
 	if err != nil {
 		return nil, err
@@ -781,10 +719,9 @@ type signerResponse struct {
 // fallback is not a transitional convenience: it is what every organisation
 // registered before migration 0009 uses, and what `make dev-signer` serves.
 //
-// Both halves come from one place, which is the point. An organisation's client
-// certificate paired with the shared address — or the reverse — is refused at a
-// signer's handshake with a message about a certificate, and nothing in it
-// names the row that produced the mismatch.
+// Both halves come from one place. An organisation's client certificate paired
+// with the shared address, or the reverse, is refused at a signer's handshake
+// with a message about a certificate that names no row.
 func (s *Server) signerFor(ctx context.Context, org string) (*http.Client, string, error) {
 	e, err := s.orgs.get(ctx, org)
 	if err != nil {

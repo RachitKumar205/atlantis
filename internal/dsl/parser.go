@@ -28,7 +28,7 @@ type Parser struct {
 // (which may be a multi-error if multiple problems were found).
 func Parse(file string, src []byte) (*File, error) {
 	toks := NewLexer(file, src).Lex()
-	// Surface lexer errors before we try to parse.
+	// Lexer errors surface before parsing starts.
 	var lexErrs []error
 	clean := make([]Token, 0, len(toks))
 	for _, t := range toks {
@@ -48,8 +48,6 @@ func Parse(file string, src []byte) (*File, error) {
 	}
 	return f, nil
 }
-
-// ---- cursor helpers ----
 
 func (p *Parser) peek() Token { return p.toks[p.pos] }
 
@@ -87,9 +85,8 @@ func (p *Parser) errf(pos Position, format string, args ...any) {
 	p.errs = append(p.errs, fmt.Errorf("%s: parse error: %s", pos, fmt.Sprintf(format, args...)))
 }
 
-// recover advances until we hit one of the synchronization tokens, so the
-// parser can keep trying after a localized error.
-// recover skips tokens until one of syncs, or EOF.
+// recover skips tokens until one of syncs, or EOF, so the parser can continue
+// after a localized error.
 //
 // It does NOT advance past the current token first. So calling it with a sync
 // kind that the current token already matches returns immediately, and a caller
@@ -125,8 +122,6 @@ func canBeFieldName(k TokenKind) bool {
 	}
 	return false
 }
-
-// ---- file / top-level ----
 
 func (p *Parser) parseFile() *File {
 	f := &File{}
@@ -225,8 +220,6 @@ func (p *Parser) parseHypertable() *HypertableDecl {
 	}
 }
 
-// ---- entity members ----
-
 func (p *Parser) parseEntityMembers() []EntityMember {
 	var members []EntityMember
 	for {
@@ -268,11 +261,10 @@ func (p *Parser) parseEntityMembers() []EntityMember {
 				members = append(members, m)
 			}
 		case TokCheck:
-			// Top-level `check "<expr>" [as name]` — table-level CHECK.
-			// The field-modifier form of `check` is only reached inside
-			// parseFieldModifiers; at member-start this is the table-level
-			// form. Routes here regardless because by definition we're not
-			// already mid-field.
+			// Top-level `check "<expr>" [as name]`, a table-level CHECK.
+			// The field-modifier form is reached only from
+			// parseFieldModifiers, so a `check` at member-start is never
+			// mid-field.
 			if m := p.parseTableCheckDecl(); m != nil {
 				members = append(members, m)
 			}
@@ -388,8 +380,6 @@ func (p *Parser) parsePrimaryDecl() *PrimaryDecl {
 		}
 	}
 }
-
-// ---- field ----
 
 // parseField parses one field. tableChecksPossible says whether the enclosing
 // block can also hold an entity-level `check` member, which is what makes the
@@ -544,52 +534,23 @@ func (p *Parser) parseFieldModifiers(fieldPos Position, tableChecksPossible bool
 			p.advance()
 			mods = append(mods, &ModUniqueDecl{Pos: t.Pos})
 		case TokCheck:
-			// `check` is the only keyword that is valid both as a field
-			// modifier and as an entity member, and unlike `primary` and
-			// `unique` — which are separated by a following `by` — both
-			// spellings are `check` followed by a STRING. Lookahead cannot tell
-			// them apart, so indentation does.
-			//
-			// A field's modifiers may wrap onto following lines; those
-			// continuation lines are indented past the field. A `check` at or
-			// left of the field's own column is therefore not a continuation of
-			// it, but the next member — an entity-level CHECK constraint.
-			//
-			// This formalises the convention the schemas already follow. Across
-			// the corpus every continuation check is indented past its field —
-			// usually aligned under the type column, though one sits just two
-			// columns in — and all four entity-level checks sit at member
-			// indent:
+			// `check` is valid both as a field modifier and as an entity
+			// member, and both spellings are `check` followed by a STRING, so
+			// lookahead cannot separate them. Indentation does: a `check` at or
+			// left of the field's own column is the next member, not a
+			// continuation of the field's modifiers.
 			//
 			//	status  varchar(20) not null default "active"
-			//	        check "status IN ('active','archived')"   <- field's
+			//	        check "status IN ('active','archived')"  <- field's
 			//
-			//	index by location_id
+			//	check "qty_available >= 0" as quantities_check   <- entity's
 			//
-			//	check "qty_available >= 0" as quantities_check     <- entity's
+			// A same-line `check` needs no case of its own: the field's name and
+			// type are already consumed, so it sits at a greater column.
 			//
-			// Without the rule the modifier form always won after a field, and
-			// the consequences were silent. A table-level check written under a
-			// field became that field's — so the generated constraint took that
-			// column's name even when the predicate never mentioned it. Two of
-			// them in a row collapsed: the parser built two ModCheckDecls and
-			// lowering kept only the last, discarding a constraint the author
-			// wrote, with no diagnostic. And `check "..." as <name>` was a parse
-			// error there, because the modifier form does not consume `as`.
-			//
-			// One rule, not two: a same-line `check` needs no special case,
-			// because parseFieldModifiers is only reached after the field's name
-			// and type are consumed, so anything still on that line necessarily
-			// sits at a greater column. An earlier version also tested
-			// t.Pos.Line > fieldPos.Line; no input could distinguish it, and a
-			// condition nothing can exercise is a claim nothing checks.
-			//
-			// Columns count bytes, so one tab is one column. Consistent
-			// indentation — all tabs or all spaces, which is what the corpus
-			// uses — behaves as it reads. Mixing them within a single entity can
-			// invert the comparison against what the eye sees; that is worth
-			// knowing rather than defending against, since such a file is
-			// already ambiguous to a human reader.
+			// Col counts bytes, so a tab is one column. Mixing tabs and spaces
+			// within one entity can invert the comparison against what the eye
+			// sees.
 			if tableChecksPossible && t.Pos.Col <= fieldPos.Col {
 				return mods
 			}
@@ -634,8 +595,8 @@ func (p *Parser) parseDefaultValue(at Position) DefaultValue {
 		p.expect(TokRParen)
 		return DefaultValue{Pos: t.Pos, Kind: DefaultNow}
 	case TokRaw:
-		// `default raw "<sql>"` — verbatim SQL. The expression is checked
-		// at migration time by Postgres; we do not try to parse it here.
+		// `default raw "<sql>"` — verbatim SQL, checked by Postgres at
+		// migration time and not parsed here.
 		p.advance()
 		expr := p.expect(TokString)
 		return DefaultValue{Pos: t.Pos, Kind: DefaultRaw, Str: expr.Value}
@@ -698,8 +659,6 @@ func (p *Parser) parseRefAction() RefAction {
 	}
 }
 
-// ---- relation ----
-
 func (p *Parser) parseRelation() *RelationDecl {
 	kw := p.advance() // has_many or has_one
 	kind := RelHasMany
@@ -719,8 +678,6 @@ func (p *Parser) parseRelation() *RelationDecl {
 		Via:    via.Value,
 	}
 }
-
-// ---- index ----
 
 func (p *Parser) parseIndex() *IndexDecl {
 	kw := p.expect(TokIndex)
@@ -812,8 +769,6 @@ func (p *Parser) parseVecOps() VectorOps {
 	}
 }
 
-// ---- cache ----
-
 func (p *Parser) parseCacheBlock() *CacheBlock {
 	kw := p.expect(TokCache)
 	p.expect(TokLBrace)
@@ -903,8 +858,6 @@ func (p *Parser) parseConsistency() Consistency {
 	}
 }
 
-// ---- query_timeout ----
-
 func (p *Parser) parseQueryTimeout() *QueryTimeoutDecl {
 	kw := p.expect(TokQueryTimeout)
 	p.expect(TokEquals)
@@ -912,15 +865,12 @@ func (p *Parser) parseQueryTimeout() *QueryTimeoutDecl {
 	return &QueryTimeoutDecl{Pos: kw.Pos, Duration: dur.Value}
 }
 
-// ---- Custom queries and procedures ----
+// parseQuery parses `query Name for [ns.]Entity { input { ... } output { ... }
+// sql touches(...) { ... } cache { ... }? }`.
 //
-// The grammar is one straight-line parse per construct: the only
-// production with real ambiguity is the typed-step WHERE expression,
-// which is parsed via parseExpr below. Raw SQL blocks come back as
-// pre-captured TokString tokens (see lexer.captureRawSQLBody) so the
-// parser doesn't have to scan them character by character.
-
-// parseQuery: `query Name for [ns.]Entity { input { ... } output { ... } sql touches(...) { ... } cache { ... }? }`.
+// Raw SQL bodies arrive as pre-captured TokString tokens from
+// lexer.captureRawSQLBody. The only production here with real ambiguity is the
+// typed-step WHERE expression, which parseExpr handles.
 func (p *Parser) parseQuery() *QueryDecl {
 	kw := p.expect(TokQuery)
 	if kw.Kind == TokError {
@@ -1179,10 +1129,9 @@ func (p *Parser) parseAssignment() SetAssignment {
 //	Cmp       := Atom ( ("=" | "!=" | "<" | "<=" | ">" | ">=") Atom )?
 //	Atom      := ArgRef | Literal | FieldRef | "now" "(" ")"
 //
-// `and` reuses the existing TokIdent lexing — we don't have an AND
-// token because the entity DSL never needed one. Comparisons are
-// non-associative; AND is left-associative. Anything richer (OR, NOT,
-// nested parens) is a sign the step belongs in a raw SQL block.
+// `and` is lexed as a TokIdent; there is no AND token. Comparisons are
+// non-associative and AND is left-associative. OR, NOT and nested parens have
+// no production here, and a step needing them belongs in a raw SQL block.
 func (p *Parser) parseExpr() Expr {
 	left := p.parseCmp()
 	for {
@@ -1280,17 +1229,15 @@ func (p *Parser) parseDefaultExpr() Expr {
 	}
 }
 
-// ---- jobs ----
+// parseJob parses `job <Name> in <ns> { args { ... } retries N timeout D
+// heartbeat D queue "..." schedule "..." visible_to "..." }`.
 //
-// `job <Name> in <namespace> { args { ... } retries N timeout D queue "..." schedule "..." }`
+// Block-level modifiers may appear in any order. A repeated one overwrites the
+// earlier value; nothing rejects the duplicate.
 //
-// The args block reuses the entity-field grammar (typed columns +
-// modifiers) — IR-lowering rejects modifiers that don't make sense for
-// args (primary, references, serial, identity, soft_delete, cache,
-// etc.). Block-level modifiers (retries / timeout / queue / schedule)
-// appear at most once each, in any order. parseJob accumulates them
-// and the lowering pass enforces the at-most-once rule with a clear
-// error citing the duplicate's position.
+// The args block reuses the entity-field grammar. lowerJob rejects primary,
+// identity, serial, unique, references and backfill on an arg, and zeroes them
+// so the IR stays well-formed.
 func (p *Parser) parseJob() *JobDecl {
 	kw := p.expect(TokJob)
 	if kw.Kind == TokError {
@@ -1374,13 +1321,11 @@ func (p *Parser) parseJob() *JobDecl {
 	}
 }
 
-// parseJobArgs consumes a single `args { ... }` block. The block body
-// is a sequence of field declarations using the same parseField helper
-// the entity grammar uses — full type-parameter support (varchar(N),
-// numeric(P,S), []T arrays) and the existing field-modifier grammar.
-// Modifier eligibility is enforced at IR-lowering time (the caller
-// can write `default 42` or `not null check "..."`, but `primary` or
-// `references` on an arg is rejected with a clear error).
+// parseJobArgs consumes one `args { ... }` block, whose body is a sequence of
+// field declarations parsed by parseField: the same types and modifiers the
+// entity grammar accepts.
+//
+// Which modifiers an arg may carry is decided at lowering, not here.
 func (p *Parser) parseJobArgs() []*FieldDecl {
 	p.expect(TokArgs)
 	p.expect(TokLBrace)

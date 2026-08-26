@@ -3,14 +3,12 @@ package introspect
 // columndrift.go detects divergence between a declared column's type/width and
 // the type the live table actually has.
 //
-// The plan/diff path compares the new IR against the IR *checkpoint*, never
-// the live DB. So a column whose live type drifted from the declaration at
-// adoption (a pre-atlantis migration that created `vendor_cart_id varchar(10)`
-// while the .atl says `varchar(255)`) stays divergent: the checkpoint matches
-// the .atl, the diff is empty, and the mismatch only surfaces as a runtime
-// 22001 (value too long) once real data exceeds the un-widened column. The
-// varchar-length diff fix closed the checkpoint→.atl half; this closes the
-// checkpoint→live half.
+// The plan/diff path compares the new IR against the IR checkpoint, never the
+// live database. A column whose live type diverged from the declaration at
+// adoption — a pre-atlantis migration creating a column `varchar(10)` where
+// the .atl says `varchar(255)` — therefore stays divergent: the
+// checkpoint matches the .atl, the diff is empty, and the mismatch surfaces as
+// SQLSTATE 22001 once data exceeds the un-widened column.
 //
 // Comparison is by Postgres's own format_type deparse, not by hand-mapping
 // atlantis type names to PG ones: each declared column is rendered onto a
@@ -21,9 +19,9 @@ package introspect
 // zone`, `bigserial` ⇒ `bigint` (the serial-ness is a default, not a type) —
 // so the only differences reported are genuine type/width divergences.
 //
-// Scope: columns present in BOTH the declaration and the live table. A
-// declared column missing live is an ADD the normal plan emits; a live column
-// missing from the declaration is handled elsewhere. Read-only; reports only.
+// Scope is columns present in both the declaration and the live table. A
+// declared column absent live is an ADD the normal plan emits, and a live
+// column absent from the declaration is handled elsewhere. Read-only.
 
 import (
 	"context"

@@ -19,33 +19,26 @@ import (
 //	  - internal/users
 //	  - internal/orders
 //
-// What this file no longer holds is where the server is or how to reach it.
-// Both come from `tide login`, which writes them into ~/.atlantis. A repository
-// describes itself — its caller name and which files are schema — and nothing
-// about the deployment it talks to.
+// The file describes the repository — its caller name, its organisation, which
+// files are schema — and nothing about the deployment. The address and the
+// credential come from `tide login`, which writes them under ~/.atlantis.
 //
-// ATL_CALLER and ATL_ORG override the two fields for the rare checkout that
-// serves more than one.
+// ATL_CALLER and ATL_ORG override those two fields, for a checkout serving more
+// than one.
 type tideConfig struct {
 	Caller      string   `yaml:"caller"`
 	SchemaPaths []string `yaml:"schema_paths"`
 
-	// TLS material, and there is no way to configure it any more.
+	// TLS material, which nothing configures. The organisation owns the address
+	// and issues the credential, and `tide login` collects both, so neither a
+	// `tls:` key nor a TIDE_TLS_* variable is read.
 	//
-	// `tls:` in tide.yaml and the TIDE_TLS_* variables are gone, along with
-	// `endpoint`. They existed because a caller used to choose which atlantis it
-	// talked to and how it proved itself — which was right when a customer ran
-	// their own, and is not now. The organisation owns the address and issues
-	// the credential; `tide login` collects both.
+	// dial() fills these from the credential store. Nothing outside this file
+	// writes them.
 	//
-	// TIDE_TLS_{CERT,KEY,CA}_PEM went with them. That was the CI model — a
-	// private key pasted into a repository secret — and it is precisely what
-	// enrolment was built to end. Nothing replaces it yet: a runner that cannot
-	// keep a key between runs has no path today, and that is recorded rather
-	// than papered over.
-	//
-	// These fields survive because dial() needs somewhere to put what the store
-	// returns; nothing outside this file writes them.
+	// A CI runner that cannot keep a key between runs therefore has no path:
+	// pasting a private key into a repository secret is what enrolment replaced,
+	// and nothing has taken its place.
 	TLS struct {
 		CertPEM string `yaml:"-"`
 		KeyPEM  string `yaml:"-"`
@@ -63,13 +56,13 @@ type tideConfig struct {
 	Generate []string `yaml:"generate"`
 
 	// storeDir and storeEnrollURL are set when the credentials came from the
-	// credential store rather than from this file or the environment. They are
-	// what scopes automatic renewal: tide renews only what tide wrote, because
-	// it cannot write back to an environment variable and rotating an identity
-	// whose replacement it must discard would lock the caller out.
+	// credential store. They scope automatic renewal: tide renews only what tide
+	// wrote, since it cannot write a replacement back to an environment
+	// variable, and rotating an identity whose replacement it must discard locks
+	// the caller out.
 	//
-	// Not YAML fields. Nothing writes these into tide.yaml, and a repository
-	// that tried would be pointing renewal at a directory it does not own.
+	// Not YAML fields. A repository setting them would point renewal at a
+	// directory it does not own.
 	storeDir       string `yaml:"-"`
 	storeEnrollURL string `yaml:"-"`
 }

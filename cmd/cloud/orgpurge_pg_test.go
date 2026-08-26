@@ -17,17 +17,11 @@ import (
 
 // `cloud org purge`, the operator's escape hatch.
 //
-// # Why this needs a test at all
-//
-// It is four flags and one UPDATE, and the temptation is to prove it by running
-// it once and watching a namespace disappear — which is exactly how it was
-// proven the first time. That check does not survive the next edit.
-//
-// What is worth holding still is not the SQL. It is the guard: this command
-// destroys a customer's database, their certificate authority and every schema
-// in it, with no backups to restore from and no retention window in front of
-// it. `-yes` is the only thing standing between a half-remembered shell history
-// entry and that outcome, and a guard nothing tests is a guard nothing keeps.
+// Four flags and one UPDATE, but what these tests hold still is the guard, not
+// the SQL. The command destroys a customer's database, their certificate
+// authority and every schema in it, with no backup and no retention window in
+// front of it, and `-yes` is the only thing between a recalled shell-history
+// entry and that outcome.
 
 func purgeTestDSN(t *testing.T) string {
 	t.Helper()

@@ -18,31 +18,25 @@ import (
 	"time"
 )
 
-// FuzzHandleIssue fuzzes the signer's POST /issue request body against
-// an in-process server with a test CA loaded into the package globals.
-// pgPool is left nil so the DB identity-check is skipped — we're stress-
-// testing the CSR + JSON validation path on its own, not the
-// registration gate (which is exercised separately at the BFF layer).
+// FuzzHandleIssue fuzzes the POST /issue request body against an in-process
+// server with a test CA in the package globals.
 //
-// Safety invariants the fuzz asserts on every iteration:
+// pgPool is nil, so the identity check is skipped and this covers the CSR and
+// JSON parsing path alone. identity_pg_test.go covers the registration gate.
 //
-//  1. No panics, no goroutine leaks, no timeouts. Any input that crashes
-//     the handler is a critical bug — a public-facing signer is the only
-//     thing standing between an attacker and arbitrary cert issuance.
-//  2. Reserved CNs (atlantis, atlantis-console, atlantis-signer) are
-//     NEVER issued certs. A 200 response for any reserved name is an
-//     immediate test failure.
-//  3. CSRs whose Subject CN does not match the request body's `caller`
-//     are NEVER issued certs. Mismatch must reject before signing.
-//  4. When the handler returns 200, the issued cert must:
-//     - be parseable as a real x509 certificate
-//     - have CA:FALSE (never sign a CA-capable leaf)
-//     - have BasicConstraintsValid=true
-//     - have ExtKeyUsage containing ClientAuth (the only EKU the
-//     handler ought to set)
-//     - have a NotAfter within ~91 days of now (TTL is 90 days; tolerate
-//     a day of skew)
-//     - have a Subject CN exactly matching the request `caller`
+// Asserted on every iteration:
+//
+//  1. No panic, no goroutine leak, no timeout.
+//  2. A reserved CN — atlantis, atlantis-console, atlantis-signer — is never
+//     issued a certificate. A 200 for one fails immediately.
+//  3. A 200 yields a certificate that parses, has CA:FALSE with
+//     BasicConstraintsValid, carries ClientAuth in its ExtKeyUsage, expires no
+//     later than certTTL plus two days, and has a Subject CN equal to the
+//     request's `caller`.
+//
+// The CSR's own Subject CN decides nothing: signCSR names the leaf from
+// `caller`, so a seed whose CSR CN differs is issued a certificate under
+// `caller` rather than refused.
 func FuzzHandleIssue(f *testing.F) {
 	setupTestCA(f)
 	log := slog.New(slog.NewJSONHandler(io.Discard, nil))

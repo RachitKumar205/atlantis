@@ -25,20 +25,17 @@ func TestConsoleRefusesToStartOnARoleThatBypassesRLS(t *testing.T) {
 		t.Skip("set ATLANTIS_TEST_PG to exercise the console's role gate")
 	}
 
-	// The admin DSN deliberately: it is the superuser the developer's console
-	// used to run as, which is the mistake being refused.
+	// The admin DSN: a superuser is the mistake being refused.
 	dsn := pgcatalog.PrivateDatabase(t, adminDSN, "atlantis_console_rolegate")
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// A real keyset, because it is now the first thing New checks.
 	//
-	// This used to be a real certificate, for the same reason: whatever New
-	// validates first is what an incomplete Config fails on, and the test then
-	// never reaches the gate it is about. Certificates left this function when
-	// they became a property of an organisation rather than of the process, and
-	// the keyring took over the position — so the hazard moved rather than
-	// went away. The content assertion below is what catches it either way, and
-	// it is what caught the certificate version.
+	// Whatever New validates first is what an incomplete Config fails on, and
+	// the test then never reaches the gate it is about. Which field holds that
+	// position moves — it was a certificate before certificates became a
+	// property of an organisation. The content assertion below is what catches
+	// the substitution either way.
 	_, err := New(Config{
 		PGURL:         dsn,
 		DataKeyset:    testKeyset(t),

@@ -20,13 +20,12 @@ import (
 //   - tagKey(self):           the tag template expanded against an entity value
 //   - indexKey<Index>(args):  atl:v1:{ID}:idx:{name}:{args-hash}
 //
-// `ID` is the "namespace.Entity" string. We deliberately use the
-// canonical ID rather than the snake-cased table name so cache keys stay
-// readable in memcachedctl / debug dumps even when entity names get long.
+// `ID` is the "namespace.Entity" string, not the snake-cased table name, so
+// cache keys stay readable in memcachedctl and debug dumps.
 //
-// Index keys are emitted for every btree / partial index. HNSW and GIN
-// indexes are NOT cached — vector queries are not cached at all, and
-// GIN's high cardinality has the same problem.
+// Index keys are emitted for every btree and partial index. HNSW and GIN
+// indexes are not cached: vector queries are not cached at all, and GIN's
+// cardinality has the same problem.
 func EmitGoCacheKeys(newIR *dsl.IR) ([]GoFile, error) {
 	if newIR == nil {
 		return nil, fmt.Errorf("EmitGoCacheKeys: newIR is required")
@@ -398,12 +397,13 @@ func splitTagTemplate(tag string) []tagPiece {
 	}
 }
 
-// goParamName turns a snake_case field name into a Go-acceptable parameter
-// name. We lower-case the first letter of the camel form so it doesn't shadow
-// the exported field name. If the result collides with a Go reserved word
-// (e.g. a DSL field named `type` or `range`), we append `Val` so the emitted
-// code is still syntactically valid. The same input always produces the same
-// output, so the regenerated tree stays diff-stable.
+// goParamName turns a snake_case field name into a Go parameter name.
+//
+// The camel form's first letter is lower-cased so it does not shadow the
+// exported field name, and a result colliding with a Go keyword — a DSL field
+// named `type` or `range` — gains a `Val` suffix.
+//
+// One input always yields one output, so the regenerated tree is diff-stable.
 func goParamName(snake string) string {
 	camel := snakeToCamel(snake)
 	if camel == "" {
@@ -416,8 +416,8 @@ func goParamName(snake string) string {
 	return name
 }
 
-// goReservedWords is the Go 1.x keyword set. Predeclared identifiers
-// (any, nil, true, etc.) shadow but don't error, so we leave them be.
+// goReservedWords is the Go keyword set. Predeclared identifiers — any, nil,
+// true — shadow without erroring and are left alone.
 var goReservedWords = map[string]bool{
 	"break":       true,
 	"case":        true,

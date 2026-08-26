@@ -9,9 +9,8 @@ import (
 // internal/cloud/store, which already has a database.
 //
 // Splitting them keeps this package a leaf with nothing beyond the standard
-// library, which its own doc comment says is load-bearing: both halves of the
-// assertion exchange depend on it, and a dependency added here is a dependency
-// added to the console.
+// library. Both halves of the assertion exchange import it, so a dependency
+// added here is one added to the console.
 
 func TestValidOrgNamesAreAccepted(t *testing.T) {
 	for _, name := range []string{
@@ -31,7 +30,7 @@ func TestValidOrgNamesAreAccepted(t *testing.T) {
 
 // Every rejection names the rule, not a constraint.
 //
-// The failure this replaces: a browser form showing somebody
+// Otherwise a browser form renders
 // `pq: new row violates check constraint "orgs_name_check"`.
 func TestInvalidOrgNamesAreRefusedWithAReason(t *testing.T) {
 	for _, tc := range []struct {
@@ -81,9 +80,9 @@ func TestReservedNamesAreRefused(t *testing.T) {
 
 // A reserved name is refused for being reserved, not for its shape.
 //
-// Every reserved word is a valid name by the grammar. If one were ever added
-// that the pattern already rejects, the reserved check for it would be dead —
-// and nobody would notice, because the name would still be refused.
+// Every reserved word is a valid name by the grammar. A reserved word the
+// pattern already rejects makes its own reserved check dead code, and the name
+// is still refused, so nothing reports it.
 func TestEveryReservedNameWouldOtherwiseBeValid(t *testing.T) {
 	for _, name := range []string{"admin", "api", "atlantis", "console", "support", "system", "www"} {
 		if !orgNamePattern.MatchString(name) {

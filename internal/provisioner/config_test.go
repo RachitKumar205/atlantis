@@ -8,10 +8,9 @@ import (
 
 // The provisioner's settings, and the states they exist to make impossible.
 //
-// Every one of these is a way to start a process that looks configured and
-// provisions nothing, or provisions something nobody can reach. None of them
-// fails at startup on its own, which is exactly why they are checked at startup
-// here.
+// Each is a way to start a process that looks configured and provisions
+// nothing, or provisions something unreachable. None fails at startup on its
+// own, which is why validate checks them there.
 
 // provisionerEnv is a complete configuration.
 var provisionerEnv = map[string]string{
@@ -111,10 +110,9 @@ func TestTheRefusalNamesEveryMissingSetting(t *testing.T) {
 
 // The eight settings provision.Config defaults are read and left EMPTY here.
 //
-// This is the anti-drift property, and it is worth asserting rather than
-// trusting. withDefaults is unexported and runs inside NewKube, so a fallback
-// supplied here would be a second source of truth that silently wins — and the
-// two would diverge the first time somebody changed one of them.
+// withDefaults is unexported and runs inside NewKube, so a fallback supplied
+// here is a second source of truth that wins by running first, and the two
+// diverge on the first change to either.
 func TestDefaultedSettingsArePassedThroughEmpty(t *testing.T) {
 	setProvisionerEnv(t)
 
@@ -182,8 +180,8 @@ func TestALeaseShorterThanTheReadinessWaitIsRefused(t *testing.T) {
 
 // Raising the readiness timeout raises the default lease with it.
 //
-// The default is computed from ReadyTimeout rather than being a constant, so
-// somebody who lengthens the wait does not silently produce a lease it outlives.
+// The default is computed from ReadyTimeout rather than fixed, so lengthening
+// the wait cannot produce a lease the wait outlives.
 func TestTheDefaultLeaseFollowsTheReadinessTimeout(t *testing.T) {
 	setProvisionerEnv(t)
 	t.Setenv("PROVISIONER_READY_TIMEOUT", "20m")
@@ -246,11 +244,9 @@ func TestTheConsoleURLIsTrimmed(t *testing.T) {
 	}
 }
 
-// A retry delay that rounds to zero milliseconds is refused.
-//
-// MarkProvisioningFailed refuses it too, and that is the point: catching it
-// here means the refusal names the setting rather than arriving from the store
-// on the first failure, when somebody is already debugging something else.
+// MarkProvisioningFailed refuses a sub-millisecond delay too. Catching it here
+// means the refusal names the setting rather than arriving from the store on
+// the first failure.
 func TestASubMillisecondRetryBaseIsRefused(t *testing.T) {
 	setProvisionerEnv(t)
 	t.Setenv("PROVISIONER_RETRY_BASE", "500us")

@@ -11,8 +11,8 @@ import (
 
 // Functions caller-authored SQL may never call, and why.
 //
-// This gate is load-bearing for `partition by`. The tenant discriminator is a
-// run-time parameter (migration 0024), and a custom GUC is PGC_USERSET —
+// `partition by` rests on this gate. The tenant discriminator is a run-time
+// parameter (migration 0024), and a custom GUC is PGC_USERSET —
 // PostgreSQL offers no way to lock it. `REVOKE SET ON PARAMETER
 // "atlantis.tenant" FROM PUBLIC` does not even create a pg_parameter_acl row
 // for a placeholder GUC, verified on 17.8. checkStatementKind already refuses
@@ -54,20 +54,12 @@ var forbiddenFunctions = map[string]string{
 // checkForbiddenCalls reports every call to a forbidden function anywhere in a
 // parsed statement.
 //
-// # Why this walks by reflection
+// Walks the protobuf message graph by reflection, visiting every field of every
+// message, so an unrecognised node type is still descended into.
 //
-// collectTableRefs in this package walks by hand, descending only into the node
-// types it knows. That is adequate for its job — a missed table reference costs
-// a stale cache generation. It is not adequate here. A hand-written walk is a
-// permit-list of places to look, and anything it forgets is not a false
-// negative in a report, it is a cross-tenant read. Postgres has well over two
-// hundred node types and pg_query adds more with each major version.
-//
-// So this walks the protobuf message graph itself, which visits every field of
-// every message without knowing what any of them mean. A node type nobody here
-// has heard of is still descended into. The same reasoning as the reflection
-// walk behind diff completeness: a check derived from the structure cannot fall
-// behind the structure.
+// A walk that names its node types is a permit-list of places to look. Postgres
+// has over two hundred node types and pg_query adds more with each major
+// version; an omission here is a cross-tenant read.
 func checkForbiddenCalls(stmt *pg.Node, context string) []error {
 	var errs []error
 	seen := map[string]bool{}

@@ -1,30 +1,23 @@
-// Package sqlparams rewrites atlantis-DSL named parameters
-// (`$arg_name`) in a raw SQL body into PostgreSQL positional
-// placeholders (`$1, $2, ...`), returning the ordered list of input
-// names that drives arg binding at call sites.
+// Package sqlparams rewrites atlantis-DSL named parameters (`$arg_name`) in a
+// raw SQL body into PostgreSQL positional placeholders (`$1, $2, ...`),
+// returning the ordered list of input names that binds args at the call site.
 //
-// The rewrite needs to run in two places: codegen (when emitting typed
-// client code that talks to atlantis-server) and runtime (when
-// atlantis-server's custom-query dispatcher hands the SQL to pgx).
-// Both paths must produce the same string + arg order or the typed
-// client and the runtime executor go out of sync. Living in one
-// package guarantees that.
+// Two callers run the rewrite: codegen, emitting typed client code, and the
+// custom-query dispatcher in atlantis-server, handing SQL to pgx. They go out
+// of sync unless both produce the same string and the same arg order.
 //
 // Scan rules:
-//   - Single-quoted strings, double-quoted identifiers, and
-//     pre-existing PG positional placeholders (`$1, $2, ...`) pass
-//     through unchanged.
-//   - `$<identifier>` where the identifier matches a declared input
-//     name is replaced with `$<n>` where n is the input's first-
-//     reference position. Repeated references to the same input use
-//     the same `$<n>` — one arg per unique input.
-//   - `$<identifier>` referencing an undeclared name returns an error.
-//     The validator should have caught this earlier; surfacing it
-//     again at codegen / runtime is defensive.
 //
-// The returned `argOrder` slice lists each referenced input name
-// exactly once in the order it first appears in the SQL. Callers
-// iterate it to bind args in the same order PG expects.
+//   - Single-quoted strings, double-quoted identifiers and pre-existing
+//     positional placeholders pass through unchanged.
+//   - `$<identifier>` matching a declared input becomes `$<n>`, n being the
+//     input's first-reference position. Repeated references share one `$<n>`,
+//     so there is one arg per unique input.
+//   - `$<identifier>` naming an undeclared input is an error. The validator
+//     rejects it earlier; this catches it again at codegen and runtime.
+//
+// The returned argOrder lists each referenced input once, in the order it first
+// appears in the SQL.
 package sqlparams
 
 import (

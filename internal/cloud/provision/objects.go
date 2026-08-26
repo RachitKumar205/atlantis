@@ -38,18 +38,16 @@ func (k *Kube) meta(ns, name, component string) metav1.ObjectMeta {
 	}
 }
 
-// The three Pod Security Admission labels. Setting the security context on our
-// own pods hardens the pods we write; the label is what makes the namespace
-// refuse a pod that lacks it — including one nothing here wrote.
+// The three Pod Security Admission labels. A security context hardens the pods
+// this package writes; the label makes the namespace refuse a pod that lacks
+// one, including a pod nothing here wrote.
 //
-// enforce is what actually rejects. warn and audit are set to the same level
-// because otherwise a rejection is a bare admission error with no record of it;
-// audit puts the reason in the API server's log, and warn returns it to whoever
-// applied the object.
+// enforce is what rejects. warn and audit are set to the same level so the
+// rejection is recorded: audit puts the reason in the API server's log, and
+// warn returns it to whoever applied the object.
 //
 // "restricted" rather than "baseline": baseline permits running as root, and
-// the whole point of the pod-level context here is that this namespace runs a
-// stranger's queries.
+// this namespace runs a stranger's queries.
 const (
 	psaEnforce = "pod-security.kubernetes.io/enforce"
 	psaAudit   = "pod-security.kubernetes.io/audit"
@@ -76,12 +74,10 @@ func (k *Kube) namespace(ns, org string) ctrlclient.Object {
 // serviceAccount exists so the workloads have something to run as other than
 // `default`.
 //
-// It is granted nothing — no Role, no RoleBinding — and that is the whole
-// design. Kubernetes mounts a token for the default account into every pod that
-// does not say otherwise, so before this the atlantis pod, which runs a
-// customer's SQL, held a live API credential it had no use for. The account
-// separates "this pod's identity" from "the namespace's identity" so that
-// granting the second later does not silently grant the first.
+// It is granted nothing — no Role, no RoleBinding — and mounts no token.
+// Kubernetes mounts a token for the default account into every pod that does
+// not say otherwise, which would leave the atlantis pod, running a customer's
+// SQL, holding a live API credential.
 func (k *Kube) serviceAccount(ns string) ctrlclient.Object {
 	no := false
 	return &corev1.ServiceAccount{
@@ -91,14 +87,11 @@ func (k *Kube) serviceAccount(ns string) ctrlclient.Object {
 	}
 }
 
-// networkPolicies is four policies rather than one, because they answer four
-// different questions and a single policy that answered all of them would be
-// unreadable.
-//
-// Policies are additive — a pod is reachable if any policy admits the traffic —
-// so the baseline sets the floor and the other three open exactly what has to be
-// open: a caller from outside, the console from within the control plane, and
-// CloudNativePG for the database it manages.
+// networkPolicies is four policies. Policies are additive — a pod is reachable
+// if any policy admits the traffic — so the baseline sets the floor and the
+// other three open exactly what has to be open: a caller from outside, the
+// console from within the control plane, and CloudNativePG for the database it
+// manages.
 func (k *Kube) networkPolicies(ns string) []ctrlclient.Object {
 	proto := corev1.ProtocolTCP
 	port := func(p int32) networkingv1.NetworkPolicyPort {
@@ -130,18 +123,12 @@ func (k *Kube) networkPolicies(ns string) []ctrlclient.Object {
 	// pod cannot forge a source address outside the pod CIDR, so this is a real
 	// boundary rather than a convention.
 	//
-	// This used to say "the console and a caller — both off-cluster". That
-	// stopped being true when the console moved into the cluster: its traffic
-	// now comes from inside the pod CIDR, which this rule excludes by design, so
-	// it was refused here after resolving perfectly well. Dropped rather than
-	// rejected, so it presented as a page that loaded forever and then timed
-	// out. Policy 3 is what lets it in.
+	// This admits callers only. The console's traffic comes from inside the pod
+	// CIDR, which this rule excludes, so policy 3 is what lets the console in.
 	//
-	// It covers the health port too. That port is not harmless: /status and
-	// /metrics live on the same listener as /healthz and are unauthenticated by
-	// design, disclosing schema version, build version and per-caller RPC
-	// counts. cmd/server/health.go says they are "already exposed at the
-	// platform layer" — this is that layer.
+	// It covers the health port too. /status and /metrics share that listener
+	// with /healthz and are unauthenticated, disclosing schema version, build
+	// version and per-caller RPC counts.
 	external := &networkingv1.NetworkPolicy{
 		TypeMeta:   typeMeta("networking.k8s.io/v1", "NetworkPolicy"),
 		ObjectMeta: k.meta(ns, "external-access", "network"),
@@ -170,21 +157,18 @@ func (k *Kube) networkPolicies(ns string) []ctrlclient.Object {
 
 	// 3. The console reaches this organisation.
 	//
-	// Narrow on purpose: the control-plane namespace AND the console's own pod
-	// label, in a single peer so the two are an AND rather than an OR. A
+	// Narrow: the control-plane namespace AND the console's own pod label, in a
+	// single peer so the two are an AND rather than an OR. A
 	// namespace-only rule would admit anything that happens to run beside the
 	// console — Cloud, the provisioner, a debugging shell — none of which has
 	// business on a tenant's admin port.
 	//
-	// This does not weaken tenant isolation. Another organisation's pods carry
-	// neither the namespace nor the label, so policy 2's exclusion of the pod
-	// CIDR still refuses them, and the k8s tests that prove one tenant cannot
-	// reach another go on proving it.
+	// Another organisation's pods carry neither the namespace nor the label, so
+	// policy 2's exclusion of the pod CIDR still refuses them.
 	//
-	// Harmless when the console runs outside the cluster: the selector matches
-	// no pod and the rule admits nobody. That is why it is unconditional rather
-	// than keyed to ConsoleInCluster — a policy that has to agree with a
-	// separate setting is a policy that will disagree with it.
+	// Unconditional rather than keyed to ConsoleInCluster: with the console
+	// outside the cluster the selector matches no pod and the rule admits
+	// nobody.
 	console := &networkingv1.NetworkPolicy{
 		TypeMeta:   typeMeta("networking.k8s.io/v1", "NetworkPolicy"),
 		ObjectMeta: k.meta(ns, "console-access", "network"),
@@ -221,10 +205,8 @@ func (k *Kube) networkPolicies(ns string) []ctrlclient.Object {
 
 	// 4. CloudNativePG reaches its own instances.
 	//
-	// Without this the baseline blocks the operator, and the symptom is the
-	// worst kind: the Cluster never becomes ready, with nothing in its status
-	// pointing at the network. The policy that isolates the database would be
-	// the thing preventing the database from existing.
+	// Without this the baseline blocks the operator, and the Cluster never
+	// becomes ready with nothing in its status pointing at the network.
 	operator := &networkingv1.NetworkPolicy{
 		TypeMeta:   typeMeta("networking.k8s.io/v1", "NetworkPolicy"),
 		ObjectMeta: k.meta(ns, "operator-access", "network"),
@@ -250,10 +232,9 @@ func (k *Kube) networkPolicies(ns string) []ctrlclient.Object {
 
 // pkiSecret is the source of truth for this organisation's certificates.
 //
-// Mounted by nothing. It exists so a repeated Ensure can find the authority it
-// already minted rather than making a new one, and it holds both private keys —
-// which is why it is separate from the secrets that are actually mounted, and
-// why nothing mounts it.
+// Mounted by nothing: it holds both authorities' private keys, and exists so a
+// repeated Ensure finds the authority it already minted rather than making a
+// new one.
 func (k *Kube) pkiSecret(ns string, b *certs.Bundle) ctrlclient.Object {
 	return &corev1.Secret{
 		TypeMeta:   typeMeta("v1", "Secret"),
@@ -279,9 +260,8 @@ func (k *Kube) pkiSecret(ns string, b *certs.Bundle) ctrlclient.Object {
 // derivedSecrets are the projections each workload actually mounts.
 //
 // Split by who may read what. The atlantis pod gets its serving identity and
-// the root it verifies callers against, and **not** the authority's private
-// key — that is the single most important line in this file, because a
-// compromised atlantis with the CA key can mint any caller in the organisation.
+// the root it verifies callers against, and not the authority's private key: an
+// atlantis holding the CA key can mint any caller in the organisation.
 func (k *Kube) derivedSecrets(ns string, b *certs.Bundle) []ctrlclient.Object {
 	atlantisTLS := &corev1.Secret{
 		TypeMeta:   typeMeta("v1", "Secret"),
@@ -330,11 +310,9 @@ func (k *Kube) derivedSecrets(ns string, b *certs.Bundle) []ctrlclient.Object {
 
 // postgres is this organisation's database.
 //
-// One cluster per organisation is a hard constraint rather than a cost choice:
-// write-ahead logging is cluster-wide, so point-in-time recovery is per
-// cluster. "Restore us to 14:00" cannot be honoured on a shared cluster without
-// rolling back every other tenant, and for a product whose pitch is safe schema
-// change that is disqualifying.
+// One cluster per organisation: write-ahead logging is cluster-wide, so
+// point-in-time recovery is per cluster. "Restore us to 14:00" cannot be
+// honoured on a shared cluster without rolling back every other tenant.
 func (k *Kube) postgres(ns string) ctrlclient.Object {
 	storageClass := k.cfg.StorageClass
 	var scPtr *string
@@ -371,7 +349,7 @@ func (k *Kube) postgres(ns string) ctrlclient.Object {
 					// Bootstrap SQL runs as superuser during initialisation,
 					// which is the only place these can run: pgvector is not a
 					// trusted extension, so the application role cannot create
-					// it, and the role is deliberately not a superuser.
+					// it, and the application role is not a superuser.
 					//
 					// vector is the one atlantis cannot start without — the
 					// connection pool registers pgvector types on every
@@ -393,37 +371,23 @@ func (k *Kube) postgres(ns string) ctrlclient.Object {
 			// Memory is limited, CPU is not. See appResources in workloads.go
 			// for why the two are treated differently.
 			//
-			// # Why 256Mi is a safe ceiling despite a measured 697Mi peak
-			//
-			// The cgroup high-water mark on an organisation running for
-			// eighteen hours reads about 697Mi, which looks like this limit is
-			// less than a third of what Postgres needs. Setting it from that
-			// number would mean 700Mi per tenant and a third of the density.
-			// Reading it as a requirement would be wrong:
+			// The cgroup high-water mark after eighteen hours reads about
+			// 697Mi, which is page cache rather than requirement:
 			//
 			//	anon   54.1Mi     file  372.4Mi     slab 12.5Mi   (18 hours old)
 			//	anon   55.4Mi     file   30.6Mi     slab  3.2Mi   (one minute old)
 			//
-			// Anonymous memory — the part that cannot be reclaimed and the part
-			// an OOM kill is decided on — is 55Mi, and it is the *same* on a
-			// fresh pod as on an old one. The rest is page cache, which Postgres
-			// lets grow to fill whatever it is given and which the kernel
-			// reclaims before killing anything. The peak measures how much room
-			// the cgroup had, not how much the database needs.
-			//
-			// So this caps the cache rather than starving the server: 55Mi of
-			// working set stays resident, roughly 190Mi remains for cache, and
-			// pressure reclaims instead of killing.
-			//
-			// 69 MiB was the figure the request was originally sized from, and
-			// it matches the 55Mi anon plus 12Mi slab measured here — the
-			// original estimate was right, and it is now checked rather than
-			// remembered.
+			// Anonymous memory — what cannot be reclaimed, and what an OOM kill
+			// is decided on — is 55Mi, and is the same on a fresh pod as on an
+			// old one. Postgres lets cache grow to fill whatever it is given,
+			// and the kernel reclaims it before killing anything. So 256Mi caps
+			// the cache rather than starving the server: 55Mi of working set
+			// stays resident, roughly 190Mi remains for cache, and pressure
+			// reclaims instead of killing.
 			Resources: corev1.ResourceRequirements{
 				Requests: corev1.ResourceList{
-					// The load-bearing number for density: Kubernetes schedules
-					// on requests, not usage, so this decides how many
-					// organisations fit on a node.
+					// Kubernetes schedules on requests, not usage, so this
+					// number decides how many organisations fit on a node.
 					corev1.ResourceMemory: resource.MustParse("256Mi"),
 					corev1.ResourceCPU:    resource.MustParse("100m"),
 				},

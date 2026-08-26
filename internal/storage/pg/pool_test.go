@@ -10,8 +10,7 @@ import (
 
 func TestDefaultConfig_MatchesPlan(t *testing.T) {
 	c := DefaultConfig("postgres://example")
-	// Numbers from PLAN.md §B.5. They are tuned per-deployment, but the
-	// defaults committed here are the starting point.
+	// Tuned per deployment; these are the committed starting points.
 	if c.MaxConns != 50 {
 		t.Errorf("MaxConns: got %d want 50", c.MaxConns)
 	}
@@ -45,8 +44,7 @@ func TestNew_RejectsBadURL(t *testing.T) {
 }
 
 func TestPool_SatisfiesRuntimeInterface(t *testing.T) {
-	// Compile-time check is in pool.go; this test just documents the
-	// contract. If a future refactor breaks it, this test pins the
-	// regression to one spot.
+	// The compile-time assertion lives in pool.go; this names the contract
+	// where a reader looks for it.
 	var _ runtime.Pool = (*Pool)(nil)
 }

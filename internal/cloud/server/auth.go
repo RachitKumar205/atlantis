@@ -13,17 +13,10 @@ import (
 
 // The one answer sign-up and reset-request give, whatever happened.
 //
-// # Why every outcome shares a response
-//
-// Both routes take an email address chosen by whoever is asking. If the answer
-// differs between "this address has an account" and "it does not", the route is
-// a membership oracle: point it at a list and learn who has one. That matters
-// more here than for most products, because an Atlantis Cloud account is an
-// account that can reach production databases.
-//
-// So the body is fixed, the status is fixed, and — see floorLatency — the time
-// is fixed too. The body alone is not enough: the registered path writes a row,
-// mints a token and sends an email, and the unregistered one does none of it.
+// A response that differed between a registered and an unregistered address
+// would make either route a membership oracle. The body and status are fixed,
+// and floorLatency fixes the timing: the registered path writes a row, mints a
+// token and sends mail, and the unregistered path does none of it.
 const checkYourEmail = "If that address can receive mail, a message is on its way."
 
 type signupRequest struct {
@@ -34,10 +27,8 @@ type signupRequest struct {
 
 // handleSignup creates an account and sends a verification link.
 //
-// An address that already has an account gets a message too — one saying
-// somebody tried to sign up with it — rather than being told it exists. That
-// keeps the two paths indistinguishable to the requester while still telling
-// the person who actually owns the address that something happened.
+// An address that already has an account is mailed too, saying a sign-up was
+// attempted. Both paths send, so neither answer distinguishes them.
 func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() { floorLatency(r.Context(), start, s.sleep) }()
@@ -52,9 +43,8 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	}
 	email := store.NormalizeEmail(req.Email)
 
-	// Shape errors are reported plainly. They are not an oracle: they say
-	// something about the string that was sent, not about whether it has an
-	// account.
+	// Shape errors are reported plainly. They describe the string that was
+	// sent, not whether it has an account.
 	if !validEmail(email) {
 		jsonError(w, "that does not look like an email address", http.StatusBadRequest)
 		return
@@ -129,9 +119,7 @@ func (s *Server) handleResetRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	email := store.NormalizeEmail(req.Email)
 
-	// The answer is the same for a malformed address as for a valid one with no
-	// account. Reporting "that is not an address" here would be harmless, but
-	// it is one more branch a prober can measure, and there is nothing to gain.
+	// A malformed address answers as a valid one with no account does.
 	if validEmail(email) {
 		s.issueReset(r.Context(), email)
 	}
@@ -209,17 +197,13 @@ func (s *Server) handleResetSubmit(w http.ResponseWriter, r *http.Request) {
 
 // completeReset spends the token and sets the password.
 //
-// Returns a message and a status rather than writing a response, because two
-// callers render it differently — one as JSON, one as a page for a browser.
+// Returns a message and a status; one caller renders JSON and the other a page.
 //
-// It does not sign anybody in, and that is the design rather than an omission:
-// signing in needs a second factor, and proving control of a mailbox is one
-// factor. A reset that produced a session would make the mailbox sufficient on
-// its own, which is the whole thing two factors exist to prevent.
+// It issues no session. Control of a mailbox is one factor, and a session
+// requires two.
 func (s *Server) completeReset(ctx context.Context, token, password string) (string, int) {
-	// The token is checked BEFORE the password is judged. The other order tells
-	// somebody holding an invalid token whether their proposed password would
-	// have been acceptable, which is a small oracle and a free one to close.
+	// The token is spent before the password is judged, so an invalid token
+	// yields no verdict on the proposed password.
 	spent, err := s.db.SpendEmailToken(ctx, token, store.PurposeResetPassword)
 	if errors.Is(err, store.ErrTokenInvalid) {
 		return "This link is not valid any more — request another.", http.StatusBadRequest
@@ -229,10 +213,8 @@ func (s *Server) completeReset(ctx context.Context, token, password string) (str
 		return "Could not reset the password.", http.StatusInternalServerError
 	}
 
-	// The token is spent by this point, and every rejection below leaves it
-	// spent. Deliberate: a token that survived a rejected password would let
-	// somebody grind candidate passwords against the strength check with a
-	// single link.
+	// The token stays spent through every rejection below. One that survived
+	// would grind candidate passwords against the strength check.
 	const used = " The link has been used, so please request another."
 
 	if err := authn.Strength(password, spent.Email); err != nil {
@@ -253,10 +235,8 @@ func (s *Server) completeReset(ctx context.Context, token, password string) (str
 		return "Could not reset the password.", http.StatusInternalServerError
 	}
 
-	// Every other reset link for this account stops working. Without this,
-	// asking three times leaves three live credentials and using one leaves
-	// two — which matters precisely when the reset was requested because
-	// somebody else had access.
+	// Every other reset link for this account stops working. Three requests
+	// otherwise leave three live credentials, and spending one leaves two.
 	if err := s.db.InvalidateEmailTokens(ctx, spent.UserID, store.PurposeResetPassword); err != nil {
 		s.log.Error("invalidate other reset tokens", "user", spent.UserID, "err", err)
 	}
@@ -280,8 +260,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.db.MarkEmailVerified(r.Context(), spent.UserID); err != nil &&
 		!errors.Is(err, store.ErrNotFound) {
-		// ErrNotFound here means it was already verified, which is not a
-		// failure — somebody opened the link twice, or from two devices.
+		// ErrNotFound means it was already verified.
 		s.log.Error("mark verified", "user", spent.UserID, "err", err)
 		page(w, http.StatusInternalServerError, "Something went wrong. Please try again.")
 		return
@@ -292,17 +271,13 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 
 // handleResetForm renders somewhere to type a new password.
 //
-// Unstyled and script-free on purpose: the strict Content-Security-Policy this
-// server sets allows nothing to load, and the form posts to the JSON endpoint
-// through an ordinary submission. The Cloud sign-in app replaces this; until it
-// exists, a reset email that leads somewhere usable is worth more than one that
-// leads to a page nobody has built.
+// Unstyled and script-free: strictCSP allows nothing to load, so the form posts
+// to the JSON endpoint as an ordinary submission.
 func (s *Server) handleResetForm(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// Escaped. The token is attacker-supplied and is being placed into an
-	// attribute, which is the textbook injection point.
+	// Escaped: the token comes from the query string into an attribute.
 	_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8">` +
 		`<title>Choose a new password</title>` +
 		`<h1>Choose a new password</h1>` +
@@ -326,8 +301,6 @@ func page(w http.ResponseWriter, code int, body string) {
 	_, _ = w.Write([]byte(body + "\n"))
 }
 
-// ── Shared plumbing ─────────────────────────────────────────────────────────
-
 // rateLimited reports whether the request may proceed, answering it if not.
 func (s *Server) rateLimited(w http.ResponseWriter, r *http.Request) bool {
 	ok, retry := s.lim.allow(s.clientIP(r))
@@ -341,10 +314,8 @@ func (s *Server) rateLimited(w http.ResponseWriter, r *http.Request) bool {
 
 // breached reports whether a password is known to have leaked.
 //
-// Fails OPEN: a corpus we cannot reach means the password is accepted. That is
-// the policy decision the authn package deliberately leaves to the caller —
-// sign-up must not stop working because a third party is down. The log line is
-// what makes the gap visible rather than silent.
+// Fails open: an unreachable corpus accepts the password, and logs that it did.
+// authn leaves this policy to the caller.
 func (s *Server) breached(ctx context.Context, password string) bool {
 	yes, err := s.breach.Breached(ctx, password)
 	if err != nil {
@@ -356,9 +327,9 @@ func (s *Server) breached(ctx context.Context, password string) bool {
 
 // send delivers a message, logging rather than returning a failure.
 //
-// Callers are the routes that must answer identically whatever happened, so a
-// send failure cannot reach the response — it would distinguish an address that
-// exists from one that does not.
+// Its callers must answer identically whatever happened, so a send failure
+// cannot reach the response: it would distinguish an address that has an
+// account from one that does not.
 func (s *Server) send(ctx context.Context, to, subject, body string) {
 	if err := s.mailer.Send(ctx, to, subject, body); err != nil {
 		s.log.Error("send mail", "subject", subject, "err", err)

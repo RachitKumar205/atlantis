@@ -13,55 +13,39 @@
 -- a different certificate authority", which is an accurate message about a
 -- system that cannot work rather than a mistake somebody made.
 --
--- ── Why these are four columns and not one ──────────────────────────────────
+-- Four columns, because reaching a signer needs an address, the root that
+-- verifies the signer's own certificate, and a client certificate and key to
+-- present. None is derivable from another.
 --
--- Reaching a signer needs an address, the root that verifies the signer's own
--- certificate, and a client certificate and key to present to it. All four are
--- per-organisation once the authority is, and none is derivable from another.
+-- They are read as a group, never column by column. Independent per-column
+-- fallback produces mixtures: signer_addr set with signer_client_cert_pem NULL
+-- dials the organisation's own signer while presenting the process-wide client
+-- certificate, which that signer refuses because SIGNER_CLIENT_CA does not
+-- chain it. The mirror case is the mis-issue verifyLeafForOrg catches later.
 --
--- ── They are read as a GROUP, never column by column ────────────────────────
+-- All four present means per-organisation. All four absent means the
+-- process-wide settings, which is what `make dev-signer` serves. Anything
+-- between is an error naming this row, and must not be the "not provisioned"
+-- error.
 --
--- This is the trap 0008's per-column COALESCE would set here, and it is worth
--- naming because the fallback below looks exactly like that one.
---
--- Four columns falling back independently produce mixtures. An organisation
--- with signer_addr set and signer_client_cert_pem NULL would dial ITS OWN
--- signer while presenting the PROCESS-WIDE client certificate — which that
--- signer refuses, because SIGNER_CLIENT_CA does not chain it. The mirror case,
--- its own CA against the shared address, is the mis-issue verifyLeafForOrg
--- catches after the fact.
---
--- So: all four present means per-organisation. All four absent means the
--- process-wide settings, which is what both organisations registered today use
--- and what `make dev-signer` serves. Anything in between is an error naming
--- this row, and it must NOT be the "not provisioned" error — see below.
---
--- ── Nullable, and why that does not repeat 0005's all-or-nothing gate ───────
---
--- store.orgCredentials treats any NULL among 0005's five columns as
--- ErrOrgNotProvisioned. These four must stay outside that check, and the reason
--- is sharper than tidiness: orgClients.get treats ErrOrgNotProvisioned as an
--- ANSWER and evicts the cached client, closing the connection. Every other
--- error keeps serving. Widening that gate would therefore not fail a request —
--- it would de-provision every organisation registered before this migration,
--- which today is both of them.
+-- Nullable, but outside 0005's all-or-nothing gate. store.orgCredentials treats
+-- any NULL among 0005's five columns as ErrOrgNotProvisioned, and
+-- orgClients.get treats that as an answer: it evicts the cached client and
+-- closes the connection, where every other error keeps serving. Widening the
+-- gate would de-provision every organisation registered before this migration.
 ALTER TABLE console.orgs ADD COLUMN IF NOT EXISTS signer_addr            TEXT;
 ALTER TABLE console.orgs ADD COLUMN IF NOT EXISTS signer_ca_pem          TEXT;
 ALTER TABLE console.orgs ADD COLUMN IF NOT EXISTS signer_client_cert_pem TEXT;
 
 -- The private half, encrypted, exactly as client_key_ct is.
 --
--- ── A different associated data string, and this is load-bearing ────────────
+-- Sealed under different associated data from client_key_ct, which uses the
+-- organisation name alone. Identical associated data would make the two
+-- ciphertexts interchangeable: an UPDATE could copy signer_client_key_ct into
+-- client_key_ct and it would decrypt cleanly, leaving the console presenting
+-- the signer's client certificate to atlantis.
 --
--- client_key_ct is sealed with the organisation name and nothing else. Sealing
--- this one the same way would make the two ciphertexts INTERCHANGEABLE: anybody
--- who can UPDATE this table could copy signer_client_key_ct into client_key_ct
--- and it would decrypt cleanly, because the associated data matches. The
--- console would then present the signer's client certificate to atlantis.
---
--- The binding that stops a key being lifted between ORGANISATIONS does not stop
--- it being lifted between COLUMNS of one row. So this column's associated data
--- names the field as well as the organisation. That is a new convention in this
--- codebase and it is introduced deliberately, in one place, rather than
--- discovered later by somebody wondering why two blobs are swappable.
+-- Binding to the organisation prevents a key being lifted between
+-- organisations, not between columns of one row, so this column's associated
+-- data names the field as well.
 ALTER TABLE console.orgs ADD COLUMN IF NOT EXISTS signer_client_key_ct   BYTEA;

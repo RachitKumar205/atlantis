@@ -3,29 +3,20 @@
 //
 // One organisation gets one Kubernetes namespace holding its own Postgres, its
 // own atlantis, its own signer, and its own pair of certificate authorities.
-// Nothing is shared between organisations except the node they happen to land
-// on and the operators that manage them.
+// Nothing is shared between organisations except the node they land on and the
+// operators that manage them.
 //
-// # What this package does not do
+// Nothing here writes to a database. Ensure reports what it built and the
+// caller decides what to record: the Kubernetes objects converge by
+// re-applying, while the database rows are the state machine that decides
+// whether re-applying is wanted at all.
 //
-// It writes nothing to any database. Provisioning an organisation and recording
-// that it was provisioned are separate concerns with separate failure modes:
-// the Kubernetes objects are converged by re-applying them, while the database
-// rows are the state machine that decides whether re-applying is even wanted.
-// Ensure reports what it built and the caller decides what to remember.
-//
-// # Everything here is Ensure-shaped
-//
-// Provisioning spans a cluster and two databases and takes the better part of a
-// minute, so it will be interrupted — by a restart, a timeout, a full disk. Every
-// step is therefore written to converge rather than to create: applying twice is
-// the normal case, not the exception, and the second run must be a no-op rather
-// than a duplicate or an error.
-//
-// The one place that is not naturally idempotent is certificate generation,
-// because fresh keys on every call are what certs.Generate promises. That is
-// handled by reading what is already there and reusing it — see ensureCerts,
-// which also explains why "does the Secret exist" is not the test.
+// Provisioning spans a cluster and two databases and takes most of a minute, so
+// it will be interrupted. Every step converges rather than creates: applying
+// twice is the normal case and the second run is a no-op. Certificate
+// generation is the exception, because fresh keys on every call are what
+// certs.Generate promises; ensureCerts reads what is already there and reuses
+// it.
 package provision
 
 import (
@@ -36,11 +27,9 @@ import (
 
 // Spec describes one organisation to provision.
 //
-// Deliberately thin. Everything else that shapes the result — images, storage
-// class, resource requests, the host organisations are reached at — lives in
-// Config, because it is a property of the deployment rather than of the
-// organisation, and because a caller should not be able to give two
-// organisations different storage classes by accident.
+// Everything else that shapes the result — images, storage class, resource
+// requests, the host organisations are reached at — lives in Config, so two
+// organisations cannot be given different storage classes.
 type Spec struct {
 	// Org is the organisation name. It becomes a namespace and appears in the
 	// certificate authorities' common names, so it is held to the same shape
@@ -50,14 +39,13 @@ type Spec struct {
 
 // Status is what Ensure reports back, and is exactly what registration needs.
 //
-// The certificate material is here rather than left in the cluster for the
-// caller to find because the caller should not need to know how this package
-// stores anything. That it happens to come out of a Secret is an implementation
-// detail of the Kubernetes target.
+// The certificate material is returned rather than left for the caller to find
+// in the cluster: that it comes out of a Secret is particular to the Kubernetes
+// target.
 type Status struct {
-	// Ready is true only when every component is serving. A Status with
-	// Ready false and no error means provisioning is still converging and the
-	// call should be repeated — not that it failed.
+	// Ready is true only when every component is serving. Ready false with no
+	// error means provisioning is still converging and the call should be
+	// repeated.
 	Ready bool
 
 	// Endpoint is host:port for the admin gRPC service, as the console dials
@@ -94,11 +82,6 @@ type Status struct {
 
 // ConsoleRotation is what one pass over an organisation's console credentials
 // found, and what it did about it.
-//
-// A struct rather than three return values because the third — ExpiresAt — is
-// the one a caller is most likely to drop, and it is the one that carries the
-// warning. Rotated and an error between them describe what happened; ExpiresAt
-// describes what is about to.
 type ConsoleRotation struct {
 	// Status describes the organisation as deployed, whether or not anything
 	// rotated, so a caller can re-register from it either way.
@@ -112,39 +95,31 @@ type ConsoleRotation struct {
 	// out: the new one when a rotation happened, otherwise the one that was
 	// already there.
 	//
-	// Reported even alongside an error, whenever the certificate was read before
-	// the failure. That is deliberate and it is the whole value of this field: a
-	// rotation that keeps failing is exactly the case where somebody needs to see
-	// the credential counting down, and returning nothing would leave the fleet
-	// looking unchanged while it ran out.
+	// Reported alongside an error whenever the certificate was read before the
+	// failure, so a rotation that keeps failing still shows the credential
+	// counting down.
 	//
 	// Zero means the call failed before reading any certificate. A caller
-	// watching the fleet must treat zero as "unknown" rather than "expired":
-	// the credential is probably fine and the cluster is not answering, which is
-	// a different alarm and is what the rotation failure count is for.
+	// watching the fleet must treat zero as unknown rather than expired: the
+	// cluster is not answering, which is what the rotation failure count is for.
 	ExpiresAt time.Time
 
 	// PreviousExpiresAt is when the superseded certificate runs out. Zero unless
 	// this call rotated.
 	//
-	// It exists because writing the new certificate is not the last step —
-	// registering it is, and that is the caller's. Until registration succeeds
-	// the console is still presenting the old one, so the old one's expiry is
-	// what describes the organisation's actual exposure. Reporting the new
-	// expiry there would show a credential as renewed at the exact moment
-	// renewal stopped taking effect.
+	// Registration is the caller's step, and until it succeeds the console is
+	// still presenting the old certificate, so the old expiry is what describes
+	// the organisation's exposure.
 	PreviousExpiresAt time.Time
 }
 
 // Target is somewhere an organisation can be provisioned.
 //
-// One implementation today, against Kubernetes. The interface exists because
-// the alternative is a package whose every function takes a Kubernetes client,
-// which makes the seam between "decide what this organisation needs" and "make
-// it exist here" impossible to test without a cluster.
+// One implementation today, against Kubernetes. The seam keeps "decide what
+// this organisation needs" testable without a cluster.
 type Target interface {
 	// Ensure converges the organisation towards running and reports where it
-	// got to. It is safe to call repeatedly and expected to be.
+	// got to. Safe to call repeatedly.
 	Ensure(ctx context.Context, spec Spec) (Status, error)
 
 	// Destroy removes everything Ensure created, including the data.
@@ -160,40 +135,29 @@ type Config struct {
 	// with anything the platform runs.
 	NamespacePrefix string
 
-	// ExternalHost is the name callers reach organisations at.
+	// ExternalHost is the name callers reach organisations at. The console
+	// reaches them at Status.Endpoint instead; see ConsoleInCluster.
 	//
 	// A name, never an address. The local cluster's node IP changes on every
 	// recreate while its name does not, so an address here would bake a
 	// certificate that stops verifying the next time the cluster is rebuilt.
-	//
-	// It used to say "callers and the console". That was true while both were
-	// outside the cluster and stopped being true when the console moved into
-	// it — see ConsoleInCluster.
 	ExternalHost string
 
 	// ConsoleInCluster reports whether the console runs beside these
-	// organisations rather than outside the cluster.
+	// organisations rather than outside the cluster. It decides
+	// Status.Endpoint, the address the console dials, as against
+	// Status.PublicEndpoint, the address a caller dials.
 	//
-	// It decides Status.Endpoint, which is the address the CONSOLE dials, as
-	// distinct from Status.PublicEndpoint which is the address a CALLER dials.
-	// Status has kept those apart from the beginning, and its comment says they
-	// "differ once the console is inside the cluster and callers are not" —
-	// this is the setting that makes them differ.
+	// A deployment fact this package cannot work out. An in-cluster console
+	// dialling ExternalHost asks cluster DNS to resolve a name that exists only
+	// outside, and gets "server misbehaving" from the resolver.
 	//
-	// A deployment fact, not something this package can work out. An in-cluster
-	// console dialling ExternalHost asks cluster DNS to resolve a name that
-	// only exists outside, and gets "server misbehaving" from the cluster
-	// resolver — a message about DNS that names nothing an operator would
-	// connect to where the console happens to be running.
-	//
-	// The certificates already allow both: ensureCerts puts the in-cluster
-	// service names in the leaf's SANs alongside ExternalHost, so switching
-	// this does not need a reissue.
+	// ensureCerts puts the in-cluster service names in the leaf's SANs
+	// alongside ExternalHost, so switching this needs no reissue.
 	ConsoleInCluster bool
 
 	// StorageClass for the Postgres volume. Empty uses the cluster default,
-	// which is fine locally and is not something to rely on in a cluster where
-	// somebody else chose the default.
+	// which is whatever that cluster's operator chose.
 	StorageClass string
 
 	// Images. PostgresImage must carry an Apache-2 TimescaleDB and pgvector,
@@ -212,65 +176,57 @@ type Config struct {
 	//
 	// Not optional in practice: atlantis's readiness probe performs a real
 	// cache operation and reports 503 on anything but a hit or a miss, so a
-	// wrong address here means the pod never becomes Ready. The default in
-	// cmd/server is localhost:11211, which in a pod is always wrong and never
-	// fatal at startup — the failure surfaces as a permanent readiness
-	// failure instead.
+	// wrong address here means the pod never becomes Ready. cmd/server defaults
+	// to localhost:11211, which in a pod is wrong and not fatal at startup.
 	MemcachedAddr string
 
 	// PodCIDR is the cluster's pod network.
 	//
-	// The network policy is written as "everything except this range", which is
-	// what lets the console and callers reach an organisation from outside the
+	// The network policy is written as "everything except this range", which
+	// lets the console and callers reach an organisation from outside the
 	// cluster while no pod inside it can.
 	//
 	// A wrong value is not symmetric. Too narrow and the console is blocked,
-	// which is loud. Too wide, or simply stale, and tenant pods fall outside
-	// the exception and are **admitted** — the isolation silently stops
-	// existing while every manifest still says it is there.
+	// which is loud. Too wide or stale and tenant pods fall outside the
+	// exception and are admitted, with every manifest still saying otherwise.
 	//
-	// It has to match the value deploy/k8s-dev.sh gives Calico as
-	// CALICO_IPV4POOL_CIDR, and nothing mechanically enforces that: the cluster
-	// CIDR is not readable from the API (a Node's spec.podCIDR is that node's
-	// slice, not the cluster's range). What does catch a mismatch is
-	// TestK8sTenantsCannotReachEachOthersDatabase, which probes the property
-	// rather than the configuration — so if these two ever drift, that test is
-	// what says so.
+	// It has to match CALICO_IPV4POOL_CIDR in deploy/k8s-dev.sh, and nothing
+	// enforces that: the cluster CIDR is not readable from the API, since a
+	// Node's spec.podCIDR is that node's slice rather than the cluster's range.
+	// TestK8sTenantsCannotReachEachOthersDatabase probes the property instead.
 	PodCIDR string
 
 	// OperatorNamespace is where CloudNativePG runs.
 	//
-	// It needs an explicit allow to reach each Postgres instance, and omitting
-	// it produces the failure that is hardest to attribute: the policy blocks
-	// the controller that creates the thing the policy is protecting, and the
-	// cluster simply never becomes ready.
+	// It needs an explicit allow to reach each Postgres instance. Omitting it
+	// makes the policy block the controller that creates the thing the policy
+	// protects, and the cluster never becomes ready.
 	OperatorNamespace string
 
 	// ControlPlaneNamespace is where the console runs.
 	//
 	// The organisation's network policy allows that namespace's console pod to
 	// reach the ports an organisation serves on. Without it an in-cluster
-	// console is refused by the tenant isolation rule, because that rule is
-	// written as "everything except the pod network" — which was exactly right
-	// while the console was outside and silently excludes it now that it is not.
+	// console is refused by the tenant isolation rule, which is written as
+	// "everything except the pod network" and so excludes anything running
+	// inside the cluster.
 	//
-	// The allow is narrow on purpose: this namespace AND the console's own pod
-	// label, not the namespace alone. Anything else running beside the console
-	// gets nothing, and another tenant's pod is still refused.
+	// The allow is narrow: this namespace AND the console's own pod label, not
+	// the namespace alone. Anything else running beside the console gets
+	// nothing, and another tenant's pod is still refused.
 	ControlPlaneNamespace string
 
-	// PostgresInstances is 1 for development. Three is the floor once anything
-	// is promised to anybody: CloudNativePG hard-restarts a single-instance
-	// cluster on every operator upgrade and blocks node drains.
+	// PostgresInstances is 1 for development. Three is the floor for a cluster
+	// with an availability promise: CloudNativePG hard-restarts a
+	// single-instance cluster on every operator upgrade and blocks node drains.
 	PostgresInstances int32
 
 	// PostgresStorage is a Kubernetes quantity, e.g. "1Gi".
 	PostgresStorage string
 
-	// ReadyTimeout bounds each wait. Exceeding it is retryable rather than
-	// terminal — the objects are applied, so the next Ensure finds them and
-	// carries on. A first provision pulls no images (they are side-loaded) but
-	// does run initdb, which is the slow part.
+	// ReadyTimeout bounds each wait. Exceeding it is retryable: the objects are
+	// applied, so the next Ensure finds them and carries on. A first provision
+	// pulls no images (they are side-loaded) but does run initdb.
 	ReadyTimeout time.Duration
 }
 
@@ -279,9 +235,9 @@ func (c Config) Namespace(org string) string { return c.NamespacePrefix + org }
 
 // withDefaults fills in what a caller did not set.
 //
-// Images and ExternalHost have no sensible default and are required: guessing
-// an image reference produces a pod that cannot start, and guessing a hostname
-// produces certificates that cannot verify. Both fail loudly in validate.
+// Images and ExternalHost have no default: guessing an image reference produces
+// a pod that cannot start, and guessing a hostname produces certificates that
+// cannot verify. validate refuses both.
 func (c Config) withDefaults() Config {
 	if c.NamespacePrefix == "" {
 		c.NamespacePrefix = "org-"
@@ -326,8 +282,7 @@ func (c Config) validate() error {
 		missing = append(missing, "PostgresImage")
 	}
 	if c.MemcachedAddr == "" {
-		// Named explicitly rather than defaulted, because the default that
-		// exists in cmd/server is the one value guaranteed to be wrong here.
+		// Named rather than defaulted: cmd/server's default is wrong in a pod.
 		missing = append(missing, "MemcachedAddr")
 	}
 	if len(missing) > 0 {

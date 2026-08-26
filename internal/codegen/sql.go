@@ -13,46 +13,21 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/schema"
 )
 
-// EmitSQL turns a Diff into a pair of migration scripts.
+// SQLScripts is the migration output of one emit pass.
 //
-// Design choices:
-//   - One file per call (caller decides the filename / sequence number).
-//   - Up and down are returned as separate strings; the caller writes them
-//     to disk side-by-side (NNNN_<name>.up.sql, NNNN_<name>.down.sql).
-//   - Entities default to the `atlantis` schema; the `table "schema.table"`
-//     override routes them elsewhere, and the emitter issues
-//     CREATE SCHEMA IF NOT EXISTS for each non-default target before any
-//     CREATE TABLE.
-//   - Reversibility: every up has a matching down. CI runs up/down/up
-//     against a fresh DB.
+// Up and Down are the single-script forms plain `tide apply` consumes. The
+// PreBackfill and PostBackfill fields and BackfillFields are populated only
+// when the diff holds a field with a `backfill` modifier paired with a NOT-NULL
+// change. `tide apply --backfill` runs them around the chunked UPDATE:
 //
-// Caveats accepted:
-//   - We do NOT auto-generate backfill SQL — that's a separate file the
-//     engineer supplies (--backfill).
-//   - Cache and query_timeout changes do not produce SQL (they affect server
-//     behavior only). They are reflected in the script as a no-op comment so
-//     the file isn't empty when those are the only changes.
-//   - Schema-qualified names throughout (atlantis.* by default; the
-//     schema from `table "schema.table"` when overridden), with no
-//     search_path manipulation, so the emitted SQL is unambiguous
-//     regardless of the caller's session search_path.
+//	PreBackfillUp        additive parts, and ADD COLUMN nullable for backfilled fields
+//	PreBackfillIndexes   CREATE INDEX CONCURRENTLY ... WHERE field IS NULL
+//	(chunked UPDATE loop, driven by BackfillFields)
+//	PostBackfillUp       ALTER COLUMN SET NOT NULL on backfilled fields
+//	PostBackfillIndexes  DROP INDEX CONCURRENTLY, mirroring the partial index
 //
-// SQLScripts is the migration output of one emit pass. Up + Down are the
-// legacy single-script forms — what plain `tide apply` consumes. The four
-// PreBackfill / PostBackfill fields and BackfillFields are populated when
-// the diff contains at least one field with a `backfill` modifier paired
-// with a NOT-NULL change; `tide apply --backfill` runs them in order
-// around the chunked UPDATE loop:
-//
-//	PreBackfillUp       — additive parts + ADD COLUMN nullable for backfilled fields
-//	PreBackfillIndexes  — CREATE INDEX CONCURRENTLY ... WHERE field IS NULL
-//	(chunked UPDATE loop runs here, driven by BackfillFields)
-//	PostBackfillUp      — ALTER COLUMN SET NOT NULL on backfilled fields
-//	PostBackfillIndexes — DROP INDEX CONCURRENTLY (mirror of the partial idx)
-//
-// For non-backfill plans the four scripts are empty strings and
-// BackfillFields is nil — callers treat "PostBackfillUp == ”" as the
-// no-phase-split signal.
+// For non-backfill plans those four are empty and BackfillFields is nil.
+// Callers test PostBackfillUp == "" for the no-phase-split signal.
 type SQLScripts struct {
 	Up   string
 	Down string
@@ -77,10 +52,14 @@ type BackfillField struct {
 	TableName  string `json:"table_name"`
 }
 
-// EmitSQL emits one migration covering every change in d, against the new IR
-// (newIR is needed to look up entity / field shape for additive changes).
+// EmitSQL emits one migration covering every change in d, against the new IR.
+// oldIR may be nil for an initial migration; newIR must not be nil. Every up
+// script has a matching down, which CI exercises as up/down/up.
 //
-// oldIR may be nil (initial migration). newIR must not be nil.
+// Names are schema-qualified and no search_path is set, so the output does not
+// depend on the caller's session. Backfill SQL is not generated, and cache and
+// query_timeout changes emit a no-op comment so a script holding only those is
+// not empty.
 func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 	if newIR == nil {
 		return SQLScripts{}, fmt.Errorf("EmitSQL: newIR is required")
@@ -111,15 +90,12 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 	down.blank()
 	emitLockTimeout(down)
 
-	// Ensure every Postgres schema referenced by a newly-added entity exists
-	// before any CREATE TABLE in that schema runs. CREATE SCHEMA IF NOT
-	// EXISTS is idempotent, so re-emitting it on a follow-up migration that
-	// happens to add another entity to the same schema is harmless. The
-	// `atlantis` and `public` schemas are skipped — `atlantis` is created
-	// by the infra migrations at server boot, and `public` always exists.
-	// Down does NOT drop schemas: a schema may hold non-atlantis objects,
-	// and a rollback that leaves an empty schema is a tiny, harmless
-	// artifact compared to risking data loss in unrelated tables.
+	// Every schema a newly-added entity names must exist before any CREATE
+	// TABLE in it. `atlantis` and `public` are skipped: the infra migrations
+	// create the first at boot and the second always exists.
+	//
+	// Down does not drop schemas. One may hold non-atlantis objects, and a
+	// rollback leaving an empty schema is cheaper than that risk.
 	for _, name := range collectNewSchemas(d.Additive, newByID) {
 		up.linef("CREATE SCHEMA IF NOT EXISTS %s;", quoteIdent(name))
 	}
@@ -127,17 +103,16 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 		up.blank()
 	}
 
-	// Process all changes in a deterministic order. We split by class so the
-	// reader sees additive first, then any backfill-required changes (with
-	// big comment banners), then breaking changes (likewise).
-	// The down script emits its class groups in reverse, because a rollback
-	// has to undo the migration in the opposite order it was applied.
+	// Changes are split by class so the reader sees additive first, then
+	// backfill-required, then breaking. The down script emits its class groups
+	// in reverse, because a rollback has to undo the migration in the opposite
+	// order it was applied.
 	//
-	// Emitting both scripts in the same order produced rollbacks that could not
+	// Emitting both scripts in the same order produces rollbacks that cannot
 	// run. Dropping a column and the entity-level CHECK that references it puts
 	// the CHECK removal in ADDITIVE and the column removal in BREAKING; the up
-	// script correctly drops the constraint first, but the down script then
-	// re-added the constraint before re-adding the column:
+	// script drops the constraint first, and a same-order down script re-adds
+	// the constraint before re-adding the column:
 	//
 	//	ALTER TABLE "zz_zz" ADD CONSTRAINT "zz_total_pos" CHECK (total > 0);
 	//	ALTER TABLE "zz_zz" ADD COLUMN "total" INTEGER;
@@ -145,18 +120,18 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 	//
 	// This is general, not specific to CHECKs: any dependency spanning two
 	// class groups has the same shape.
-	// Policies that must be rebuilt come down BEFORE any class group runs, and
-	// go back up after all of them.
+	// Policies needing a rebuild come down before any class group runs and go
+	// back up after all of them.
 	//
-	// Not as a change competing for position. PostgreSQL refuses to alter a
+	// Not as a change competing for position: PostgreSQL refuses to alter a
 	// column a policy depends on, and the column change's own class varies with
-	// what kind of change it is — so ordering by class group is not a rule, it
-	// is a coincidence that holds until it does not. A rebuild is a constraint
-	// on the WHOLE migration: nothing may touch that column while the policy
-	// stands, and the policy must stand again when the migration ends.
+	// the change, so class-group ordering would place the two correctly only by
+	// coincidence. A rebuild constrains the whole migration — nothing may touch
+	// that column while the policy stands, and the policy must stand again at
+	// the end.
 	//
-	// Bracketing it is also what makes the down script correct without a second
-	// rule, because the down groups are emitted in reverse.
+	// Bracketing also makes the down script correct with no second rule, since
+	// the down groups are emitted in reverse.
 	rebuilt := partitionRebuilds(d, newByID, oldByID)
 	for _, r := range rebuilt {
 		up.commentf("rebuild tenant isolation on %s: PostgreSQL refuses to alter a column a policy depends on", r.entityID)
@@ -179,20 +154,14 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 		label   string
 		changes []Change
 	}{
-		// EVERY group is filtered, not just BREAKING.
+		// EVERY group is filtered, not just BREAKING. Being bracketed is a
+		// property of the entity, not of a class: a same-column type change
+		// whose policy predicate does not move is ADDITIVE.
 		//
-		// Bracketed entities have their partition change removed, because the
-		// bracket owns the drop and the recreate. Leaving the change in a group
-		// as well emits the policy twice, and on the DOWN path the group's copy
-		// recreates it BEFORE the column is reverted — the exact SQLSTATE 0A000
-		// the bracket exists to remove.
-		//
-		// This used to filter BREAKING alone, which was correct only while every
-		// partition change was classified cross-caller-breaking. A same-column
-		// type change whose policy predicate does not move is now ADDITIVE, so
-		// an unfiltered group would carry it straight back into emitClass. The
-		// rule is a property of being bracketed, not of a class, so it is
-		// applied where the grouping happens rather than per group.
+		// A bracketed entity's partition change is removed because the bracket
+		// owns the drop and the recreate. Left in a group it emits the policy
+		// twice, and on the DOWN path recreates it before the column is
+		// reverted — the SQLSTATE 0A000 the bracket exists to remove.
 		{"ADDITIVE", withoutBracketedPartitionChanges(d.Additive, rebuilt)},
 		{"BACKFILL REQUIRED", withoutBracketedPartitionChanges(d.BackfillRequired, rebuilt)},
 		// Destructive before breaking: a parked object must be out of the way
@@ -414,18 +383,13 @@ func buildPhaseSplit(d *Diff, newByID, oldByID map[string]*dsl.Entity) (pre, pre
 	post.blank()
 	emitLockTimeout(post)
 
-	// The index scripts deliberately get no lock_timeout, for two reasons that
-	// both have to hold.
+	// The index scripts get no lock_timeout. SET LOCAL takes effect only inside
+	// a transaction block and these run outside one, so it would be accepted,
+	// emit a WARNING, and change nothing.
 	//
-	// SET LOCAL only takes effect inside a transaction block. These run outside
-	// one, so the statement would be accepted, emit a WARNING, and change
-	// nothing — a guard that reads as present and cannot fire, which is worse
-	// than an absent one because it stops anybody looking again.
-	//
-	// A session-level SET would take effect, and is still wrong here. CREATE
-	// INDEX CONCURRENTLY that hits its timeout mid-build leaves an INVALID
-	// index behind, which no later run cleans up and which every planner then
-	// ignores while it occupies the name. Waiting is the better failure.
+	// A session-level SET would take effect and is still wrong: CREATE INDEX
+	// CONCURRENTLY that times out mid-build leaves an INVALID index that no
+	// later run cleans up and every planner ignores while it holds the name.
 	preIdx.line("-- Partial-index lifecycle for the chunked backfill. CREATE INDEX CONCURRENTLY")
 	preIdx.line("-- runs OUTSIDE a transaction; each line is its own statement.")
 	preIdx.line("-- No lock_timeout here: SET LOCAL is inert outside a tx, and a timeout")
@@ -551,15 +515,13 @@ func emitClass(up, down *sqlBuilder, label string, changes []Change, newByID, ol
 	down.blank()
 }
 
-// reorderEntityAddsByFKDependency returns changes with EntityAdded entries
-// topologically sorted ahead of all other changes, so an FK from a new
-// entity to another new entity in the same migration resolves correctly
-// regardless of the entities' alphabetical order. Non-EntityAdded changes
-// (field add, NOT NULL tighten, …) target entities that already exist in
-// the prior schema, so their ordering relative to each other is preserved.
-// On a topo failure (true cycle between two different new entities), the
-// original order is returned so the apply fails with a clearer Postgres
-// error rather than swallowing the change set.
+// reorderEntityAddsByFKDependency sorts EntityAdded entries topologically ahead
+// of every other change, so an FK between two new entities in one migration
+// resolves whatever their alphabetical order.
+//
+// Other changes target entities that already exist, so their relative order is
+// preserved. A cycle between two new entities returns the original order, so
+// the apply fails with Postgres's error rather than swallowing the change set.
 func reorderEntityAddsByFKDependency(changes []Change, newByID map[string]*dsl.Entity) []Change {
 	var adds []Change
 	var rest []Change
@@ -599,14 +561,12 @@ func reorderEntityAddsByFKDependency(changes []Change, newByID map[string]*dsl.E
 
 // emitChange dispatches one change to its specific emitter.
 //
-// Down statements are written in REVERSE structural order on the down side by
-// each emitter — i.e. a CREATE TABLE on up is mirrored by DROP TABLE on down,
-// and a column ADD is mirrored by a column DROP. The orchestration outer
-// loop preserves the additive→backfill→breaking sequence on the up side; the
-// down side mirrors that. (We don't re-sort the down statements —
-// migrate runs them top-to-bottom as written, and the per-change reversal is
-// sufficient because we never combine destructive + additive changes in the
-// same migration without explicit ceremony.)
+// Each emitter mirrors its own up statement on the down side: CREATE TABLE
+// against DROP TABLE, column ADD against column DROP.
+//
+// The down statements are not re-sorted. migrate runs them as written, and
+// per-change reversal suffices because destructive and additive changes never
+// share a migration without explicit ceremony.
 func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*dsl.Entity) {
 	up.commentf("%s: %s", ch.Kind, ch.Detail)
 	down.commentf("%s (reversed): %s", ch.Kind, ch.Detail)
@@ -614,10 +574,9 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 	case KindEntityAdded:
 		e := newByID[ch.EntityID]
 		emitEntityCreate(up, e)
-		// A real drop, not a park. This undoes a table THIS migration created,
-		// so the only rows it can lose are ones written since it ran, and
-		// parking would leave a tombstone behind for something the schema never
-		// deliberately removed. Parking is for an author deleting a declaration.
+		// A real drop, not a park. This undoes a table the same migration
+		// created, so the only rows it can lose are ones written since it ran.
+		// Parking is for an author deleting a declaration.
 		emitEntityDrop(down, e)
 	case KindEntityRemoved:
 		e := oldByID[ch.EntityID]
@@ -716,16 +675,14 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 		if oldE.PartitionField == newE.PartitionField {
 			break
 		}
-		// The index is dropped explicitly before it is recreated. Both names
-		// derive from the TABLE, not the column, so the old index already
-		// occupies the new one's name — and emitPartitionPolicy writes
-		// CREATE INDEX IF NOT EXISTS, which would find it and leave the index
-		// pointing at the column the policy no longer uses. Every read would
-		// then be a sequential scan under a policy that looks correct.
+		// Dropped explicitly before recreation. Both names derive from the
+		// table, not the column, so the old index occupies the new one's name
+		// and emitPartitionPolicy's CREATE INDEX IF NOT EXISTS would find it
+		// still pointing at the column the policy no longer uses. Every read
+		// would be a sequential scan under a policy that looks correct.
 		//
-		// The policy needs no such care: emitPartitionPolicy writes DROP POLICY IF
-		// EXISTS under the same name before it creates one. (Third statement,
-		// not first — an earlier comment here said "opens with".)
+		// The policy needs no such care: emitPartitionPolicy writes DROP POLICY
+		// IF EXISTS under the same name first.
 		emitPartitionIndexDrop(up, oldE)
 		emitPartitionPolicy(up, newE)
 		emitPartitionIndexDrop(down, newE)
@@ -770,13 +727,13 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 		//
 		// Every statement targets ch.Constraint, because a changed check keeps
 		// its name: only an author-named check or a field check can reach this
-		// kind. An *unnamed* entity check is named from its predicate, so
+		// kind. An unnamed entity check is named from its predicate, so
 		// changing the predicate changes the name, which makes it a removal
 		// plus an addition rather than a change — different keys, different
-		// branch. Synthesizing a Change without the name here was the bug: the
-		// drop fell back to hashing the old predicate and emitted
-		// DROP CONSTRAINT IF EXISTS on a name that had never existed, so the
-		// old constraint survived and the ADD then collided with it:
+		// branch. A Change synthesized without the name makes the drop fall
+		// back to hashing the old predicate, emitting DROP CONSTRAINT IF EXISTS
+		// on a name that never existed, so the old constraint survives and the
+		// ADD collides with it:
 		//
 		//	ERROR:  constraint "total_positive" for relation "shop_order" already exists
 		emitCheckDrop(up, e, ch)
@@ -904,11 +861,10 @@ func triggerName(e *dsl.Entity, suffix string) string {
 }
 
 func emitEntityCreate(b *sqlBuilder, e *dsl.Entity) {
-	// `IF NOT EXISTS` so the initial migration is idempotent — a
-	// partially-failed run (or an out-of-band repair) can re-apply this
-	// file without conflict. The diff-driven `tidectl plan` migrations
-	// (additive / backfill / breaking) deliberately do NOT carry IF NOT
-	// EXISTS so a missing object surfaces as a loud error rather than
+	// `IF NOT EXISTS` so the initial migration is idempotent: a partially
+	// failed run, or an out-of-band repair, can re-apply this file. The
+	// diff-driven `tidectl plan` migrations (additive / backfill / breaking)
+	// carry no IF NOT EXISTS, so a missing object is an error rather than
 	// silent drift.
 	b.linef("CREATE TABLE IF NOT EXISTS %s (", qualifiedTable(e))
 	cols := []string{}
@@ -939,15 +895,13 @@ func emitEntityCreate(b *sqlBuilder, e *dsl.Entity) {
 		tableConstraints = append(tableConstraints,
 			fmt.Sprintf("  CONSTRAINT %s UNIQUE (%s)", quoteIdent(name), joinQuoted(u.Fields)))
 	}
-	// Table-level CHECK constraints (multi-column / polymorphic XOR
-	// predicates). The Expr is whatever the engineer wrote inside the
-	// `check "..."` declaration; Postgres validates it at migration time.
-	// Names come from resolveCheckNames, the same function the differ uses, so
-	// a constraint created here and a constraint an ALTER later targets cannot
-	// be named differently. Field-level checks are inlined by columnDecl and
-	// auto-named by Postgres, so only the entity-level ones are emitted here —
-	// but they are named in the presence of the field ones, which is why the
-	// filter is on the resolved list rather than on e.Checks.
+	// Table-level CHECK constraints only; columnDecl inlines the field-level
+	// ones for Postgres to auto-name. Names come from resolveCheckNames, which
+	// the differ also uses, so a constraint created here and one a later ALTER
+	// targets cannot be named differently.
+	//
+	// The filter is on the resolved list rather than e.Checks, because entity
+	// checks are numbered in the presence of the field ones.
 	for _, r := range resolveCheckNames(e) {
 		if r.field != "" {
 			continue
@@ -996,24 +950,12 @@ func emitEntityCreate(b *sqlBuilder, e *dsl.Entity) {
 
 // emitEntityDrop parks a table instead of dropping it.
 //
-// The table is moved into the tombstone schema, where the application cannot
-// reach it — every generated statement names atlantis.<table> explicitly — and
-// left intact. A scheduled reaper drops it once the retention window has
-// passed. Until then the change is undone by moving it back, with the rows
-// still in it.
+// The table moves into the tombstone schema, out of reach because every
+// generated statement names atlantis.<table> explicitly, and stays intact until
+// a scheduled reaper drops it. Undoing the change moves it back with its rows.
 //
-// This replaces DROP TABLE ... CASCADE, which was two problems in one line. The
-// drop itself was irreversible: the documentation already conceded that a
-// migration losing data is not reversible and that point-in-time restore of the
-// entire database is the recovery path, which is not a recovery path for one
-// mistaken line in a schema file. And CASCADE silently removed dependent
-// objects — views, foreign keys from tables that were not part of this change —
-// so the blast radius exceeded what the plan showed.
-//
-// Parking is deliberately not CASCADE-equivalent: if another object still
-// depends on this table, the move fails and the migration stops. That is the
-// point. A dependency nobody accounted for should surface as an error at apply
-// time, not as a silent deletion.
+// Not CASCADE-equivalent: if another object still depends on the table, the
+// move fails and the migration stops rather than removing the dependent.
 func emitEntityDrop(b *sqlBuilder, e *dsl.Entity) {
 	// No CASCADE. It removed dependent objects — views, foreign keys from
 	// tables outside this change — that the plan never showed, so the blast
@@ -1030,25 +972,21 @@ func emitEntityDrop(b *sqlBuilder, e *dsl.Entity) {
 
 // emitEntityPark moves a table out of reach instead of dropping it.
 //
-// The table goes to the tombstone schema, where nothing can reach it — every
-// generated statement names atlantis.<table> explicitly — and stays intact. A
-// reaper drops it once the retention window passes; until then the change is
-// undone by moving it back, rows and all.
+// The table goes to the tombstone schema, out of reach because every generated
+// statement names atlantis.<table> explicitly, and stays intact until a reaper
+// drops it. Until then the change is undone by moving it back, rows and all.
 //
-// This is what replaces DROP TABLE for a removal the author asked for. The
-// documentation already conceded that a migration losing data is irreversible
-// and that point-in-time restore of the whole database is the recovery path,
-// which is no recovery path at all for one mistaken line in a schema file.
+// The only recovery from a real DROP TABLE is a point-in-time restore of the
+// whole database.
 func emitEntityPark(b *sqlBuilder, e *dsl.Entity) {
-	// The PHYSICAL name, not the computed one. An entity may override its table
-	// with `table "consumer.accounts"`, and 17 of the 19 schemas in this repo
-	// do. SET SCHEMA moves whatever qualifiedTable names, so the table arrives
-	// in the tombstone schema called `accounts` — while a rename addressing the
-	// computed `<ns>_<entity>` name finds nothing. With IF EXISTS that rename
-	// was a silent no-op, so the real table ended up stranded in the tombstone
-	// schema registered under a name that had never existed: invisible to the
-	// reaper, unrestorable by the down migration, and recorded in the register
-	// as reaped on a date when it was not.
+	// The PHYSICAL name, not the computed one. `table "consumer.accounts"`
+	// overrides it, as 17 of the 19 schemas here do, and SET SCHEMA moves
+	// whatever qualifiedTable names, so the table lands in the tombstone schema
+	// as `accounts`.
+	//
+	// A rename addressing the computed `<ns>_<entity>` name finds nothing, and
+	// with IF EXISTS is a silent no-op: the table is then stranded under a name
+	// that never existed, invisible to the reaper and unrestorable by down.
 	srcSchema, srcTable := physicalParts(e)
 
 	// Qualified by source schema because the tombstone schema is shared: two
@@ -1126,29 +1064,24 @@ func emitFieldAdd(b *sqlBuilder, e *dsl.Entity, f *dsl.Field) {
 
 // emitFieldDrop parks a column instead of dropping it.
 //
-// A column cannot be moved to another schema, so it is renamed. That is enough
-// to make it invisible: every generated statement names its columns explicitly,
-// so a renamed column is absent from reads, writes and the entity's proto
-// surface, while the data stays exactly where it was. Undoing it is a rename
-// back.
+// A column cannot move schema, so it is renamed. Every generated statement
+// names its columns explicitly, so a renamed column is absent from reads,
+// writes and the proto surface while the data stays. Undoing it is a rename.
 //
-// The cost is that the column still occupies its space and still enforces any
-// NOT NULL it carried, so a parked NOT NULL column would block inserts. Its
-// constraint is dropped for that reason — the column is retained for its data,
-// not its rules.
+// Its NOT NULL is dropped: a parked NOT NULL column would block inserts. The
+// column is retained for its data, not its rules.
 func emitFieldDrop(b *sqlBuilder, e *dsl.Entity, name string) {
 	b.linef("ALTER TABLE %s DROP COLUMN %s;", qualifiedTable(e), quoteIdent(name))
 }
 
 // emitFieldPark renames a column out of the way instead of dropping it.
 //
-// A column cannot move to another schema, so it is renamed — which is enough:
-// every generated statement names its columns, so a renamed column is absent
-// from reads, writes and the proto surface while its data stays put.
+// A column cannot move schema, so it is renamed. Every generated statement
+// names its columns, so a renamed column is absent from reads, writes and the
+// proto surface while its data stays put.
 //
-// Its NOT NULL is dropped because the column is being retained for its data,
-// not its rules, and a parked NOT NULL column would reject inserts that touch
-// only the live ones.
+// Its NOT NULL is dropped: a parked NOT NULL column would reject inserts that
+// touch only the live columns.
 func emitFieldPark(b *sqlBuilder, e *dsl.Entity, name string) {
 	parked := parkedName(name)
 	b.linef("ALTER TABLE %s RENAME COLUMN %s TO %s;",
@@ -1188,24 +1121,20 @@ const DefaultParkRetention = 30 * 24 * time.Hour
 // emitParkRegistration records a parked object in the same statement group as
 // the rename that parked it.
 //
-// In the migration rather than in the server on the side, because a park
-// applied but not recorded is invisible to the reaper and to anyone looking for
-// it: the object would survive every retention window and nobody would have a
-// list saying it exists.
+// In the migration rather than alongside it in the server: a park applied but
+// not recorded is invisible to the reaper and absent from `tide parked`, so the
+// object outlives every retention window with nothing listing it.
 func emitParkRegistration(b *sqlBuilder, kind, schemaName, objectName, parentTable, originalSchema, originalName string) {
 	parent := "NULL"
 	if parentTable != "" {
 		parent = sqlStringLiteral(parentTable)
 	}
-	// originalSchema is recorded separately from schema_name because for a
-	// table they differ: schema_name is the tombstone the object now lives in,
-	// originalSchema is where it has to go back to. Without it the register
-	// cannot describe a restore, which is most of what a register is for.
+	// originalSchema differs from schema_name for a table: schema_name is the
+	// tombstone it now lives in, originalSchema where it goes back to.
 	//
 	// The conflict target is the partial unique index over live registrations.
-	// Untargeted, DO NOTHING would also swallow a primary-key conflict and any
-	// future constraint, turning a failed registration into a park that was
-	// applied and never recorded.
+	// Untargeted, DO NOTHING would swallow a primary-key conflict too, turning
+	// a failed registration into a park applied and never recorded.
 	b.linef("INSERT INTO atlantis.parked_objects "+
 		"(kind, schema_name, object_name, parent_table, original_schema, original_name, reap_after) "+
 		"VALUES (%s, %s, %s, %s, %s, %s, now() + INTERVAL '%d days') "+
@@ -1267,41 +1196,14 @@ func emitDefault(b *sqlBuilder, e *dsl.Entity, field string, d *dsl.Default) {
 	b.linef("ALTER TABLE %s ALTER COLUMN %s SET DEFAULT %s;", qualifiedTable(e), quoteIdent(field), defaultExpr(*d))
 }
 
-// emitCompositeUnique adds or drops a multi-column UNIQUE constraint. The
-// name is deterministic (compositeUniqueName) so the DROP on `on=false`
-// finds exactly what a prior ADD created.
-// checkConstraintName resolves the name a CHECK constraint is emitted under.
+// checkConstraintName returns the identifier a CHECK change acts on. Resolved
+// at diff time and carried on the Change, because only the differ sees both
+// sides; an empty name yields invalid SQL that fails at apply.
 //
-// This is the emitter's business, not the differ's. The differ matches old
-// against new by identity (see resolvedChecks); names are computed here, from
-// the entity being emitted for, so a positional name is always positional
-// within the schema version it belongs to.
-//
-// A field-level check written as `total int check "total > 0"` is inlined into
-// the column definition by EmitInitial and so has no name of its own there. It
-// needs one to be added or dropped later, and the name must be derivable from
-// the column alone.
-// checkConstraintName returns the identifier a CHECK change acts on.
-//
-// Resolved at diff time and carried on the Change, because only the differ can
-// see both sides. Deriving it here scanned the entity the emitter was handed —
-// always the *new* one, which for a removal cannot contain the constraint being
-// removed — then fell back to hashing the predicate, emitting
-// DROP CONSTRAINT IF EXISTS on a name that had never existed. IF EXISTS turned
-// that into a no-op, so the plan reported the constraint gone while the
-// database went on enforcing it.
-//
-// There is no fallback. An earlier version kept one "for Changes built before
-// Constraint existed", justified by a persisted-plan replay path — which does
-// not exist: every emitter call site recomputes the diff from IR snapshots
-// (admin.go, backfill.go, history.go, sandbox/embedded.go, cmd/tidectl/plan.go),
-// and the stored schema_versions.diff JSON is only ever counted and rendered,
-// never re-emitted. A fallback that cannot run is a second naming scheme
-// nobody maintains, and it disagreed with resolveCheckNames.
-//
-// An empty name yields DROP CONSTRAINT IF EXISTS "" — invalid SQL that fails at
-// apply. That is the right outcome for a Change this build cannot interpret,
-// and the opposite of the silent success the old fallback produced.
+// Deriving it here would scan the new entity, which for a removal cannot hold
+// the constraint being removed, then fall back to hashing the predicate. DROP
+// CONSTRAINT IF EXISTS on a name that never existed is a no-op, so the plan
+// reports the constraint gone while the database still enforces it.
 func checkConstraintName(ch Change) string { return ch.Constraint }
 
 // fieldCheckName returns the constraint name resolveCheckNames assigned to a
@@ -1318,16 +1220,12 @@ func fieldCheckName(e *dsl.Entity, field string) string {
 
 // truncateIdent keeps a generated identifier inside Postgres's 63-byte limit.
 //
-// Postgres does not reject an over-long identifier; it silently truncates it.
-// That is the dangerous behaviour: a CREATE storing a 63-byte prefix and a
-// later DROP supplying the full 80-byte name refer to the same object only by
-// accident, and DROP CONSTRAINT IF EXISTS turns the mismatch into a success.
+// Postgres silently truncates an over-long identifier rather than rejecting it,
+// so a CREATE storing a 63-byte prefix and a DROP supplying the full 80-byte
+// name match only by accident, and DROP CONSTRAINT IF EXISTS reports success.
 //
-// Truncating here, deterministically, means the name we emit is the name stored
-// — so the two statements always agree. The hash suffix keeps distinct inputs
-// distinct, which plain truncation would not: two long column names sharing a
-// prefix would otherwise collapse to one identifier and CREATE TABLE would fail
-// with "constraint already exists".
+// The hash suffix keeps distinct inputs distinct: plain truncation collapses
+// two long names sharing a prefix, and CREATE TABLE then fails.
 func truncateIdent(name string) string {
 	const maxIdent = 63
 	if len(name) <= maxIdent {
@@ -1356,27 +1254,14 @@ func truncateIdent(name string) string {
 	return name[:cut] + suffix
 }
 
-// unnamedCheckName names an entity-level `check "..."` that the author did not
-// name. It is the single source of that name: EmitInitial writes it when
-// creating the table, and resolvedChecks derives constraint identity from it.
-// The two must agree, or a migrated database and a freshly created one carry
-// differently-named constraints and every later ALTER targets the wrong one.
+// unnamedCheckName names an entity-level `check "..."` the author did not name.
+// EmitInitial writes it and resolvedChecks derives constraint identity from it;
+// disagreement leaves a migrated and a freshly created database with
+// differently-named constraints, so every later ALTER targets the wrong one.
 //
-// Derived from the predicate rather than from position. Position was the
-// obvious choice and it was wrong: deleting the first of two unnamed checks
-// renumbered the second, so a single deletion reported as a removal *plus* a
-// predicate change on a constraint nobody touched — escalating the plan to
-// backfill-required and re-validating the whole table under ACCESS EXCLUSIVE
-// for a constraint that had not moved. Predicate-derived names make reordering
-// a no-op, which is what it is.
-//
-// occurrence disambiguates the degenerate case of the same predicate written
-// twice; Postgres requires distinct constraint names on a table, and two
-// identical CHECKs are two constraints as far as the catalog is concerned.
-//
-// Truncated to four bytes. The collision domain is the checks of one table, so
-// 2^32 is ample, and the name has to stay inside Postgres's 63-byte identifier
-// limit alongside the table name.
+// Derived from the predicate, not position: deleting the first of two unnamed
+// checks renumbers the second, reporting a spurious predicate change and
+// re-validating the table under ACCESS EXCLUSIVE. Truncated to four bytes.
 func unnamedCheckName(e *dsl.Entity, expr string, occurrence int) string {
 	sum := sha256.Sum256([]byte(expr))
 	name := fmt.Sprintf("%s_check_%s", tableName(e), hex.EncodeToString(sum[:4]))
@@ -1388,10 +1273,9 @@ func unnamedCheckName(e *dsl.Entity, expr string, occurrence int) string {
 
 // emitCheckAdd renders ADD CONSTRAINT ... CHECK.
 //
-// No NOT VALID: the whole point of classifying this backfill-required is that
-// the constraint IS validated against existing rows, so the apply fails loudly
-// on data that violates it rather than leaving an unenforced constraint behind.
-// A NOT VALID variant would be a different, deliberately-chosen behaviour, and
+// No NOT VALID. Classifying this backfill-required means the constraint is
+// validated against existing rows, so the apply fails on data that violates it
+// rather than leaving an unenforced constraint behind. A NOT VALID variant
 // would need its own plan class.
 func emitCheckAdd(b *sqlBuilder, e *dsl.Entity, ch Change) {
 	expr, _ := ch.To.(string)
@@ -1412,6 +1296,9 @@ func emitCheckDrop(b *sqlBuilder, e *dsl.Entity, ch Change) {
 		qualifiedTable(e), quoteIdent(checkConstraintName(ch)))
 }
 
+// emitCompositeUnique adds or drops a multi-column UNIQUE constraint. The name
+// comes from compositeUniqueName, so the DROP on `on=false` finds exactly what
+// a prior ADD created.
 func emitCompositeUnique(b *sqlBuilder, e *dsl.Entity, fields []string, on bool) {
 	name := compositeUniqueName(e, fields)
 	if on {
@@ -1530,18 +1417,18 @@ func columnDecl(f dsl.Field, checkName string) string {
 	if f.Check != "" {
 		// Named explicitly rather than left to Postgres.
 		//
-		// Postgres auto-names an inline single-column check <table>_<column>_check
-		// and, when that exceeds the 63-byte identifier limit, shortens the table
-		// and column parts *proportionally* (makeObjectName). Reproducing that
-		// meant guessing an implementation detail, and the guess was wrong:
+		// Postgres auto-names an inline single-column check
+		// <table>_<column>_check and, when that exceeds the 63-byte identifier
+		// limit, shortens the table and column parts proportionally
+		// (makeObjectName), which is not reproducible by truncation:
 		//
 		//	postgres:  zzlongns_an_entity_with_a_reall_a_column_with_a_long_name_check
-		//	atlantis:  zzlongns_an_entity_with_a_really_quite_long_name_a_column_with_a_long_name_check
+		//	truncated: zzlongns_an_entity_with_a_really_quite_long_name_a_column_with_a_long_name_check
 		//
-		// A later DROP CONSTRAINT IF EXISTS used our 80-byte name, Postgres
-		// truncated it to a different 63-byte string, IF EXISTS swallowed the
-		// miss, and the migration reported success with the constraint still
-		// enforcing. Emitting the name removes the guess entirely.
+		// A later DROP CONSTRAINT IF EXISTS carrying the 80-byte name is
+		// truncated by Postgres to a different 63-byte string, IF EXISTS
+		// swallows the miss, and the migration reports success with the
+		// constraint still enforcing. Emitting the name removes the guess.
 		//
 		// For names inside the limit this produces exactly the name Postgres
 		// would have chosen, so nothing already deployed is renamed.
@@ -1609,7 +1496,8 @@ func fkTargetRef(r *dsl.Ref) string {
 	return `"atlantis".` + quoteIdent(tableNameFromID(r.TargetID))
 }
 
-// tableNameFromID converts a canonical "namespace.Entity" into our flat table name.
+// tableNameFromID converts a canonical "namespace.Entity" into the flat table
+// name, `<namespace>_<snake>`.
 func tableNameFromID(id string) string {
 	parts := strings.SplitN(id, ".", 2)
 	if len(parts) != 2 {
@@ -1618,11 +1506,11 @@ func tableNameFromID(id string) string {
 	return parts[0] + "_" + snakeCase(parts[1])
 }
 
-// Constraint / index names are deterministic so we can DROP CONSTRAINT and
-// DROP INDEX without remembering Postgres's auto-generated names. Each name
-// fits within the 63-char Postgres identifier limit (truncation falls back
-// to a hash suffix — we keep the unhashed form short by relying on
-// snake_case entity names).
+// Constraint and index names are deterministic, so DROP CONSTRAINT and DROP
+// INDEX need no record of Postgres's auto-generated ones.
+//
+// Each fits the 63-character identifier limit; past it, truncateIdent replaces
+// the tail with a hash suffix.
 
 func pkName(e *dsl.Entity) string               { return tableName(e) + "_pkey" }
 func fkName(e *dsl.Entity, field string) string { return tableName(e) + "_" + field + "_fkey" }
@@ -1759,9 +1647,7 @@ func (s *sqlBuilder) linef(format string, args ...any) {
 
 // commentf writes one `--` comment line, and guarantees it stays one line.
 //
-// # Why this is a security boundary and not formatting
-//
-// A `--` comment ends at the first newline, so ANY line terminator inside the
+// A `--` comment ends at the first newline, so any line terminator inside the
 // text ends the comment and puts whatever follows at top level, as SQL.
 //
 // The migration header says DO NOT EDIT BY HAND, and every comment here is
@@ -1769,19 +1655,17 @@ func (s *sqlBuilder) linef(format string, args ...any) {
 // the backfill expression, the index expression and its predicate. The DSL
 // lexer turns `\n` in a string literal into a real newline
 // (internal/dsl/lexer.go), so a declaration reaches this function already
-// carrying one. A review executed the whole chain on PostgreSQL 17.8:
+// carrying one. On PostgreSQL 17.8:
 //
 //	total int check "total > 0 /*\n; DROP POLICY shop_doc_partition ON shop.doc; --*/"
 //
 // The expression parses as an ordinary CHECK — the newline is whitespace and
 // the block comment is stripped — so every validator in internal/dsl/sqlvalidate
-// passes it. Emitted, the second line was top-level SQL, and applying the
-// migration dropped the row-level security policy off the table.
+// passes it. Emitted, the second line is top-level SQL, and applying the
+// migration drops the row-level security policy off the table.
 //
-// That is the exact capability the CHECK gate was written to remove, arriving
-// through the comment rather than through the constraint. So the neutralising
-// happens HERE, where every Detail channel converges, rather than in each
-// validator: a new `Kind` added later cannot forget it.
+// The neutralising happens here, where every Detail channel converges, rather
+// than in each validator, so a new `Kind` added later cannot forget it.
 //
 // Every control character goes, not just \n and \r: the set PostgreSQL's
 // scanner ends a comment on is not worth re-deriving, and nothing legitimate
@@ -1802,46 +1686,11 @@ func sanitizeComment(text string) string {
 
 // emitLockTimeout bounds how long the migration will WAIT for a lock.
 //
-// # The failure this prevents
-//
-// ApplyMigration runs the whole script in one transaction. DDL here takes
-// ACCESS EXCLUSIVE — ALTER TABLE ... ENABLE ROW LEVEL SECURITY does, and so
-// does ADD COLUMN — and an ACCESS EXCLUSIVE request that cannot be granted
-// QUEUES. Every subsequent statement on that table, including plain SELECTs,
-// then queues behind the waiter. So a migration that would have taken
-// milliseconds turns into a full outage on the table for as long as one
-// unrelated long-running query holds its lock.
-//
-// Without a timeout there is no upper bound on that. With one, the migration
-// fails, rolls back, and can be retried when the table is quieter — which is
-// the outcome an operator would choose if asked.
-//
-// # Which scripts get it
-//
-// Every script that a caller executes inside a transaction, which is all four
-// of Up, Down, PreBackfillUp and PostBackfillUp. It went onto Up and Down
-// first, and the backfill path was left without it for a while — the same
-// exposure by a different route, since PreBackfillUp carries ADD COLUMN
-// (backfill.go runs it on the apply tx) and PostBackfillUp carries ALTER
-// COLUMN SET NOT NULL (internal/backfill/runner.go runs it on its own tx).
-// Both take ACCESS EXCLUSIVE. A migration is not bounded because the common
-// path is bounded.
-//
-// TestEveryTransactionalScriptBoundsItsLockWait asserts this over the fields of
-// SQLScripts by reflection, so a fifth script cannot ship without an answer.
-// The index scripts are excluded there for the reason stated at their emit
-// site: they run outside a transaction, where SET LOCAL is inert.
-//
-// # Why this is not a fix for the index build
-//
-// It bounds the WAIT, not the HOLD. Once granted, the lock is held for the rest
-// of the transaction, and CREATE INDEX (not CONCURRENTLY) inside it can run for
-// minutes on a large table with reads and writes blocked throughout. The
-// concurrent-index channel exists — buildPhaseSplit emits CREATE INDEX
-// CONCURRENTLY into a script that runs outside a transaction — but only for
-// backfill plans. Routing ordinary DDL through it needs an apply path that can
-// leave the transaction, which does not exist yet. Tracked as its own task; a
-// review measured 238 ms of blocked reads and writes at 31 MB, which scales.
+// ApplyMigration runs the script in one transaction and the DDL takes ACCESS
+// EXCLUSIVE. A request that cannot be granted queues, and every later statement
+// on that table queues behind it, so one long-running query turns a millisecond
+// migration into an outage. It bounds the WAIT, not the HOLD: CREATE INDEX
+// inside the transaction still blocks for its duration, 238 ms on 31 MB.
 func emitLockTimeout(b *sqlBuilder) {
 	b.line("-- Bound the WAIT for locks. Without this an ACCESS EXCLUSIVE request")
 	b.line("-- queues behind any long-running query, and every later statement on")
@@ -1908,11 +1757,9 @@ func EmitInitial(newIR *dsl.IR) (SQLScripts, error) {
 // before the entities that reference them. Cycles (self-references aside)
 // are reported as an error.
 //
-// Self-references are tolerated by emitting the entity but issuing the FK
-// constraint AFTER the table — we already use named FK constraints in the
-// CREATE TABLE statement, which Postgres accepts even for self-references.
-// True cycles between two different tables are an error (we'd need
-// to emit the constraint with a separate ALTER TABLE — future work).
+// Self-references are tolerated: the FK constraint is named inside CREATE
+// TABLE, which Postgres accepts. A cycle between two different tables is an
+// error, and would need the constraint emitted as a separate ALTER TABLE.
 func topoSortEntities(entities []dsl.Entity) ([]*dsl.Entity, error) {
 	byID := map[string]*dsl.Entity{}
 	for i := range entities {
@@ -1961,17 +1808,13 @@ func topoSortEntities(entities []dsl.Entity) ([]*dsl.Entity, error) {
 }
 
 // assertCheckNamesUnique refuses to emit a schema in which two author-supplied
-// CHECK names collide on one entity. Postgres rejects such a table, so emitting
-// it would produce a migration that cannot apply; the generated SQL would fail
-// deep inside an apply transaction with Postgres's own message, naming the
+// CHECK names collide on one entity. Postgres rejects such a table, so the
+// migration would fail inside the apply transaction with a message naming the
 // constraint but not the file it came from.
 //
-// Generated names never reach here — resolveCheckNames assigns them around
-// whatever the author reserved — so this can only fire on something a person
-// wrote twice.
-//
-// It runs on both IRs in EmitSQL, not just the new one, because the down script
-// re-creates dropped entities from the old IR.
+// Only an author-written duplicate reaches here; resolveCheckNames assigns
+// generated names around whatever the author reserved. EmitSQL runs it on both
+// IRs, because the down script re-creates dropped entities from the old one.
 func assertCheckNamesUnique(ir *dsl.IR) error {
 	if ir == nil {
 		return nil
@@ -1988,37 +1831,13 @@ func assertCheckNamesUnique(ir *dsl.IR) error {
 }
 
 // emitPartitionPolicy renders the row-level security that enforces
-// `partition by`.
+// `partition by`. Enforcement is in Postgres, not in each generated read, so a
+// policy cannot be omitted by a handler written later and covers paths atlantis
+// never sees.
 //
-// Enforcement lives in Postgres rather than in each generated read, and that is
-// the entire point. The previous design injected a predicate into every
-// generated query; the server was later rewritten to dispatch from the IR at
-// runtime, the injection was not carried across, and every read silently
-// returned every tenant's rows. A policy cannot be forgotten by a handler
-// written afterwards, and it covers paths atlantis never sees — custom query
-// bodies, backfill expressions, anything executed on that connection.
-//
-// FORCE is not optional. Without it the table owner bypasses RLS entirely, and
-// atlantis owns the tables it creates, so the policy would apply to everyone
-// except the one role that actually connects.
-//
-// The predicate goes through atlantis.current_partition() rather than inlining
-// whatever that function reads. That indirection is what let migration 0024
-// move the discriminator from a table to a run-time parameter without touching
-// a single policy, and the reason it is still required is worth stating
-// precisely, because the obvious version of it stopped being true.
-//
-// The differ does now read `partition by` — diffPartition emits DDL when the
-// clause is added, removed or moved. What it compares is DECLARATIONS. A change
-// to the POLICY TEXT this function emits is invisible to it: the .atl file is
-// byte-identical before and after, so there is no diff, so no migration. Ship a
-// version of atlantis that writes a different predicate and every policy
-// already in the field keeps the old one, permanently, with nothing able to
-// tell you.
-//
-// So the constraint holds in the shape that matters: whatever this function
-// emits has to stay correct forever, and indirection through a function is how
-// the mechanism stays changeable when the text cannot be.
+// FORCE is required; without it the table owner bypasses RLS. What this emits
+// is permanent: the differ compares declarations, so changing the policy text
+// produces no migration.
 func emitPartitionPolicy(b *sqlBuilder, e *dsl.Entity) {
 	if e.PartitionField == "" {
 		return
@@ -2026,112 +1845,51 @@ func emitPartitionPolicy(b *sqlBuilder, e *dsl.Entity) {
 	table := qualifiedTable(e)
 	col := quoteIdent(e.PartitionField)
 
-	// The discriminator is text, so anything else needs a cast — and WHICH
-	// side is cast decides whether this is usable. Measured on PG 17.8 over
-	// 200k rows, as a role RLS applies to:
+	// The discriminator is text, and which side carries the cast decides
+	// whether the policy is usable. Measured on PG 17.8 over 200k rows, as a
+	// role RLS applies to:
 	//
-	//   col = current_partition()          text col  0.29 ms,      16 buffers
-	//   col::text = current_partition()    uuid col   286 ms,  400182 buffers
-	//   col = current_partition()::uuid    uuid col  0.29 ms,      15 buffers
+	//	col = current_partition()          text col  0.29 ms,      16 buffers
+	//	col::text = current_partition()    uuid col   286 ms,  400182 buffers
+	//	col = current_partition()::uuid    uuid col  0.29 ms,      15 buffers
 	//
-	// Casting the COLUMN defeats the index: the comparison stops being an
-	// index key and becomes a per-row filter, and because current_partition()
-	// is a function call rather than a constant, it is then invoked once per
-	// row scanned. STABLE does not memoise it. Casting the FUNCTION keeps the
-	// whole thing an index condition and one call per query.
+	// Casting the COLUMN drops the index condition to a per-row filter, and
+	// current_partition() is a function call rather than a constant, so it runs
+	// once per row scanned; STABLE does not memoise it.
 	//
-	// Without any cast, a non-text column does not merely perform badly — the
-	// policy cannot be created at all: `operator does not exist: uuid = text`,
-	// surfacing at apply time as an opaque Postgres error against DDL nobody
-	// hand-wrote.
+	// Without any cast the policy cannot be created at all:
+	// `operator does not exist: uuid = text`.
 	predicate := partitionPolicyPredicate(e)
 
 	b.linef("ALTER TABLE %s ENABLE ROW LEVEL SECURITY;", table)
 	b.linef("ALTER TABLE %s FORCE ROW LEVEL SECURITY;", table)
 	// USING gates what a statement may read; WITH CHECK gates what it may
-	// write. Both are required: USING alone would let a caller INSERT a row
-	// attributed to another tenant, which it could then not see — a write leak
-	// rather than a read leak, and just as much a breach.
-	// CREATE POLICY has no IF NOT EXISTS, and the initial migration promises to
-	// be re-appliable after a partial failure. Dropping first keeps that true.
+	// CREATE POLICY has no IF NOT EXISTS and the initial migration must stay
+	// re-appliable after a partial failure, so the boundary is dropped first.
 	//
-	// The boundary only. The default grant below is made re-appliable by a
-	// catalogue check instead of by a DROP, because dropping that one is a
-	// user's supported action and this function must not undo it.
+	// The boundary only. The default grant below uses a catalogue check
+	// instead, because dropping that one is a user's supported action.
 	b.linef("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(partitionPolicyName(e)), table)
 
-	// TWO policies, and which is which is the whole design.
+	// The boundary is RESTRICTIVE, the grant PERMISSIVE. PostgreSQL admits a
+	// row when any permissive policy allows it and every restrictive one does,
+	// so the boundary ANDs with everything; a permissive boundary would OR with
+	// a user's own `USING (true)` and expose every tenant.
 	//
-	// PostgreSQL admits a row when ANY permissive policy allows it AND EVERY
-	// restrictive policy allows it. So the tenant boundary goes in the
-	// restrictive slot, where it ANDs with everything and nothing can widen
-	// past it, and the grant goes in the permissive slot, where it is one of
-	// possibly many.
-	//
-	// It used to be the other way round: one permissive policy carrying the
-	// boundary. That works only while it is the sole policy on the table,
-	// because a second permissive policy ORs with it — so a user adding
-	// `USING (true)` for their own access control silently exposed every
-	// tenant. The defence was to refuse the migration outright whenever
-	// another permissive policy existed, which held the line and made
-	// user-defined access control impossible: the first RBAC rule anyone wrote
-	// stopped `tide apply` working on that table.
-	//
-	// Restrictive inverts that. A user may add whatever permissive policies
-	// their authorization model needs; each is a grant, and none of them can
-	// reach outside the tenant. Verified against a deliberately hostile
-	// `AS PERMISSIVE USING (true) WITH CHECK (true)`: reads returned only the
-	// bound tenant's rows, an INSERT attributed to another tenant was refused
-	// naming this policy, and a cross-tenant UPDATE touched nothing.
-	//
-	// USING gates what a statement may read; WITH CHECK what it may write.
-	//
-	// This comment used to say that both were required because "USING alone
-	// lets a caller INSERT a row attributed to another tenant". That is wrong,
-	// and was corrected after measuring it on PostgreSQL 17: when WITH CHECK is
-	// omitted entirely, PostgreSQL reuses USING as the write check, and a
-	// cross-tenant INSERT is refused naming this policy. Omitting it opens
-	// nothing.
-	//
-	// Writing both is still right, for a different and weaker reason: it states
-	// the intent, and it keeps the write half pinned if somebody later gives
-	// the read half a different predicate. The shape that genuinely does leak
-	// is an explicit `WITH CHECK (true)` — which is what a well-meaning "let
-	// writes through" edit produces, and which this line makes it obvious you
-	// are choosing.
+	// USING gates reads, WITH CHECK writes. Omitting WITH CHECK is safe —
+	// PostgreSQL reuses USING, verified on 17 — but an explicit
+	// `WITH CHECK (true)` leaks, so both are written out.
 	b.linef("CREATE POLICY %s ON %s AS RESTRICTIVE USING (%s) WITH CHECK (%s);",
 		quoteIdent(partitionPolicyName(e)), table, predicate, predicate)
 
 	// The default grant, created only when the table would otherwise admit
-	// nothing.
+	// nothing: restrictive policies only subtract, and RLS needs at least one
+	// permissive policy to pass any row.
 	//
-	// Restrictive policies only ever subtract, so a table carrying the boundary
-	// alone is deny-all — RLS needs at least one permissive policy to let any
-	// row through. This supplies it, deliberately total, reproducing the
-	// behaviour of the single permissive policy it replaces where the tenant
-	// check was the only constraint.
-	//
-	// It is CONDITIONAL, and that is what the DO block is for. This is the
-	// policy a user replaces when they define access control: the documented
-	// path is to drop it and write narrower permissive grants, which cannot
-	// weaken isolation because that lives in the restrictive policy above. An
-	// unconditional DROP-then-CREATE undoes that on the next apply — and
-	// because permissive policies OR, restoring `USING (true)` beside their
-	// narrow grants does not merely add a policy back, it makes every one of
-	// them stop constraining anything. Their access control is gone and the
-	// catalogue still lists it.
-	//
-	// Reachable from well beyond entity creation, which is what makes it worth
-	// a DO block rather than a comment telling people not to. diffPartition
-	// calls this when the clause is added, and the partition-rebuild bracket
-	// calls it again at the end of any migration that moves the discriminator
-	// column. A change classified ADDITIVE is enough.
-	//
-	// The condition asks whether ANY permissive policy exists, not whether our
-	// own name is missing. Checking our own name is precisely what re-creates
-	// the total grant beside the user's replacements; asking whether the table
-	// can admit anything at all is the question this policy exists to answer,
-	// and it keeps the script re-appliable without a DROP.
+	// Conditional, hence the DO block. A user may drop this and write narrower
+	// permissive grants; re-creating `USING (true)` beside them would OR with
+	// each and nullify all of them. The condition asks whether any permissive
+	// policy exists, not whether this one is missing.
 	tableLit := "'" + strings.ReplaceAll(table, "'", "''") + "'"
 	b.line("DO $atlantis_default_access$")
 	b.line("BEGIN")
@@ -2143,66 +1901,37 @@ func emitPartitionPolicy(b *sqlBuilder, e *dsl.Entity) {
 	b.line("END")
 	b.line("$atlantis_default_access$;")
 
-	// An index on the discriminator, always, owned by the policy.
+	// Always emitted, never skipped because a declared index leads with the
+	// column. Declared indexes are droppable and this one is not re-emitted —
+	// emitPartitionPolicy runs only at entity creation — so removing the
+	// declaration takes the index through an ADDITIVE migration. Measured on
+	// 200k rows: 590 ms and 201,673 buffers against 0.046 ms and 7.
 	//
-	// An earlier version of this skipped the index when the schema already
-	// declared something leading with the column — a btree, a unique, a
-	// composite primary key. That was wrong in the direction that matters, for
-	// two reasons found by executing it rather than reading it.
-	//
-	// First, the constructs it trusted are droppable and this index is not
-	// re-emitted. emitPartitionPolicy runs only when the entity is created, so
-	// removing the declaration the skip relied on takes the index with it —
-	// through a migration classified ADDITIVE, which is the class nobody looks
-	// twice at. (The skip inspected e.Indexes and single-column primaries, never
-	// e.Uniques, so `unique by` was never actually one of the constructs it
-	// trusted — an earlier version of this comment said it was. `index by` and
-	// `index partial by` were.) Measured on 200k rows, the end state is 590 ms and 201,673
-	// buffers against 0.046 ms and 7. A safety-critical index must not have its
-	// lifetime tied to an unrelated declaration somebody may reasonably delete.
-	//
-	// Second, "leads with the column" is not the same as "can answer
-	// col = value". A partial index covers only rows matching its predicate; a
-	// gin or hnsw index cannot serve equality at all. Both were accepted, and
-	// both measured as sequential scans — 590 ms and 670 ms respectively.
-	//
-	// The cost of always emitting is a duplicate btree when the author also
-	// declared one: bounded, visible in the migration, and removable by the
-	// author. The cost of the skip was a silent thousandfold read regression
-	// arriving through the safest migration class. IF NOT EXISTS keeps this
-	// re-appliable.
+	// "Leads with the column" is not "can answer col = value" either: a partial
+	// index covers only matching rows, and gin and hnsw cannot serve equality.
 	b.linef("CREATE INDEX IF NOT EXISTS %s ON %s (%s);",
 		quoteIdent(partitionIndexName(e)), table, col)
 }
 
 // emitPartitionDisable removes tenant isolation from a table that has it.
 //
-// Not the exact inverse of emitPartitionPolicy, and not its reverse order —
-// an earlier version of this comment claimed both and neither was true. What it
-// is: the four statements that undo the four the policy emitter writes, ordered
-// so no intermediate state denies every statement.
+// Four statements undoing the four emitPartitionPolicy writes, ordered so no
+// intermediate state denies every statement. Neither the exact inverse nor the
+// reverse order.
 //
-// IF EXISTS throughout, because this is also the DOWN path of the migration
-// that added the policy, and a down migration has to survive being run against
-// a database where the up half only partly applied.
+// IF EXISTS throughout: this is the DOWN path of the migration that added the
+// policy, and must survive a partly-applied up half.
 func emitPartitionDisable(b *sqlBuilder, e *dsl.Entity) {
 	if e.PartitionField == "" {
 		return
 	}
 	table := qualifiedTable(e)
-	// The switches go BEFORE the policy, not after.
+	// The switches go BEFORE the policy. Dropping the policy first leaves
+	// enabled=true, forced=true, policies=0 — deny-all. Harmless inside apply's
+	// single transaction, but down_sql is also run by hand.
 	//
-	// An earlier version dropped the policy first and claimed in this comment
-	// that the table was "never left in a state where FORCE is on with no
-	// policy". A review replayed the statements one at a time and refuted it:
-	// after the DROP the table read enabled=true, forced=true, policies=0 — the
-	// deny-all state the comment said it avoided. Harmless during apply, which
-	// runs the whole script in one transaction, but down_sql is also handed to
-	// operators to run by hand.
-	//
-	// Lifting FORCE and then DISABLE first means the intermediate state is
-	// "isolation off, policy still present", which reads as the table did
-	// before the policy existed.
+	// Lifting FORCE then DISABLE makes the intermediate state "isolation off,
+	// policy still present".
 	b.linef("ALTER TABLE %s NO FORCE ROW LEVEL SECURITY;", table)
 	b.linef("ALTER TABLE %s DISABLE ROW LEVEL SECURITY;", table)
 	b.linef("DROP POLICY IF EXISTS %s ON %s;", quoteIdent(partitionPolicyName(e)), table)
@@ -2226,20 +1955,14 @@ func emitPartitionIndexDrop(b *sqlBuilder, e *dsl.Entity) {
 		quoteIdent(entitySchema(e)), quoteIdent(partitionIndexName(e)))
 }
 
-// partitionPolicyPredicate renders the boundary policy's condition, and is the
-// single definition of it.
+// partitionPolicyPredicate renders the boundary policy's condition, and is its
+// single definition. emitPartitionPolicy writes it into CREATE POLICY and
+// diffPartition compares old and new forms to decide whether a change alters
+// what a caller can read; two renderings would be free to disagree silently.
 //
-// Both the emitter and the DIFFER need this string, and for different reasons:
-// emitPartitionPolicy writes it into CREATE POLICY, and diffPartition compares
-// the old and new forms to decide whether a change alters what any caller can
-// read. A second rendering in the differ would be two descriptions of the same
-// text, free to disagree — and the disagreement would be silent, because each
-// looks correct alone. That is the shape behind most of the defects this file's
-// comments describe, so there is one function and two callers.
-//
-// The cast is part of the predicate, not decoration: it is what makes
-// `varchar` -> `uuid` a real change to what the policy matches, while
-// `varchar(16)` -> `varchar(32)` leaves the text byte-identical.
+// The cast is part of the predicate: it makes `varchar` -> `uuid` a real change
+// to what the policy matches, while `varchar(16)` -> `varchar(32)` leaves the
+// text byte-identical.
 func partitionPolicyPredicate(e *dsl.Entity) string {
 	if e == nil || e.PartitionField == "" {
 		return ""
@@ -2280,14 +2003,12 @@ func partitionCastType(e *dsl.Entity) string {
 
 // partitionIndexName is the index backing the policy predicate.
 //
-// Named for its purpose rather than its column, so it is recognisable as the
-// policy's own and not mistaken for one the author declared.
+// Named for its purpose rather than its column, so it is not mistaken for one
+// the author declared.
 //
-// Note the residual hazard, which is structural rather than specific to this
-// name: the CREATE above uses IF NOT EXISTS, so any collision drops this index
-// silently rather than failing. A field literally named `partition` would
-// collide, and is only unreachable because `partition` is a reserved token the
-// parser rejects.
+// The CREATE above uses IF NOT EXISTS, so a name collision drops this index
+// silently. A field named `partition` would collide, and is unreachable only
+// because the parser rejects that token.
 func partitionIndexName(e *dsl.Entity) string {
 	return truncateIdent(tableName(e) + "_partition_idx")
 }
@@ -2301,11 +2022,8 @@ func partitionPolicyName(e *dsl.Entity) string {
 // partitionDefaultPolicyName names the permissive grant that sits beside the
 // restrictive boundary.
 //
-// Named for what it is rather than after the mechanism: an operator reading
-// pg_policy should be able to tell at a glance which policy they may replace
-// (this one) and which is load-bearing (partitionPolicyName). Dropping this one
-// and writing narrower grants is the supported way to add access control;
-// dropping the other removes tenant isolation.
+// Dropping this policy and writing narrower grants is the supported way to add
+// access control. Dropping partitionPolicyName removes tenant isolation.
 func partitionDefaultPolicyName(e *dsl.Entity) string {
 	return truncateIdent(tableName(e) + "_default_access")
 }
@@ -2318,46 +2036,12 @@ func partitionRebuildLockName(e *dsl.Entity) string {
 
 // emitRebuildLock closes the table before the tenant boundary comes down.
 //
-// # What it is for
+// The bracket must drop the boundary, since PostgreSQL refuses to alter a
+// column a policy depends on, leaving RLS enabled with no boundary and the
+// permissive grant still admitting rows.
 //
-// The rebuild bracket has to drop the boundary, because PostgreSQL refuses to
-// alter a column a policy depends on. Dropping it alone does not leave the
-// table shut: the permissive `<table>_default_access USING (true)` grant is
-// still there, and the operator may have replaced it with grants of their own.
-// Either way the table spends the middle of the migration with row-level
-// security ENABLED, no boundary, and something that admits rows — which is
-// every tenant's rows to every caller.
-//
-// A previous version of this note called the intermediate state deny-all. That
-// was true when the boundary was the only policy and it was PERMISSIVE. Since
-// the boundary moved to the restrictive slot the same drop inverts: it stopped
-// denying everything and started admitting everything, which is the direction
-// that matters.
-//
-// # Why a policy rather than dropping the grant
-//
-// Dropping `<table>_default_access` would shut the table only when the operator
-// still has atlantis's grant. Replacing that grant is a documented, supported
-// thing to do, so a fix that only handles atlantis's own name fixes the case in
-// front of it and leaves the case the docs invite. A RESTRICTIVE `USING (false)`
-// ANDs with every permissive policy on the table, whoever wrote it, and touches
-// none of them.
-//
-// It also names no column, so it does not itself block the ALTER the bracket
-// exists to allow.
-//
-// # The failure mode this chooses
-//
-// A migration that dies between the lock and the unlock leaves the table
-// deny-all: an outage, immediately visible, fixed by dropping one policy. That
-// is the trade being made deliberately — inside ApplyMigration's transaction
-// the ALTER holds ACCESS EXCLUSIVE and nobody observes either state, so this is
-// entirely about the hand-run and the --no-transaction runner, where the
-// alternative is a cross-tenant read nobody notices.
-//
-// DROP before CREATE for the same reason the boundary has one: CREATE POLICY has
-// no IF NOT EXISTS, and a re-applied script must not fail on the statement that
-// closes the table.
+// A RESTRICTIVE `USING (false)` ANDs with every permissive policy and names no
+// column, so it does not block the ALTER.
 func emitRebuildLock(b *sqlBuilder, e *dsl.Entity) {
 	table := qualifiedTable(e)
 	name := quoteIdent(partitionRebuildLockName(e))
@@ -2367,14 +2051,12 @@ func emitRebuildLock(b *sqlBuilder, e *dsl.Entity) {
 
 // emitRebuildUnlock reopens the table once the boundary is back.
 //
-// nameFrom is the entity the lock was named after and tableFrom is where the
-// table lives by the time this runs; they differ only if the migration also
-// moved the table, and a policy keeps its name across that.
+// nameFrom is the entity the lock was named after, tableFrom where the table
+// lives by now; they differ only if the migration moved it.
 //
-// Unconditional, and deliberately not folded into emitPartitionPolicy: when the
-// migration REMOVES `partition by`, the epilogue creates no policy at all, and a
-// lock dropped only alongside a boundary would stay behind as a permanent
-// deny-all on a table that was supposed to end up open.
+// Unconditional, not folded into emitPartitionPolicy: removing `partition by`
+// creates no policy, and a lock dropped only alongside a boundary would remain
+// as a permanent deny-all.
 func emitRebuildUnlock(b *sqlBuilder, nameFrom, tableFrom *dsl.Entity) {
 	b.linef("DROP POLICY IF EXISTS %s ON %s;",
 		quoteIdent(partitionRebuildLockName(nameFrom)), qualifiedTable(tableFrom))
@@ -2398,21 +2080,19 @@ func partitionRebuilds(d *Diff, newByID, oldByID map[string]*dsl.Entity) []parti
 	// Keyed on the OLD partition column being touched, not on the kind of
 	// partition change.
 	//
-	// The first version bracketed only KindPartitionChanged with an unchanged
-	// column, and a review executed two shapes that fall outside it and both
-	// produce the identical SQLSTATE 0A000 the bracket exists to prevent:
+	// Bracketing only KindPartitionChanged with an unchanged column misses two
+	// shapes that produce the same SQLSTATE 0A000:
 	//
 	//	remove `partition by` + widen the same column
 	//	move `partition by` to org + widen the OLD column
 	//
-	// PostgreSQL refuses to alter a column any policy depends on. The invariant
-	// is therefore not "the partition column's type changed" — it is NOTHING
-	// MAY TOUCH THE OLD PARTITION COLUMN WHILE ITS POLICY STANDS. Selecting on
-	// the change kind was picking the symptom that had been reproduced.
+	// PostgreSQL refuses to alter a column any policy depends on, so the
+	// invariant is not "the partition column's type changed" but "nothing may
+	// touch the old partition column while its policy stands".
 	//
-	// So: bracket whenever the old side had a policy and this migration alters
-	// the column that policy names. What goes back up at the end is whatever
-	// the NEW side declares — nothing, if the clause was removed.
+	// Bracket whenever the old side had a policy and this migration alters the
+	// column that policy names. What goes back up at the end is whatever the
+	// new side declares — nothing, if the clause was removed.
 	seen := map[string]bool{}
 	var out []partitionRebuild
 	consider := func(entityID string) {
@@ -2453,25 +2133,6 @@ func altersColumn(d *Diff, entityID, column string) bool {
 	}
 	return false
 }
-
-// emitForeignPolicyGuard was here, and its deletion is the point of the
-// restrictive inversion rather than a side effect of it.
-//
-// It aborted the migration when the table carried any permissive policy other
-// than atlantis's own, because permissive policies OR and a permissive tenant
-// boundary could therefore be widened past. That was the correct defence for
-// that design, and it made user-defined access control impossible: the first
-// RBAC grant anyone wrote stopped `tide apply` working on that table, and the
-// error's advice — make your grants RESTRICTIVE — inverts the logic, since
-// restrictive policies AND and so cannot express "admins OR auditors".
-//
-// With the boundary restrictive (see emitPartitionPolicy), a foreign permissive
-// policy is exactly what it should be: a grant, bounded by the tenant, and no
-// longer anything to refuse.
-
-// sqlLiteral went with it. Its only caller was that guard, which spliced schema
-// and policy names into a RAISE. Nothing emitted here needs a runtime string
-// literal any more — identifiers go through quoteIdent.
 
 // withoutBracketedPartitionChanges drops the partition changes whose policy the
 // prologue/epilogue bracket already owns.

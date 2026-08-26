@@ -13,26 +13,13 @@ import (
 
 // handleAuthorize sends a signed-in user to an organisation's console.
 //
-// # What makes this a gate rather than a mint
+// The role in the assertion is read from cloud.memberships. Unlike `cloud
+// mint`, which signs the -org and -role it is given and requires the signing
+// key, this route is reachable by any session, so it takes no role parameter.
 //
-// `cloud mint` signs whatever -org and -role it is passed, which was acceptable
-// while it needed the signing key and therefore an operator. This is reachable
-// by anyone with a session, so the grant has to come from somewhere the caller
-// does not control: cloud.memberships. The role in the assertion is the role in
-// the row. There is no parameter that could say otherwise, which is why there
-// is no parameter.
-//
-// # And why there is no destination parameter either
-//
-// The obvious shape is ?console=<url> validated against an allowlist. The
-// destination is looked up from the organisation instead, so the request
-// carries no URL at all. An allowlist is a check that can be written wrongly —
-// a prefix match, a forgotten scheme, a later exception for staging. Nothing
-// to check is stronger than something checked carefully.
-//
-// A `console` parameter is therefore ignored rather than honoured. A test
-// asserts that, because "ignored" and "not implemented yet" look identical from
-// outside and only one of them stays true.
+// The destination is looked up from the organisation. The request carries no
+// URL, so there is no allowlist to write wrongly. A `console` query parameter
+// is ignored, and a test asserts that.
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	if !s.rateLimited(w, r) {
 		return
@@ -66,18 +53,16 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 // grantFor resolves the membership and destination for one organisation, or
 // answers the request.
 //
-// Both lookups, together, because they fail for reasons a person needs told
-// apart: not a member is a permission answer, and no console registered is an
-// operator answer. Returning one error for both would send somebody to ask the
-// wrong question.
+// Both lookups together, because they fail for different reasons: not a member
+// is a permission answer, and no console registered is an operator answer.
 func (s *Server) grantFor(w http.ResponseWriter, r *http.Request, user *store.User, org string) (issuer.Grant, bool) {
 	ctx := r.Context()
 
 	role, err := s.db.RoleIn(ctx, user.ID, org)
 	if errors.Is(err, store.ErrNotFound) {
-		// Deliberately the same answer whether the organisation does not exist
-		// or the user is simply not in it. Distinguishing them turns this route
-		// into a way to enumerate every organisation in the product.
+		// The same answer whether the organisation does not exist or the user is
+		// not in it. Distinguishing them makes this route an enumeration of
+		// every organisation in the product.
 		s.log.Info("authorize refused: no membership", "user", user.ID, "org", org)
 		page(w, http.StatusForbidden,
 			"You are not a member of that organisation.\n\n"+
@@ -92,11 +77,8 @@ func (s *Server) grantFor(w http.ResponseWriter, r *http.Request, user *store.Us
 
 	consoleURL, err := s.db.ConsoleURL(ctx, org)
 	if errors.Is(err, store.ErrNoConsole) {
-		// This used to say an operator finishes it with `cloud org register`,
-		// which was true when an organisation only became usable because
-		// somebody typed that. It provisions itself now, so the honest answer
-		// is what it is waiting on — and for a failure, that somebody is
-		// looking rather than that the reader has a command to run.
+		// An organisation provisions itself, so the answer is what it is
+		// waiting on rather than a command to run.
 		page(w, http.StatusServiceUnavailable, s.notReadyMessage(ctx, org))
 		return issuer.Grant{}, false
 	}
@@ -109,9 +91,8 @@ func (s *Server) grantFor(w http.ResponseWriter, r *http.Request, user *store.Us
 	// Every organisation this person belongs to, so the console can draw a
 	// switcher without calling Cloud on each page.
 	//
-	// A failure here is not fatal. The list is a convenience and the gate is
-	// this function; minting without it costs a switcher, and refusing the
-	// sign-in over it would take somebody's console away to save a menu.
+	// A failure here is not fatal. The gate is this function, and the list only
+	// draws the switcher, so minting without it costs a menu.
 	var orgs []string
 	memberships, err := s.db.MembershipsOf(ctx, user.ID)
 	if err != nil {
@@ -130,16 +111,15 @@ func (s *Server) grantFor(w http.ResponseWriter, r *http.Request, user *store.Us
 		// The destination is also the audience. One value, so a token cannot be
 		// delivered somewhere it would not verify.
 		Audience: consoleURL,
-		// Names only. Roles are deliberately absent: a console has no business
-		// knowing what somebody may do somewhere it cannot reach, and the list
-		// is only ever used to draw a menu.
+		// Names only, no roles: the list draws a menu, and a console has no
+		// use for permissions in an organisation it cannot reach.
 		Orgs: orgs,
 	}, true
 }
 
 // redirectWithAssertion mints and sends the browser on.
 //
-// The assertion travels in the URL **fragment**. A fragment is never sent to a
+// The assertion travels in the URL fragment. A fragment is never sent to a
 // server, so it stays out of the console's access log, out of the Referer on
 // the next navigation, and out of anything between the two. The console strips
 // it from the address bar before exchanging it.
@@ -166,8 +146,6 @@ func (s *Server) redirectWithAssertion(w http.ResponseWriter, r *http.Request, g
 	http.Redirect(w, r, grant.Audience+"/login#"+frag.Encode(), http.StatusSeeOther)
 }
 
-// ── Step-up ─────────────────────────────────────────────────────────────────
-
 // originOf reduces a URL to a CSP source expression.
 //
 // A source expression may carry a path, but matching then becomes path-prefix
@@ -175,10 +153,9 @@ func (s *Server) redirectWithAssertion(w http.ResponseWriter, r *http.Request, g
 // origin risks a policy that looks right and blocks the one navigation this
 // page exists to make.
 //
-// This is load-bearing, not belt and braces. Migration 0004's CHECK is
-// `console_url ~ '^https?://[^/]+'`, which is UNANCHORED at the end and so
-// admits `https://example.com/console`; `cloud org register` permits a path
-// too. Reducing to the origin is what keeps the directive correct for those.
+// Migration 0004's CHECK is `console_url ~ '^https?://[^/]+'`, unanchored at
+// the end, so it admits `https://example.com/console`, and `cloud org register`
+// permits a path too. Reducing to the origin keeps the directive correct.
 //
 // An unparseable value yields the empty string, which leaves form-action at
 // 'self' — the page still renders and the redirect is still refused, which is
@@ -194,15 +171,11 @@ func originOf(raw string) string {
 
 // serveReauthPage asks for a second factor.
 //
-// # Why this page exists when C3 deleted its sibling
-//
-// C3 wrote a script-free TOTP enrolment page and then deleted it, because
-// sign-in answers JSON and no browser could ever navigate to it. The rule that
-// replaced it was not "no HTML" — it was "does this have a caller". This one
-// does: the console opens it in a popup, which is the whole mechanism.
+// The console opens this in a popup, so unlike the JSON sign-in routes it is
+// navigated to by a browser.
 //
 // Script-free, so Cloud stays under `default-src 'none'`. The postMessage that
-// hands the result back runs on the *console's* origin, under the console's own
+// hands the result back runs on the console's origin, under the console's own
 // script-src, after the redirect below.
 func (s *Server) serveReauthPage(w http.ResponseWriter, org, consoleURL, errMsg string) {
 	banner := ""
@@ -258,13 +231,10 @@ func (s *Server) serveReauthPage(w http.ResponseWriter, org, consoleURL, errMsg 
 
 // handleReauth checks the second factor and mints a step-up assertion.
 //
-// # The property this exists for
-//
-// A step-up assertion says somebody presented a factor. An ordinary one says
-// somebody holds a session, which may be twelve hours old. The console refuses
-// the second where it requires the first, so this is the only route in the
-// product that sets identity.Claims.StepUp — and it does so only after
-// checkSecondFactor has returned true.
+// A step-up assertion asserts that a factor was presented; an ordinary one
+// asserts only a session, which may be twelve hours old. This is the only route
+// that sets identity.Claims.StepUp, and only after checkSecondFactor returns
+// true.
 func (s *Server) handleReauth(w http.ResponseWriter, r *http.Request) {
 	if !s.rateLimited(w, r) {
 		return
@@ -301,8 +271,8 @@ func (s *Server) handleReauth(w http.ResponseWriter, r *http.Request) {
 		// "Try the next one" and not "try again": SpendTOTPStep accepts a code
 		// only from a step strictly later than the last one used, so
 		// resubmitting the code still on screen is refused however correct it
-		// looks. That is deliberate — it is what stops a code seen over a
-		// shoulder being replayed inside its ninety-second validity.
+		// looks, which is what stops a code observed over a shoulder being
+		// replayed inside its ninety-second validity.
 		s.serveReauthPage(w, org, grant.Audience,
 			"That code is not right, or it has already been used. "+
 				"Wait for your authenticator to show a new one.")

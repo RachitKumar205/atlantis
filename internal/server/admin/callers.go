@@ -16,11 +16,8 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/server/interceptors"
 )
 
-// ---------------------------------------------------------------------------
-// GetCallers — list all known callers (registered identities ∪ has-files)
-// ---------------------------------------------------------------------------
-
-// CallerInfo summarises one caller's registration state.
+// CallerInfo summarises one caller's registration state. GetCallers lists every
+// known caller: registered identities together with those that have files.
 //
 // Registered carries the operator-recorded intent: true means the caller
 // exists in caller_identities (either pre-registered by an operator or
@@ -47,10 +44,9 @@ type GetCallersRequest struct{}
 // registered through the console but have not yet pushed schema.
 //
 // Revoked callers are listed too, carrying RevokedAt. They keep their row since
-// migration 0033, so filtering them out here would leave an operator with no way
-// to see that a caller exists but is cut off — and no way to find it again in
-// order to restore it. This is the one read of caller_identities that
-// deliberately does not go through the active_* views.
+// migration 0033, so filtering them out here leaves no way to see that a caller
+// exists but is cut off, and no way to find it again to restore it. This is the
+// one read of caller_identities that does not go through the active_* views.
 func (s *Service) GetCallers(ctx context.Context, _ *adminpb.GetCallersRequest) (*adminpb.GetCallersResponse, error) {
 	// No-PG test path, matching the other methods in this package. Without it
 	// this is the one migrated RPC that segfaults rather than returning.
@@ -131,10 +127,7 @@ ORDER BY caller`)
 	return &adminpb.GetCallersResponse{Callers: out}, nil
 }
 
-// ---------------------------------------------------------------------------
-// RegisterCaller — pre-register a caller cert-CN before first apply
-// ---------------------------------------------------------------------------
-
+// RegisterCallerRequest pre-registers a caller cert-CN before its first apply.
 type RegisterCallerRequest struct {
 	Caller    string `json:"caller"`
 	CanMutate bool   `json:"can_mutate"`
@@ -172,13 +165,11 @@ func validCallerName(s string) bool {
 // console's audit_log instead.
 //
 // Registration also reconciles the caller's default capability grants, in the
-// same transaction as the identity row. Before caller_capabilities existed,
-// can_mutate was read directly by the gates, so writing the row was the whole
-// of registration. Now the gates read grants, and an identity with no grants
-// can authenticate and do nothing — so a registration that wrote only the
-// identity would produce a caller that looks correct in GetCallers and is
-// refused by every RPC. See authz.DefaultCapabilities for the mapping and
-// authz.ManagedCapabilities for what this deliberately does not touch.
+// same transaction as the identity row. The gates read grants, not can_mutate,
+// and an identity with no grants can authenticate and do nothing, so a
+// registration writing only the identity produces a caller that looks correct
+// in GetCallers and is refused by every RPC. See authz.DefaultCapabilities for
+// the mapping and authz.ManagedCapabilities for what this leaves alone.
 //
 // Operator-only.
 func (s *Service) RegisterCaller(ctx context.Context, req *adminpb.RegisterCallerRequest) (*adminpb.RegisterCallerResponse, error) {
@@ -203,10 +194,9 @@ func (s *Service) RegisterCaller(ctx context.Context, req *adminpb.RegisterCalle
 	// A revoked caller is not re-registered back into service.
 	//
 	// The upsert below does not clear revoked_at, so without this the command
-	// would report success while the caller stayed cut off — the operator learns
-	// otherwise from a support ticket. Refusing is also the safer of the two
-	// directions: registration is routine and revocation is deliberate, so a
-	// routine act must not quietly undo a deliberate one.
+	// would report success while the caller stayed cut off. Refusing is the
+	// safer direction: registration is routine and revocation is not, so the
+	// routine act must not undo the other one.
 	var revoked bool
 	if err := tx.QueryRow(ctx, `
 SELECT revoked_at IS NOT NULL FROM atlantis.caller_identities WHERE caller = $1`,
@@ -240,10 +230,9 @@ ON CONFLICT (caller) DO UPDATE SET can_mutate = EXCLUDED.can_mutate`,
 // syncDefaultCapabilities reconciles the managed grant bundle for one caller.
 //
 // Revoke-then-grant, not grant-only: flipping can_mutate from true to false has
-// to actually remove SCHEMA_APPLY, or demotion would be cosmetic. The DELETE is
-// scoped to the managed set so an out-of-band CAPABILITY_OPERATOR survives
-// re-registration — an operator correcting a typo in created_by should not
-// silently strip authority they granted on purpose.
+// to remove SCHEMA_APPLY, or the demotion is cosmetic. The DELETE is scoped to
+// the managed set so an out-of-band CAPABILITY_OPERATOR survives
+// re-registration, and correcting a typo in created_by does not strip it.
 //
 // The INSERT uses ON CONFLICT DO NOTHING rather than an upsert so granted_at
 // keeps recording when the caller first received the capability. Re-registering
@@ -316,10 +305,8 @@ func (s *Service) LookupCallerCertBinding(ctx context.Context, caller string) (i
 	return interceptors.CertBinding{Exists: true}, nil
 }
 
-// ---------------------------------------------------------------------------
-// RecordCallerCertExpiry — persist NotAfter + fingerprint of a freshly issued cert
-// ---------------------------------------------------------------------------
-
+// RecordCallerCertExpiryRequest carries the NotAfter and fingerprint of a
+// freshly issued certificate.
 type RecordCallerCertExpiryRequest struct {
 	Caller string `json:"caller"`
 	// ExpiresAt is RFC3339. Required.
@@ -344,18 +331,13 @@ type RecordCallerCertExpiryResponse struct {
 	ExpiresAt string `json:"expires_at"`
 }
 
-// RecordCallerCertExpiry stores the NotAfter and fingerprint of the
-// caller's most recently console-issued cert. Operator-only — invoked
-// by the BFF after a successful signer issuance.
+// RecordCallerCertExpiry stores the NotAfter of the caller's most recently
+// console-issued certificate. Operator-only, invoked by the BFF after a
+// successful signer issuance.
 //
-// The fingerprint write is the load-bearing one: the cert-binding
-// interceptor in cmd/server reads this column on every authenticated
-// RPC and rejects any peer cert whose SHA-256 doesn't match. So a
-// successful UPDATE here is what flips an old cert from "still
-// crypto-valid" to "superseded — won't authenticate." A failed write
-// leaves the old fingerprint in place; the caller will keep working
-// with the old cert until a successful re-record (operationally we
-// surface the BFF error and the operator retries).
+// The fingerprint on the request is validated and not stored: migration 0032
+// removed pinning, so nothing compares a peer certificate against a recorded
+// one. See the write below.
 func (s *Service) RecordCallerCertExpiry(ctx context.Context, req *adminpb.RecordCallerCertExpiryRequest) (*adminpb.RecordCallerCertExpiryResponse, error) {
 	if err := s.guardOperatorTransport(ctx); err != nil {
 		return nil, err
@@ -371,10 +353,9 @@ func (s *Service) RecordCallerCertExpiry(ctx context.Context, req *adminpb.Recor
 		return nil, fmt.Errorf("admin: parse expires_at: %w", err)
 	}
 
-	// Fingerprint optional during migration window. When present must be
-	// exactly 64 hex chars (SHA-256 = 32 bytes = 64 hex). A malformed
-	// value would silently land as a non-matching fingerprint and lock
-	// the caller out, so reject early at the boundary.
+	// Optional. When present it must be exactly 64 hex characters, SHA-256
+	// being 32 bytes, so a malformed value is refused at the boundary rather
+	// than reaching the store.
 	var fp []byte
 	if req.GetFingerprint() != "" {
 		fp, err = hex.DecodeString(req.GetFingerprint())
@@ -387,15 +368,11 @@ func (s *Service) RecordCallerCertExpiry(ctx context.Context, req *adminpb.Recor
 	}
 
 	// Records when this caller's certificate runs out, and nothing else.
-	//
-	// It used to maintain three fingerprint columns and shift one into a
-	// previous slot with a deadline, so a renewal whose response was lost did
-	// not lock the machine out. Migration 0032 removed all of that with pinning;
-	// a seven-day certificate is what makes the overlap unnecessary.
+	// Migration 0032 removed the three fingerprint columns along with pinning,
+	// a seven-day certificate making the renewal overlap unnecessary.
 	//
 	// cert_expires_at survives because GetCallers reports it and the console
-	// shows it. "When does this run out" is worth answering whether or not
-	// anything enforces a particular certificate.
+	// shows it, whether or not anything enforces a particular certificate.
 	tag, err := s.pool.Exec(ctx, `
 UPDATE atlantis.caller_identities
    SET cert_expires_at = $2
@@ -409,10 +386,7 @@ UPDATE atlantis.caller_identities
 	return &adminpb.RecordCallerCertExpiryResponse{Caller: req.GetCaller(), ExpiresAt: exp.UTC().Format(time.RFC3339)}, nil
 }
 
-// ---------------------------------------------------------------------------
-// RevokeCaller — remove a caller's registrations
-// ---------------------------------------------------------------------------
-
+// RevokeCallerRequest names the caller whose registrations are removed.
 type RevokeCallerRequest struct {
 	Caller string `json:"caller"`
 }
@@ -430,25 +404,20 @@ type RevokeCallerResponse struct {
 // CN starts failing Unauthenticated within one cache TTL (~5s). This is the
 // revocation mechanism — no CRL, no OCSP.
 //
-// # Why the identity row is marked rather than deleted
+// The identity row is marked, not deleted. caller_capabilities references it
+// ON DELETE CASCADE, so deleting it destroys every grant the caller holds,
+// including CAPABILITY_OPERATOR and CAPABILITY_LOGS_READ, which registration
+// does not manage precisely so re-registering cannot strip a hand-granted
+// capability. The loss surfaces later as a PermissionDenied on one page.
 //
-// caller_capabilities references it ON DELETE CASCADE, so deleting it destroyed
-// every grant the caller held — including CAPABILITY_OPERATOR and
-// CAPABILITY_LOGS_READ, which registration deliberately does not manage so that
-// re-registering cannot strip what an operator granted by hand. Revoking stripped
-// it anyway, and the loss only showed up later as a PermissionDenied on one page.
+// Deletion also makes revocation one-way for a reserved CN: RegisterCaller
+// refuses 'atlantis-console', so a deleted console identity has no supported
+// way back. See migration 0033.
 //
-// It also made revocation one-way for a reserved CN. RegisterCaller refuses
-// 'atlantis-console', so a deleted console identity had no supported way back —
-// and the console is the caller that most needs revoking, holding an admin
-// credential for every organisation. See migration 0033.
-//
-// # Why a caller with no identity row still gets one
-//
-// The upsert writes a tombstone for a caller that only ever existed in
-// caller_registrations. Without it, deleting the registrations would cut the
-// caller off until its next `tide apply` wrote them back — revocation undone by
-// the very thing being revoked.
+// A caller with no identity row still gets one. The upsert writes a tombstone
+// for a caller that existed only in caller_registrations; without it, deleting
+// the registrations cuts the caller off only until its next `tide apply` writes
+// them back.
 func (s *Service) RevokeCaller(ctx context.Context, req *adminpb.RevokeCallerRequest) (*adminpb.RevokeCallerResponse, error) {
 	if err := s.guardOperatorTransport(ctx); err != nil {
 		return nil, err

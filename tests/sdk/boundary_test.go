@@ -1,27 +1,19 @@
 //go:build sdk
 
-// SDK module-boundary test. Verifies the typed-client sub-module
-// (github.com/rachitkumar205/atlantis/clients/go) never imports anything from atlantis's main
-// module. The whole point of the sub-module split is that caller repos
-// — API services, data pipelines, mobile / ML / web consumers — see only
-// the proto types + gRPC stubs + thin client wrappers, never atlantis's
-// internal/codegen, internal/dsl, internal/cache, the server impl, the
-// pgx pool, memcached, or the DSL parser.
+// SDK module-boundary test. Fails when the typed-client sub-module,
+// github.com/rachitkumar205/atlantis/clients/go, imports anything from the main
+// module.
 //
-// The Makefile's `cd clients/go && go build ./...` step already enforces
-// this at build time (the SDK's go.mod does not require github.com/rachitkumar205/atlantis,
-// so any leaked import fails to resolve). This test is the explicit gate
-// for CI — a fast, readable assertion that surfaces the violating import
-// path rather than a compile error buried in proto-generated code.
+// A caller repo sees the proto types, the gRPC stubs and the thin client
+// wrappers, and none of internal/codegen, internal/dsl, internal/cache, the
+// server implementation, the pgx pool or memcached.
 //
-// Why a separate test rather than relying on the build alone:
-//   - `go build` failures from boundary breaches look identical to
-//     unrelated missing-module errors. The test names the offender.
-//   - CI gates need a single `go test` invocation to flip red; the
-//     build step is upstream and harder to surface in a PR check.
-//   - A future contributor might be tempted to add a replace directive
-//     "just to unblock the build" — the test runs against the SDK as
-//     a real consumer would see it, with no replaces in scope.
+// The `codegen` target runs `cd clients/go && go build ./...` (Makefile:375),
+// which catches the same leak, since the SDK's go.mod does not require the main
+// module and a leaked import fails to resolve. This test names the offending
+// import path instead of producing a missing-module error indistinguishable
+// from an unrelated one, and it runs with no replace directive in scope, which
+// is how a consumer resolves the module.
 
 package sdk
 

@@ -9,21 +9,16 @@ import (
 
 // Reissuing the console's credentials.
 //
-// The dangerous mistake here is not a rotation that fails — that is loud. It is
-// a rotation that mints a new authority along with the leaves, because both
-// certificates would still work, the console would still connect, and every
-// caller certificate in the organisation would stop authenticating at once with
-// nothing pointing back at this function.
+// A rotation that mints a new authority along with the leaves is silent: both
+// certificates still work, the console still connects, and every caller
+// certificate in the organisation stops authenticating at once with nothing
+// pointing back at this function.
 //
-// So the authority assertions below are the load-bearing ones, and they are
-// written as byte comparisons rather than as "still verifies": a regenerated
-// root verifies its own fresh leaves perfectly well.
+// The authority assertions below are byte comparisons rather than "still
+// verifies", because a regenerated root verifies its own fresh leaves.
 
-// The point of the exercise: the credentials actually change.
-//
 // Without this, a no-op implementation satisfies every other test in this file,
-// and an operator who rotated after a suspected leak would still be holding the
-// leaked certificate.
+// and a rotation after a suspected leak leaves the leaked certificate in place.
 func TestReissuingReplacesBothConsoleLeaves(t *testing.T) {
 	b := generate(t, "acme")
 	oldConsole := append([]byte(nil), b.Console.CertPEM...)
@@ -52,13 +47,10 @@ func TestReissuingReplacesBothConsoleLeaves(t *testing.T) {
 	}
 }
 
-// Neither authority is touched, byte for byte.
-//
-// This is the assertion that catches the catastrophic version. ensureCerts
-// refuses to regenerate an authority for exactly this reason: a fresh root
-// orphans every caller certificate already issued under the old one, and the
-// organisation finds out when its callers stop authenticating rather than when
-// this function runs.
+// Neither authority is touched, byte for byte. ensureCerts refuses to
+// regenerate one for the same reason: a fresh root orphans every caller
+// certificate issued under the old one, and the organisation finds out when its
+// callers stop authenticating rather than when this function runs.
 func TestReissuingLeavesBothAuthoritiesUntouched(t *testing.T) {
 	b := generate(t, "acme")
 	caCert := append([]byte(nil), b.CA.CertPEM...)
@@ -79,12 +71,8 @@ func TestReissuingLeavesBothAuthoritiesUntouched(t *testing.T) {
 	}
 }
 
-// A caller certificate issued before the rotation still works after it.
-//
-// The same property as above, stated the way an organisation experiences it.
-// The authority comparison is what a reviewer checks; this is what breaks at
-// three in the morning, so it is worth asserting directly rather than trusting
-// that the two are equivalent.
+// The same property as above, from the organisation's side: a caller
+// certificate issued before the rotation still verifies after it.
 func TestACallerCertificateSurvivesAConsoleRotation(t *testing.T) {
 	b := generate(t, "acme")
 
@@ -105,12 +93,9 @@ func TestACallerCertificateSurvivesAConsoleRotation(t *testing.T) {
 	}
 }
 
-// The reissued leaves chain where they are supposed to, and nowhere else.
-//
-// certs_test.go asserts this for Generate. It has to hold for the rotation path
-// too: signing the signer-client leaf with the issuing CA would collapse the two
-// trust domains into one, which is the failure the package comment exists to
-// prevent — and every leaf would still look valid.
+// certs_test.go asserts this for Generate; it has to hold for the rotation path
+// too. Signing the signer-client leaf with the issuing CA collapses the two
+// trust domains into one, and every leaf still looks valid.
 func TestReissuedLeavesKeepTheirSeparateRoots(t *testing.T) {
 	b := generate(t, "acme")
 	if err := ReissueConsoleLeaves(b, time.Time{}); err != nil {
@@ -133,11 +118,8 @@ func TestReissuedLeavesKeepTheirSeparateRoots(t *testing.T) {
 	}
 }
 
-// Everything that is not the console's is left alone.
-//
-// The server leaves are mounted by running pods. Replacing them here would make
-// a rotation require a restart, which is the property that makes this cheap
-// enough to run unattended.
+// The server leaves are mounted by running pods, so replacing them here would
+// make a rotation require a restart.
 func TestReissuingDoesNotTouchTheServerLeaves(t *testing.T) {
 	b := generate(t, "acme")
 	server := append([]byte(nil), b.Server.CertPEM...)
@@ -155,12 +137,10 @@ func TestReissuingDoesNotTouchTheServerLeaves(t *testing.T) {
 	}
 }
 
-// The names and usages are the ones the rest of the system checks for.
-//
 // ConsoleCN is what the server's allowlist admits and what
-// SIGNER_ALLOWED_CLIENT_CNS matches. A rotation that produced a correct
-// certificate under a different name would be refused everywhere, and the
-// error would be about a certificate rather than about this.
+// SIGNER_ALLOWED_CLIENT_CNS matches. A rotation producing a correct certificate
+// under a different name is refused everywhere, and the error names a
+// certificate rather than this.
 func TestReissuedLeavesCarryTheLoadBearingNames(t *testing.T) {
 	b := generate(t, "acme")
 	if err := ReissueConsoleLeaves(b, time.Time{}); err != nil {
@@ -192,7 +172,7 @@ func TestReissuedLeavesCarryTheLoadBearingNames(t *testing.T) {
 	}
 }
 
-// The lifetime restarts from the rotation, which is the point of rotating.
+// The lifetime restarts from the rotation.
 func TestReissuedLeavesExpireRelativeToTheRotation(t *testing.T) {
 	b := generate(t, "acme")
 	// A year on, so the new expiry cannot be confused with the original one.
@@ -215,11 +195,9 @@ func TestReissuedLeavesExpireRelativeToTheRotation(t *testing.T) {
 	}
 }
 
-// A bundle that cannot sign is refused, and refused before anything is replaced.
-//
-// Half a rotation is the worst outcome available: a console holding a fresh
-// certificate for atlantis and a stale one for the signer works until the next
-// enrolment, then fails somewhere unrelated to this.
+// Refused before anything is replaced. Half a rotation leaves a console with a
+// fresh certificate for atlantis and a stale one for the signer, which works
+// until the next enrolment and then fails somewhere unrelated to this.
 func TestReissuingRefusesAnUnusableBundle(t *testing.T) {
 	t.Run("a missing authority", func(t *testing.T) {
 		b := generate(t, "acme")

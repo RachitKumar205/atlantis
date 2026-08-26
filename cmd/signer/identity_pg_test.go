@@ -16,19 +16,14 @@ import (
 
 // The signer's registration check, against a real schema.
 //
-// # Why this did not exist before, and why that was a hole
+// The check is one SELECT inline in handleIssue, reachable only through a
+// signed request with CA material behind it. The fuzz test sets pgPool to nil,
+// so nothing else executes the query the signer refuses unregistered callers
+// with, and a typo in it surfaces as every issuance failing in a deployment.
 //
-// The check was one SELECT inline in handleIssue, reachable only through a
-// signed request with CA material behind it. The fuzz test sets pgPool to nil
-// and notes the identity check is "tested elsewhere"; elsewhere was nowhere. So
-// the query the signer relies on to refuse unregistered callers was never
-// executed by any test, and a typo in it would have surfaced as every issuance
-// failing in a deployment.
-//
-// It matters more now. The signer reads a view rather than the table, because a
-// revoked caller keeps its row — and a signer still issuing certificates to a
-// revoked caller is a revocation that is contradicted by the component that
-// hands out credentials.
+// The query reads a view rather than the table, because a revoked caller keeps
+// its row. A signer still issuing certificates to a revoked caller contradicts
+// the revocation.
 
 func signerIdentityDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()

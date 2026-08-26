@@ -42,8 +42,8 @@ func TestAnOrganisationsSignerRoundTrips(t *testing.T) {
 	f := newFixture(t, false)
 	ctx := context.Background()
 
-	// A second, independent authority — which is the whole point of a signer
-	// per organisation.
+	// A second, independent authority, which is what a signer per organisation
+	// gets.
 	signerPKI := testpki.New(t, t.TempDir())
 	read := func(path string) string {
 		b, err := os.ReadFile(path)

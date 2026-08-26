@@ -134,10 +134,9 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// lost. Logging it means an operator can see the answer without knowing to
 	// go looking.
 	//
-	// Refusal is opt-in via ATL_REQUIRE_APACHE_TIMESCALE because self-hosting on
-	// the Community build is entirely legitimate: the Timescale License
-	// restricts offering the software as a service, not running it. A hosted
-	// deployment sets the flag; nobody else is affected.
+	// Refusal is opt-in via ATL_REQUIRE_APACHE_TIMESCALE. The Timescale License
+	// restricts offering the software as a service, not running it, so the flag
+	// belongs to a hosted deployment.
 	if edition, derr := pg.DetectTimescaleEdition(ctx, pool); derr != nil {
 		log.Warn("could not determine the TimescaleDB edition", "err", derr)
 	} else {
@@ -159,13 +158,9 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 
 	// Whether row-level security means anything at all, checked once at boot.
 	//
-	// `partition by` delegates tenant isolation to PostgreSQL precisely so that
-	// a forgotten call site cannot leak and caller-authored SQL is covered by
-	// the same guarantee as a generated read. All of that is void if the role
-	// we connect as bypasses RLS — and the failure is invisible: the policies
-	// exist, FORCE is set, the catalog agrees, and every read still returns
-	// every tenant's rows. internal/storage/pg has a live test that executes
-	// exactly that.
+	// A superuser or BYPASSRLS role leaves every `partition by` policy attached,
+	// visible in the catalog and inert: FORCE is set, the catalog agrees, and
+	// every read returns every tenant's rows. internal/storage/pg executes that.
 	//
 	// Refusal is opt-in via ATL_REQUIRE_TENANT_ISOLATION, matching the
 	// Timescale check above. A deployment with no partitioned entities is
@@ -317,12 +312,10 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// One AuthChecker → two interceptors (Unary + Stream) that share the same
 	// allowlist + exempt-prefix set.
 	//
-	// The admin prefix used to be exempt, so that a caller could apply schema —
-	// which is what writes its caller_registrations row — before appearing in
-	// the allowlist that row feeds. Self-registration on first apply was the
-	// bootstrap, and the exemption was also the reason an admin RPC whose
-	// author forgot to write an authz call was reachable by anyone. Both end
-	// here: registration is an operator act through RegisterCaller, seeded for
+	// The admin prefix is not exempt. An exemption there bootstraps a caller —
+	// applying schema is what writes its caller_registrations row — at the cost
+	// of leaving any admin RPC with no authz call of its own reachable by
+	// anyone. Registration is an operator act through RegisterCaller, seeded for
 	// a fresh install by migration 0019, and the capability interceptor below
 	// governs the admin plane.
 	//
@@ -399,17 +392,11 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// has a caller_identities row. No row — never registered, or revoked — is
 	// Unauthenticated, five seconds behind a RevokeCaller.
 	//
-	// It no longer compares fingerprints. This block described binding a row to
-	// one leaf's SHA-256 long after migration 0032 deleted cert_fingerprint and
-	// its two overlap columns; the lifetime dropped to seven days and the trust
-	// decision became the chain and the common name, verified by the handshake.
-	// See that migration for why short certificates and active revocation are
-	// alternatives rather than a pair.
+	// No fingerprint comparison: migration 0032 deleted cert_fingerprint and its
+	// two overlap columns. Certificate lifetime is seven days and the trust
+	// decision is the chain and the common name, verified at the handshake.
 	//
-	// Nothing is exempt by default. The console used to be, because it had no
-	// fingerprint to bind — a reason that left with the fingerprints, and one
-	// that was costing the console its only revocation. See the ExemptCallers
-	// default in config.go.
+	// Nothing is exempt by default; see CertBindingExemptCallers in config.go.
 	// One CertBindingChecker → both interceptor flavors share one
 	// TTL cache, so a stream lookup for "vendor" and a unary lookup
 	// for "vendor" hit the same cache entry instead of duplicating
@@ -528,17 +515,13 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// caller code uses the generated SDK to RegisterJobHandlers, the
 	// worker's runtime lookups will resolve. Until then, submitted
 	// jobs sit in atlantis.jobs awaiting handler deployment.
-	// Built-in jobs — the maintenance atlantis performs on its own behalf,
-	// registered and scheduled together by jobs.RegisterBuiltins because
-	// splitting those two steps across separate call sites is how the TTL
-	// sweeper ended up with neither.
+	// Built-in jobs: the maintenance atlantis runs on its own behalf.
+	// jobs.RegisterBuiltins registers and schedules in one call, so neither step
+	// can be added without the other.
 	//
-	// Deliberately OUTSIDE the ATL_JOBS_WORKER_ENABLED branch below. That flag
-	// governs caller job queues and defaults to false; atlantis's own garbage
-	// collection cannot be conditional on it. Destructive migrations retain
-	// parked objects for thirty days on the promise that something eventually
-	// removes them, and a promise contingent on an unrelated opt-in is not one
-	// worth making.
+	// Outside the ATL_JOBS_WORKER_ENABLED branch below. That flag governs caller
+	// job queues and defaults to false, while destructive migrations retain
+	// parked objects for thirty days against something removing them.
 	builtinRegistry := jobs.NewRegistry()
 	if err := jobs.RegisterBuiltins(ctx, builtinRegistry, pool.Raw(), log); err != nil {
 		// Returned, not os.Exit: every defer in run() — the pool, the
@@ -569,9 +552,8 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		}
 	}()
 
-	// And a worker draining the built-in queue, for the same reason: a
-	// schedule that fires into a queue nobody drains is no better than a
-	// schedule that never fires.
+	// And a worker on the built-in queue. A schedule firing into an undrained
+	// queue does nothing.
 	builtinWorker := jobs.NewWorker(pool.Raw(), builtinRegistry, jobs.BuiltinQueue, jobs.Config{
 		Schema:        "atlantis",
 		DrainInterval: time.Second,
@@ -703,37 +685,24 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// Ask the database whether every partitioned entity's table actually
 	// carries an enforced policy.
 	//
-	// # Why this still exists now that the differ reads the clause
+	// diffPartition compares two declarations; this compares a declaration
+	// against the live catalogue. A correct declaration sits over a table with
+	// no policy when the migration was planned and never applied, when the
+	// database was adopted with the clause already written, or when the policy
+	// was dropped out of band.
 	//
-	// It once existed because nothing emitted the policy: adding `partition by`
-	// to an entity that already existed produced an empty plan. That is fixed —
-	// diffPartition emits the DDL, and `tide apply` creates the policy.
+	// Binding a tenant succeeds whether or not a policy exists, so the
+	// observable signal — omit the tenant, get refused — reports healthy either
+	// way while every read returns every tenant's rows.
 	//
-	// What is NOT fixed, and cannot be, is that the differ compares two
-	// DECLARATIONS while this compares a declaration against the LIVE CATALOGUE.
-	// Those are different questions, and the second one is the one an operator
-	// is actually asking. A policy can be absent from a correct declaration for
-	// reasons no differ can see: the migration was planned and never applied,
-	// the database was adopted with the clause already written, the policy was
-	// dropped out of band, or the checkpoint predates the differ learning to
-	// read the clause at all.
+	// One closure, used at boot and on every hot reload. A checkpoint reaches a
+	// running server through LISTEN/NOTIFY, and the reload turns on enforcement
+	// in the dispatcher for whatever the table carries then.
 	//
-	// The failure is invisible from inside the server, which is what makes the
-	// check load-bearing rather than belt-and-braces. Binding a tenant succeeds
-	// whether or not a policy exists, so the one signal an operator can see —
-	// omit the tenant, get refused — reports healthy either way, while every
-	// read returns every tenant's rows.
-	//
-	// One closure, used at boot AND on every hot reload. Boot alone is not
-	// enough: a checkpoint arrives at a running server through LISTEN/NOTIFY,
-	// and the reload turns on enforcement in the dispatcher for whatever the
-	// table happens to carry at that moment.
-	// Returns the table count alongside the findings, so the gate is not handed
-	// a second, independently computed answer to "how many partitioned entities
-	// are there". It was `len(partitionedEntities(ir))` at both call sites — a
-	// separate walk over the same IR — and a review turned the probe-failure
-	// refusal off at both by replacing that expression with 0, with the suite
-	// green. One walk, one answer.
+	// It returns the table count with the findings, so the gate is not handed a
+	// separately computed one. Two walks over the same IR let
+	// `len(partitionedEntities(ir))` be replaced by 0 at both call sites, which
+	// turns the probe-failure refusal off with the suite green.
 	verifyPartitions := func(ctx context.Context, ir *dsl.IR) ([]string, int, error) {
 		var tables []pg.PartitionedTable
 		for i := range ir.Entities {

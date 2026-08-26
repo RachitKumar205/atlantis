@@ -28,7 +28,7 @@ func buildProtoDescriptors(e *dsl.Entity) (protoreflect.FileDescriptor, error) {
 		Syntax:  strPtr("proto3"),
 	}
 
-	// Check if we need the Timestamp import.
+	// Whether the Timestamp import is needed.
 	needsTimestamp := false
 	for _, f := range e.Fields {
 		if f.Type.Name == "timestamptz" || f.Type.Name == "date" {
@@ -178,35 +178,24 @@ func buildFileDescriptor(file *descriptorpb.FileDescriptorProto) (protoreflect.F
 // every message nested inside it, the single-field synthetic oneof that proto3
 // presence is built on.
 //
-// # Why this is not protodesc's job
+// protodesc.NewFile does not do this. protoc synthesizes these oneofs when it
+// compiles a .proto and writes them into the FileDescriptorProto it emits;
+// protodesc consumes that descriptor as given. It validates the pairing — a
+// proto3-optional field inside a oneof must be its only member — and does not
+// create it, so a descriptor built in Go with the flag set and no oneof passes
+// validation and yields a field with no presence.
 //
-// It reads like it should be: protoc synthesizes these oneofs when it compiles
-// a .proto, so `optional int64 x = 1;` needs no oneof in the source. But protoc
-// writes the oneof into the FileDescriptorProto it emits, and protodesc.NewFile
-// consumes that descriptor as given. It VALIDATES the pairing — a
-// proto3-optional field inside a oneof must be the only member — and does not
-// create it. A descriptor built in Go with the flag set and no oneof passes
-// validation and produces a field with no presence at all.
+// Without this, every nullable scalar column served by the dynamic dispatcher
+// has HasPresence() == false and Has() degrades to "differs from the zero
+// value". Two paths depend on it:
 //
-// # What that cost
+//   - bindColumnValue reads Has() to choose between binding a value and binding
+//     SQL NULL, so a client explicitly sending `count = 0` or `note = ""` on a
+//     nullable column writes NULL.
+//   - protoValueForCursor cannot tell a NULL ordering column from a real zero.
 //
-// This code carried a comment asserting the opposite for as long as it existed,
-// so every nullable scalar column served by the dynamic dispatcher had
-// HasPresence() == false, and Has() degraded to "differs from the zero value".
-// Two paths depended on it and both were wrong in the same direction:
-//
-//   - bindColumnValue read Has() to choose between binding a value and binding
-//     SQL NULL, so a client that explicitly sent `count = 0` or `note = ""` on a
-//     nullable column wrote NULL. The value the caller asked for was not stored
-//     and nothing reported a problem.
-//   - protoValueForCursor could not tell a NULL ordering column from a real
-//     zero, which is #71.
-//
-// Neither was visible to the tests, because a test that leaves a field UNSET
-// gets the right answer either way — it is only an EXPLICIT zero that separates
-// the two implementations.
-//
-// # Naming
+// A test that leaves a field unset gets the right answer either way; only an
+// explicit zero separates the two implementations.
 //
 // protoc names the oneof `_<field>` and prepends further underscores on
 // collision; this mirrors that so a descriptor built here and one compiled from

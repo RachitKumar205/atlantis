@@ -11,11 +11,12 @@ import (
 	"strings"
 )
 
-// tableNamePat matches the `[schema.]table` shape allowed in the
-// `table "..."` entity modifier. Each segment is the standard unquoted
-// Postgres identifier shape. Stricter than Postgres itself — we don't
-// accept anything that would need quoting, because the codegen already
-// quotes everything.
+// tableNamePat matches the `[schema.]table` shape the `table "..."` entity
+// modifier allows: one or two unquoted Postgres identifiers.
+//
+// Stricter than Postgres, which accepts anything inside quotes. Codegen quotes
+// every identifier it emits, so a name needing quotes here would round-trip
+// through two quoting layers.
 var tableNamePat = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?$`)
 
 // IR is the resolved, validated, JSON-serializable schema.
@@ -114,7 +115,7 @@ type CustomQuery struct {
 // query. The namespace is inherited from the Owner entity so the same
 // query name can exist in two namespaces without conflict.
 func (q *CustomQuery) ID() string {
-	// Owner is "namespace.Entity"; we want "namespace.QueryName".
+	// Owner is "namespace.Entity"; the id is "namespace.QueryName".
 	if i := strings.IndexByte(q.Owner, '.'); i >= 0 {
 		return q.Owner[:i] + "." + q.Name
 	}
@@ -123,23 +124,17 @@ func (q *CustomQuery) ID() string {
 
 // Job is a resolved `job Name in ns { ... }` declaration.
 //
-// A job is a typed background-work declaration. atlantis-server emits
-// a SubmitX RPC and a typed handler interface from this IR; the
-// worker drains atlantis.jobs rows, deserializes Args JSON to the
-// generated typed struct, and routes to the handler the caller
-// registered at server startup. Retries / TimeoutMS / Queue /
-// Schedule govern the worker's runtime behavior.
+// Codegen emits a SubmitX RPC and a typed handler interface from this. The
+// worker drains atlantis.jobs rows, deserializes Args JSON into the generated
+// struct, and routes to the registered handler.
 //
-// Args reuses the entity-field shape so the existing type system
-// (varchar(N), numeric(P,S), arrays, NOT NULL, defaults, checks)
-// applies verbatim. Args MUST NOT carry storage-only modifiers
-// (primary, identity, serial, unique, references, backfill); the
-// lowering pass enforces this and emits a precise rejection so the
-// caller knows which modifier to drop.
+// Args reuses the entity-field shape, so varchar(N), numeric(P,S), arrays, NOT
+// NULL, defaults and checks apply unchanged. lowerJob rejects the storage-only
+// modifiers — primary, identity, serial, unique, references, backfill — naming
+// the one to drop.
 //
-// Schedule is the raw cron spec verbatim — parsing + validation
-// happens at runtime in the scheduler. The IR stores the string so
-// subsequent diff / codegen runs see a stable, comparable value.
+// Schedule holds the cron spec verbatim; the scheduler parses it at runtime, so
+// diff and codegen compare a stable value.
 type Job struct {
 	Name      string  `json:"name"`
 	Namespace string  `json:"namespace"`
@@ -226,20 +221,18 @@ type ProcedureStepIR struct {
 	Pos     Position       `json:"-"`
 }
 
-// EnqueueStepIR is a resolved `enqueue Job(args)` step. The codegen
-// emits an INSERT into atlantis.jobs sharing the procedure's tx, so
-// the job is enqueued atomically with the procedure's other writes.
+// EnqueueStepIR is a resolved `enqueue Job(args)` step. Codegen emits an INSERT
+// into atlantis.jobs on the procedure's own transaction, so the job commits with
+// the procedure's other writes.
 //
-// TargetJobID is the canonical "namespace.JobName" id matching one of
-// IR.Jobs. Args lists the resolved argument expressions in the order
-// the codegen serializes them into the args JSON; argument-name
-// uniqueness + presence checks happen at IR-lowering time.
+// TargetJobID is the canonical "namespace.JobName" matching one of IR.Jobs.
+// Args holds the resolved argument expressions in the order codegen serializes
+// them into the args JSON; lowering checks their names for presence and
+// uniqueness.
 //
-// Queue / MaxRetries / TimeoutMS are denormalized onto the step at
-// lower time so the codegen doesn't have to re-walk IR.Jobs at emit
-// time. If the target job's declaration later changes (different
-// queue, retries), regenerating the procedure picks up the new
-// values without a separate apply step.
+// Queue, MaxRetries and TimeoutMS are copied from the target job at lower time,
+// so emit does not re-walk IR.Jobs. A later change to the job's declaration
+// reaches the procedure on the next codegen run.
 type EnqueueStepIR struct {
 	TargetJobID string                `json:"target_job_id"`
 	Args        []EnqueueAssignmentIR `json:"args,omitempty"`
@@ -258,19 +251,16 @@ type EnqueueAssignmentIR struct {
 // TypedStepIR is a resolved typed mutation. Each field carries a
 // validation invariant the codegen relies on:
 //
-//   - Verb is exactly one of "update" / "delete" / "insert" — the
-//     codegen builds the SQL template directly from the verb name.
-//   - TargetID resolves to an existing Entity in the same IR. The
-//     codegen reads the entity's column list and table name to
-//     render the statement; an unknown target would crash codegen,
-//     so lowering rejects it.
-//   - Assigns reference real columns on TargetID. Lowering rejects
-//     unknown columns so a stale step doesn't reach SQL emission
-//     and produce a query that explodes at runtime.
-//   - Where, when present, is a Boolean expression tree limited to
-//     literals, $args, field refs, and comparisons / AND. OR and NOT
-//     are intentionally absent — a step that needs them belongs in a
-//     raw `sql touches(...) { ... }` block, not a typed step.
+//   - Verb is exactly one of "update", "delete", "insert"; codegen builds the
+//     SQL template from the verb name.
+//   - TargetID resolves to an Entity in the same IR, whose column list and
+//     table name codegen reads to render the statement. Lowering rejects an
+//     unknown target.
+//   - Assigns reference real columns on TargetID. Lowering rejects unknown
+//     ones.
+//   - Where, when present, is a Boolean tree of literals, $args, field refs,
+//     comparisons and AND. parseExpr has no production for OR or NOT; a step
+//     needing them belongs in a raw `sql touches(...) { ... }` block.
 type TypedStepIR struct {
 	Verb     string         `json:"verb"`      // "update", "delete", "insert"
 	TargetID string         `json:"target_id"` // canonical id
@@ -379,12 +369,9 @@ type Entity struct {
 	// Only meaningful on Kind == EntityKindHypertable; validateEntity rejects
 	// it elsewhere rather than accepting a setting that would be dropped.
 	//
-	// create_hypertable and this parameter are Apache-2.0 licensed
-	// (timescaledb sql/ddl_api.sql), which matters: the Timescale License
-	// forbids offering TSL software as a database service, and its "Value
-	// Added" exception requires that users be prohibited from modifying schema
-	// via DDL — precisely what this product exists to permit. Anything emitted
-	// here must stay inside the Apache-2 subset.
+	// create_hypertable and this parameter are Apache-2.0 (timescaledb
+	// sql/ddl_api.sql). Anything emitted here stays inside that subset; see
+	// internal/storage/pg/timescale_license.go for what the TSL forbids.
 	ChunkTimeIntervalMS int `json:"chunk_time_interval_ms,omitempty"`
 
 	// TableName overrides the physical table name codegen would otherwise
@@ -395,10 +382,9 @@ type Entity struct {
 	// Empty means atlantis uses the computed default.
 	TableName string `json:"table_name,omitempty"`
 
-	// RetiredProtoNumbers lists protobuf field numbers that previously existed
-	// on this entity but have since been removed. Tracked here (persisted in
-	// the IR checkpoint) so we never reuse them — protobuf forbids reuse of
-	// field numbers even after a field is dropped.
+	// RetiredProtoNumbers lists protobuf field numbers this entity has held and
+	// dropped. Protobuf forbids reusing a field number after a field is
+	// removed, so the IR checkpoint carries them forward.
 	RetiredProtoNumbers []int `json:"retired_proto_numbers,omitempty"`
 }
 
@@ -780,8 +766,6 @@ type InvalWhere struct {
 // incompatibly. Used by the diff engine to refuse stale checkpoints.
 const CurrentIRVersion = 1
 
-// ---- Lower: AST -> IR ----
-
 // Lower converts a set of parsed Files into a single IR, resolving FK targets
 // and enforcing the grammar's validation rules.
 //
@@ -794,11 +778,9 @@ func Lower(files []*File) (*IR, error) {
 	ir := &IR{Version: CurrentIRVersion}
 	var errs []error
 
-	// Pass 1: collect entities first. QueryDecl/ProcedureDecl lowering
-	// depends on every entity being resolvable, so we deliberately make
-	// two parser-AST passes — one for entities, one for queries +
-	// procedures. New top-level decl shapes that don't reference other entities slot into
-	// pass 1 alongside entities.
+	// Pass 1: entities. QueryDecl and ProcedureDecl lowering needs every entity
+	// resolvable, so entities are collected in a pass of their own. A new
+	// top-level shape that references no other entity belongs here.
 	//
 	// File-source paths are threaded into custom queries/procedures so
 	// pg_query_go error messages can point at the right .atl file.
@@ -1046,7 +1028,7 @@ func lowerMembers(_ string, ms []EntityMember, e *Entity) []error {
 				Kind: mm.Kind,
 				Name: mm.Name,
 				// Target is resolved in validateEntity (needs cross-entity context).
-				// We stash the bare name here; namespace inference happens later.
+				// The bare name is stashed here; namespace inference runs later.
 				TargetID: mm.Target,
 				Via:      mm.Via,
 			})
@@ -1133,23 +1115,17 @@ func lowerField(fd *FieldDecl) (Field, []error) {
 		case *ModUniqueDecl:
 			f.Unique = true
 		case *ModCheckDecl:
-			// Field carries one check, so a second silently replaced the first.
-			// The parser builds both ModCheckDecls faithfully; this loop kept
-			// only the last, so a constraint the author wrote disappeared with
-			// no diagnostic — invisible to the differ, absent from the emitted
-			// DDL, and therefore absent from the database.
+			// A field carries one check. The parser builds both ModCheckDecls,
+			// and keeping the last drops a declared constraint with no
+			// diagnostic: invisible to the differ, absent from the DDL.
 			//
-			// Reported rather than merged into one predicate with AND: the two
-			// are separate constraints in Postgres, with separate names, and
-			// silently fusing them would change which one a later error message
-			// names. Two table-level checks are the way to express this, and
-			// they are what the column rule in parseFieldModifiers now yields.
+			// Reported rather than merged with AND. In Postgres the two are
+			// separate constraints under separate names, so fusing them changes
+			// which name a later error carries.
 			//
-			// Two *identical* predicates are still two declarations and still an
-			// error. Skipping them as a harmless duplicate reintroduces exactly
-			// the silent collapse this guard exists to stop, and codegen already
-			// treats repeated predicates as separate constraints
-			// (unnamedCheckName takes an occurrence counter for that reason).
+			// Two identical predicates are still two declarations and still an
+			// error. codegen treats repeated predicates as separate constraints
+			// — unnamedCheckName takes an occurrence counter.
 			if f.Check != "" {
 				errs = append(errs, fmt.Errorf("%s: field %s declares more than one `check`; "+
 					"a field carries a single check, so write the others as entity-level "+
@@ -1247,7 +1223,7 @@ func lowerCache(cb *CacheBlock, _ *Entity) (*Cache, []error) {
 		}
 	}
 	// Extract {placeholder} fields from the tag template; validation happens
-	// in validateEntity once we know the entity's field set.
+	// in validateEntity, once the entity's field set is known.
 	c.TagFields = parseTagPlaceholders(cb.Tag)
 
 	for _, ic := range cb.Invalidate {
@@ -1260,7 +1236,7 @@ func lowerCache(cb *CacheBlock, _ *Entity) (*Cache, []error) {
 	return c, errs
 }
 
-// parseDurationMS converts our DSL duration literal (e.g. "10m", "1h", "30s",
+// parseDurationMS converts a DSL duration literal (e.g. "10m", "1h", "30s",
 // "7d") into milliseconds. Returns an error for unknown units.
 func parseDurationMS(s string) (int, error) {
 	if s == "" {
@@ -1307,26 +1283,6 @@ func parseTagPlaceholders(tag string) []string {
 	}
 }
 
-// ---- Validation ----
-
-// validateEntity enforces every grammar validation rule against a
-// fully-lowered entity, resolving cross-entity references against byID.
-//
-// Rules:
-//  1. Exactly one primary field per entity.
-//  2. All references targets must resolve to an existing entity+field; target
-//     field must be primary or unique.
-//  3. has_many/has_one target entity must exist and the via field must exist.
-//  4. Tag templates may only interpolate fields declared on this entity.
-//  5. index hnsw requires a vector(...) field.
-//  6. index gin requires jsonb or []Type field.
-//  7. Field names unique within an entity (enforced at lower time).
-//  8. Entity names globally unique across namespaces (enforced at lower time).
-//  9. vector(n) dimensions match across all uses of the same field.
-//     (Only relevant if we ever index across multiple vectors of mismatched
-//     dims — the index reads the field's own type so this is auto-ok.)
-//
-// 10. query_timeout must be 50ms..30s.
 // isSolePrimaryKey reports whether name is this entity's entire primary key.
 // False for a composite key, and for any non-key column.
 func isSolePrimaryKey(e *Entity, name string) bool {
@@ -1341,47 +1297,52 @@ func isSolePrimaryKey(e *Entity, name string) bool {
 	return false
 }
 
+// validateEntity enforces every grammar validation rule against a fully-lowered
+// entity, resolving cross-entity references against byID.
+//
+//  1. Exactly one primary field per entity.
+//  2. Every references target resolves to an existing entity and field, and
+//     that field is primary or unique.
+//  3. has_many/has_one target entity exists, and the via field exists.
+//  4. Tag templates interpolate only fields declared on this entity.
+//  5. index hnsw requires a vector(...) field.
+//  6. index gin requires a jsonb or []Type field.
+//  7. vector(n) dimensions match across all uses of the same field.
+//  8. query_timeout is between 50ms and 30s.
+//
+// Field names unique within an entity, and entity names unique across
+// namespaces, are enforced at lower time rather than here.
 func validateEntity(e *Entity, byID map[string]*Entity) []error {
 	var errs []error
 
 	// `partition by` names the column PostgreSQL row-level security isolates on.
 	//
-	// The clause is accepted rather than rejected — an earlier revision rejected
-	// it outright, and this comment described that. Enforcement now lives in the
-	// database: codegen emits ENABLE / FORCE ROW LEVEL SECURITY and a policy
-	// comparing the column to atlantis.current_partition(), so a read that
-	// forgot to inject a predicate is still filtered, and so caller-authored SQL
-	// — custom query bodies, CHECK expressions, backfill expressions — is
-	// covered by the same guarantee as a generated read. Delegating to the
-	// database is the entire point; predicate injection is what failed before,
-	// because it leaks the moment a handler is added without it.
+	// Enforcement lives in the database. codegen emits ENABLE / FORCE ROW LEVEL
+	// SECURITY and a policy comparing the column to
+	// atlantis.current_partition(), so a read with no injected predicate is
+	// still filtered, and caller-authored SQL — custom query bodies, CHECK
+	// expressions, backfill expressions — carries the same guarantee as a
+	// generated read.
 	//
-	// The discriminator IS a run-time parameter, atlantis.tenant, set
+	// The discriminator is a run-time parameter, atlantis.tenant, set
 	// transaction-locally (migration 0024). A custom GUC is PGC_USERSET and
-	// PostgreSQL will not lock one, so what keeps it honest is a validator that
-	// rejects set_config and set_partition in every caller-authored SQL surface
-	// — see internal/dsl/sqlvalidate. Migration 0021 chose a locked table
-	// instead; that was safe without a validator and cost a transaction ID per
-	// request, which is why 0024 reversed it.
+	// PostgreSQL will not lock one, so internal/dsl/sqlvalidate rejects
+	// set_config and set_partition in every caller-authored SQL surface.
 	//
-	// Two things must hold at runtime for any of this to mean anything, and
-	// neither is checked here because neither is a schema property: the server
-	// must connect as a role that does not bypass RLS (a superuser sees through
-	// FORCE — asserted at boot by pg.RequireIsolatedRole), and something must
-	// call atlantis.set_partition for the request. Until the second lands, a
-	// partitioned entity reads as zero rows for a restricted role rather than
-	// leaking — the correct failure direction.
+	// Two runtime conditions are no part of the schema and are not checked
+	// here: the server connects as a role that does not bypass RLS, asserted at
+	// boot by pg.RequireIsolatedRole, and interceptors.NewPartition binds the
+	// request's tenant. A partitioned entity read with no bind returns zero
+	// rows for a restricted role.
 	if e.PartitionField != "" {
 		if f := e.FindField(e.PartitionField); f == nil {
 			errs = append(errs, fmt.Errorf("%s: `partition by` names unknown field %q",
 				e.ID(), e.PartitionField))
 		} else if !f.NotNull {
-			// A nullable discriminator is a hole. The policy compares
-			// `col = current_partition()`, and NULL = anything is NULL, so a row
-			// with a NULL tenant is invisible to every tenant — including the
-			// one that wrote it — and is reachable only by a superuser or a
-			// path that bypasses RLS. Rows nobody can see are worse than an
-			// error at schema time.
+			// The policy compares `col = current_partition()`, and NULL =
+			// anything is NULL, so a row with a NULL tenant matches no tenant's
+			// policy: invisible to the one that wrote it, and reachable only
+			// through a path that bypasses RLS.
 			errs = append(errs, fmt.Errorf("%s: `partition by` field %q must be `not null`; "+
 				"a NULL discriminator matches no tenant's policy and the row becomes "+
 				"invisible to everyone", e.ID(), e.PartitionField))
@@ -1443,13 +1404,13 @@ func validateEntity(e *Entity, byID map[string]*Entity) []error {
 	}
 
 	// Rule 3: has_many / has_one — target exists, via field exists on target.
-	// AST stored the bare target name; we infer namespace by searching.
+	// The AST stored the bare target name; the namespace is inferred below.
 	for ri := range e.Relations {
 		r := &e.Relations[ri]
-		// If the user wrote "OtherEntity" without ns, find the entity by bare
-		// name. Multiple namespaces may declare an entity with the same name
-		// (e.g., consumer.CartItem and vendor.CartItem); we resolve in favor
-		// of the referrer's own namespace before giving up as ambiguous.
+		// An unqualified "OtherEntity" is found by bare name. Several
+		// namespaces may declare that name — consumer.CartItem and
+		// vendor.CartItem — and resolution favours the referrer's own
+		// namespace before reporting ambiguity.
 		resolved, ok := resolveByNameInNS(byID, r.TargetID, e.Namespace)
 		if !ok {
 			errs = append(errs, fmt.Errorf("%s relation %s: target entity %s not found", e.ID(), r.Name, r.TargetID))
@@ -1494,13 +1455,11 @@ func validateEntity(e *Entity, byID map[string]*Entity) []error {
 					// cache id is built from the complete primary key, so a
 					// single value can only address a single-column key.
 					//
-					// Rejecting rather than accepting is the point. A composite
-					// key would silently produce a partial id — "1:4" where the
+					// A composite key produces a partial id — "1:4" where the
 					// entity's own handlers use "1:4|1:9" — so every write to
-					// the child would enqueue an invalidation for a key nothing
-					// reads. No error, no invalidation, stale rows until TTL.
-					// The same holds for a non-key column, which addresses
-					// nothing at all.
+					// the child enqueues an invalidation for a key nothing
+					// reads: no error, no invalidation, stale rows until TTL. A
+					// non-key column addresses nothing at all.
 					errs = append(errs, fmt.Errorf(
 						"%s cache invalidate_on: self.%s must be this entity's sole primary key "+
 							"(a cache id is built from the whole key, so one value cannot address "+
@@ -1593,7 +1552,7 @@ func validateEntity(e *Entity, byID map[string]*Entity) []error {
 			for _, ifld := range idx.Fields {
 				if ifld.IsExpr {
 					// Raw SQL expression — Postgres validates at migration
-					// time. We don't try to parse it here.
+					// time; it is not parsed here.
 					continue
 				}
 				if e.FindField(ifld.Name) == nil {
@@ -1620,11 +1579,11 @@ func validateEntity(e *Entity, byID map[string]*Entity) []error {
 		}
 	}
 
-	// `serial` is only valid on bigint columns. Postgres's BIGSERIAL is
-	// strictly a bigint+sequence shorthand; smaller integer widths have
-	// their own SERIAL / SMALLSERIAL forms which we don't expose because
-	// the legacy schema uses BIGSERIAL exclusively. `identity` + `serial`
-	// together is rejected; they're alternative strategies.
+	// `serial` is only valid on bigint columns: Postgres's BIGSERIAL is a
+	// bigint+sequence shorthand, and the narrower SERIAL / SMALLSERIAL forms
+	// have no DSL spelling.
+	//
+	// `identity` and `serial` together is an error; they are alternatives.
 	for _, f := range e.Fields {
 		if f.Serial && f.Type.Name != "bigint" {
 			errs = append(errs, fmt.Errorf("%s.%s: serial is only valid on bigint, got %s",
@@ -1670,23 +1629,9 @@ func validateEntity(e *Entity, byID map[string]*Entity) []error {
 	return errs
 }
 
-// resolveByNameInNS resolves a bare entity name with a same-namespace
-// preference. When the IR contains entities of the same bare name in
-// different namespaces (common during cutover when consumer.CartItem and
-// vendor.CartItem coexist), this hint disambiguates without forcing every
-// `has_many` / `invalidate_on` reference to spell out the full qualified
-// form (the grammar's single-Ident shape can't carry a namespace).
-//
-// Resolution order:
-//  1. If `name` is already namespace-qualified ("ns.Entity"), use it.
-//  2. If exactly one entity in `preferNS` matches the bare name, return it.
-//  3. If exactly one entity across all namespaces matches, return it.
-//  4. Multiple cross-namespace matches → ambiguous, no hit.
-//
 // validateUniqueTableNames enforces that no two entities claim the same
-// physical table via the `table "<schema.table>"` modifier. A duplicate
-// would silently route writes for one entity into another entity's
-// rows; we fail loud at lower time instead.
+// physical table via the `table "<schema.table>"` modifier. A duplicate routes
+// writes for one entity into another entity's rows, so lowering fails.
 func validateUniqueTableNames(entities []Entity) []error {
 	seen := map[string]string{} // table-name -> first entity ID that claimed it
 	var errs []error
@@ -1716,6 +1661,14 @@ func validateTableNameShape(name string) error {
 	return nil
 }
 
+// resolveByNameInNS resolves a bare entity name, preferring preferNS. The
+// grammar's single-Ident reference shape cannot carry a namespace, so this
+// disambiguates when the IR holds the same bare name in two namespaces.
+//
+//  1. A namespace-qualified name ("ns.Entity") is used as given.
+//  2. Exactly one match in preferNS wins.
+//  3. Otherwise, exactly one match across all namespaces wins.
+//  4. Several cross-namespace matches are ambiguous, and there is no hit.
 func resolveByNameInNS(byID map[string]*Entity, name string, preferNS string) (*Entity, bool) {
 	if strings.Contains(name, ".") {
 		if e, ok := byID[name]; ok {
@@ -1754,12 +1707,10 @@ func resolveByNameInNS(byID map[string]*Entity, name string, preferNS string) (*
 	return anyMatch, anyMatch != nil
 }
 
-// ---- JSON checkpoint helpers ----
-
 // LookupEntity returns the entity with the given canonical id
-// ("namespace.Name"), or nil if no such entity exists in the IR.
-// Linear scan since the typical IR holds a few dozen entities; if
-// this ever shows up in profiles we'd add a map cached on the IR.
+// ("namespace.Name"), or nil if the IR holds no such entity.
+//
+// A linear scan; the typical IR holds a few dozen entities.
 func (ir *IR) LookupEntity(id string) *Entity {
 	if ir == nil {
 		return nil
@@ -1792,24 +1743,17 @@ func DecodeJSONIR(data []byte) (*IR, error) {
 	return &ir, nil
 }
 
-// ---- Custom query / procedure lowering ----
-
-// lowerQuery turns a QueryDecl into a resolved CustomQuery. The
-// validation surface covers four things in addition to the structural
-// parser-level checks: (1) every $arg referenced anywhere in the SQL
-// or expression tree must be declared in input{}, (2) every
-// EntityRef in `for`, `output as ...`, and `touches(...)` must resolve
-// to a real entity, (3) every touches() entity is listed exactly once
-// (duplicates would double-bump generation counters and waste outbox
-// work for no semantic reason), and (4) the raw SQL body must mention
-// every declared input at least once — an unused input is almost
-// always a typo or a stale schema.
+// lowerQuery turns a QueryDecl into a resolved CustomQuery, adding four checks
+// to the structural ones the parser makes:
 //
-// Identifier resolution INSIDE the raw SQL body (table/column names
-// referring to real entities) lives in the pg_query_go validator,
-// which runs at plan time. Lowering keeps this function lean enough
-// that codegen tests can run without CGO; the deeper SQL validation
-// is layered on top by tide plan.
+//   - every $arg in the SQL or expression tree is declared in input{}
+//   - every EntityRef in `for`, `output as ...` and `touches(...)` resolves
+//   - touches() lists each entity once; a repeat double-bumps its generation
+//     counter
+//   - the SQL body references every declared input at least once
+//
+// Identifier resolution inside the raw SQL body runs at plan time, in the
+// pg_query_go validator, so this function stays runnable without CGO.
 func lowerQuery(path string, d *QueryDecl, byID map[string]*Entity) (*CustomQuery, []error) {
 	var errs []error
 	// Resolve the target entity. An unqualified name binds to the
@@ -2153,13 +2097,11 @@ func resolveTouches(refs []EntityRef, byID map[string]*Entity, defaultNS string,
 // multiple SQL blocks (e.g., a procedure with several steps) for the
 // per-procedure unused-input check.
 //
-// This is the lightweight, dep-free pass; the deeper pg_query_go pass
-// (which validates table/column references too) runs at plan time.
-// Dollar-quoted strings (`$tag$ ... $tag$`) are skipped — pg_query_go
-// catches malformed ones at plan time, and treating them as
-// placeholders here would produce noisy false positives. The scan
-// only commits to a placeholder when the trailing character after the
-// identifier is NOT a `$`.
+// The dependency-free pass; the pg_query_go pass, which also resolves table and
+// column references, runs at plan time.
+//
+// Dollar-quoted strings, `$tag$ ... $tag$`, are skipped: the scan commits to a
+// placeholder only when the character after the identifier is not a `$`.
 func scanRawArgRefs(sql string, declared map[string]bool, pos Position, context string) (map[string]bool, []error) {
 	refs := map[string]bool{}
 	if sql == "" {
@@ -2244,7 +2186,7 @@ func validateInputUsage(inputs []QueryParam, used map[string]bool, context strin
 // lowerCacheForCustom adapts an entity-style CacheBlock to the IR's
 // Cache type for use on a custom query. Custom queries care about
 // `ttl`, `tag`, and `invalidate_on` semantics in the same shape as
-// entities, so we reuse the same lowering path.
+// entities, so the same lowering path serves both.
 func lowerCacheForCustom(cb *CacheBlock) *Cache {
 	if cb == nil {
 		return nil
@@ -2285,15 +2227,14 @@ func lowerJob(path string, d *JobDecl) (*Job, []error) {
 		Pos:        d.Pos,
 	}
 
-	// Args: each FieldDecl rows lowers through the shared lowerField
-	// helper to inherit the type system + default-value lowering, then
-	// we reject the modifiers that don't apply to function-call args.
+	// Each arg lowers through lowerField to inherit the type system and
+	// default-value lowering; the modifiers that do not apply to a call
+	// argument are rejected after.
 	for _, fd := range d.Args {
 		f, ferrs := lowerField(fd)
 		errs = append(errs, ferrs...)
-		// Reject storage-only modifiers. lowerField already populated
-		// the flags; we surface them as errors and zero them so the
-		// downstream IR is well-formed even when we keep going.
+		// lowerField has already set the flags. Each becomes an error and is
+		// then zeroed, so the IR stays well-formed while lowering continues.
 		for _, mod := range fd.Modifiers {
 			switch mod.(type) {
 			case *ModPrimaryDecl:
@@ -2389,8 +2330,8 @@ func lowerEnqueueStep(s *EnqueueStep, byJobID map[string]*Job, defaultNS string,
 		return nil, []error{fmt.Errorf("%s: procedure %s step %d: unknown job %s", s.Pos, procName, idx+1, jobID)}
 	}
 
-	// Build a map of declared arg names so we can verify the caller's
-	// keys + spot duplicates + report missing required ones.
+	// Declared arg names, for checking the caller's keys, spotting duplicates
+	// and reporting missing required ones.
 	declared := make(map[string]*Field, len(job.Args))
 	for i := range job.Args {
 		declared[job.Args[i].Name] = &job.Args[i]
@@ -2598,12 +2539,10 @@ func lowerEphemeral(path string, d *EphemeralDecl) (*Ephemeral, []error) {
 // will read or write that table, and an unbound statement against it is either
 // a cross-tenant read or a silent zero-row write.
 //
-// Shared by the dynamic dispatcher and the code generator. Both serve custom
-// SQL and both have to reach the same answer. The dispatcher had this logic and
-// the emitter had none, so `tidectl codegen` emitted custom-query and
-// custom-procedure handlers that ran on the bare pool — the surface the whole
-// row-level-security design exists to protect, because a custom body is opaque
-// author text with nowhere to inject a predicate.
+// Shared by the dynamic dispatcher and the code generator, which both serve
+// custom SQL and have to reach the same answer. Where only one of them asks,
+// the other emits handlers that run on the bare pool — and a custom body is
+// opaque text with nowhere to inject a predicate.
 func (ir *IR) TouchesPartitioned(ids []string) bool {
 	if ir == nil {
 		return false

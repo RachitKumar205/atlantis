@@ -257,8 +257,8 @@ func TestBuildPKArrayRefusesWhatItCannotType(t *testing.T) {
 	resolveProtoDescriptors(meta, fd)
 
 	// The column metadata claims a type buildPKArray has no arm for. Reaching
-	// this in production needs a DSL type nothing maps yet; the point is what
-	// happens WHEN it is reached, not how likely that is today.
+	// this in production needs a DSL type nothing maps yet; what is asserted
+	// is what happens when it is reached.
 	unknown := columnMeta{
 		field:    &dsl.Field{Name: "k", Type: dsl.FieldType{Name: "inet"}},
 		protoNum: meta.pkCols[0].protoNum,

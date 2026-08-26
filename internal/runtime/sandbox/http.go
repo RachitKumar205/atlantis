@@ -4,11 +4,10 @@ package sandbox
 // Sandbox method in JSON-over-HTTP so cross-process callers and the
 // `tide sandbox boot` CLI can drive a sandbox over the wire.
 //
-// The shape is deliberately thin: every endpoint is a near-1:1 mirror
-// of a Go method on Sandbox / Inspector / Fixtures. Auth, rate-limit,
-// and persistence policy stay out of scope here — they belong to the
-// hosting layer that wraps Server.ServeHTTP. Tests use httptest +
-// Server.ServeHTTP directly, no networking.
+// Every endpoint is a near-1:1 mirror of a Go method on Sandbox, Inspector or
+// Fixtures. Auth, rate limiting and persistence belong to the layer wrapping
+// Server.ServeHTTP. Tests drive Server.ServeHTTP through httptest, with no
+// networking.
 //
 // Endpoint catalogue:
 //
@@ -158,8 +157,6 @@ func (s *Server) routeChild(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ─────────────────────────── lifecycle ───────────────────────────
-
 type createSandboxRequest struct {
 	IR          *dsl.IR     `json:"ir"`
 	Backend     Backend     `json:"backend,omitempty"`
@@ -268,8 +265,6 @@ func (s *Server) deleteSandbox(w http.ResponseWriter, id string) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// ─────────────────────────── SQL ───────────────────────────
-
 type sqlRequest struct {
 	SQL  string `json:"sql"`
 	Args []any  `json:"args,omitempty"`
@@ -377,8 +372,6 @@ func (ss *serverSandbox) handleSQLQuery(w http.ResponseWriter, r *http.Request) 
 	}
 	writeJSONTimed(w, http.StatusOK, queryResponse{Rows: out}, start)
 }
-
-// ─────────────────────────── Inspect ───────────────────────────
 
 // requireSim writes a 400 and returns true when the sandbox is
 // embedded-backed — every Inspect / Mark / Snapshot / Fixtures handler
@@ -556,8 +549,6 @@ func (ss *serverSandbox) handleInspectDiff(w http.ResponseWriter, r *http.Reques
 	writeJSONTimed(w, http.StatusOK, d, start)
 }
 
-// ─────────────────────────── Snapshot ───────────────────────────
-
 func (ss *serverSandbox) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	if r.Method == http.MethodGet || r.Method == http.MethodPut {
@@ -594,8 +585,6 @@ func (ss *serverSandbox) handleSnapshot(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusMethodNotAllowed, "use GET or PUT")
 	}
 }
-
-// ─────────────────────────── Mark / Restore ───────────────────────────
 
 type markResponse struct {
 	MarkID string `json:"mark_id"`
@@ -649,8 +638,6 @@ func (ss *serverSandbox) handleRestore(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// ─────────────────────────── Fork ───────────────────────────
-
 type forkRequest struct {
 	N int `json:"n"`
 }
@@ -681,8 +668,6 @@ func (s *Server) handleFork(w http.ResponseWriter, r *http.Request, ss *serverSa
 	}
 	writeJSONTimed(w, http.StatusCreated, forkResponse{IDs: ids}, start)
 }
-
-// ─────────────────────────── Fixtures ───────────────────────────
 
 type fixturesBulkRequest struct {
 	Qualified string `json:"qualified"`
@@ -719,8 +704,6 @@ func (ss *serverSandbox) handleFixturesBulk(w http.ResponseWriter, r *http.Reque
 	}
 	writeJSONTimed(w, http.StatusOK, fixturesBulkResponse{Inserted: n}, start)
 }
-
-// ─────────────────────────── helpers ───────────────────────────
 
 // writeJSONTimed wraps any JSON-serialisable body with a top-level
 // `t_server_us` field capturing the elapsed time since `start`. Used

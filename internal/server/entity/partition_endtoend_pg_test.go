@@ -23,23 +23,17 @@ import (
 // The whole chain, against a real database, as a role row-level security
 // applies to.
 //
-// # Why this exists
-//
 // Everything else testing `partition by` proves one link. A fake pool proves
 // the dispatcher binds. A SQL test proves the policy filters. A source-level
 // test proves a call site exists. An interceptor test proves a header becomes a
-// context value. None of them cross a boundary.
+// context value. None of them cross a boundary, and a boundary is where the
+// defects sit: a dispatcher binding a value nothing checks, an interceptor
+// supplying a value nothing consumes, a validator walking a tree its pair does
+// not, a read-back dropping a filter another rule depends on.
 //
-// Seven defects were introduced into this feature while fixing other defects in
-// it, and EVERY ONE sat at a boundary: the dispatcher bound a value nothing
-// checked; the interceptor supplied a value nothing consumed; a validator
-// walked a tree its pair did not; a read-back dropped a filter another rule
-// depended on. Each link was tested. The chain was not.
-//
-// So this test asserts the only property that matters, in the terms a caller
-// would state it: **a request carrying tenant A's header can read tenant A's
-// rows and cannot read tenant B's.** It runs the real interceptor, the real
-// dispatcher, the real emitted DDL, and a real restricted role.
+// The property asserted is that a request carrying tenant A's header can read
+// tenant A's rows and cannot read tenant B's. It runs the real interceptor, the
+// real dispatcher, the real emitted DDL, and a real restricted role.
 //
 //	ATLANTIS_TEST_PG=postgres://atlantis:atlantis@localhost:5432/atlantis?sslmode=disable \
 //	  go test ./internal/server/entity/ -run PartitionEndToEnd -v
@@ -146,12 +140,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON atlantis.e2e_doc TO e2e_tenant;`)
 		return err
 	})
 
-	// The connecting role OWNS the table, which is the production shape:
+	// The connecting role owns the table, which is the production shape:
 	// atlantis creates the tables it serves and connects as the role that owns
-	// them. It also makes FORCE load-bearing — ENABLE alone exempts the owner,
-	// so a fixture where some other role owns the table passes with FORCE
-	// removed from the emitted DDL. Found by mutating the emitter and watching
-	// this test stay green.
+	// them. It is also what makes FORCE do anything — ENABLE alone exempts the
+	// owner, so a fixture where another role owns the table passes with FORCE
+	// removed from the emitted DDL.
 	if _, err := admin.Exec(ctx, `ALTER TABLE atlantis.e2e_doc OWNER TO e2e_tenant`); err != nil {
 		t.Fatalf("hand the table to the connecting role: %v", err)
 	}

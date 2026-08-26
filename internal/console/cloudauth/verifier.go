@@ -7,11 +7,10 @@
 // strength of it. Everything after that — role checks, sudo, audit — reads the
 // session, exactly as before.
 //
-// The shape on the wire is a plain JWT verified against a JWKS endpoint. That
-// is deliberate rather than incidental: both halves of this exchange are
-// written in this repository, which makes it easy to drift into a private
-// format that happens to work, and a private format is one nobody can inspect
-// with an ordinary tool or reason about from a specification.
+// The shape on the wire is a plain JWT verified against a JWKS endpoint. Both
+// halves of this exchange are written in this repository, where a private
+// format that happens to work would be as easy to reach for, and could be
+// inspected by no ordinary tool and checked against no specification.
 package cloudauth
 
 import (
@@ -31,10 +30,9 @@ import (
 // signature, a claim that does not match, an expired token. It is the caller's
 // signal to answer 401.
 //
-// It carries no detail about which check failed, on purpose — the wrapped
-// error is for the console's own log, not for the response body. Reporting
-// "expired" separately from "wrong audience" tells whoever is holding a token
-// exactly which part to work on next.
+// It carries no detail about which check failed; the wrapped error is for the
+// console's own log, not the response body. Reporting "expired" separately from
+// "wrong audience" tells the holder of a token which part to work on next.
 var ErrUnverified = errors.New("assertion not verified")
 
 // ErrKeysUnavailable reports that this console could not obtain Cloud's

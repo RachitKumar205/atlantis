@@ -167,11 +167,11 @@ func TestErrors(t *testing.T) {
 	}
 }
 
-// TestCorpus_RemoveEveryField walks every entity field in the real .atl
-// fixtures and removes it, asserting the result re-parses and drops exactly
-// that one field. This is the load-bearing check on EndByte correctness: too
-// large a span swallows a neighbor (caught by the name-set diff); too small
-// leaves a fragment (caught by the re-parse inside RemoveField).
+// TestCorpus_RemoveEveryField removes every entity field in the real .atl
+// fixtures one at a time, asserting the result re-parses and drops exactly that
+// field. It is what checks EndByte: too large a span swallows a neighbour,
+// caught by the name-set diff, and too small leaves a fragment, caught by the
+// re-parse inside RemoveField.
 func TestCorpus_RemoveEveryField(t *testing.T) {
 	files := corpusFiles(t)
 	for _, path := range files {

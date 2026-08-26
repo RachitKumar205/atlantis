@@ -2,10 +2,9 @@
 // construction, tuning, pgvector type registration, and the adapter that
 // satisfies the runtime.Pool interface the generated handlers consume.
 //
-// Everything here is concrete pgx code. The generated server stubs depend
-// only on runtime.Pool — they never import this package directly. That
-// indirection is what lets us evolve pool / batching / vector encoding
-// without touching generated code.
+// Everything here is concrete pgx code. The generated server stubs depend only
+// on runtime.Pool and never import this package, so pooling, batching and
+// vector encoding change without regenerating any of them.
 package pg
 
 import (
@@ -64,7 +63,7 @@ type Pool struct {
 //   - Sets the session timezone to UTC so timestamptz round-trips don't
 //     surprise callers running in non-UTC machines.
 //   - Registers pgvector types so vector(N) columns scan into pgvector.Vector
-//     values (and our generated row structs which expose them as []float32).
+//     values, which the generated row structs expose as []float32.
 //
 // Any AfterConnect failure aborts that connection, so a misconfigured server
 // (missing vector extension, missing pgvector type) fails loudly at boot
@@ -92,30 +91,23 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 		// Start every connection with no tenant bound.
 		//
 		// atlantis.tenant is the discriminator every `partition by` policy
-		// compares against (migration 0024). atlantis only ever sets it
-		// transaction-locally, so it reverts on its own — but a value can also
-		// arrive from outside this process: a server-level or role-level
-		// default, a `SET` in the connection string's options parameter, or a
-		// connection pooler that hands back a backend somebody else used. A
-		// connection that starts with a tenant already bound would serve that
-		// tenant's rows to the first request that forgot to bind.
+		// compares against (migration 0024). atlantis sets it only
+		// transaction-locally, so its own binds revert; a value arriving from
+		// outside — a server or role default, a `SET` in the connection
+		// string's options parameter, a pooler handing back a used backend —
+		// does not, and the first request on that connection that binds no
+		// tenant reads that tenant's rows.
 		//
-		// Here rather than on release, and the difference is measured. A reset
-		// per release costs a round trip on every request: 92,821 tps against
-		// 46,648 on 8 connections, which is more than `partition by` costs in
-		// total. Once per physical connection is amortised to nothing over a
-		// pooled connection's life, and the case it cannot catch — a session
-		// value set mid-life — is closed twice over: sqlvalidate rejects
-		// set_config in caller SQL, and set_partition refuses to bind over an
-		// existing value rather than overwrite it.
+		// At connect, not at release. A reset per release costs a round trip on
+		// every request: 92,821 tps against 46,648 on 8 connections, which is
+		// more than `partition by` costs in total.
 		//
-		// SET to the empty string, NOT `RESET`. RESET restores the parameter's
-		// session default, and an ALTER ROLE ... SET default IS that default —
-		// so RESET here restores precisely the value this is meant to clear. It
-		// was written as RESET first and TestTenantResetAtConnect caught it.
-		// The empty string reads back as NULL because current_partition() maps
-		// it through nullif (migration 0024), which is the same property that
-		// makes a transaction-local bind fail closed after it reverts.
+		// SET to the empty string, not RESET. RESET restores the parameter's
+		// session default, and an ALTER ROLE ... SET default is that default,
+		// so RESET restores precisely the value being cleared;
+		// TestTenantResetAtConnect asserts the difference. The empty string
+		// reads back as NULL because current_partition() maps it through nullif
+		// (migration 0024).
 		if _, err := conn.Exec(ctx, `SET "atlantis.tenant" = ''`); err != nil {
 			return fmt.Errorf("clear tenant discriminator: %w", err)
 		}
@@ -202,11 +194,11 @@ type pgxRow struct {
 func (r pgxRow) Scan(dest ...any) error {
 	err := r.row.Scan(dest...)
 	if err != nil && err.Error() == "no rows in result set" {
-		// Wrap the RUNTIME's sentinel, not a local one. errors.Is compares by
-		// identity, so a local sentinel with an identical message never
-		// matched — and because the wrap also rewrote the message to
-		// "no rows: no rows in result set", IsNoRows' string fallbacks missed
-		// it too. Every no-rows from this adapter was invisible.
+		// Wrapping runtime.ErrNoRows, not a local sentinel. errors.Is compares
+		// by identity, so a local one with an identical message never matches,
+		// and the wrap rewrites the message to "no rows: no rows in result
+		// set", which IsNoRows' string fallbacks miss as well. Every no-rows
+		// from this adapter would then be invisible.
 		return fmt.Errorf("%w: %s", runtime.ErrNoRows, err)
 	}
 	return err

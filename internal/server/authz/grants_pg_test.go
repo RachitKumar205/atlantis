@@ -102,10 +102,9 @@ func TestUnspecifiedGrantIsDropped(t *testing.T) {
 	}
 }
 
-// An unauthenticated connection resolves to no caller. That is an empty grant
-// set, not a lookup error — the interceptor denies either way, but the error
-// path would point whoever is debugging at the database instead of at the
-// missing client certificate.
+// An unauthenticated connection resolves to no caller: an empty grant set, not
+// a lookup error. The interceptor denies either way, but the error names the
+// database instead of the missing client certificate.
 func TestAnonymousCallerGetsEmptySetWithoutQuerying(t *testing.T) {
 	db := &fakeDB{byCaller: map[string][]string{}}
 	got, err := newGrants(t, db, "").For(context.Background())

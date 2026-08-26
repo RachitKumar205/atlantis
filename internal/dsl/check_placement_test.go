@@ -5,30 +5,21 @@ import (
 	"testing"
 )
 
-// `check` is the only keyword valid both as a field modifier and as an entity
-// member, and unlike `primary` and `unique` — separated by a following `by` —
-// both spellings are the keyword followed by a STRING. Lookahead cannot tell
-// them apart, so indentation does: a field's modifiers may wrap onto following
-// lines, and those continuation lines are indented past the field. A `check` at
-// or left of the field's own column is the next member, not a continuation.
+// `check` is valid both as a field modifier and as an entity member, and both
+// spellings are the keyword followed by a STRING. Indentation separates them: a
+// `check` at or left of the field's own column is the next member, not a
+// continuation of the field's modifiers.
 //
-// The rule formalises the convention the schemas already used. Across the
-// corpus every continuation check sits under its field's type column and every
-// entity-level check sits at member indent; the change reclassified none of
-// them.
+// The tests below pin the three failures the modifier form produces where it
+// wins after a field, none of which report anything:
 //
-// Before the rule the modifier form always won after a field, and every
-// consequence was silent:
-//
-//   - A table-level check written under a field became that field's, so the
-//     generated constraint took that column's name even when the predicate
-//     never mentioned it. Confirmed live: `check "length(name) > 0"` following
-//     `colour text` emitted ADD CONSTRAINT "e2e_widget_colour_check".
-//   - Two in a row collapsed. The parser built two ModCheckDecls and lowering
-//     kept the last, discarding a constraint the author wrote — no diff entry,
-//     no DDL, no diagnostic.
-//   - `check "..." as <name>` was a parse error there, because the modifier
-//     form does not consume `as`. The same line one position earlier parsed.
+//   - A table-level check becomes that field's, so the constraint takes the
+//     column's name. `check "length(name) > 0"` after `colour text` emits
+//     ADD CONSTRAINT "e2e_widget_colour_check".
+//   - Two in a row collapse. The parser builds two ModCheckDecls and lowering
+//     keeps the last: no diff entry, no DDL, no diagnostic.
+//   - `check "..." as <name>` is a parse error, since the modifier form does
+//     not consume `as`.
 
 func TestCheckAtMemberIndentBelongsToTheEntity(t *testing.T) {
 	src := "entity W in e2e {\n" +
@@ -53,7 +44,7 @@ func TestCheckAtMemberIndentBelongsToTheEntity(t *testing.T) {
 	}
 }
 
-// The form that used to be a parse error in this position.
+// The modifier form does not consume `as`, so this parses only as a member.
 func TestNamedCheckParsesAfterAField(t *testing.T) {
 	src := "entity W in e2e {\n" +
 		"  id bigint primary\n" +
@@ -70,9 +61,8 @@ func TestNamedCheckParsesAfterAField(t *testing.T) {
 	}
 }
 
-// Two entity-level checks after a field must both survive. Previously both were
-// absorbed as the field's modifiers and lowering kept only the second, so the
-// first vanished with no diagnostic.
+// Two entity-level checks after a field both survive. Absorbed as that field's
+// modifiers, lowering keeps only the second and the first vanishes silently.
 func TestTwoChecksAfterAFieldBothSurvive(t *testing.T) {
 	src := "entity W in e2e {\n" +
 		"  id bigint primary\n" +
@@ -92,10 +82,10 @@ func TestTwoChecksAfterAFieldBothSurvive(t *testing.T) {
 	}
 }
 
-// The constraint that ruled out every simpler fix: a field's modifiers may
-// continue on the next line. atlprint's TestMultiLineField covers it and
-// schema/vendor/internal/shopify/schema.atl uses it, so a rule keyed on "starts
-// a line" would break the shipped corpus. Keyed on column, it does not.
+// A field's modifiers may continue on the next line. atlprint's
+// TestMultiLineField covers the shape and the shipped corpus uses it, so a rule
+// keyed on "starts a line" reclassifies existing declarations. Keyed on column,
+// it does not.
 func TestFieldModifiersMayWrapOntoTheNextLine(t *testing.T) {
 	src := "entity W in e2e {\n" +
 		"  id bigint primary\n" +
@@ -172,7 +162,7 @@ func TestTheRuleIsRelativeToTheField(t *testing.T) {
 	}
 }
 
-// A field carries one check. A second used to replace the first in silence.
+// A field carries one check; a second is an error, not a silent replacement.
 func TestSecondCheckOnOneFieldIsAnError(t *testing.T) {
 	src := "entity W in e2e {\n" +
 		"  id bigint primary\n" +
@@ -239,9 +229,8 @@ func TestTheRuleWorksWithTabIndentation(t *testing.T) {
 	}
 }
 
-// The example in docs/reference/dsl-grammar.md must actually behave as it
-// claims. A grammar reference that is wrong about binding is worse than one
-// that says nothing, because the reader has no reason to doubt it.
+// The example in docs/reference/dsl-grammar.md binds the way that page says it
+// does.
 func TestGrammarReferenceExampleBindsAsDocumented(t *testing.T) {
 	// Copied verbatim from the "Where a `check` binds" section.
 	src := "entity Order in shop {\n" +
@@ -282,13 +271,13 @@ func TestGrammarReferenceExampleBindsAsDocumented(t *testing.T) {
 // The rule must not leak into blocks that hold fields and nothing else.
 //
 // `args`, `state` and `ephemeral` have no entity-level `check` member, so a
-// `check` inside them can only be a modifier and there is no ambiguity to
-// resolve. Applying the column rule there turned an ordinary declaration into
-// a hard parse error — "expected arg name or '}', got check" — which says
-// nothing about binding or indentation, so the fix (indent one more column)
-// was unguessable. The shipped corpus escaped only because
-// schema/vendor/internal/shopify/schema.atl:426 happens to be indented deeper
-// than its arg.
+// `check` inside them is always a modifier and there is no ambiguity to
+// resolve.
+//
+// The column rule applied there makes an ordinary declaration a parse error —
+// "expected arg name or '}', got check" — which names neither binding nor
+// indentation, so the remedy of indenting one more column does not follow from
+// it.
 func TestChecksInFieldOnlyBlocksAreAlwaysModifiers(t *testing.T) {
 	for name, src := range map[string]string{
 		"job args": "job J in v {\n" +
@@ -318,14 +307,11 @@ func TestChecksInFieldOnlyBlocksAreAlwaysModifiers(t *testing.T) {
 	}
 }
 
-// Entity-level checks in positions where no field precedes them.
+// Entity-level checks in the positions where no field precedes them: as the
+// first member, after `table "..."`, and after `ttl_field`.
 //
-// An earlier version of this file carried this test with the note "this test is
-// here so the next person does not make it" — about the argument that
-// entity-level checks are unreachable, which was used to justify a
-// constraint-naming change. Rewriting the file for the new rule dropped it,
-// taking with it the only coverage of `check` as the first entity member, after
-// `table "..."`, and after `ttl_field`. Restored.
+// The indentation rule never applies to these, so they are the cases that show
+// an entity-level check is reachable at all.
 func TestTableCheckParsesWithoutAPrecedingField(t *testing.T) {
 	for name, src := range map[string]string{
 		"after a table override": "entity W in e2e {\n  id bigint primary\n  name text not null\n  table \"public.w\"\n  check \"length(name) > 0\"\n}\n",
@@ -371,8 +357,8 @@ func TestTwoIdenticalChecksOnOneFieldIsAlsoAnError(t *testing.T) {
 	}
 }
 
-// The error message tells the author what to do; following it literally has to
-// work. Anything else is a dead end dressed as guidance.
+// The duplicate-check error names a remedy. Applying it literally parses and
+// lowers.
 func TestTheDuplicateCheckAdviceActuallyWorks(t *testing.T) {
 	// The advice: keep one on the field, move the other to member indentation
 	// with a name.

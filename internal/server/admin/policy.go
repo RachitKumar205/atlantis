@@ -21,11 +21,8 @@ import (
 //	admin.go     ApplyMigration, after emit and before the drift checks
 //	backfill.go  BeginBackfillPlan, which reaches the same DDL by another door
 //
-// The table, the RPCs and the console panel shipped one release ahead of that,
-// deliberately, so an operator could see the rule they were about to be held to
-// and agree it before it decided anything. A gate that appears in the same
-// release that starts refusing applies is a gate people learn about from an
-// outage. That release has passed; do not reintroduce the caveat.
+// The table, the RPCs and the console panel shipped one release ahead of the
+// gate, so the rule was visible and agreed before it decided anything.
 //
 // Nothing here caches, and that is the reason the table lives in atlantis.*
 // rather than in config. authz.postgresGrants caches for five seconds because
@@ -68,12 +65,10 @@ const DefaultApproverRole = "admin"
 // effectiveChangePolicy resolves what applies to one class, given whatever the
 // table holds.
 //
-// A class with no row requires approval. So does a class whose stored name
-// nobody recognises, and a class outside the set a diff can produce. The three
-// cases are one rule on purpose: every way of failing to find a rule fails the
-// same way, and the safe way. A deployment where somebody deleted a row, or
-// mistyped one, is a deployment where more applies stop for a human — never
-// one where fewer do.
+// A class with no row requires approval. So does a class whose stored name is
+// unrecognised, and a class outside the set a diff can produce. The three cases
+// are one rule: every way of failing to find a rule fails closed, so a deleted
+// or mistyped row makes more applies stop for a human, never fewer.
 func effectiveChangePolicy(stored map[adminpb.PlanClass]ChangePolicy, class adminpb.PlanClass) ChangePolicy {
 	if p, ok := stored[class]; ok {
 		if p.ApproverRole == "" {

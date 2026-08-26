@@ -13,11 +13,10 @@ import (
 
 // Extension detection + auto-enable.
 //
-// atlantis can't reach into the Postgres host's filesystem to apt-install
-// extension binaries. What it CAN do is enable an already-installed
-// extension via `CREATE EXTENSION IF NOT EXISTS foo;` inside the apply
-// transaction, and tell the operator clearly what to install at the OS
-// level when an extension is required by the schema but missing on disk.
+// atlantis cannot reach the Postgres host's filesystem to install extension
+// binaries. It enables an already-installed extension with `CREATE EXTENSION
+// IF NOT EXISTS foo;` inside the apply transaction, and names what to install
+// at the OS level when the schema requires an extension missing from disk.
 //
 // Triggers (DSL → extension):
 //   vector(N) column         → vector   (pgvector)
@@ -215,9 +214,9 @@ func prepareExtensions(ctx context.Context, tx pgx.Tx, ir *dsl.IR) ([]string, er
 		return nil, extensionsMissingError(missing)
 	}
 	for _, name := range toEnable {
-		// CREATE EXTENSION takes an identifier, not a parameterized
-		// value. extension names come from our own constant set, never
-		// from caller input, so no injection surface.
+		// CREATE EXTENSION takes an identifier, not a parameterized value.
+		// The names come from a constant set in this package, never from
+		// caller input.
 		stmt := fmt.Sprintf(`CREATE EXTENSION IF NOT EXISTS %s`, quoteIdent(name))
 		if _, err := tx.Exec(ctx, stmt); err != nil {
 			return nil, fmt.Errorf("CREATE EXTENSION %s: %w (atlantis could not enable this extension despite pg_available_extensions listing it — the most common cause is the atlantis role lacking privilege; ask your DBA to run `%s` in the atlantis database, or check Postgres logs for the underlying error)",

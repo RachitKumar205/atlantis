@@ -12,9 +12,9 @@ import (
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
 
-// TestEveryMethodIsDeniedWithoutItsGrant is the enforcement counterpart to
-// TestEveryAdminMethodDeclaresACapability. That test proves every method
-// declares something; this one proves the declaration is load-bearing.
+// The enforcement counterpart to TestEveryAdminMethodDeclaresACapability. That
+// test proves every method declares something; this proves the declaration is
+// what the interceptor acts on.
 //
 // It enumerates methods from the descriptor rather than from a list, so an RPC
 // added tomorrow is covered the moment it exists. For each method it asserts
@@ -22,11 +22,9 @@ import (
 // capability does. The second half is what catches an accidental hierarchy —
 // if someone makes OPERATOR imply everything, this fails on every method.
 //
-// Every governed prefix is exercised. There is one today; during the proto
-// migration there were two, and a policy that governed only the path not in
-// production would have passed every other test here while enforcing nothing.
-// Driving whatever Policy actually claims to govern keeps that true if a second
-// path is ever added again.
+// Every governed prefix is exercised. With two of them, a policy governing only
+// the path not in production passes every other test here while enforcing
+// nothing, so this drives whatever Policy claims to govern.
 func TestEveryMethodIsDeniedWithoutItsGrant(t *testing.T) {
 	policy, err := AdminPolicy()
 	if err != nil {
@@ -155,20 +153,17 @@ func TestUnknownCallerHoldsNothing(t *testing.T) {
 	}
 }
 
-// TestAdminServiceDeclaresNoStreamingRPC holds the invariant that "the policy
-// covers a method" implies "the server enforces it".
+// Holds the invariant that "the policy covers a method" implies "the server
+// enforces it".
 //
 // Policy has only a unary interceptor, and cmd/server's stream chain has no
 // capability entry. Adding `rpc Tail(...) returns (stream ...)` with a
 // required_capability compiles, records a requirement in BuildPolicy, and
-// serves with no check whatsoever — grpcServer embeds
-// UnimplementedAdminServiceServer precisely so a new method does not break the
-// build, so nothing else catches it either.
+// serves with no check; grpcServer embeds UnimplementedAdminServiceServer, so a
+// new method does not break the build either.
 //
-// Whoever adds the first streaming admin RPC should add Policy.StreamInterceptor
-// and install it in cmd/server's ChainStreamInterceptor, then delete this test.
-// Until then the invariant is held here rather than by a comment claiming a
-// guard that does not exist.
+// The first streaming admin RPC needs Policy.StreamInterceptor installed in
+// cmd/server's ChainStreamInterceptor, and this test deleted.
 func TestAdminServiceDeclaresNoStreamingRPC(t *testing.T) {
 	sd := adminpb.File_atlantis_admin_v1_admin_proto.Services().ByName("AdminService")
 	if sd == nil {

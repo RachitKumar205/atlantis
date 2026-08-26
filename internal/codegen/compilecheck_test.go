@@ -12,43 +12,28 @@ import (
 // The emitted server, committed as an ordinary package so the Go compiler
 // type-checks it.
 //
-// # Why a committed package and not a test
+// The emitter tests call parseAsGo, which parses without type-checking, so a
+// signature change on either side of the emitter boundary reaches a caller's
+// build before it reaches this suite. Committing the output makes
+// `go build ./...`, `go vet` and CI type-check it, with no toolchain to install
+// and nothing to skip when buf is absent.
 //
-// Nothing in this repository compiled a generated server. The emitter tests
-// call parseAsGo, which parses without type-checking, and the emitted code
-// imported a pb module that resolved nowhere — so a signature change on either
-// side of the emitter boundary was discovered in a caller's build. That has
-// happened: emitted_types_test.go records an incident where every generated
-// server for a partitioned entity failed to compile in the caller's repository
-// while this suite stayed green.
+// The defects a type-check catches and a parse does not:
 //
-// A test that shells out to buf and go build would have to skip when buf is
-// absent, and a skipping test is not a gate. Committing the output instead
-// makes `go build ./...`, `go vet` and CI type-check it for free, with nothing
-// to skip and no toolchain to install.
+//   - a .proto naming atlantis.common.v1.Interval without importing it
+//   - a server declaring pgtype.Interval without importing pgtype
+//   - runtime.IntervalToProto returning this module's commonpb.Interval, a
+//     different Go type from the emitted server's copy of the same message
+//   - a pb import path that resolves in no module
 //
-// # What it caught immediately
-//
-// On its first compile, four defects that every other test in this package had
-// passed over:
-//
-//   - the emitted .proto named atlantis.common.v1.Interval without importing it
-//   - the emitted server declared pgtype.Interval without importing pgtype
-//   - runtime.IntervalToProto returned this module's commonpb.Interval, which
-//     is a DIFFERENT Go type from the emitted server's copy of the same message
-//   - the pb import path resolved in no module at all
-//
-// # Why this pinning function exists
-//
-// A committed package that compiles but no longer matches the emitter would be
-// worse than no check: it would report the emitter healthy on the strength of a
-// stale artifact. So the same run that compares the golden files compares this
-// tree, and `-update` rewrites both.
+// A committed package that compiles but no longer matches the emitter would
+// report the emitter healthy from a stale artifact, so the same run that
+// compares the golden files compares this tree, and `-update` rewrites both.
 const compilecheckServerDir = "compilecheck/server"
 
 // compilecheckConfig points the emitter at the committed tree's own paths.
-// Both prefixes are inside this module on purpose — the emitted server imports
-// atlantis's internal/ packages, so it can only ever compile here.
+// Both prefixes are inside this module: the emitted server imports atlantis's
+// internal/ packages, so it can only compile here.
 var compilecheckConfig = GenConfig{
 	ServerPBPrefix:  "github.com/rachitkumar205/atlantis/internal/codegen/compilecheck/pb",
 	ServerPkgPrefix: "github.com/rachitkumar205/atlantis/internal/codegen/compilecheck/server",
@@ -99,21 +84,15 @@ func emitCompilecheckServer(t *testing.T, ir *dsl.IR) map[string]string {
 // Everything the emitters put under gen/go/server/ must be compiled.
 //
 // emitCompilecheckServer names its emitters by hand, so one added to
-// cmd/tidectl and not to that list would emit server code this package never
-// builds — the gap that existed for EmitCustomServer until today, and the one
-// its output was found to have on first compile.
+// cmd/tidectl and not to that list emits server code this package never builds.
 //
 // The check is derived rather than listed: the golden set already holds every
 // emitter's output for the fixture, so anything in it under gen/go/server/ and
 // absent from the compile fixture is a hole, whatever emitter produced it.
 //
-// # What this deliberately does NOT cover
-//
-// Only the server side. gen/go/keys and clients/go/client are emitted and
+// Server side only. gen/go/keys and clients/go/client are emitted and
 // golden-compared but not compiled: the client is caller code that imports the
 // caller's own pb, so compiling it here would need a second fixture module.
-// That is worth doing and is not done. The gap is stated here rather than left
-// for someone to infer from the absence of a test.
 func TestCompilecheckCoversTheServerEmitters(t *testing.T) {
 	const serverPrefix = "gen/go/server/"
 	goldenDir := filepath.Join("testdata", "golden")

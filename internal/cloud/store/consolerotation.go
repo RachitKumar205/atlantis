@@ -18,9 +18,7 @@ import (
 // rotation on the provisioner's next pass.
 //
 // Idempotent in effect but not in timestamp: asking twice moves the mark
-// forward, which is what makes the clear below safe. An operator who asks again
-// while a rotation is already running is asking for a rotation that starts
-// after their second request, and moving the timestamp is how that is recorded.
+// forward, which is what ClearConsoleRotationRequest compares against.
 func (s *Store) RequestConsoleRotation(ctx context.Context, org string) error {
 	if org == "" {
 		return errors.New("an organisation is required")
@@ -43,14 +41,10 @@ func (s *Store) RequestConsoleRotation(ctx context.Context, org string) error {
 // ConsoleRotationRequests returns every organisation with an outstanding
 // request, and when it was made.
 //
-// The timestamp is returned rather than a bare set because it is what
-// ClearConsoleRotationRequest needs in order not to discard a request that
-// arrived while the rotation it is finishing was already under way.
+// The timestamp is returned because ClearConsoleRotationRequest compares
+// against it.
 //
-// One query for the whole fleet rather than one per organisation: reconcile
-// already iterates every ready organisation, and asking the database per
-// organisation would turn a reconcile pass into a query per tenant for a column
-// that is almost always NULL.
+// One query for the whole fleet, for a column that is almost always NULL.
 func (s *Store) ConsoleRotationRequests(ctx context.Context) (map[string]time.Time, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT org, console_rotate_requested_at
@@ -77,16 +71,11 @@ func (s *Store) ConsoleRotationRequests(ctx context.Context) (map[string]time.Ti
 // ClearConsoleRotationRequest marks a request satisfied, but only the one that
 // was seen.
 //
-// # Why this is not simply SET NULL
-//
-// An operator can ask again while the provisioner is part-way through the
-// rotation their first request triggered — during an incident that is the
-// likely case, not an unlikely one. An unconditional clear would drop the
-// second request, and the credential the operator asked twice to replace would
-// be the one still in use.
-//
-// Comparing against the timestamp the pass observed means a request made after
-// that moment survives and is honoured on the next pass.
+// The clear is conditional on requested_at matching seen, the timestamp the
+// pass observed. An unconditional SET NULL would discard a request made while
+// that pass was still running, leaving the credential it was asked twice to
+// replace still in use. A later request survives and is honoured on the next
+// pass.
 func (s *Store) ClearConsoleRotationRequest(ctx context.Context, org string, seen time.Time) error {
 	if org == "" {
 		return errors.New("an organisation is required")
@@ -98,8 +87,7 @@ func (s *Store) ClearConsoleRotationRequest(ctx context.Context, org string, see
 		 WHERE org = $1
 		   AND console_rotate_requested_at <= $2
 	`, org, seen)
-	// No RowsAffected check. Matching nothing is the correct outcome when a
-	// newer request has replaced the one this pass handled, and it is not
-	// distinguishable here from the organisation having been deleted meanwhile.
+	// No RowsAffected check: matching nothing is correct when a newer request
+	// has replaced the one this pass handled.
 	return err
 }

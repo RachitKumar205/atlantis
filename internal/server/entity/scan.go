@@ -422,18 +422,16 @@ func setRepeatedFloat32(msg *dynamicpb.Message, fd protoreflect.FieldDescriptor,
 // Returns nil for a column that was NULL in the row, which the page token
 // carries as its own arm.
 //
-// # Why HasPresence and not a bare Has
+// HasPresence, not a bare Has. scanRow leaves a field unset when the database
+// gave it NULL, and codegen emits nullable columns as proto3 `optional`, so
+// presence records nullness — but only for fields that have presence. An
+// implicit-presence scalar reports Has() == false for a legitimate zero, so
+// Has() alone reports `id = 0` or `name = ""` as NULL and encodes a cursor that
+// skips or repeats rows around those values.
 //
-// scanRow leaves a field UNSET when the database gave it NULL, and codegen
-// emits nullable columns as proto3 `optional`, so presence is a faithful record
-// of nullness — but only for fields that HAVE presence. An implicit-presence
-// scalar reports Has() == false for a legitimate zero, so checking Has() alone
-// would report `id = 0` or `name = ""` as NULL and encode a cursor that skips
-// or repeats rows around those values.
-//
-// Reading through msg.Get() without any presence check is what caused the
-// defect this fixes: a NULL arrived as the type's zero value, indistinguishable
-// from a real one, and the cursor it produced named a position no row sat at.
+// msg.Get() with no presence check is worse still: a NULL arrives as the type's
+// zero value, indistinguishable from a real one, and the cursor names a
+// position no row sits at.
 func protoValueForCursor(msg *dynamicpb.Message, fd protoreflect.FieldDescriptor, cm columnMeta) any {
 	if fd == nil {
 		return nil
@@ -446,19 +444,16 @@ func protoValueForCursor(msg *dynamicpb.Message, fd protoreflect.FieldDescriptor
 	case "text", "varchar", "citext", "uuid", "numeric":
 		return msg.Get(fd).String()
 	case "interval":
-		// Not a cursor coordinate. `interval` is orderable in SQL, but its
-		// wire form is now a message and EncodePageToken has no arm for one —
-		// it would return "unsupported cursor type", failing the request that
-		// tried to page on it rather than issuing a token nothing can decode.
+		// Not a cursor coordinate. `interval` is orderable in SQL, but its wire
+		// form is a message and EncodePageToken has no arm for one, so it
+		// returns "unsupported cursor type" and fails the request that tried to
+		// page on it.
 		//
-		// Returning nil here would be worse: the null arm encodes fine, so the
-		// page would advance past a coordinate that means "no interval" and
-		// silently skip rows. Falling through to the unsupported-type error is
-		// the loud option, and the one that names the real limitation.
+		// Returning nil instead encodes fine through the null arm, so the page
+		// advances past a coordinate meaning "no interval" and skips rows.
 		//
 		// Ordering by an interval column still works; only paging on one is
-		// refused. Making it pageable needs an Interval arm in the page token,
-		// which is a wire change and its own decision.
+		// refused. Making it pageable needs an Interval arm in the page token.
 		return msg.Get(fd).Interface()
 	case "bigint":
 		return msg.Get(fd).Int()

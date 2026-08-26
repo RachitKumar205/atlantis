@@ -1,32 +1,18 @@
 -- An overlap window, so a renewal whose response is lost does not lock a
 -- machine out.
 --
--- ── The failure this exists to remove ───────────────────────────────────────
+-- With one fingerprint per caller, recording the new one stops the certificate
+-- the machine still holds from authenticating. Any step after that write can
+-- lose the response — a timeout, a proxy 502, the process dying before the file
+-- reaches disk — leaving the machine holding a superseded certificate and
+-- needing a valid one to renew. `tide login` renews unattended across a fleet,
+-- so a rare delivery failure becomes a recurring lockout with no self-service
+-- recovery.
 --
--- caller_identities held ONE fingerprint and the cert-binding interceptor
--- accepted exactly that one. So renewal was: mint the new certificate, record
--- its fingerprint, hand it back. The moment the fingerprint was recorded, the
--- certificate the machine was still holding stopped authenticating.
---
--- Every step after the write is a step where the response can be lost — a
--- timeout, a proxy answering 502, the process dying before the file reaches
--- disk, a full filesystem. The machine then holds a superseded certificate and
--- needs a valid one to renew, which is a hard lockout with an administrator as
--- the only way out.
---
--- Rare per machine, and `tide login` renews unattended across a fleet, forever.
--- A one-in-ten-thousand delivery failure becomes a recurring incident with no
--- self-service recovery.
---
--- ── Bounded by time, not by use ─────────────────────────────────────────────
---
--- The tighter design retires the previous fingerprint the moment the new one is
--- first used: the old certificate dies as soon as the machine proves it has the
--- replacement. It was not chosen, and the reason is where the "first use" is
--- observed — inside the cert-binding interceptor, on every authenticated RPC.
--- Retiring there means a write on the hottest read path in the product, behind
--- a five-second cache that would let it fire repeatedly before the new state is
--- visible.
+-- The window is bounded by time, not by first use of the new certificate.
+-- First use is observable only in the cert-binding interceptor, on every
+-- authenticated RPC, so retiring there is a write on the hottest read path,
+-- behind a five-second cache that would let it fire repeatedly.
 --
 -- prev_valid_until costs one comparison and no write. The exposure it buys is
 -- explicit and short: a superseded certificate keeps working until this

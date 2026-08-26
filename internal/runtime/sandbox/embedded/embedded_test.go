@@ -6,12 +6,10 @@ package embedded_test
 // they run by default — but each test is structured so failures are
 // loud and obvious.
 //
-// If embedded-postgres can't start in the current environment
-// (no network for the first-run binary download, a firewall blocking
-// the loopback, etc.), every test in this file will fail with a
-// readable "start:" prefix. That's intentional: the published
-// fidelity matrix promises embedded works, and we want CI to fail
-// rather than silently skip when it doesn't.
+// Where embedded-postgres cannot start — no network for the first-run binary
+// download, a firewall on loopback — every test here fails under a "start:"
+// prefix rather than skipping. The published fidelity matrix says embedded
+// works, so an environment that cannot run it is a CI failure.
 
 import (
 	"context"
@@ -22,12 +20,11 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/runtime/sandbox/embedded"
 )
 
-// userIR shapes a single entity that exercises the embedded backend's
-// DDL apply path. We deliberately use a plain bigint PK (not Identity)
-// so the test can supply explicit IDs — IDENTITY columns reject
-// non-DEFAULT inserts unless the caller uses OVERRIDING SYSTEM VALUE,
-// which exists in production codegen-emitted handlers but is out of
-// scope for this CRUD smoke test.
+// userIR shapes one entity that drives the embedded backend's DDL apply path.
+//
+// A plain bigint PK rather than Identity, so the test supplies explicit IDs: an
+// IDENTITY column rejects a non-DEFAULT insert without OVERRIDING SYSTEM VALUE,
+// which codegen-emitted handlers write and this does not.
 func userIR() *dsl.IR {
 	return &dsl.IR{
 		Version: 1,

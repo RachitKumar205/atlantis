@@ -62,11 +62,11 @@ func (s *Sandbox) LoadIR(ir *dsl.IR) error {
 	return nil
 }
 
-// buildTableDescFromEntity translates one *dsl.Entity into a TableDesc.
-// All IR semantics that sim honors at execution time are captured here;
-// IR features that don't affect sim behavior (Cache block, Relations,
-// Indexes for query planning) are deliberately ignored —
-// secondary-index-driven scans are not yet wired.
+// buildTableDescFromEntity translates one *dsl.Entity into a TableDesc,
+// carrying every IR semantic sim honours at execution time.
+//
+// The Cache block, Relations and Indexes are dropped: sim runs no
+// secondary-index scan, so none of them changes an answer.
 func buildTableDescFromEntity(e *dsl.Entity) (*sim.TableDesc, error) {
 	schema, name := schemaNameFor(e)
 
@@ -145,11 +145,11 @@ func toSnake(s string) string {
 	return b.String()
 }
 
-// primaryKeyColumns returns the entity's PK columns in declaration
-// order. Composite-PK entities carry CompositePK explicitly; single-PK
-// entities have it on the field via the `primary` modifier. Mutual
-// exclusion is enforced at IR-lower time — we trust that contract and
-// take the first applicable representation.
+// primaryKeyColumns returns the entity's PK columns in declaration order.
+//
+// A composite PK carries CompositePK explicitly; a single PK sits on the field
+// under the `primary` modifier. Lowering enforces that only one is set, so this
+// takes the first applicable representation.
 func primaryKeyColumns(e *dsl.Entity) ([]string, error) {
 	if len(e.CompositePK) > 0 {
 		return append([]string(nil), e.CompositePK...), nil

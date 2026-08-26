@@ -17,20 +17,15 @@ import (
 
 // The health listener's two trust levels.
 //
-// # Why this exists
+// Open /status and /metrics leave a NetworkPolicy as the only thing keeping
+// another tenant's pod away, and that policy is not portable: `ipBlock` covers
+// pod traffic under Calico, never covers it under GKE Dataplane V2, and
+// excludes nothing on EKS, where pods take VPC addresses. The manifest reads
+// the same on all three.
 //
-// /status and /metrics used to be open. The only thing keeping another
-// tenant's pod away was a NetworkPolicy, and that policy is not portable:
-// `ipBlock` covers pod traffic under Calico, never covers it under GKE
-// Dataplane V2, and on EKS excludes nothing at all because pods take VPC
-// addresses. On at least one target the isolation would have stopped existing
-// while every manifest still said it was there.
-//
-// **These tests run with no NetworkPolicy at all.** That is the point. A test
-// that proved isolation inside a cluster would keep passing on a platform where
-// the policy was inert, because the policy would be doing the work. Here the
-// credential is the only thing standing there, which is the property that has
-// to survive a change of cloud.
+// These tests run with no NetworkPolicy. One that proved isolation inside a
+// cluster would keep passing where the policy is inert, since the policy would
+// be doing the work; here the credential is the only thing standing there.
 
 // healthFixture starts the real listener over TLS and returns its address plus
 // the PKI that roots it.

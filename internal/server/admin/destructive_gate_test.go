@@ -14,23 +14,14 @@ import (
 
 // The apply gate, exercised through the handler against a live database.
 //
-// # This file used to read source instead
+// An AST test asserting that ApplyMigration mentions codegen.ClassDestructive
+// inside a returning condition fits a flat refusal of two classes written as an
+// `if`, which a careless edit can drop unnoticed. It does not fit
+// gateOnChangePolicy, which is class-agnostic and reads the rule from a table:
+// such a test would need a class name re-added to ApplyMigration so it could
+// find one, encoding the fix rather than the property.
 //
-// It held two AST tests asserting that ApplyMigration mentioned
-// codegen.ClassDestructive inside a condition that returns. That was the right
-// guard for the shape it guarded: a flat refusal of two classes, written as an
-// `if`, which a careless edit could drop without anything noticing.
-//
-// Those tests said so themselves — "this asserts the condition is present,
-// never that it fires ... TestDirectApplyCannotSkipApproval, which calls the
-// handler against a live database, is the one that proves it, and it arrives
-// with the change-policy work". The change-policy work has arrived, and the
-// refusal is no longer a class literal in an if: gateOnChangePolicy is
-// deliberately class-agnostic and reads the rule from a table. Keeping the AST
-// tests would have meant re-adding a class name to ApplyMigration so a test
-// could find it — encoding the old fix rather than the property it protected.
-//
-// The property is unchanged and is what these assert: a direct gRPC apply
+// The property is what these assert: a direct gRPC apply
 // cannot skip the human. Calling svc.ApplyMigration IS the direct-gRPC path —
 // the capability interceptor only ever checked the capability, and it cannot
 // see the request body, so it has no idea the change destroys anything.
@@ -305,7 +296,7 @@ func TestASupersededPlanReopensRatherThanBricking(t *testing.T) {
 	// returns this same id, and ApproveSchemaPlan only touches a row awaiting a
 	// decision. Left superseded, the plan is one nobody can apply and nobody can
 	// approve. approveStoredPlan fails this test unless exactly one pending row
-	// matched, so it IS the assertion.
+	// matched, so it carries the assertion.
 	approveStoredPlan(t, svc, plan.GetPlanId())
 	if err := depScopeApply(t, svc, "dssup", "ledger.atl", gateLedgerV2, plan); err != nil {
 		t.Errorf("the re-opened plan was approved and still would not apply, so "+
@@ -329,7 +320,7 @@ func TestAPendingPlanThatExpiredIsRenewed(t *testing.T) {
 	if err := depScopeApply(t, svc, "dsren", "ledger.atl", gateLedgerV2, plan); err == nil {
 		t.Fatal("the destructive change applied without approval")
 	}
-	// Pending, NOT approved — that is what separates this from
+	// Pending, not approved, which separates this from
 	// TestAnExpiredApprovalReopens, which backdates an approval instead.
 	if got := storedPlanState(t, svc, plan.GetPlanId()); got != planPending {
 		t.Fatalf("plan state = %q, want %q before backdating", got, planPending)
@@ -364,7 +355,7 @@ func TestAPendingPlanThatExpiredIsRenewed(t *testing.T) {
 	if got := storedPlanState(t, svc, plan.GetPlanId()); got != planPending {
 		t.Errorf("plan state = %q, want %q", got, planPending)
 	}
-	// And it is decidable, which is the point of renewing it.
+	// And it is decidable, which is what renewing it buys.
 	approveStoredPlan(t, svc, plan.GetPlanId())
 }
 
@@ -401,7 +392,7 @@ func TestAnAppliedPlanIsNotReapplied(t *testing.T) {
 		t.Errorf("the refusal does not say the plan was already applied: %v", err)
 	}
 
-	// Terminal means terminal: it must NOT have been re-opened. Re-opening here
+	// Terminal means terminal: it must not have been re-opened. Re-opening here
 	// would make an executed plan decidable again, which is an approval for
 	// work that has already happened.
 	if got := storedPlanState(t, svc, plan.GetPlanId()); got != planApplied {
@@ -477,9 +468,8 @@ SELECT count(*) FROM information_schema.columns
 // terminally and advised "re-plan and request approval again" — advice that
 // cannot be followed, because re-planning returns the SAME id and the row is
 // still `approved`, which ApproveSchemaPlan refuses as "not awaiting a
-// decision". The plan became permanently unapplicable AND permanently
-// undecidable, and the only escape was editing the .atl bytes to move the
-// hash, which no message mentions.
+// decision". The plan is then both unapplicable and undecidable, and the only
+// escape is editing the .atl bytes to move the hash, which no message mentions.
 //
 // A server upgrade that changes emitted SQL is enough to reach it. b6c0555
 // added emitLockTimeout — exactly that shape — and would have bricked every

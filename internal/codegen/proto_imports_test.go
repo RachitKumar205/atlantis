@@ -68,9 +68,8 @@ func assertImportsCoverReferences(t *testing.T, path, content string) {
 }
 
 func TestEmittedProtoImportsEveryWellKnownTypeItUses(t *testing.T) {
-	// One entity per shape that reaches a well-known type. `interval` is here
-	// deliberately: it is documented, it parses, and it is the type that
-	// exposed this gap.
+	// One entity per shape that reaches a well-known type. `interval` is
+	// included because it is documented and it parses.
 	for _, tc := range []struct{ name, src string }{
 		{"timestamptz", `entity A in app { id bigint primary  at timestamptz }`},
 		{"date", `entity A in app { id bigint primary  d date }`},
@@ -133,8 +132,8 @@ query SpansOver for Span {
 	}
 }
 
-// TestEmittedProtoImportCheckerCatchesAMissingImport proves the checker above
-// can fail. A guard nobody has seen fail is a guard nobody knows works.
+// TestEmittedProtoImportCheckerCatchesAMissingImport drives the checker above
+// to a failure, so a checker that always passes does not read as coverage.
 func TestEmittedProtoImportCheckerCatchesAMissingImport(t *testing.T) {
 	const bad = `syntax = "proto3";
 import "google/protobuf/timestamp.proto";

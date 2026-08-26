@@ -16,27 +16,18 @@ import (
 
 // GenerateSchema writes .atl describing tables no declaration mentions.
 //
-// # The onboarding problem this solves
-//
 // Introspection is declaration-driven: loadExistingTables filters pg_class to
-// the tables the declaration already names. So adopting a database required
-// .atl files describing every table in it — which is precisely what somebody
-// adopting a legacy database does not have. The first step of onboarding was
-// "hand-write fifty declarations, then we will check them".
-//
-// # How it works, and why so little of it is new
+// the tables the declaration already names, so adopting a database otherwise
+// requires .atl files describing every table in it first.
 //
 //	discover tables → stub entity per table → introspect → emit .atl
 //
 // Only the ends are new. FromPostgres fills a stub in because its column loop
-// runs over live columns the declaration does not name, and fieldType already
-// maps Postgres types to .atl types. The middle was built for adopt.
+// runs over live columns the declaration does not name, and fieldType maps
+// Postgres types to .atl types.
 //
-// # Read-only
-//
-// Same READ ONLY transaction as InspectSchema, for the same reason: this shares
-// a path with adopt, and the guarantee should be one Postgres enforces rather
-// than one a reviewer has to notice.
+// Runs in the same READ ONLY transaction as InspectSchema, so the read-only
+// guarantee is enforced by Postgres rather than by review.
 func (s *Service) GenerateSchema(ctx context.Context, req *adminpb.GenerateSchemaRequest) (*adminpb.GenerateSchemaResponse, error) {
 	ns := req.GetNamespace()
 	if ns == "" {

@@ -17,19 +17,18 @@ import (
 
 // `cloud org revoke-console` and its opposite.
 //
-// # Why these are worth holding still
+// The console cannot do either to itself: revoking is the last thing it could
+// do, and restoring is unreachable from it once revoked. These two commands are
+// the whole of that path, and a fault in either surfaces during an incident.
 //
-// The pair exists because the console cannot do either to itself: revoking is
-// the last thing it could do, and restoring is not available to it at all once
-// revoked. So these two commands are the whole of that path, and a fault in
-// either is discovered during an incident by someone who has already lost the
-// browser.
+// Restore is the claim under test. caller_capabilities references
+// caller_identities ON DELETE CASCADE (0018), so deleting the row destroys every
+// grant, and RegisterCaller refuses the reserved CN. Migration 0033 sets
+// revoked_at instead of deleting, which is what leaves the grants in place for
+// a restore to clear.
 //
-// The half that matters most is restore. Before migration 0033 there was no way
-// back — RegisterCaller refuses the reserved CN — so "can this actually be
-// undone" is the claim under test, and it has to be tested against real
-// migrations rather than a hand-built table, because what makes it true is the
-// absence of the ON DELETE CASCADE that 0018 declares.
+// Against the real migrations rather than a hand-built table, since the cascade
+// is what the property turns on.
 
 // consoleRevokeDSN builds a private database with the real infra schema.
 //

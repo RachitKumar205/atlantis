@@ -15,34 +15,24 @@ import (
 
 // The rebuild bracket must never leave the table open.
 //
-// # The window
-//
 // PostgreSQL refuses to alter a column a policy depends on, so a migration that
 // changes the tenant column's type has to take the boundary down, alter, and put
 // it back. Dropping the boundary alone does not shut the table: the permissive
-// `<table>_default_access USING (true)` grant is still there — and so is
-// whatever the operator replaced it with. Row-level security stays ENABLED with
-// nothing restricting it, which is every tenant's rows to every caller.
+// `<table>_default_access USING (true)` grant is still there, and so is whatever
+// the operator replaced it with. Row-level security stays ENABLED with nothing
+// restricting it, which is every tenant's rows to every caller. With the
+// boundary in the restrictive slot, dropping it admits everything rather than
+// denying everything.
 //
-// The finding that named this called the intermediate state deny-all. That was
-// true while the boundary was PERMISSIVE and the only policy. Since the boundary
-// moved to the restrictive slot the same drop inverts — it stopped denying
-// everything and started admitting everything — so the recorded severity
-// understated it in the one direction that matters.
+// The end state is correct and every other test passes on it. The exposure is
+// reachable only between two statements: inside ApplyMigration's transaction
+// the ALTER holds ACCESS EXCLUSIVE and no reader observes either state, so it
+// takes a hand-run script or a --no-transaction runner dying mid-way. This
+// executes the script in two halves and reads the table at the seam.
 //
-// # Why this asserts on the MIDDLE, not the end
-//
-// The end state has always been correct and every existing test passes on it.
-// What was wrong was reachable only between two statements, which is why nothing
-// caught it: inside ApplyMigration's transaction the ALTER holds ACCESS
-// EXCLUSIVE and no reader observes either state. The exposure is a hand-run
-// script or a --no-transaction runner dying mid-way, so this executes the script
-// in two halves and reads the table at the seam.
-//
-// A string assertion on statement order would be the easy version and would not
-// have caught the original defect either: the order WAS right, and the table was
-// open anyway because a policy nobody had thought about was still admitting
-// rows. The question is what a caller can read, so the test reads.
+// A string assertion on statement order would not catch it — the order can be
+// right while a policy nobody thought about is still admitting rows. The
+// question is what a caller can read, so the test reads.
 func TestTheRebuildBracketNeverOpensTheTable(t *testing.T) {
 	dsn := os.Getenv("ATLANTIS_TEST_PG")
 	if dsn == "" {

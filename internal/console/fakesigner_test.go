@@ -12,24 +12,20 @@ import (
 
 // A stand-in for cmd/signer, over real mTLS.
 //
-// # What it fakes and what it does not
+// It fakes the certificate authority, since signing a CSR needs a CA private
+// key and reaching for the real one would test cmd/signer rather than the
+// console. Everything else is real: real TLS, real client certificate
+// verification, real X.509 issued from a real request.
 //
-// It fakes the certificate authority — signing a CSR needs a CA private key,
-// and a test that reached for the real one would be a test of cmd/signer rather
-// than of the console. Everything else is real: real TLS, real client
-// certificate verification, real X.509 issued from a real request.
-//
-// In particular it does NOT generate a keypair. The whole claim of enrolment is
-// that the private key stays on the machine that made the request, so a
-// stand-in that quietly minted its own key would let the console pass a test it
-// ought to fail — the response would look identical and nothing downstream
-// checks.
+// It generates no keypair. Enrolment's claim is that the private key stays on
+// the machine that made the request, and a stand-in minting its own key
+// produces an identical response that nothing downstream checks.
 type fakeSigner struct {
 	URL string
 
-	// pki is the authority that decides who may CALL this signer, and is also
+	// pki is the authority that decides who may call this signer, and is also
 	// its own server identity. Separate from the one it issues from; see the
-	// fixture for why that separation is the whole point.
+	// fixture for what that separation buys.
 	pki                   *testpki.PKI
 	clientCert, clientKey string
 
@@ -115,11 +111,11 @@ func (f *fakeSigner) handle(w http.ResponseWriter, r *http.Request) {
 
 	// Report a DIFFERENT root than the one the leaf chains to.
 	//
-	// Artificial, and deliberately so. In every deployment that exists the
-	// signer's root and the organisation's server root are the same bytes, which
-	// means a test cannot tell whether the console echoes the signer's `ca_pem`
-	// or reads its own `console.orgs.ca_pem` — both produce an identical
-	// response, and a mutation swapping one for the other survives.
+	// Artificial. In every deployment the signer's root and the organisation's
+	// server root are the same bytes, so a test cannot tell whether the console
+	// echoes the signer's `ca_pem` or reads its own `console.orgs.ca_pem`: both
+	// produce an identical response, and a mutation swapping one for the other
+	// survives.
 	//
 	// register.go records that the two "are the same CA in every deployment that
 	// exists today and are not required to be". This makes them differ so the

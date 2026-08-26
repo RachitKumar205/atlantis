@@ -235,9 +235,6 @@ func paths(files []GoFile) []string {
 	return out
 }
 
-// ----------------------------------------------------------------------------
-// Go client emission for QueryX
-
 func TestEmitGoClient_QueryMethodEmitted(t *testing.T) {
 	ir := lower(t, `entity Account in consumer { id bigint primary email text not null }`)
 	files, _ := EmitGoClient(ir, GenConfig{})

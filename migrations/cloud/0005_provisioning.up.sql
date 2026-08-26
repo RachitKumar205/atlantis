@@ -12,7 +12,7 @@
 -- two. It cannot distinguish queued from in-flight from failed-after-four-tries,
 -- which is exactly what a machine doing the work needs to know.
 
--- ── The queue ───────────────────────────────────────────────────────────────
+-- The queue.
 --
 -- Modelled on atlantis.jobs, which is the lease queue this codebase already
 -- runs, and deliberately not on a simpler design. Two properties are worth the
@@ -71,7 +71,7 @@ CREATE INDEX IF NOT EXISTS org_provisioning_claimable_idx
     ON cloud.org_provisioning (created_at)
     WHERE state IN ('pending', 'failed', 'provisioning');
 
--- ── The record ──────────────────────────────────────────────────────────────
+-- The record.
 --
 -- Cloud has never had an audit log. The console has one and Cloud's user id was
 -- designed to be its actor — cloud.users' comment says the id becomes the `sub`

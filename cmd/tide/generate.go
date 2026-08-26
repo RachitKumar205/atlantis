@@ -87,9 +87,9 @@ func fetchCanonicalIR(ctx context.Context, cfg *tideConfig) (*dsl.IR, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The IR travels as opaque bytes, not as a structured proto message: it is
-	// the input to a content hash, and google.protobuf.Struct would reorder
-	// keys and change that hash for a schema nobody edited.
+	// The IR travels as opaque bytes rather than a structured proto message: it
+	// is the input to a content hash, and google.protobuf.Struct reorders keys,
+	// changing that hash for an unedited schema.
 	if len(resp.GetIr()) == 0 || string(resp.GetIr()) == "null" {
 		return nil, fmt.Errorf("server has no schema yet — run `tide apply` first")
 	}

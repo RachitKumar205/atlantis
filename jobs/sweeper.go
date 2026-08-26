@@ -39,28 +39,18 @@ type SweepExpiredHandler struct {
 // dropExpiredChunks removes whole chunks whose time range has entirely passed,
 // returning how many were dropped.
 //
-// # Why this is not a DELETE
+// Not a DELETE. The caller has established that this entity is a hypertable
+// whose ttl_field is its time dimension, and dropping a chunk is DDL, so the
+// tenant policy does not filter it. See schema.ExpiryFor.
 //
-// The caller has already established that this entity is a hypertable whose
-// ttl_field is its time dimension. Dropping a chunk is DDL, so the tenant
-// policy does not filter it — which is the only reason expiry can work at all
-// on a `partition by` entity. See schema.ExpiryFor for the full argument.
+// `older_than => now()` drops every chunk lying entirely in the past. A chunk
+// straddling now() holds rows whose ttl has not passed and is left alone; those
+// rows expire when it closes and the next sweep runs, so the lag is one
+// chunk_time_interval.
 //
-// # Why the interval is zero
-//
-// `older_than => now()` drops every chunk lying entirely in the past, which is
-// exactly "the ttl has passed for every row it holds". A chunk straddling now()
-// is left alone: it contains rows whose ttl has NOT passed, and drop_chunks
-// only removes chunks whose range falls completely before the bound. Rows in
-// that chunk expire when it closes and the next sweep runs — the lag is one
-// chunk_time_interval, which is the granularity the schema author chose.
-//
-// # Why the count is rows, not a boolean
-//
-// drop_chunks returns one row per dropped chunk. Counting them gives the
-// metric something real to report; a bare Exec would leave "dropped nothing"
-// and "did not run" indistinguishable, which is the failure this sweeper has
-// now had twice.
+// It counts rows rather than returning a boolean, because drop_chunks returns
+// one row per dropped chunk. A bare Exec leaves "dropped nothing" and "did not
+// run" indistinguishable.
 func (h *SweepExpiredHandler) dropExpiredChunks(
 	ctx context.Context, sqlSchema, table string, e *dsl.Entity,
 ) (int, error) {
@@ -157,21 +147,13 @@ func (h *SweepExpiredHandler) Handle(ctx context.Context, argsJSON []byte) error
 		// NULL, and the subquery selects no ctids. The DELETE then SUCCEEDS,
 		// reports zero rows, and expired rows accumulate forever.
 		//
-		// That is the same silent shape this function's own comment below
-		// describes fixing once already — "a sweeper that deleted nothing on
-		// every entity for months looked exactly like a sweeper with nothing to
-		// delete" — arrived at by a different route, and worse, because there is
-		// no error to collect this time.
+		// `tide apply` refuses the combination outright
+		// (admin.unexpirableEntities), so the way in is a checkpoint written
+		// before that guard existed.
 		//
-		// `tide apply` now refuses this combination outright
-		// (admin.unexpirableEntities), so the route in is a checkpoint written
-		// before that guard existed. This is the runtime's side of the same
-		// property: the state where expiry silently stops must not be reachable
-		// without a counter moving.
-		//
-		// The job is NOT failed. Other entities sweep normally, and a handler
-		// that dead-letters every five minutes is a handler somebody disables.
-		// The counter is the durable signal.
+		// The job is not failed: other entities sweep normally, and a handler
+		// that dead-letters every five minutes gets disabled. The counter is
+		// the durable signal.
 		if blocked[sqlSchema+"."+table] {
 			sweepBlockedTotal.WithLabelValues(e.ID()).Inc()
 			h.log().Warn("sweep: skipped, row-level security hides every row from the sweeper",
@@ -184,11 +166,9 @@ func (h *SweepExpiredHandler) Handle(ctx context.Context, argsJSON []byte) error
 			continue
 		}
 
-		// DELETE ... LIMIT is MySQL. Postgres rejects it outright, so for as
-		// long as this statement had that shape every sweep failed on its
-		// first entity — which nobody noticed, because the failure was
-		// swallowed below and the job was never registered to run in the first
-		// place. The bound has to be expressed as a subquery over ctid.
+		// DELETE ... LIMIT is MySQL; Postgres rejects it, so the bound is a
+		// subquery over ctid. Written the other way, every sweep fails on its
+		// first entity and the failure is swallowed below.
 		//
 		// Identifiers are quoted rather than interpolated bare: they come from
 		// the IR checkpoint, but a `table "..."` override is author-supplied
@@ -228,13 +208,10 @@ func (h *SweepExpiredHandler) Handle(ctx context.Context, argsJSON []byte) error
 	if total > 0 {
 		_ = Checkpoint(ctx, 100, fmt.Sprintf("swept %d expired row(s)", total))
 	}
-	// The denominator is entities ATTEMPTED, not len(failures)+1.
-	//
-	// It used to be the latter, which is not a count of anything. It reported
-	// "1 of 2 entities failed" when one entity of one failed, and "3 of 4" when
-	// all three did — an operator reading it would conclude something swept
-	// successfully when nothing had. The only case it happened to get right was
-	// exactly one survivor.
+	// The denominator is entities attempted, not len(failures)+1, which counts
+	// nothing: it reads "1 of 2 entities failed" when the one entity failed,
+	// and "3 of 4" when all three did, so a total failure looks partial. It is
+	// right only when exactly one entity survives.
 	//
 	// The same shape as the two failures this file's own comments describe: a
 	// number that is not connected to the thing it is reported as. TestSweeperSurfacesFailure
@@ -262,9 +239,8 @@ func (h *SweepExpiredHandler) Handle(ctx context.Context, argsJSON []byte) error
 // Whether a DELETE will match rows is a property of the table and the role. So
 // ask the catalogue about the table and the role.
 //
-// A failure here is returned rather than swallowed. Not knowing whether the
-// sweep can see its rows is not a reason to sweep anyway: that is the state
-// this whole change exists to stop being invisible.
+// A failure here is returned, not swallowed. Not knowing whether the sweep can
+// see its rows is not a reason to sweep.
 func (h *SweepExpiredHandler) blockedTables(ctx context.Context, ir *dsl.IR) (map[string]bool, error) {
 	var names []string
 	for i := range ir.Entities {

@@ -44,9 +44,8 @@ func TestPlanClassToPB(t *testing.T) {
 	}
 }
 
-// timeToPB's zero-time handling is load-bearing on the console's worker page: a
-// zero time means "never happened", and mapping it to a real timestamp would
-// render as 1970 rather than as blank.
+// A zero time means "never happened" on the console's worker page. Mapped to a
+// real timestamp it renders as 1970 rather than as blank.
 func TestTimeToPBDistinguishesZeroFromEpoch(t *testing.T) {
 	if got := timeToPB(time.Time{}); got != nil {
 		t.Errorf("zero time = %v, want nil — a never-set timestamp must not become 1970", got)

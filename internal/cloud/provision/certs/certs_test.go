@@ -46,8 +46,7 @@ func pool(t *testing.T, caPEM []byte) *x509.CertPool {
 }
 
 // verifies reports whether leaf chains to root for the given usage. Both
-// answers are interesting here — most of these tests are about a chain that
-// must NOT build.
+// answers matter: most of these tests are about a chain that must not build.
 func verifies(t *testing.T, leafPEM, rootPEM []byte, usage x509.ExtKeyUsage) bool {
 	t.Helper()
 	_, err := parseLeaf(t, leafPEM).Verify(x509.VerifyOptions{
@@ -80,10 +79,9 @@ func TestEachLeafChainsToItsOwnRoot(t *testing.T) {
 	}
 }
 
-// The invariant init-certs.sh spends twenty lines on: nothing is signed by both
-// roots. If the signer verified its clients against the authority it issues
-// from, every certificate it had ever issued would also be a credential for
-// talking to it.
+// Nothing is signed by both roots. If the signer verified its clients against
+// the authority it issues from, every certificate it had ever issued would also
+// be a credential for talking to it.
 func TestTheTwoAuthoritiesAreSeparateTrustDomains(t *testing.T) {
 	b := generate(t, "acme")
 
@@ -122,8 +120,7 @@ func TestOneOrganisationsCertificateIsRefusedByAnother(t *testing.T) {
 		t.Fatal("contoso's console certificate is accepted by acme's atlantis")
 	}
 
-	// Same common name in both, which is the point: the name collides and the
-	// certificate still does not.
+	// Same common name in both: the name collides and the certificate does not.
 	if got := parseLeaf(t, a.Console.CertPEM).Subject.CommonName; got != ConsoleCN {
 		t.Errorf("acme console CN = %q, want %q", got, ConsoleCN)
 	}
@@ -132,9 +129,9 @@ func TestOneOrganisationsCertificateIsRefusedByAnother(t *testing.T) {
 	}
 }
 
-// internal/console/client.go leaves tls.Config.ServerName unset on purpose, so
-// the leaf has to match whatever address was dialled — and there are two of
-// them, the in-cluster one and the public one.
+// internal/console/client.go leaves tls.Config.ServerName unset, so the leaf has
+// to match whatever address was dialled, and there are two of them: the
+// in-cluster one and the public one.
 func TestTheServerLeafMatchesEveryAddressItIsDialledBy(t *testing.T) {
 	b := generate(t, "acme")
 	leaf := parseLeaf(t, b.Server.CertPEM)
@@ -154,8 +151,7 @@ func TestTheServerLeafMatchesEveryAddressItIsDialledBy(t *testing.T) {
 
 // Apple's verifier rejects a TLS server certificate valid for more than 825
 // days, and says so with a message that names one of its own rules rather than
-// anything about trust. Verified at the boundary when the shell script was
-// shortened; this keeps the Go path from drifting back over the line.
+// anything about trust.
 func TestServerCertificatesStayUnderTheAppleCeiling(t *testing.T) {
 	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
 	b, err := Generate(Options{
@@ -273,8 +269,7 @@ func TestGenerateRefusesAnUnusableRequest(t *testing.T) {
 		t.Error("Generate accepted an atlantis leaf with no SAN")
 	}
 
-	// The signer is the one that is easy to forget, because it feels internal
-	// — but the console dials it over https:// and Go checks the hostname.
+	// The console dials the signer over https:// and Go checks the hostname.
 	if _, err := Generate(Options{
 		Org:            "acme",
 		ServerDNSNames: []string{"atlantis.acme.svc"},

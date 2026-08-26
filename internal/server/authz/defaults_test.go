@@ -10,10 +10,8 @@ import (
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
 
-// TestDefaultCapabilitiesArePinned states the bundles literally. The point is
-// not to restate the source — it is that widening them has to be a deliberate
-// edit to a test that says "this is what registering a caller grants", rather
-// than a one-line append that reviews as housekeeping.
+// The bundles stated literally, so widening one is an edit to a test naming
+// what registering a caller grants rather than a one-line append.
 func TestDefaultCapabilitiesArePinned(t *testing.T) {
 	readOnly := Names(DefaultCapabilities(false))
 	sort.Strings(readOnly)
@@ -69,11 +67,10 @@ func TestManagedSetCoversBothBundles(t *testing.T) {
 // capabilityNamesIn returns the quoted CAPABILITY_* literals in a .sql file,
 // excluding line comments.
 //
-// The exclusion is the point. Both migrations discuss capabilities in prose
-// above the SQL, and 0018 line 17 quotes 'CAPABILITY_SCHEMA_READ' inside a
-// comment explaining why the column stores names — so a naive regex over the
-// whole file reports a grant that the VALUES list may not contain, and every
-// assertion built on it passes on the strength of a sentence.
+// The exclusion carries the work. Both migrations discuss capabilities in prose
+// above the SQL, and 0018 quotes 'CAPABILITY_SCHEMA_READ' inside a comment
+// explaining why the column stores names, so a regex over the whole file
+// reports a grant the VALUES list may not contain.
 func capabilityNamesIn(t *testing.T, path string) map[string]bool {
 	t.Helper()
 	body, err := os.ReadFile(path)
@@ -93,15 +90,12 @@ func capabilityNamesIn(t *testing.T, path string) map[string]bool {
 	return out
 }
 
-// TestBundlesMatchTheBackfillMigration ties the Go rule to the SQL that applied
-// it once, historically.
-//
 // Two callers with the same can_mutate flag, one registered before migration
 // 0018 and one after, must hold the same grants. Nothing in the type system
 // connects a string literal in a .sql file to a []Capability in Go, so the
-// check is a read of the file: every capability the Go bundles issue must be
-// granted by the migration, and every name the migration grants must be one
-// this binary recognizes.
+// check reads the file: every capability the Go bundles issue must be granted
+// by the migration, and every name the migration grants must be one this binary
+// recognizes.
 //
 // The two bundles are checked separately against the migration's two blocks.
 // Checking a flat union would pass if CAPABILITY_SCHEMA_APPLY moved out of the
@@ -208,34 +202,29 @@ func assertSameSet(t *testing.T, what string, got map[string]bool, want []string
 	}
 }
 
-// TestConsoleBootstrapGrantsEveryRPCTheConsoleCalls is the fresh-install path,
-// checked against what the console actually does rather than against a list.
+// The fresh-install path, checked against what the console calls rather than
+// against a list.
 //
-// Removing the admin allowlist exemption means the console reaches admin RPCs
-// only if it holds grants, and it holds grants only if a migration seeds them.
-// Without the identity row the first boot of a new deployment has no identity
-// able to call RegisterCaller — the RPC that creates the first identity — and
-// the install is unrecoverable over gRPC. 0019 is where that row is written, so
-// that one claim is pinned to 0019 by name.
+// The console reaches admin RPCs only if it holds grants, and it holds grants
+// only if a migration seeds them. Without the identity row, the first boot of a
+// new deployment has no identity able to call RegisterCaller — the RPC that
+// creates the first identity — and the install is unrecoverable over gRPC. 0019
+// writes that row, so that one claim is pinned to 0019 by name.
 //
-// A missing grant for any *other* RPC fails quietly instead: the server starts,
-// and one console page returns PermissionDenied to whoever happens to open it.
-// So the expectation is computed — every RPC name appearing in internal/console
-// source, mapped through the proto's own declarations — and a new console
-// feature calling a new RPC fails here until some migration grants what it
-// needs.
+// A missing grant for any other RPC fails quietly: the server starts and one
+// console page returns PermissionDenied. So the expectation is computed from
+// every RPC name appearing in internal/console source, mapped through the
+// proto's own declarations.
 //
-// # Why the grants are scanned across every migration, not just 0019
+// The grants are scanned across every migration, not just 0019. 0019 has
+// already run on every deployment that exists, so a grant appended to it now
+// reaches fresh installs and nothing else, and the upgrade path gets a console
+// page returning PermissionDenied for ever. New grants go in the migration that
+// introduces the feature needing them.
 //
-// 0019 has already run on every deployment that exists. A grant appended to it
-// now would reach fresh installs and nothing else, so the upgrade path — the
-// one with users on it — would get a console page that returns PermissionDenied
-// forever. New grants therefore go in the migration that introduces the feature
-// needing them, and this reads the union.
-//
-// The union is discovered rather than listed. An earlier version of this test
-// named one file, and the first feature to add a console grant elsewhere failed
-// it with a message blaming the wrong migration.
+// The union is discovered rather than listed: naming one file makes the first
+// console grant added elsewhere fail with a message blaming the wrong
+// migration.
 func TestConsoleBootstrapGrantsEveryRPCTheConsoleCalls(t *testing.T) {
 	const migrationsDir = "../../../migrations/infra"
 
@@ -347,16 +336,13 @@ func rpcNamesReferencedIn(t *testing.T, dir string, methods map[string]adminpb.C
 
 // Nothing RegisterCaller hands out may include CAPABILITY_SCHEMA_APPROVE.
 //
-// The separation this asserts is the whole reason the capability is not just
-// folded into CAPABILITY_OPERATOR: the identity that wants a schema change must
-// never be the identity that permits it. Today that holds because applying
-// identities are machine cert CNs registered through RegisterCaller, and the
-// only holder of SCHEMA_APPROVE is the console — which 0019 deliberately
-// withheld SCHEMA_APPLY from.
+// The identity that wants a schema change must not be the identity that permits
+// it, which is why SCHEMA_APPROVE is separate from CAPABILITY_OPERATOR.
+// Applying identities are machine cert CNs registered through RegisterCaller,
+// and the only holder of SCHEMA_APPROVE is the console, which 0019 withholds
+// SCHEMA_APPLY from.
 //
-// It would stop holding the moment somebody appends this to a bundle to make a
-// CI pipeline stop asking. That edit reads as a one-line convenience; this is
-// what makes it read as removing the gate.
+// Appending SCHEMA_APPROVE to a registration bundle removes the gate.
 func TestApproveIsInNoRegistrationBundle(t *testing.T) {
 	for _, canMutate := range []bool{false, true} {
 		for _, name := range Names(DefaultCapabilities(canMutate)) {

@@ -17,8 +17,8 @@ import (
 // where they might not.
 
 // adoptPartitionSchema declares tenant isolation. The physical table the test
-// creates deliberately has no policy, so the declaration is a statement of
-// intent that the live database has not yet satisfied.
+// creates carries no policy, so the declaration states an intent the live
+// database has not satisfied.
 const adoptPartitionSchema = `
 entity Doc in adoptp {
   id     bigint primary

@@ -9,21 +9,14 @@
 //	ATL_TLS_KEY   path to the caller's mTLS private key (PEM)
 //	ATL_TLS_CA    path to the atlantis server's CA bundle (PEM)
 //
-// # Why there is no insecure mode
+// There is no insecure mode. Falling back to insecure.NewCredentials when
+// ATL_TLS_CERT is unset gives a caller a handshake failure rather than a
+// plaintext channel, one layer below where the cause is legible.
 //
-// [Credentials] used to return insecure.NewCredentials when ATL_TLS_CERT was
-// unset, and this doc called that "the correct choice for dev / same-cluster
-// prod where atlantis is reachable on a private bridge". Both halves were
-// wrong once the server stopped accepting plaintext:
-//
-//   - The server requires a client certificate on every connection. A caller
-//     without one does not get a private-bridge channel; it gets a handshake
-//     failure, one layer below where the cause is legible.
-//   - The certificate is not only transport security. atlantis identifies the
-//     caller by its certificate CN, and the caller allowlist, the
-//     caller-to-cert binding and the capability grants all key off it. A
-//     connection with no client cert has no identity, so there is nothing for
-//     authorization to be about.
+// The certificate is also the identity: atlantis reads the caller from its CN,
+// and the allowlist, the caller-to-cert binding and the capability grants all
+// key off that. A connection with no client certificate has nothing for
+// authorization to be about.
 package atltransport
 
 import (
@@ -81,22 +74,18 @@ func Credentials() (credentials.TransportCredentials, error) {
 	}), nil
 }
 
-// Dial returns a gRPC client connection to addr with credentials sourced
-// from Credentials() plus any extra opts the caller provides. Use this
-// for everything except where you need custom call-option machinery
-// (e.g. the JSON codec for admin RPCs — see the WithDialOption escape
-// hatch in those call sites).
+// Dial returns a gRPC client connection to addr, with credentials from
+// Credentials and any extra opts. A call site needing its own codec — the admin
+// RPCs' JSON one — passes it through opts.
 func Dial(addr string, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
 	creds, err := Credentials()
 	if err != nil {
 		return nil, err
 	}
-	// gRPC defaults the client receive limit to 4 MiB, which is too small
-	// for bulk entity Query reads — a single page of rows carrying large
-	// jsonb/blob columns (e.g. large raw_data payloads) overflows it with
-	// "received message larger than max". Raise the default; callers can
-	// still override by passing their own WithDefaultCallOptions in opts
-	// (the later value wins).
+	// gRPC's 4 MiB client receive limit is too small for a bulk entity Query: one
+	// page of rows carrying large jsonb or blob columns overflows it with
+	// "received message larger than max". A caller's own WithDefaultCallOptions
+	// in opts overrides this, since the later value wins.
 	defaults := []grpc.DialOption{
 		grpc.WithTransportCredentials(creds),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxRecvMsgBytes)),

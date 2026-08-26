@@ -19,13 +19,11 @@ import (
 
 // Renewal, through the listener that production uses.
 //
-// # Why these do not call the handler directly
-//
 // Renewal authenticates by the certificate the peer presented, which arrives on
-// r.TLS. A test that set r.TLS by hand would pass on any ClientAuth mode the
-// listener happened to be configured with — including one that never asks for a
-// certificate at all — so it would assert that the handler reads a field, not
-// that the property holds. These start the real listener and dial it.
+// r.TLS. Setting r.TLS by hand passes on any ClientAuth mode the listener is
+// configured with, including one that never asks for a certificate, so it
+// asserts that the handler reads a field rather than that the property holds.
+// These start the real listener and dial it.
 
 // renewClient dials the enrolment listener presenting certPEM/keyPEM, or
 // presenting nothing when both are empty.
@@ -86,9 +84,8 @@ type enrolledMachine struct {
 
 // enrolMachine runs a real enrolment and returns what the machine keeps.
 //
-// The key is generated here and never leaves, which is the point — so this
-// helper has to build the CSR itself rather than borrow newCSR, which throws
-// its key away.
+// The key is generated here and never leaves, so this builds the CSR itself
+// rather than borrowing newCSR, which throws its key away.
 func (f *consoleFixture) enrolMachine(t *testing.T, caller string) enrolledMachine {
 	t.Helper()
 
@@ -138,10 +135,9 @@ func TestRenewalNeedsTheCertificateItIsReplacing(t *testing.T) {
 
 // TestRenewalWorksWithTheCurrentCertificate.
 //
-// It used to also assert that atlantis's stored fingerprint rotated. Migration
-// 0032 removed that column with pinning, so what is checked instead is the
-// console's own record — which is what renewal itself resolves from, and so the
-// thing whose staleness would actually break something.
+// Migration 0032 removed atlantis's fingerprint column along with pinning, so
+// what is checked is the console's own record, which is what renewal resolves
+// from and therefore the record whose staleness breaks something.
 func TestRenewalWorksWithTheCurrentCertificate(t *testing.T) {
 	f := newEnrolmentFixture(t)
 	m := f.enrolMachine(t, "backend")
@@ -190,11 +186,9 @@ func TestRenewalWorksWithTheCurrentCertificate(t *testing.T) {
 // machine is still holding the old one — and needs a valid certificate to try
 // again.
 //
-// This used to depend on a 24-hour overlap window, which existed because
-// atlantis pinned a caller to one leaf. Migration 0032 removed the pinning and
-// with it the window: an older certificate is simply still that caller's
-// certificate until it expires, so the recovery below needs no special case at
-// all. That is the simplification a seven-day lifetime bought.
+// Migration 0032 removed the pinning that made a 24-hour overlap window
+// necessary. An older certificate is still that caller's certificate until it
+// expires, so the recovery below needs no special case.
 func TestAReplacedCertificateCanStillRenew(t *testing.T) {
 	f := newEnrolmentFixture(t)
 	m := f.enrolMachine(t, "backend")
@@ -242,8 +236,8 @@ func TestACertificateThisConsoleDidNotIssueCannotRenew(t *testing.T) {
 // subject decides nothing — and what comes back is a certificate for the caller
 // it already was.
 //
-// The assertion used to be "refused". That was weaker: it tested a comparison
-// somebody could remove, where this tests that the identity in the issued
+// Asserting only that the request is refused is weaker: it tests a comparison
+// that can be removed, where this tests that the identity in the issued
 // certificate never came from the request at all.
 func TestRenewalCannotChangeWhichCallerYouAre(t *testing.T) {
 	f := newEnrolmentFixture(t)
@@ -320,15 +314,13 @@ func TestRenewalIsAuditedWithBothFingerprints(t *testing.T) {
 	}
 }
 
-// ── helpers ─────────────────────────────────────────────────────────────────
-
 // callerFingerprint reads the certificate this console currently records for a
 // caller, or nil when it has never enrolled one.
 //
-// It used to read atlantis.caller_identities.cert_fingerprint, which migration
-// 0032 dropped — and it swallowed the resulting error and returned nil, so
-// every assertion built on it passed without checking anything. Worth naming:
-// a helper that returns a zero value on error turns three tests into no tests.
+// It reads the console's record, not atlantis.caller_identities.cert_fingerprint,
+// which migration 0032 dropped. It also fails the test on an unexpected error
+// rather than returning nil: a helper that returns a zero value on error turns
+// every assertion built on it into no assertion.
 func (f *consoleFixture) callerFingerprint(t *testing.T, caller string) []byte {
 	t.Helper()
 	rec, err := f.srv.db.forOrg(defaultOrg).currentCallerCert(context.Background(), caller)

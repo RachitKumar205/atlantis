@@ -1,28 +1,16 @@
 // Package store is Atlantis Cloud's database: who people are, and which
 // organisations they belong to.
 //
-// # What this is the record of
-//
 // Every console in the product verifies assertions and holds no accounts of its
-// own. Until this existed, the `org` claim in those assertions was whatever
-// `cloud mint -org` was handed, and the `role` claim likewise — Cloud asserted
-// membership it had no record of. This is that record, and Cloud's /authorize
-// checks it before minting.
+// own, so the `org` and `role` claims are only as good as this record. Cloud's
+// /authorize checks it before minting.
 //
-// # Why there is no bound handle here yet
-//
-// The console has orgStore, a handle that makes an unscoped query on a policed
-// table a compile error. Cloud gets the equivalent when it has a table that can
-// carry a boundary — none of the four here can, for reasons set out in
-// migrations/cloud/0001. The short version: users and identities are the
-// queries that *discover* who a request is, so they cannot be filtered by who
-// the request is, and a policy on identities would make every OAuth sign-in
-// create a duplicate account rather than find the existing one.
-//
-// What does exist from today is policyguard.go, which refuses to start if a
+// cloud.users and cloud.identities carry no row-level boundary. They are the
+// queries that discover who a request is, so they cannot be filtered by who the
+// request is, and a policy on identities would make every OAuth sign-in create a
+// duplicate account rather than find the existing one. The tables that can be
+// bound are reached through UserStore; policyguard.go refuses to start when a
 // table appears in this schema that is neither policed nor explicitly exempt.
-// That is what stops the second-factor secrets landing unpoliced without anyone
-// deciding.
 package store
 
 import (
@@ -49,21 +37,15 @@ import (
 // would turn a blip into an account that appears not to exist.
 var ErrNotFound = errors.New("not found")
 
-// ErrAlreadyExists reports a row that is already there.
-//
-// Named rather than left as a raw SQLSTATE so a caller can decide. Creating an
-// account that exists is not a failure for a seeding script and is worth
-// reporting to an operator, and those want different handling — which is
-// impossible if the only signal is a constraint name in a driver error.
+// ErrAlreadyExists reports a row that is already there. Named rather than left
+// as a driver error, so a re-run of a seeding script can treat it as success.
 var ErrAlreadyExists = errors.New("already exists")
 
 // ErrIdentityClaimed reports a provider account that belongs to another user.
 //
-// Distinct from ErrAlreadyExists, which says the row is there. This says it is
-// there and points somewhere else — the difference between "you already linked
-// this" and "somebody else did". Linking is refused rather than moved: a
-// provider account silently changing owner is how one person takes another's
-// sign-in method.
+// Distinct from ErrAlreadyExists, which says only that the row is there.
+// Linking is refused rather than moved: a provider account silently changing
+// owner is how one person takes another's sign-in method.
 var ErrIdentityClaimed = errors.New("already linked to another account")
 
 // ErrLastSignInMethod reports an unlink that would lock the account out.
@@ -92,8 +74,7 @@ type User struct {
 	Name  string
 
 	// PasswordHash is nil for an account created by OAuth that has never set
-	// one. That is a supported state, not an incomplete one — see the
-	// migration. What such an account may not do is skip the second factor.
+	// one. Such an account may not skip the second factor.
 	PasswordHash *string
 
 	EmailVerifiedAt *time.Time
@@ -139,32 +120,19 @@ func (s *Store) Close() { s.pool.Close() }
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 
 // txFinishTimeout bounds the commit and rollback in both transaction helpers,
-// which deliberately do not use the caller's context. See tx.
-//
-// Named for what it bounds. It was bindTimeout, which read as though it were
-// about `cloud.set_user` — the one statement it has never applied to.
+// which do not use the caller's context. See tx.
 const txFinishTimeout = 5 * time.Second
 
-// tx runs fn inside a transaction.
+// tx runs fn inside a transaction, for writes that span tables and belong to
+// nobody — an organisation with its owner and its queue row, where two of the
+// three existing without the third is unrecoverable. UserStore.tx is this with
+// an RLS bind in front.
 //
-// This is UserStore.tx with the RLS bind taken out. That one exists to hold
-// `cloud.set_user` for the life of a statement and is therefore bound to a user
-// id; this one is for writes that span tables and belong to nobody — creating an
-// organisation with its owner and its queue row, for instance, where two of the
-// three existing without the third is a state the product cannot recover from.
-//
-// # Why the commit and rollback abandon the caller's context
-//
-// pgx destroys the pooled connection when a rollback Exec fails, so rolling
-// back on a context that has already been cancelled churns the pool — and a
-// cancelled caller is the common case rather than an exotic one. The same
-// applies to the commit, more sharply: a caller that gives up between the last
-// statement and COMMIT would otherwise abandon a write that has already
-// happened, and the retry then collides with it.
-//
-// CreateUserWithIdentity had this skeleton inline before this existed, with a
-// comment pointing at UserStore.tx and saying it was "the same discipline".
-// Two copies of a discipline is one copy too many.
+// The commit and rollback abandon the caller's context. pgx destroys the pooled
+// connection when a rollback Exec fails, so rolling back on an already-cancelled
+// context churns the pool. A caller that gives up between the last statement and
+// COMMIT would abandon a write that has already happened, and the retry then
+// collides with it.
 func (s *Store) tx(ctx context.Context, fn func(pgx.Tx) error) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -195,17 +163,14 @@ func (s *Store) tx(ctx context.Context, fn func(pgx.Tx) error) error {
 
 // newPoolConfig builds the pool's configuration.
 //
-// Every new physical connection has its user discriminator cleared. Cloud's own
-// binds are transaction-local and revert by themselves, so this is not about
-// them — it covers a value arriving from outside this process: a role-level
-// default, a SET in the connection string's `options`, or a pooler handing back
-// somebody else's backend. Any of those would pre-bind a user, and the first
-// query that forgot to bind would read that user's rows instead of nothing.
+// Every new physical connection has its user discriminator cleared, against a
+// value arriving from outside this process: a role-level default, a SET in the
+// connection string's `options`, or a pooler handing back somebody else's
+// backend. Any of those pre-binds a user, and the first query that forgot to
+// bind reads that user's rows instead of nothing.
 //
-// SET to the empty string, deliberately NOT RESET. RESET restores the
-// parameter's session default, and an `ALTER ROLE ... SET` *is* that default —
-// so RESET would restore precisely the value it is meant to clear. The console
-// carries the same note; a test caught it on the server side first.
+// SET to the empty string, not RESET. RESET restores the parameter's session
+// default, and an `ALTER ROLE ... SET` is that default.
 func newPoolConfig(pgURL string) (*pgxpool.Config, error) {
 	cfg, err := pgxpool.ParseConfig(pgURL)
 	if err != nil {
@@ -225,14 +190,11 @@ func Migrate(pgURL string, log *slog.Logger) error {
 	return migrate.RunFS(pgURL, migrations.Cloud, "cloud", migrate.CloudHistoryTable, log)
 }
 
-// ── Users ───────────────────────────────────────────────────────────────────
-
 // NormalizeEmail is the one place an address is folded for storage and lookup.
 //
-// The database enforces the same rule with a CHECK constraint, which is what
-// makes this a convenience rather than the mechanism. An INSERT that skipped
-// this function would be refused rather than quietly creating a second account
-// for the same person under different capitalisation.
+// A CHECK constraint enforces the same rule, so an INSERT that skipped this
+// function is refused rather than quietly creating a second account for the same
+// person under different capitalisation.
 func NormalizeEmail(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
 // CreateUser inserts an account. passwordHash may be nil for an OAuth account.
@@ -295,10 +257,10 @@ func (s *Store) scanUser(ctx context.Context, sql string, arg any) (*User, error
 // newUserID mints an opaque, stable identifier.
 //
 // This becomes the `sub` claim and therefore the audit actor in every
-// organisation's console. It is deliberately not an email: an address can be
-// reassigned to a different person, which would retroactively change who an
-// audit row says acted. 128 bits from crypto/rand, prefixed so it is
-// recognisable in a log line.
+// organisation's console. Not an email: an address can be reassigned to a
+// different person, which would retroactively change who an audit row says
+// acted. 128 bits from crypto/rand, prefixed so it is recognisable in a log
+// line.
 func newUserID() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -306,8 +268,6 @@ func newUserID() (string, error) {
 	}
 	return "usr_" + hex.EncodeToString(b), nil
 }
-
-// ── Organisations and membership ────────────────────────────────────────────
 
 // CreateOrg records an organisation. Idempotent: re-creating an existing one is
 // not an error, because `cloud org register` is expected to be re-runnable.
@@ -321,10 +281,8 @@ func (s *Store) CreateOrg(ctx context.Context, name, displayName string) error {
 
 // ErrNoConsole reports an organisation nobody has told Cloud how to reach.
 //
-// Distinct from ErrNotFound, which says there is no such organisation. This one
-// exists and has members; there is simply nowhere to send them. The two need
-// telling apart because they are different mistakes — a typo in a name, versus
-// a provisioning step nobody ran.
+// Distinct from ErrNotFound: the organisation exists and has members, and there
+// is nowhere to send them.
 var ErrNoConsole = errors.New("no console is registered for this organisation")
 
 // SetConsoleURL records where an organisation's console lives.
@@ -332,12 +290,10 @@ var ErrNoConsole = errors.New("no console is registered for this organisation")
 // Written by `cloud org register`. Also the audience the assertions for that
 // console are minted with — see migration 0004 for why those are one value.
 //
-// The trailing slash is trimmed HERE rather than at the call site. This value
-// is compared against a console's CLOUD_AUDIENCE for exact equality and is
+// The trailing slash is trimmed here rather than at the call site. The value is
+// compared against a console's CLOUD_AUDIENCE for exact equality and is
 // concatenated with a path to build a redirect, so one stray slash is every
-// sign-in for that organisation failing with a message about the token. Doing
-// it in the command that happens to write it today would leave the next writer
-// to remember, and the failure it produces gives no hint what to remember.
+// sign-in for that organisation failing with a message about the token.
 func (s *Store) SetConsoleURL(ctx context.Context, org, consoleURL string) error {
 	consoleURL = strings.TrimRight(strings.TrimSpace(consoleURL), "/")
 	tag, err := s.pool.Exec(ctx,
@@ -354,13 +310,8 @@ func (s *Store) SetConsoleURL(ctx context.Context, org, consoleURL string) error
 // ConsoleURL returns where to send somebody who has been authorized into an
 // organisation.
 //
-// # Why this is the only source of a redirect target
-//
-// /authorize takes no destination from the request. It takes an organisation
-// name, checks membership, and asks this. A URL that arrived in a query
-// parameter would need validating against something, and the something would
-// be this column anyway — so the parameter is skipped and the column consulted
-// directly. There is then no input that could be validated wrongly.
+// The only source of a redirect target: /authorize takes an organisation name,
+// checks membership, and asks this, so no destination arrives in the request.
 //
 // Reports ErrNoConsole when the organisation exists but has no console, which
 // is a state `cloud org create` leaves behind and `cloud org register` clears.
@@ -410,9 +361,8 @@ func (s *Store) RemoveMember(ctx context.Context, userID, org string) error {
 
 // RoleIn returns the user's role in one organisation, or ErrNotFound.
 //
-// This is the gate /authorize consults before minting. It returns the role
-// rather than a boolean because the assertion carries it, and reading both from
-// one row is what stops the two disagreeing.
+// The gate /authorize consults before minting. Returns the role rather than a
+// boolean because the assertion carries it, read from the same row.
 func (s *Store) RoleIn(ctx context.Context, userID, org string) (identity.Role, error) {
 	var role string
 	err := s.pool.QueryRow(ctx,
@@ -427,11 +377,8 @@ func (s *Store) RoleIn(ctx context.Context, userID, org string) (identity.Role, 
 	return identity.Role(role), nil
 }
 
-// MembershipsOf lists every organisation a user belongs to, ordered by name.
-//
-// Ordered so the console's organisation switcher is stable between loads —
-// an unordered list reshuffles on every query and the entry under the cursor
-// moves.
+// MembershipsOf lists every organisation a user belongs to, ordered by name so
+// the console's organisation switcher does not reshuffle between loads.
 func (s *Store) MembershipsOf(ctx context.Context, userID string) ([]Membership, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT org, role FROM cloud.memberships WHERE user_id = $1 ORDER BY org`, userID)
@@ -481,8 +428,6 @@ func (s *Store) MembersOf(ctx context.Context, org string) ([]User, error) {
 	return out, rows.Err()
 }
 
-// ── OAuth identities ────────────────────────────────────────────────────────
-
 // Identity is a linked OAuth account.
 type Identity struct {
 	Provider  string
@@ -497,17 +442,12 @@ type Identity struct {
 // display address and reports success, which is what a second sign-in through
 // the same provider does.
 //
-// # Why the conflict clause names the user
-//
-// Without `WHERE cloud.identities.user_id = EXCLUDED.user_id`, an attempt to
-// link a provider account that ALREADY BELONGS TO SOMEBODY ELSE takes the
-// conflict branch, updates only provider_email, and returns no error. The
-// caller is told the link was made. It was not, and it still points at the
-// other account.
-//
-// That is the shape this package keeps paying for: a write that succeeds while
-// changing nothing it claimed to change. With the predicate, the update matches
-// no row and the row count says so, which is what ErrIdentityClaimed reports.
+// The conflict clause names the user. Without
+// `WHERE cloud.identities.user_id = EXCLUDED.user_id`, linking a provider
+// account that already belongs to somebody else takes the conflict branch,
+// updates provider_email, and returns no error: the caller is told a link was
+// made that still points at the other account. With the predicate the update
+// matches no row, which is what ErrIdentityClaimed reports.
 func (s *Store) LinkIdentity(ctx context.Context, userID, provider, subject, email string) error {
 	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO cloud.identities (provider, provider_subject, user_id, provider_email)
@@ -527,31 +467,21 @@ func (s *Store) LinkIdentity(ctx context.Context, userID, provider, subject, ema
 
 // UnlinkIdentity disconnects a provider from an account.
 //
-// Removes EVERY identity this user has for that provider, because "disconnect
-// GitHub" is the thing a person means and one account can hold two links from
-// one provider — the primary key is (provider, provider_subject), so linking a
-// second GitHub account is allowed.
+// Removes every identity this user has for that provider. The primary key is
+// (provider, provider_subject), so one account can hold two GitHub links, and
+// "disconnect GitHub" means both.
 //
-// # Why the rule lives in the WHERE clause
+// An account whose only way in is an OAuth link keeps it. Password reset needs
+// a password to reset, so removing the last link locks the account out for
+// good, support included.
 //
-// An account whose only way in is an OAuth link must not be able to remove it.
-// There is no recovery from that state: password reset needs a password to
-// reset, so the account is reachable by nobody, support included.
+// The rule is in the WHERE clause: between reading that the account also has a
+// password and deleting the row, another request can remove that password.
 //
-// The condition is part of the DELETE rather than a check the handler performs
-// first. Two reasons, and the second is the one that matters. A separate check
-// is one somebody can forget at the next call site — and between reading "this
-// account also has a password" and deleting the row, another request can remove
-// that password. One statement has no such window: Postgres evaluates the
-// predicate against the same snapshot it deletes from.
-//
-// # What the predicate counts, and the version of it that was wrong
-//
-// It counts identities belonging to OTHER providers. The first draft counted
-// all of the user's identities and asked for more than one, which passes for an
-// account with two GitHub links and no password — and then deletes both,
-// leaving exactly the locked-out account this function exists to prevent. The
-// count has to describe what survives the delete, not what exists before it.
+// The predicate counts identities belonging to other providers, which is what
+// survives the delete. Counting all the user's identities and asking for more
+// than one passes an account with two GitHub links and no password, then
+// deletes both.
 func (s *Store) UnlinkIdentity(ctx context.Context, userID, provider string) error {
 	tag, err := s.pool.Exec(ctx, `
 		DELETE FROM cloud.identities
@@ -565,16 +495,13 @@ func (s *Store) UnlinkIdentity(ctx context.Context, userID, provider string) err
 	if err != nil {
 		return err
 	}
-	// One or more: the delete covers every link for this provider, and reporting
-	// "not found" after removing two of them would be the same shape of lie
-	// this file keeps closing.
+	// One or more: the delete covers every link for this provider.
 	if tag.RowsAffected() >= 1 {
 		return nil
 	}
 
-	// Nothing was deleted, and the two reasons need telling apart: the link was
-	// not there, or it was the last way in. Reported distinctly because one is
-	// somebody clicking twice and the other is somebody about to be locked out.
+	// Nothing was deleted: either the link was not there, or it was the last way
+	// in. Somebody clicking twice and somebody about to be locked out.
 	var linked bool
 	if err := s.pool.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM cloud.identities WHERE user_id = $1 AND provider = $2)`,
@@ -589,16 +516,10 @@ func (s *Store) UnlinkIdentity(ctx context.Context, userID, provider string) err
 
 // CreateUserWithIdentity creates an OAuth account and its link together.
 //
-// # Why this is not CreateUser followed by two more calls
-//
-// An account arriving through a provider needs three things written: the user,
-// the fact that the address is already verified, and the identity. CreateUser
-// cannot set email_verified_at, so done separately that is three statements
-// with two gaps in it, and a failure in either gap leaves a row somebody is
-// stuck behind — an account that cannot sign in because nothing verified it, or
-// one with no way in because the link never landed. Neither is visible as an
-// error to the person who just consented; both present as "it didn't work",
-// and the retry hits the UNIQUE constraint on the email.
+// One transaction because CreateUser cannot set email_verified_at: three
+// separate statements leave two gaps, and a failure in either leaves an account
+// that cannot sign in because nothing verified it, or one with no linked
+// identity. The retry then hits the UNIQUE constraint on the email.
 //
 // The address is stored verified because the provider attested it, and the
 // caller has already refused anything the provider did not flag as verified.
@@ -675,11 +596,10 @@ func (s *Store) IdentitiesOf(ctx context.Context, userID string) ([]Identity, er
 
 // UserByIdentity resolves an OAuth account to a Cloud user.
 //
-// This runs during a callback, before anyone is signed in, and it is the query
-// that establishes who they are — which is exactly why cloud.identities carries
-// no row-level boundary. Under a policy keyed to the current user this would
-// match nothing, and the caller would read that as "not linked" and create a
-// second account for the same person on every sign-in.
+// Runs during a callback, before anyone is signed in, which is why
+// cloud.identities carries no row-level boundary. Under a policy keyed to the
+// current user this would match nothing, and the caller would read that as "not
+// linked" and create a second account on every sign-in.
 func (s *Store) UserByIdentity(ctx context.Context, provider, subject string) (*User, error) {
 	var userID string
 	err := s.pool.QueryRow(ctx,

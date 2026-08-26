@@ -279,9 +279,9 @@ func printJobStatusRow(j *adminpb.JobStatus) {
 		fmt.Printf("%s     %s %s\n", cliout.Red("error"), cliout.Grey("(at "+j.GetLastErrorAt()+")"), cliout.Red(j.GetLastError()))
 	}
 	if j.GetProgressPct() >= 0 && (j.GetProgressPct() > 0 || j.GetProgressMsg() != "") {
-		// ProgressPct=-1 means the handler hasn't reported. We render
-		// anything else (including a deliberate 0% with a message)
-		// so a long-running job's last-known state is visible.
+		// ProgressPct = -1 means the handler has not reported. Everything else
+		// renders, 0% with a message included, so a long-running job's
+		// last-known state stays visible.
 		msg := j.GetProgressMsg()
 		if msg == "" {
 			msg = cliout.Grey("(no message)")

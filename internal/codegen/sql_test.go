@@ -5,9 +5,8 @@ import (
 	"testing"
 )
 
-// assertContains is a small helper for substring assertions on emitted SQL.
-// It's loose by design: we want to verify the emitter generates the right
-// shape, not pin every whitespace detail.
+// assertContains asserts a substring of emitted SQL. Loose: it checks the
+// shape, not the whitespace.
 func assertContains(t *testing.T, haystack, needle string) {
 	t.Helper()
 	if !strings.Contains(haystack, needle) {
@@ -262,8 +261,6 @@ entity D in x {
 		assertContains(t, up, sub)
 	}
 }
-
-// ---- diff-based emission ----
 
 func TestEmit_Diff_NoChanges(t *testing.T) {
 	ir := lower(t, `entity A in x { id bigint primary }`)
@@ -525,10 +522,9 @@ func TestSnakeCase(t *testing.T) {
 	}
 }
 
-// TestEmit_TableOverride_SchemaQualified verifies that the `table
-// "<schema.table>"` modifier moves the emitted DDL out of the atlantis
-// schema and onto the operator's existing prod table. The whole point of
-// the modifier is to let atlantis run against pre-existing data.
+// The `table "<schema.table>"` modifier moves the emitted DDL out of the
+// atlantis schema and onto the operator's existing table, which is how atlantis
+// runs against pre-existing data.
 func TestEmit_TableOverride_SchemaQualified(t *testing.T) {
 	ir := lower(t, `entity Account in consumer {
   table "consumer.accounts"
@@ -568,9 +564,8 @@ func TestEmit_TableOverride_NoOverride(t *testing.T) {
 	assertContains(t, scripts.Up, `CREATE TABLE IF NOT EXISTS "atlantis"."consumer_account"`)
 }
 
-// TestEmit_TableOverride_FKTargetsOverride: when an FK points at an
-// entity with `table "..."`, REFERENCES must use the override location.
-// If we ever regress here, FKs would silently target the wrong table.
+// An FK pointing at an entity with `table "..."` must render REFERENCES against
+// the override location. Otherwise the FK targets the wrong table silently.
 func TestEmit_TableOverride_FKTargetsOverride(t *testing.T) {
 	ir := lower(t, `
 entity Account in consumer {

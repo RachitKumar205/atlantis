@@ -46,39 +46,23 @@ type healthDeps struct {
 // newHealthServer wires the four health routes on addr, over TLS, with two
 // different trust levels.
 //
-// # Why this listener has a credential at all
+// The disclosing routes require a credential. Organisations are provisioned
+// into a shared cluster and run their customers' SQL, so a neighbouring pod
+// belongs to another operator, and a NetworkPolicy does not carry across that:
+// `ipBlock` covers pod traffic under Calico, never covers it under GKE
+// Dataplane V2, and matches nothing on EKS, where pods take VPC addresses. The
+// manifest reads the same on all three.
 //
-// It used to have none, and the comment on statusHandler explained why: these
-// routes "live on the same port as /healthz and /metrics which are already
-// exposed at the platform layer". That was a reasonable position for a
-// single-tenant deployment, where every workload in the cluster belongs to one
-// operator and a NetworkPolicy is a sufficient boundary.
+// The two trust levels: /healthz and /readyz disclose nothing and stay
+// reachable by the kubelet, which presents no certificate; /status gives the
+// schema and build version and /metrics per-caller RPC counts, which describe a
+// customer's system.
 //
-// It is not this deployment. Organisations are provisioned into a shared
-// cluster and run their customers' SQL, so a neighbouring pod is somebody
-// else's program. The only thing that kept it out was a NetworkPolicy — and
-// that policy is not portable: `ipBlock` covers Pod traffic under Calico, never
-// covers it under GKE Dataplane V2, and on EKS the exclusion matches nothing at
-// all because Pods take VPC addresses. On one of those the isolation silently
-// stops existing while every manifest still says it is there.
-//
-// So the network is no longer the boundary. A credential is, and the policy
-// becomes a second layer whose inconsistency is tolerable.
-//
-// # Why one listener rather than two
-//
-// The routes carry two trust levels. /healthz and /readyz disclose nothing and
-// must stay reachable by the kubelet, which presents no certificate. /status
-// gives the schema and build version; /metrics gives per-caller RPC counts.
-// Those describe a customer's system.
-//
-// Two ports would express that split, at the cost of a second Service port, a
-// second stored address, and a migration to carry it. One listener with
-// VerifyClientCertIfGiven expresses the same thing: an absent certificate is
-// allowed onto the open routes, a presented one is verified against the same CA
-// the admin plane uses, and the closed routes require that verification to have
-// happened. The distinction is enforced per route by credential rather than by
-// port number.
+// One listener with VerifyClientCertIfGiven, not two ports. An absent
+// certificate reaches the open routes, a presented one is verified against the
+// CA the admin plane uses, and the closed routes require that verification.
+// A second port would need a second Service port, a second stored address, and
+// a migration to carry it.
 //
 // Once shutdownSignal cancels, /readyz returns 503 immediately so the load
 // balancer drains the pod before the HTTP server itself shuts down.
@@ -128,11 +112,10 @@ func requireClientCert(next http.HandlerFunc) http.HandlerFunc {
 // statusHandler returns a small JSON document for the console's Health
 // page — uptime, server version, current schema version.
 //
-// Behind requireClientCert. It used to be open, on the argument that it shared
-// a port with routes already exposed at the platform layer; see newHealthServer
-// for why that argument no longer holds here. The schema version is read fresh
-// on each call so the chip reflects the latest applied version without a
-// SPA-side cache.
+// Behind requireClientCert; see newHealthServer.
+//
+// The schema version is read on each call, so the console shows the latest
+// applied version with no cache of its own.
 func statusHandler(deps healthDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), deps.ProbeTimeout)

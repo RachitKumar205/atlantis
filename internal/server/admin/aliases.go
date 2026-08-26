@@ -80,9 +80,8 @@ type SetCallerAliasesResponse struct {
 //   - Each alias must be a non-empty string, non-equal to its own
 //     caller (no self-loop — pointless), and not collide with any
 //     other caller's canonical name (would create an ambiguous
-//     authentication-vs-alias split). The collision check is a
-//     defense-in-depth follow-up; today we allow it and operators
-//     are responsible for not creating conflicts.
+//     authentication-vs-alias split). The collision check is not
+//     implemented, so a conflicting alias is accepted.
 //   - Reserved names ("atlantis", "atlantis-console", etc.) are
 //     rejected the same way they are in RegisterCaller.
 func (s *Service) SetCallerAliases(ctx context.Context, req *adminpb.SetCallerAliasesRequest) (*adminpb.SetCallerAliasesResponse, error) {

@@ -47,13 +47,11 @@ func (f *consoleFixture) meBody(t *testing.T, token string) (org string, orgs []
 	return got.Org, got.Orgs
 }
 
-// TestTheOrgListReachesTheBrowserFromTheSessionRow is the whole delivery path:
-// claim → session row → /api/auth/me.
+// The delivery path end to end: claim → session row → /api/auth/me.
 //
-// The middle step is the one worth pinning. The console cannot ask Cloud what a
-// user belongs to — step 3 severed that on purpose, so that Cloud being down is
-// not a console being down — so if the list is not on the row, there is nowhere
-// for it to come from and the switcher silently never appears.
+// The console cannot ask Cloud what a user belongs to, so that Cloud being down
+// is not a console being down. If the list is not on the row, there is nowhere
+// for it to come from and the switcher never appears.
 func TestTheOrgListReachesTheBrowserFromTheSessionRow(t *testing.T) {
 	f := newConsoleFixture(t)
 
@@ -256,10 +254,10 @@ func TestSandboxesDoNotCrossTheSwitch(t *testing.T) {
 	// boot cannot succeed — but it must fail for the right reason, and 429 is
 	// the wrong one.
 	//
-	// Before the destroy below, deliberately. A build where the organisation is
-	// not part of the key answers that destroy with 204, and a sandbox that has
-	// just been destroyed is not counted against anything — so checking the
-	// count afterwards would agree with the broken build.
+	// Before the destroy below. A build where the organisation is not part of
+	// the key answers that destroy with 204, and a just-destroyed sandbox is
+	// counted against nothing, so checking the count afterwards agrees with the
+	// broken build.
 	if w := f.post(t, "/api/sandbox", `{"backend":"sim"}`, globex); w.Code == http.StatusTooManyRequests {
 		t.Errorf("the other organisation is billed for it: %s", w.Body.String())
 	}

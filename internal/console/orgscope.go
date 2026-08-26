@@ -12,16 +12,11 @@ import (
 
 // orgStore is a store bound to one organisation.
 //
-// # Why this is a type rather than an argument
-//
-// One console process serves many organisations, so `console.audit_log` holds
-// several organisations' rows and every query against it has to be scoped. The
-// obvious implementation is an `org string` parameter on each method, and it
-// fails in the way scoping always fails: the compiler cannot tell the
-// difference between the right value, the wrong one, and one somebody forgot to
-// thread through. `deleteAllSessions` was `DELETE FROM console.sessions` with no
-// WHERE for exactly that reason — nobody decided it should cross organisations,
-// it simply never occurred to anyone that it would.
+// One console process serves many organisations, so console.audit_log holds
+// several organisations' rows and every query against it must be scoped. A type
+// rather than an `org string` parameter: the compiler cannot distinguish a
+// correct argument from a wrong one or a missing one, and an unscoped
+// `DELETE FROM console.sessions` compiles.
 //
 // Methods that touch organisation-scoped data hang off this type and read the
 // organisation from the handle. A handler that has not said which organisation
@@ -44,28 +39,21 @@ func (s *store) forOrg(org string) *orgStore { return &orgStore{db: s, org: org}
 
 // ErrNoOrg reports an attempt to bind an empty organisation.
 //
-// Fails closed on purpose. An empty bind would leave console.current_org()
-// returning NULL, under which the RESTRICTIVE policy admits nothing — so the
-// caller would see an empty audit log rather than an error, and "the page is
-// blank" is a much harder thing to diagnose than a refusal.
+// Fails closed. An empty bind leaves console.current_org() returning NULL,
+// under which the RESTRICTIVE policy admits nothing, so the caller reads an
+// empty audit log rather than an error.
 var ErrNoOrg = errors.New("no organisation bound")
 
-// bindTimeout bounds the commit and rollback below, which deliberately do not
-// use the request context.
+// bindTimeout bounds the commit and rollback below, which do not use the
+// request context.
 const bindTimeout = 5 * time.Second
 
 // tx runs fn inside a transaction with the organisation bound.
 //
-// # Why a transaction is required, not merely convenient
-//
-// console.set_org uses set_config(..., true), which is transaction-local. That
-// is what makes it safe on a pooled connection: the value reverts when the
-// transaction ends, so the next request to borrow the same backend cannot
-// inherit it. A plain SET on the pool would persist to whatever unrelated
-// request came next, which is the whole hazard.
-//
-// Before this, every console query ran directly on the pool and nothing here
-// opened a transaction at all.
+// A transaction is required. console.set_org uses set_config(..., true), which
+// is transaction-local, so the value reverts when the transaction ends and the
+// next request to borrow the same backend cannot inherit it. A plain SET on the
+// pool would persist to an unrelated request.
 func (o *orgStore) tx(ctx context.Context, fn func(pgx.Tx) error) error {
 	if o.org == "" {
 		return ErrNoOrg
@@ -114,22 +102,18 @@ func (o *orgStore) tx(ctx context.Context, fn func(pgx.Tx) error) error {
 
 // newPoolConfig builds the console pool's configuration.
 //
-// # The AfterConnect hook
-//
-// Every new physical connection has its organisation discriminator cleared.
-// atlantis's own binds are transaction-local and revert by themselves, so this
-// is not about them — it covers a value arriving from outside this process: a
+// AfterConnect clears the organisation discriminator on every new physical
+// connection. The binds this package makes are transaction-local and revert on
+// their own; this covers a value arriving from outside the process — a
 // server-level or role-level default, a SET in the connection string's
-// `options`, or a connection pooler handing back somebody else's backend. Any
-// of those would pre-bind an organisation, and the first query that forgot to
-// bind would read that organisation's rows instead of nothing.
+// `options`, or a pooler returning another session's backend. Any of those
+// pre-binds an organisation, and the first query that failed to bind would read
+// that organisation's rows rather than none.
 //
-// SET to the empty string, deliberately NOT RESET. RESET restores the
-// parameter's session default — and an `ALTER ROLE ... SET` *is* that default,
-// so RESET would restore precisely the value it is meant to clear. The
-// server-side version was written as RESET first and a test caught it. The
-// empty string reads back as NULL through console.current_org(), because of the
-// nullif in its body.
+// SET to the empty string, not RESET. RESET restores the parameter's session
+// default, and an `ALTER ROLE ... SET` is that default, so RESET restores
+// precisely the value it is meant to clear. The empty string reads back as NULL
+// through console.current_org(), because of the nullif in its body.
 func newPoolConfig(pgURL string) (*pgxpool.Config, error) {
 	cfg, err := pgxpool.ParseConfig(pgURL)
 	if err != nil {

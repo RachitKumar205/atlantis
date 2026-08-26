@@ -1,5 +1,5 @@
 // Package invalidate writes the cache_invalidations outbox and drains it.
-// Schema in migrations/0000_outbox.up.sql.
+// Schema in migrations/infra/0000_outbox.up.sql.
 package invalidate
 
 import (

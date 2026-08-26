@@ -7,13 +7,12 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/runtime"
 )
 
-// Outbox is the runtime.Outbox stub. Generated Create/Update/Delete
-// handlers call Enqueue inside the tx before commit, then
-// EnqueueGenerationBump afterward — for the sim we silently record both
-// without driving a real worker or NOTIFY-channel pipeline.
+// Outbox is the runtime.Outbox stub. Generated Create, Update and Delete
+// handlers call Enqueue inside the transaction and EnqueueGenerationBump after
+// it; both are recorded here, with no worker and no NOTIFY pipeline.
 //
-// Tests that want to assert "the handler emitted the right invalidation"
-// inspect Recorded(); everything else can ignore the outbox.
+// Recorded() returns what the handler emitted, for a test asserting on the
+// invalidation.
 type Outbox struct {
 	mu       sync.Mutex
 	enqueues []EnqueueCall

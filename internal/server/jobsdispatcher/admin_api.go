@@ -82,9 +82,8 @@ type EventSnapshot struct {
 // in-memory state under d.mu.RLock so it's safe to call concurrently
 // with register / unregister / drain.
 //
-// Ordering: stable-by-SessionID so successive polls of the same set
-// render with the same row order. Sorting in the console is per-
-// column user-driven; this just gives us a consistent baseline.
+// Ordered by SessionID so successive polls of the same set render in the same
+// row order. The console sorts per column on top of this.
 func (d *Dispatcher) SnapshotSessions() []SessionSnapshot {
 	d.mu.RLock()
 	out := make([]SessionSnapshot, 0, len(d.sessions))
@@ -159,10 +158,9 @@ func (d *Dispatcher) DrainSession(sessionID string) error {
 		"session", sessionID, "caller", s.caller, "queue", s.queue,
 		"inflight", s.inflightCount())
 
-	// Background watcher: once inflight reaches zero, send Goodbye and
-	// close the stream so the worker disconnects cleanly. We don't
-	// block the caller — drain is intentionally async so the console
-	// can poll for completion.
+	// Background watcher: once inflight reaches zero, send Goodbye and close
+	// the stream so the worker disconnects cleanly. The caller is not blocked,
+	// so the console polls for completion.
 	go d.awaitDrainAndClose(s)
 	return nil
 }
@@ -253,8 +251,8 @@ func (d *Dispatcher) awaitDrainAndClose(s *session) {
 	case s.outbox <- &DispatchEnvelope{Goodbye: &Goodbye{Reason: "drained"}}:
 	default:
 	}
-	// Small sleep so the Goodbye actually leaves the outbox before we
-	// close the channel out from under the sender goroutine.
+	// Small sleep so the Goodbye leaves the outbox before the channel closes
+	// under the sender goroutine.
 	time.Sleep(50 * time.Millisecond)
 	s.close()
 }
@@ -299,9 +297,8 @@ func sortSnapshots(in []SessionSnapshot) {
 // jobs.ReleaseRow with the dispatcher's reason string so the row's
 // last_error column shows "released:evicted" in PG.
 func releaseEvicted(ctx context.Context, d *Dispatcher, s *session, jobID int64) error {
-	// We import jobs lazily here to avoid a cycle; the file-level
-	// imports above stay narrow. (The jobs package is already linked
-	// elsewhere in this binary, so this isn't a heavyweight import.)
+	// jobs is reached through a function variable rather than imported at file
+	// level, to avoid a cycle. It is already linked into this binary.
 	return releaseRowFunc(ctx, d.pool, jobID, s.claimedBy(), "evicted")
 }
 

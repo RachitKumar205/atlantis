@@ -12,10 +12,9 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Token purposes. Presenting a token issued for one does not satisfy the other:
-// they are issued under different conditions — verification at sign-up to an
-// address nobody has proven, reset on request to one already proven — so a
-// token good for either would be only as strong as the weaker path.
+// Token purposes. A token issued for one does not satisfy the other: they are
+// issued under different conditions, verification at sign-up to an unproven
+// address and reset to a proven one.
 const (
 	PurposeVerifyEmail   = "verify_email"
 	PurposeResetPassword = "reset_password"
@@ -23,10 +22,8 @@ const (
 
 // Token lifetimes.
 //
-// Verification is generous because the common failure is a person who signs up
-// and reads their email tomorrow. Reset is short because the window is the
-// exposure: a reset link sitting in an inbox is a live credential, and the
-// person asked for it seconds ago.
+// Verification is generous: an address may not be read for a day. Reset is
+// short, because a reset link sitting in an inbox is a live credential.
 const (
 	VerifyTokenTTL = 24 * time.Hour
 	ResetTokenTTL  = 1 * time.Hour
@@ -35,15 +32,13 @@ const (
 // ErrTokenInvalid reports a token that is unknown, expired, already spent, or
 // issued for a different purpose.
 //
-// Deliberately one error for all four. Telling a caller which would let
-// somebody probe for valid tokens, and none of the four gives the user
-// different advice: the answer is always "ask for another link".
+// One error for all four: distinguishing them would let a caller probe for
+// valid tokens, and every case has the same remedy.
 var ErrTokenInvalid = errors.New("this link is not valid any more")
 
 // IssueEmailToken mints a token, stores its hash, and returns the token.
 //
-// The returned string is the only time the token exists outside the caller's
-// hand — the database holds a SHA-256 of it, so a read of cloud.email_tokens is
+// The database holds a SHA-256 of the token, so a read of cloud.email_tokens is
 // not a working reset for every pending account.
 func (s *Store) IssueEmailToken(ctx context.Context, userID, email, purpose string, ttl time.Duration) (string, error) {
 	if purpose != PurposeVerifyEmail && purpose != PurposeResetPassword {
@@ -75,18 +70,12 @@ type SpentToken struct {
 
 // SpendEmailToken validates a token for one purpose and marks it used.
 //
-// # Why the check and the spend are one statement
+// The check and the spend are one statement: UPDATE ... WHERE used_at IS NULL
+// ... RETURNING, with the row count as the answer. Reading and then updating
+// leaves a window in which two concurrent requests both see the token unused.
 //
-// Reading the row and then updating it leaves a window in which two concurrent
-// requests both see the token as unused — which is exactly the race a replay
-// would exploit, and the narrower it gets the harder the resulting bug is to
-// believe. The UPDATE ... WHERE used_at IS NULL ... RETURNING does both, and
-// the row count is the answer.
-//
-// The address is compared as well as the user, so a reset issued to an old
-// address cannot be spent after the account's address has changed. Without it,
-// somebody who controlled the mailbox at issue time keeps a working reset after
-// losing it.
+// The address is compared as well as the user, so a token issued to an address
+// the account no longer holds cannot be spent.
 func (s *Store) SpendEmailToken(ctx context.Context, token, purpose string) (*SpentToken, error) {
 	sum := sha256.Sum256([]byte(token))
 
@@ -115,10 +104,8 @@ func (s *Store) SpendEmailToken(ctx context.Context, token, purpose string) (*Sp
 // InvalidateEmailTokens spends every outstanding token of one purpose for a
 // user.
 //
-// Called after a password is set, so that any other reset link in flight stops
-// working. Without it, requesting three resets leaves three live credentials
-// and using one leaves two — which matters precisely when a reset was requested
-// because somebody else had access.
+// Called after a password is set, so any other reset link in flight stops
+// working. Three requests otherwise leave three live credentials.
 func (s *Store) InvalidateEmailTokens(ctx context.Context, userID, purpose string) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE cloud.email_tokens SET used_at = NOW()
@@ -129,10 +116,8 @@ func (s *Store) InvalidateEmailTokens(ctx context.Context, userID, purpose strin
 
 // DeleteExpiredEmailTokens removes rows that can no longer be spent.
 //
-// Returns the count so a caller can log it. Rows are kept until expiry rather
-// than deleted on use, which is what lets a second presentation of the same
-// link be told apart from one that never existed — useful in a log, and the
-// reason this sweep exists at all rather than deleting on spend.
+// Rows are kept until expiry rather than deleted on use, so a second
+// presentation of the same link is distinguishable from one that never existed.
 func (s *Store) DeleteExpiredEmailTokens(ctx context.Context) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `DELETE FROM cloud.email_tokens WHERE expires_at < NOW()`)
 	if err != nil {
@@ -141,14 +126,11 @@ func (s *Store) DeleteExpiredEmailTokens(ctx context.Context) (int64, error) {
 	return tag.RowsAffected(), nil
 }
 
-// ── Passwords ───────────────────────────────────────────────────────────────
-
 // SetPassword stores a hash, which the caller has already produced.
 //
-// Takes a hash rather than a password on purpose: this package does not import
-// the hashing one, so there is no path by which a plaintext password reaches a
-// SQL statement. The type system will not stop somebody passing plaintext here,
-// but the signature and this note mean nobody does it by accident.
+// Takes a hash rather than a password. This package does not import the hashing
+// package, so no code path carries a plaintext password into a SQL statement.
+// The type does not enforce it; the parameter name does.
 func (s *Store) SetPassword(ctx context.Context, userID, passwordHash string) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE cloud.users SET password_hash = $2, updated_at = NOW() WHERE id = $1`,

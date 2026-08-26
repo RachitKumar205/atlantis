@@ -12,30 +12,20 @@ import (
 // ValidateEntityExpressions runs the forbidden-call gate over the SQL an entity
 // declaration carries outside a query or procedure body.
 //
-// # Why this exists separately from validateBlock
+// Separate from validateBlock, which sees only `query{}` bodies and procedure
+// raw steps. internal/codegen/sql.go emits a CHECK expression verbatim into DDL
+// as `CONSTRAINT <name> CHECK (<expr>)`, and PostgreSQL does not require it to
+// be IMMUTABLE, so a call planted there runs on every INSERT and UPDATE.
 //
-// The gate was wired into validateBlock, which sees `query{}` bodies and
-// procedure raw steps, and that was mistaken for "all caller-authored SQL". It
-// is not. A CHECK expression is author-written SQL that atlantis emits verbatim
-// into DDL (internal/codegen/sql.go, `CONSTRAINT <name> CHECK (<expr>)`), and
-// PostgreSQL does not require a CHECK expression to be IMMUTABLE. So a call
-// planted there executes on every INSERT and UPDATE of the row.
+// set_config writes the parameter without going through set_partition, so it
+// rebinds the tenant of a transaction that was correctly bound and the
+// once-only guard never sees it. On PostgreSQL 17.8, as a NOSUPERUSER
+// NOBYPASSRLS role bound to tenant A, an INSERT firing such a CHECK left the
+// discriminator reading tenant B for the rest of the transaction.
 //
-// That is worse than the residual risk `partition by` already accepts. Dropping
-// the policy or removing `partition by` is visible in a plan diff; a
-// set_config buried in a CHECK reads as an ordinary constraint, survives
-// review, and rebinds the tenant of a transaction that was correctly bound —
-// which defeats every other defence at once, including the once-only guard,
-// because set_config writes the parameter without going through the setter.
-//
-// Reproduced on PostgreSQL 17.8 as a NOSUPERUSER NOBYPASSRLS role: bound to
-// tenant A, an INSERT firing such a CHECK left the discriminator reading
-// tenant B, and every later statement in the transaction read tenant B's rows.
-//
-// Partial-index predicates are included even though PostgreSQL refuses a
-// volatile function there ("functions in index predicate must be marked
-// IMMUTABLE"). Relying on that would make this gate's coverage depend on an
-// unrelated PostgreSQL rule that atlantis does not control.
+// Partial-index predicates are covered too. PostgreSQL refuses a volatile
+// function there — "functions in index predicate must be marked IMMUTABLE" —
+// but that is its rule to change, not atlantis's.
 func ValidateEntityExpressions(e *dsl.Entity) error {
 	var errs []error
 
@@ -60,28 +50,18 @@ func ValidateEntityExpressions(e *dsl.Entity) error {
 		// several: query bodies, procedure steps, table CHECKs, field CHECKs,
 		// partial-index predicates, backfill expressions and index expressions.
 		//
-		// Deliberately not numbered, and deliberately not called complete.
-		// Every count stated in this repository has been short, including the
-		// two that replaced the previous short one — a later review found this
-		// enumeration listed eight while the sentence said seven, and then
-		// found a channel none of the counts had: author text is emitted
-		// verbatim into the migration's `--` comment lines, where a newline
-		// ends the comment and puts the rest at top level (closed at the
-		// emitter, see sqlBuilder.commentf).
+		// That list is not complete. Author text also reaches the migration's
+		// `--` comment lines, where a newline ends the comment and leaves the
+		// rest at top level; sqlBuilder.commentf closes that one.
 		//
-		// Coverage is also uneven, not just incomplete: `backfill` is gated
-		// from internal/server/admin/backfill.go but NOT at plan time and NOT
-		// in the boot audit, because AuditForbiddenCalls runs
-		// ValidateEntityExpressions, which never reads Field.Backfill.
-		// codegen emits this one into the column definition
-		// AND internal/server/entity inlines it into every generated INSERT as
-		// COALESCE($n::type, <raw expr>) — so it executes on every insert that
-		// omits the column, not only at CREATE TABLE.
+		// Coverage is uneven as well. `backfill` is gated from
+		// internal/server/admin/backfill.go, not at plan time and not in the
+		// boot audit: AuditForbiddenCalls runs ValidateEntityExpressions, which
+		// never reads Field.Backfill.
 		//
-		// An adversarial review put set_config in one and rebound the tenant
-		// mid-transaction on PostgreSQL 17.8, while the gate reported nothing.
-		// The migration comment listing the covered surfaces named four; that
-		// enumeration was the defect.
+		// This surface runs on every insert that omits the column, not only at
+		// CREATE TABLE — internal/server/entity inlines it into the generated
+		// INSERT as COALESCE($n::type, <raw expr>).
 		if f.Default != nil && f.Default.Kind == dsl.DefaultIRRaw && f.Default.Str != "" {
 			if err := checkExpression(f.Default.Str,
 				fmt.Sprintf("%s: field %q default", e.ID(), f.Name)); err != nil {
@@ -90,21 +70,16 @@ func ValidateEntityExpressions(e *dsl.Entity) error {
 		}
 	}
 	for i, idx := range e.Indexes {
-		// `index by expr "<sql>"` — the seventh caller-authored SQL surface, and
-		// the most dangerous one found. codegen emits it as `((<expr>))` inside
-		// CREATE INDEX with no validation at all: internal/dsl/ir.go says
-		// outright "Raw SQL expression — Postgres validates at migration time.
-		// We don't try to parse it here."
+		// `index by expr "<sql>"` is emitted as `((<expr>))` inside CREATE
+		// INDEX, and internal/dsl/ir.go leaves the expression to Postgres at
+		// migration time.
 		//
-		// PostgreSQL validating it later is not a gate, because the escape is a
-		// STATEMENT boundary rather than a bad expression. A review closed the
-		// parenthesis and appended its own DDL:
+		// Postgres validating it later is not a gate: the escape is a statement
+		// boundary, not a bad expression.
 		//
 		//	index by expr "lower(email)); DROP POLICY IF EXISTS <policy> ON <table>; CREATE INDEX zz ON <table> ((1"
 		//
-		// which applies cleanly and drops the tenant-isolation policy off the
-		// table. Every other defence in this package protects a policy that this
-		// one could delete.
+		// applies cleanly and drops the tenant-isolation policy off the table.
 		for j, f := range idx.Fields {
 			if !f.IsExpr || f.Expr == "" {
 				continue
@@ -135,27 +110,21 @@ func ValidateEntityExpressions(e *dsl.Entity) error {
 // checkExpression applies the forbidden-call gate to one expression, parsed in
 // the syntactic context codegen actually emits it into.
 //
-// # Why the context matters, and why the first version of this leaked
-//
-// It parsed `SELECT (<expr>)` and skipped anything that failed to parse, on the
-// reasoning that PostgreSQL would reject it too. That reasoning is false,
-// because the two are different strings. codegen emits
+// Parsing `SELECT (<expr>)` and skipping what fails is unsound: codegen emits
 // `CONSTRAINT <name> CHECK (<expr>)` inside CREATE TABLE, so an expression that
-// closes the CHECK's parenthesis early is a parse error as a SELECT and
-// perfectly good DDL in place:
+// closes the CHECK's parenthesis early is a parse error as a SELECT and valid
+// DDL in place.
 //
 //	check "true) , CONSTRAINT ck_evil CHECK (set_config('atlantis.tenant','victim',true) IS NOT NULL"
 //
 // emits two constraints, the second of which rebinds the tenant on every write.
-// An adversarial review executed exactly that against PostgreSQL 17.8 as a
-// NOSUPERUSER NOBYPASSRLS role and read another tenant's row through it, while
-// this function returned nil.
+// On PostgreSQL 17.8, as a NOSUPERUSER NOBYPASSRLS role, a read through it
+// returned another tenant's row while this function returned nil.
 //
-// So: parse it as the constraint it becomes, reject what does not parse, and
-// require that it yields exactly one constraint. The last of those is the one
-// that catches the injection — the forbidden-call walk would have found the
-// planted set_config too, but only once the payload was parsed in a shape that
-// contains it. Structure first, contents second.
+// So the checks are structural first: parse it as the constraint it becomes,
+// reject what does not parse, and require exactly one constraint. The
+// forbidden-call walk finds the planted set_config only once the payload is
+// parsed in a shape that contains it.
 func checkExpression(expr, context string) error {
 	if expr == "" {
 		return nil
@@ -189,8 +158,8 @@ func checkExpression(expr, context string) error {
 }
 
 // countTableConstraints counts the table-level constraints a parsed CREATE
-// TABLE declares. One is the constraint we wrapped; anything more came from the
-// expression closing its own parenthesis.
+// TABLE declares. One is the probe's own wrapper; anything more came from the
+// expression closing that parenthesis.
 func countTableConstraints(stmt *pg.Node) int {
 	create := stmt.GetCreateStmt()
 	if create == nil {

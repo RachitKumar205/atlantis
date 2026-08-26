@@ -270,11 +270,11 @@ job Open in shop {
 // TestVisibleToRefusesACallerTheJobDoesNotName covers the gate that used to
 // read req.SubmittedBy.
 //
-// That value is filled by cmd/tide from $USER, so the check was decorative:
-// any authenticated caller could type the name the job declared and submit.
-// It now reads the mTLS identity, and the point of driving it through the real
-// RPC is that a request CAN still carry a submitted_by claiming to be someone
-// else — the test sends exactly that, and it must not help.
+// That value is filled by cmd/tide from $USER, so a check against it is
+// decorative: any authenticated caller can type the name the job declared and
+// submit. The check reads the mTLS identity instead. Driven through the real
+// RPC because a request can still carry a submitted_by naming somebody else,
+// which is what this sends.
 func TestVisibleToRefusesACallerTheJobDoesNotName(t *testing.T) {
 	base := depScopeService(t)
 	ctx := context.Background()

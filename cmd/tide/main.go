@@ -1,22 +1,15 @@
 // tide — caller-side CLI invoked from inside caller repos.
 //
-//	tide apply [--no-pull]                     submit + apply this repo's .atl files
-//	tide apply --backfill                      kick off declarative backfill for a backfill_required plan
-//	tide apply --dry-run
-//	tide plan  [--format FMT]                   dry-run plan; no mutation
-//	tide pull  [--force]                        refresh .tide-cache from server
-//	tide list                                   print every entity in the merged schema
-//	tide show  <path-substring>                 print one .atl file from the merged schema
-//	tide backfill status [plan-hash]            monitor a backfill kicked off by `tide apply --backfill`
-//	tide version
+// printUsage below lists every subcommand; TestEverySubcommandAppearsInUsage
+// holds it level with the dispatch switch.
 //
-// Reads tide.yaml from cwd to discover schema paths + the atlantis
-// endpoint. Submits the .atl files to AdminService.PlanSchema. Routes the
-// outcome:
+// tide reads tide.yaml from the working directory for the caller name and the
+// schema paths, submits the .atl files to AdminService.PlanSchema, and routes
+// the plan class:
 //
-//   - additive               → ApplyMigration, regenerate local client
-//   - backfill_required      → print expected backfill, exit 1
-//   - cross_caller_breaking  → print impact report, exit 2
+//   - additive               → ApplyMigration, regenerate the local client
+//   - backfill_required      → print the expected backfill, exit 1
+//   - cross_caller_breaking  → print the impact report, exit 2
 //   - destructive            → print what is destroyed, exit 4
 //   - unparseable            → print the validation errors, exit 3
 //
@@ -24,13 +17,12 @@
 // two separately: a breaking change is cleared by shipping the other callers'
 // updates, a destructive one by deciding whether losing the rows is intended.
 //
-// `tide apply` auto-runs `tide pull` first so cross-caller references resolve
-// against the freshest merged schema. Suppress with --no-pull when the
-// network is unavailable or the cache is known-current.
+// `tide apply` runs `tide pull` first, so cross-caller references resolve
+// against the current merged schema. --no-pull suppresses it.
 //
-// Network transport is protobuf over gRPC via the generated admin stubs in
-// clients/go. mTLS material and the endpoint come from the credential store
-// `tide login` writes; neither is configurable in tide.yaml.
+// Transport is protobuf over gRPC through the generated admin stubs in
+// clients/go. The mTLS material and the endpoint come from the credential store
+// `tide login` writes, and neither is settable in tide.yaml.
 package main
 
 import (

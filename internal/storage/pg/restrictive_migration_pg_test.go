@@ -15,22 +15,18 @@ import (
 // without ever widening the table, and without rewriting the operator's
 // predicate.
 //
-// # Why this runs the real .sql
+// The real .sql runs here. The migration is a DO block full of format() and
+// catalogue lookups, the file is what ships, and a Go re-implementation would
+// be a second thing to get wrong.
 //
-// The migration is a DO block full of format() and catalogue lookups. A Go
-// re-implementation of it would be a second thing to get wrong, and the thing
-// shipped to customers is the file. So the file is what executes here.
+// Two failures, neither visible in the end state:
 //
-// # What is actually at risk
-//
-// Two failures, neither of which the end state reveals:
-//
-//   - A WIDER INTERMEDIATE STATE. Drop the permissive boundary before the
-//     restrictive one exists and the table is unisolated for the width of one
-//     statement. Inside a transaction that is invisible; down_sql and this
-//     migration are also things operators run by hand.
-//   - A REGENERATED PREDICATE. Rebuilding `col = current_partition()` from the
-//     declared column silently discards an operator's own hardening — the
+//   - A wider intermediate state. Dropping the permissive boundary before the
+//     restrictive one exists leaves the table unisolated for the width of one
+//     statement. Inside a transaction that is invisible, and down_sql and this
+//     migration are both run by hand.
+//   - A regenerated predicate. Rebuilding `col = current_partition()` from the
+//     declared column discards an operator's own hardening — the
 //     `deleted_at IS NULL` below — and makes soft-deleted rows visible to every
 //     caller, while the migration reports success.
 //
@@ -120,8 +116,7 @@ SELECT count(*) FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid
 			"row to every caller. Restrictive policies only ever narrow")
 	}
 
-	// THE POINT OF THE WHOLE CHANGE: a hostile grant, of the kind a user writes
-	// for RBAC and the old model had to refuse outright, cannot cross the
+	// A permissive grant of the kind RBAC is written with cannot cross the
 	// boundary.
 	if _, err := admin.Exec(ctx, `
 CREATE POLICY m25t_user_rbac ON atlantis.m25t_doc AS PERMISSIVE USING (true) WITH CHECK (true)`); err != nil {

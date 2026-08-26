@@ -507,28 +507,15 @@ type TableNameDecl struct {
 func (*TableNameDecl) isEntityMember()      {}
 func (t *TableNameDecl) Position() Position { return t.Pos }
 
-// ---- Custom query and procedure declarations ----
+// QueryDecl is `query <Name> for <Entity> { input { ... } output { ... } sql
+// touches(...) { ... } cache { ... } }`. Reads only, no mutation arms.
 //
-// QueryDecl + ProcedureDecl are the platform's escape hatch for caller
-// workloads QueryX can't model: GROUP BY aggregations, DISTINCT ON,
-// seeded-random sampling, multi-entity transactions, anything the
-// typed predicate surface doesn't express. They live at the file's
-// top level (alongside EntityDecl / HypertableDecl) so callers can
-// declare them in the same .atl file as the entity they target — no
-// atlantis PR needed to introduce a new read shape.
+// The declaration carries the typed signature and the cache metadata — touches,
+// TTL, invalidate tag. The SQL body is validated at plan time by pg_query_go,
+// not here.
 //
-// The DSL grammar is small here on purpose. The expressiveness lives
-// inside the raw SQL block, validated at plan-time via pg_query_go;
-// the DSL itself only declares the typed signature (inputs, outputs)
-// and the cache-invariant metadata (touches, cache TTL, invalidate
-// tag). Procedures add typed mutation steps (update / delete / insert
-// on an entity) so the codegen can automatically bump the right
-// generation counters without the caller having to enumerate them.
-
-// QueryDecl: `query <Name> for <Entity> { input { ... } output { ... } sql touches(...) { ... } cache { ... } }`.
-// Reads only — no mutation arms. The output shape is either `as <Entity>`
-// (the query returns rows of the target entity) or an explicit column
-// list when the query joins or aggregates beyond the entity's shape.
+// Output is either `as <Entity>`, where rows match the target entity, or an
+// explicit column list where the query joins or aggregates past that shape.
 type QueryDecl struct {
 	Pos    Position
 	Name   string
@@ -662,9 +649,9 @@ type SetAssignment struct {
 	Value Expr
 }
 
-// Expr is the typed-step expression form: literals, arg references,
-// field references, and `now()`. Deliberately tiny — anything more
-// complex belongs in a raw `sql touches(...) { ... }` step.
+// Expr is the typed-step expression form: literals, arg references, field
+// references, and `now()`. Anything beyond these goes in a raw
+// `sql touches(...) { ... }` step.
 type Expr interface {
 	isExpr()
 	Position() Position
@@ -723,36 +710,28 @@ type ProcedureInvalidate struct {
 	TagTpl string // the tag template, e.g. "consumer:{account_id}"
 }
 
-// ---- Declarative jobs ----
+// JobDecl is `job <Name> in <ns> { args { ... } <runtime modifiers> }`, a typed
+// background-work declaration.
 //
-// A `job` is a typed background-work declaration. The body lists the
-// args the handler receives (each is a FieldDecl: same field grammar
-// as an entity column, minus FK / index / cache modifiers) plus
-// block-level runtime modifiers: retries, timeout, queue, schedule.
+// Codegen emits a handler interface on the server SDK,
+// `<Job>Handler.Handle(ctx, args) error`, and a submission method on the client
+// SDK, `client.Submit<Job>(ctx, args) (jobID, error)`.
 //
-// At codegen time atlantis emits, on the server SDK, a typed handler
-// interface (`<Job>Handler.Handle(ctx, args) error`); on the client SDK,
-// a typed submission method (`client.Submit<Job>(ctx, args) (jobID, error)`).
-// The atlantis worker drains atlantis.jobs rows, deserializes the
-// args JSON into the typed struct, and routes to the right handler.
-//
-// Runtime semantics — retries / timeout / queue / schedule — are
-// honored by atlantis-server's in-Postgres worker pool. See
-// internal/jobs/runner.go.
+// clients/go/jobs/runner.go drains atlantis.jobs rows, deserializes the args
+// JSON into the typed struct, and routes to the registered handler.
 type JobDecl struct {
 	Pos       Position
 	Name      string
 	Namespace string
 
-	// Args is the typed input the handler receives. Each FieldDecl is
-	// the same grammar as an entity column (`name type modifiers`), but
-	// the parser rejects column-only modifiers (primary, references,
-	// soft_delete, cache, etc.) — args are inputs, not schema.
+	// Args is the typed input the handler receives, each the same grammar as an
+	// entity column. lowerJob rejects primary, identity, serial, unique,
+	// references and backfill on an arg.
 	Args []*FieldDecl
 
-	// Runtime modifiers. Zero values mean atlantis defaults
-	// (Retries = 0, Timeout = 30m, Queue = "default", Schedule = "",
-	// Heartbeat = server's HeartbeatBudget).
+	// Runtime modifiers, nil when undeclared. A nil Timeout leaves the handler
+	// with no per-attempt deadline; a nil Queue puts the job on 'default'
+	// (migration 0006); a nil Heartbeat takes the runner's HeartbeatBudget, 2m.
 	Retries   *JobRetries
 	Timeout   *JobTimeout
 	Heartbeat *JobHeartbeat
@@ -775,35 +754,31 @@ func (*JobDecl) isDecl()              {}
 func (j *JobDecl) Position() Position { return j.Pos }
 func (j *JobDecl) DeclName() string   { return j.Name }
 
-// JobRetries: `retries N` — the maximum number of times a failing job
-// is re-attempted before being moved to atlantis.jobs_dead.
+// JobRetries is `retries N`, the number of times a failing job is re-attempted
+// before it moves to atlantis.jobs_dead.
 type JobRetries struct {
 	Pos   Position
 	Count int
 }
 
-// JobTimeout: `timeout 30m` — per-attempt deadline. The worker
-// cancels the handler's context when the duration elapses. Lease
-// expiry is computed from this value (lease = timeout * 1.5 by
-// default; documented in jobs runtime config).
+// JobTimeout is `timeout 30m`, the per-attempt deadline: the worker cancels the
+// handler's context once the duration elapses.
+//
+// The claim lease is separate and comes from the runner's HeartbeatBudget, not
+// from this value. See JobHeartbeat.
 type JobTimeout struct {
 	Pos      Position
 	Duration string // verbatim duration token text; parsed at IR-lowering time
 }
 
-// JobHeartbeat: `heartbeat 10m` — per-attempt lease budget for the
-// dispatched-worker dispatcher. The dispatcher writes this duration
-// into atlantis.jobs.claimed_until at claim time; the worker has
-// until then to send a Heartbeat or Checkpoint envelope, after which
-// the dispatcher revokes and re-dispatches.
+// JobHeartbeat is `heartbeat 10m`, the per-attempt lease budget. The dispatcher
+// writes it into atlantis.jobs.claimed_until at claim time, and a worker that
+// sends no Heartbeat or Checkpoint envelope before then is revoked and the job
+// re-dispatched.
 //
-// Zero (unset) means "use the server's global HeartbeatBudget."
-// Operators set this on jobs whose handlers do IO-bound work that
-// genuinely exceeds the default (bulk imports, video encoding,
-// ML training). It does NOT relax the per-attempt timeout
-// — that's the separate `timeout` modifier and bounds how long a
-// SINGLE handler invocation runs. The heartbeat budget bounds how
-// often the worker must signal liveness.
+// Unset means the server's HeartbeatBudget. It bounds how often the worker
+// signals liveness, not how long one handler invocation may run; that is the
+// separate `timeout` modifier.
 type JobHeartbeat struct {
 	Pos      Position
 	Duration string // verbatim duration token text; parsed at IR-lowering time
@@ -828,16 +803,14 @@ type JobSchedule struct {
 	CronSpec string
 }
 
-// ---- Workflows ----
+// WorkflowDecl is `workflow <Name> in <ns> { state { ... } step <name> { ... }
+// ... compensate <step> { ... } }`.
 //
-// A workflow is a multi-step orchestration: each step runs a declared
-// job, steps execute in declaration order, and if a step fails after
-// exhausting retries, compensations for prior steps run in reverse
-// order. The DSL grammar mirrors Temporal's workflow-as-code model
-// but is declarative: the step sequence is fixed at schema time, not
-// built dynamically at runtime.
-
-// WorkflowDecl: `workflow <Name> in <ns> { state { ... } step <name> { ... } ... compensate <step> { ... } }`.
+// Each step runs a declared job, in declaration order. A step that fails after
+// exhausting its retries runs the compensations for the prior steps in reverse
+// order.
+//
+// The step sequence is fixed at schema time; nothing builds it at runtime.
 type WorkflowDecl struct {
 	Pos           Position
 	Name          string
@@ -874,15 +847,12 @@ type WorkflowCompDecl struct {
 	Args     []EnqueueAssignment
 }
 
-// ---- Ephemeral (memcached-only) declarations ----
+// EphemeralDecl is `ephemeral <Name> in <ns> { key <type> <fields...> ttl
+// <duration> }`, a typed shape backed by memcached rather than Postgres: no
+// table, no migration.
 //
-// An `ephemeral` is a typed data shape backed by memcached, not
-// Postgres. No table, no migration, no VACUUM. Codegen emits typed
-// Get/Set/Delete methods. The TTL is declared at the block level;
-// loss on eviction is the documented contract (callers must handle
-// cache-miss gracefully).
-
-// EphemeralDecl: `ephemeral <Name> in <ns> { key <type> <fields...> ttl <duration> }`.
+// Codegen emits typed Get/Set/Delete. Loss on eviction is part of the
+// contract, so every read can miss.
 type EphemeralDecl struct {
 	Pos       Position
 	Name      string

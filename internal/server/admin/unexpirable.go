@@ -12,28 +12,11 @@ import (
 // unexpirableEntities lists entities declaring expiry the platform cannot
 // perform, in a stable order.
 //
-// # What makes an entity unexpirable
+// Unexpirable means schema.ExpiryFor returns ExpiryUnreachable. The sweeper
+// binds no tenant, so under FORCE ROW LEVEL SECURITY its DELETE matches nothing
+// and succeeds.
 //
-// `ttl_field` together with `partition by`, on anything the sweeper cannot
-// expire by dropping chunks. The sweeper runs on a schedule with no request
-// behind it, so it binds no tenant; under FORCE ROW LEVEL SECURITY its DELETE
-// is still subject to the tenant policy, matches nothing, and SUCCEEDS. Expired
-// rows accumulate with no error anywhere.
-//
-// schema.ExpiryFor owns the classification, including why a hypertable whose
-// ttl_field is its time dimension escapes this entirely.
-//
-// # Why this is refused rather than warned
-//
-// The neighbouring apply checks all guard situations an operator can knowingly
-// accept, and each carries an override. This one does not, because there is no
-// version of it that works. Accepting the declaration would mean writing a
-// retention promise into the schema that the platform silently does not keep —
-// and retention is usually a compliance control, so the gap surfaces as an
-// audit finding rather than a bug report.
-//
-// #48 made the state observable with a counter. A counter tells an operator
-// that expiry stopped; it cannot stop them declaring it in the first place.
+// Refused, with no override, unlike the neighbouring apply checks.
 func unexpirableEntities(ir *dsl.IR) []string {
 	if ir == nil {
 		return nil

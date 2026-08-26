@@ -1,30 +1,15 @@
 -- The address a CALLER reaches this organisation's atlantis at.
 --
--- ── Why atl_endpoint could not be reused ────────────────────────────────────
+-- Separate from atl_endpoint, which is the address the CONSOLE dials, for the
+-- same reason 0005 added atl_health_addr rather than reusing it. `tide login`
+-- hands this to a laptop or a build runner outside the console's network, while
+-- the console's route to a tenant's atlantis may be a mesh or VPC address that
+-- resolves nowhere else.
 --
--- atl_endpoint is the address the CONSOLE dials. Migration 0005 already had to
--- learn this lesson once, and said so: it added atl_health_addr as a separate
--- column rather than reusing atl_endpoint, because the console reaches atlantis
--- two ways and "an unmoved health address would have every organisation's
--- Health page reporting one server's status."
+-- NULL means "the same as atl_endpoint", which is correct for every
+-- organisation registered before this migration.
 --
--- This is the same shape, one consumer further out. `tide login` hands a
--- machine the address it should dial, and that machine is a developer's laptop
--- or a build runner sitting outside whatever network the console lives in. The
--- console's route to a tenant's atlantis is plausibly a mesh or VPC address
--- that resolves nowhere else. Handing it to every caller welds the two together
--- permanently, and the day they need to differ the column has to be split under
--- live data.
---
--- ── The fallback, and why it is here rather than in Go ──────────────────────
---
--- NULL means "the same as atl_endpoint". Every organisation registered before
--- this migration gets that behaviour for free, which is correct: in every
--- deployment that exists today the two addresses ARE the same, and
--- `make dev-org-register` registers localhost:9090, which a laptop can reach.
---
--- Written as COALESCE at the read site rather than backfilled, on purpose. A
--- backfill would copy today's value and then silently diverge the first time
--- somebody changed atl_endpoint — leaving callers pointed at an address nobody
--- updated, with nothing to show the two had ever been linked.
+-- Resolved by COALESCE at the read site rather than backfilled. A backfill
+-- would copy today's value and then diverge the first time atl_endpoint
+-- changed, leaving callers pointed at an address nothing updates.
 ALTER TABLE console.orgs ADD COLUMN IF NOT EXISTS atl_public_endpoint TEXT;

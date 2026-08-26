@@ -1,29 +1,21 @@
 //go:build audit
 
-// Caller audit. Walks caller repos listed in AUDIT_CALLER_ROOTS and
-// asserts that no file outside the explicit exemption list invokes a
-// PG connection directly. The intent is to make a regression of the
-// atlantis contract loud and immediate: once a caller has cut over
-// to the typed gRPC client there is no reason for it to ever own a
-// *pgxpool.Pool or to call pool.Query / pool.Exec / pool.QueryRow /
-// pgx.Batch.Queue. A new direct-pool callsite slipping in (a hand-rolled
-// repository, an "emergency" backfill script, a paste from another
-// service) reintroduces the cross-repo coupling that atlantis was
-// built to eliminate.
+// Caller audit. Walks the caller repos listed in AUDIT_CALLER_ROOTS and fails
+// on any file outside the exemption list that opens a PG connection directly.
 //
-// Two-layer gate:
+// A caller served by the typed gRPC client owns no *pgxpool.Pool and calls no
+// pool.Query, pool.Exec, pool.QueryRow or pgx.Batch.Queue. A new direct-pool
+// call site — a hand-rolled repository, an emergency backfill script, a paste
+// from another service — restores the cross-repo coupling atlantis removes.
 //
-//  1. Methods of interest are matched by selector name only — `.Query`,
-//     `.Exec`, `.QueryRow`, `.Queue`. Names are uncommon enough on
-//     non-pool types that the false-positive rate is acceptable for an
-//     allow-list approach (any incidental match goes into exemptions.yaml
-//     with a one-line justification).
+// Two layers:
 //
-//  2. Files listed in exemptions.yaml are skipped. The list shrinks as
-//     each 9b caller-cutover PR removes the repository file it replaces.
-//     The target state is an empty exemption list — at that point the
-//     audit gate goes red on any direct-pool callsite anywhere in the
-//     monorepo.
+//  1. Methods are matched by selector name alone: `.Query`, `.Exec`,
+//     `.QueryRow`, `.Queue`. Those names are rare enough on non-pool types
+//     that an incidental match is cheaper to exempt than to disambiguate.
+//
+//  2. Files named in exemptions.yaml are skipped, each with a justification.
+//     An empty list means the gate fires on any direct-pool call site.
 //
 // Configuration:
 //

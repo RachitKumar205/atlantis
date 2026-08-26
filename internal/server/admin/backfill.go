@@ -321,8 +321,8 @@ func (s *Service) BeginBackfillPlan(ctx context.Context, req *adminpb.BeginBackf
 	// therefore subject to FORCE ROW LEVEL SECURITY, with no tenant bound. So
 	// the chunk SELECT matches nothing: the worker reports every chunk as a
 	// success having written zero rows, marks the field complete, and the
-	// follow-on SET NOT NULL then fails on the rows the backfill never touched.
-	// Silent, and it fails at the point furthest from the cause.
+	// follow-on SET NOT NULL then fails on the rows the backfill never touched,
+	// which is as far from the cause as the sequence reaches.
 	//
 	// Binding a tenant here would be wrong, not merely incomplete: a backfill
 	// has to cover every tenant, so there is no single correct value to bind.
@@ -583,10 +583,9 @@ LIMIT 1`, caller).Scan(&planHash)
 }
 
 // splitSQLStatements breaks a multi-line script into individual
-// statements. Each non-blank, non-comment line is treated as one
-// statement (CREATE INDEX CONCURRENTLY is a single-line statement;
-// multi-line statements would need a real splitter, which we don't need
-// until a use case demands it).
+// statements. Each non-blank, non-comment line is one statement, CREATE INDEX
+// CONCURRENTLY being single-line. A multi-line statement would need a real
+// splitter.
 func splitSQLStatements(script string) []string {
 	var out []string
 	for _, line := range splitLines(script) {
@@ -660,71 +659,32 @@ func submittedFilesToPB(in []SubmittedFile) []*adminpb.SubmittedFile {
 // refuseBackfillOnBlockedTables refuses a plan whose backfill would silently
 // write nothing.
 //
-// # What actually goes wrong
-//
 // The chunked UPDATE runs as the atlantis role with no tenant bound. Where the
-// TABLE has row-level security enabled and forced, and the role does not bypass
-// it, the chunk SELECT matches nothing. The worker reports each chunk a
-// success, marks the field complete, and the follow-on SET NOT NULL then fails
-// on rows nothing ever touched — a failure as far from its cause as this
-// pipeline allows. Executed end to end against PostgreSQL 17.
+// table has row-level security enabled and forced and the role does not bypass
+// it, the chunk SELECT matches nothing: the worker reports every chunk a
+// success, marks the field complete, and the follow-on SET NOT NULL fails on
+// rows nothing ever touched. Reproduced end to end on PostgreSQL 17.
 //
-// # Why this asks the database and not the schema
+// The question is asked of the catalogue rather than the schema, which cannot
+// disagree with what the statement will do. Testing `e.PartitionField != ""`
+// instead refuses backfills that work: `partition by` declared with no policy
+// on the table, which is the modal case because no differ emits the policy when
+// the clause is added to an entity that already exists; and roles holding
+// BYPASSRLS or superuser, which RequireIsolatedRole permits outside
+// ATL_REQUIRE_TENANT_ISOLATION. It also misses an entity that dropped
+// `partition by` and kept its policy. Any table that would hide its rows is
+// caught, whatever the schema says about it.
 //
-// The first version tested `e.PartitionField != ""`, and a review executed
-// three cases where that refuses a backfill which works:
+// A known gap: this probes with the server's role and the failure belongs to
+// the worker's. They are the same role today. Giving the worker its own role,
+// which a second permissive `FOR ALL TO <backfill_role> USING (true)` policy
+// would require, makes this probe the wrong principal and refuse working
+// backfills.
+// VerifyPartitionPolicies would also need to read polroles, which it does not:
+// it cannot tell `TO worker USING (true)` from a global `USING (true)`.
 //
-//   - `partition by` declared with NO policy on the table. This is the MODAL
-//     case — no differ emits the policy when the clause is added to an entity
-//     that already exists, which is the exact gap the feature exists to detect.
-//   - a role holding BYPASSRLS, and a superuser role. RequireIsolatedRole
-//     rejects that posture only under ATL_REQUIRE_TENANT_ISOLATION, so it is a
-//     supported deployment and the policy does not apply to it.
-//
-// And it missed the mirror case entirely: an entity that DROPPED `partition by`
-// keeps its policy, because removal emits nothing either. The schema says
-// unpartitioned, the table still hides every row.
-//
-// So the question is asked of the catalog, which cannot disagree with what the
-// statement will do. It is also no longer scoped to partitioned entities — any
-// table that would hide its rows is caught, whatever the schema says about it.
-//
-// # What was NOT tried, and why the earlier note here was wrong
-//
-// An earlier version of this comment said binding was "a design decision, not a
-// mechanical fix", and gave two reasons. A review executed both on PostgreSQL
-// 17.8 and both are wrong:
-//
-//   - "A BYPASSRLS role is what pg.RequireIsolatedRole refuses at boot." That
-//     check inspects current_user on the SERVER's pool. A SECURITY DEFINER
-//     function owned by a separate BYPASSRLS role bypasses the policy with the
-//     login role still NOBYPASSRLS, so no conflict exists as stated. It is a
-//     real escalation surface and needs REVOKE EXECUTE FROM PUBLIC, but it is a
-//     mechanism, not a contradiction.
-//   - "Iterating per tenant needs the tenant list." True, and beside the point,
-//     because the option below needs no tenant list at all.
-//
-// The mechanism that works, and that nobody had considered: a SECOND permissive
-// policy, `FOR ALL TO <backfill_role> USING (true)`. Measured — the worker sees
-// and updates every row, and the request path, connecting as the table owner,
-// still sees none. No BYPASSRLS anywhere, no tenant list, no cross-tenant
-// primitive exposed to request handling. Its costs are a second role and pool,
-// one extra emitted line per partitioned table, and teaching
-// VerifyPartitionPolicies to read polroles — which today cannot tell
-// `TO worker USING (true)` from a global `USING (true)` and would reject it.
-//
-// That is the shape a fix should take. Refusing remains correct until it exists.
-//
-// # This asks with the SERVER's role, and the failure belongs to the WORKER's
-//
-// They are the same role today, so the answer is right by coincidence. The
-// moment the worker gets its own role — which the mechanism above requires —
-// this probes the wrong principal and will refuse backfills that work.
-//
-// # A probe that fails refuses
-//
-// Same rule as the boot gate. Proceeding on an unknown answer risks the silent
-// zero-row backfill this exists to prevent, and a backfill is restartable.
+// A probe that fails refuses. Proceeding on an unknown answer risks the silent
+// zero-row backfill, and a backfill is restartable.
 func (s *Service) refuseBackfillOnBlockedTables(ctx context.Context, ir *dsl.IR, fields []codegen.BackfillField) error {
 	if ir == nil || len(fields) == 0 {
 		return nil

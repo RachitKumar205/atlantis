@@ -1,13 +1,15 @@
 // Package predsql renders a resolved partial-index predicate (dsl.PredExpr) to
-// SQL and to a stable diff-identity key. It is a leaf shared by two callers that
-// must not depend on each other: codegen (emits CREATE INDEX ... WHERE) and
-// introspect (renders the declared predicate so the drift matcher can compare it
-// against the live one through pg_query). Keeping a single renderer here is what
-// guarantees the emitted predicate and the matched predicate never diverge.
+// SQL and to a stable diff-identity key.
 //
-// A PredExpr is one of: PredKindNull / PredKindCompare (the two legacy shapes,
-// kept structured so their SQL / diff key / cache suffix stay byte-identical) or
-// PredKindExpr (any other predicate, already canonical SQL text from pg_query).
+// A leaf shared by two callers that must not import each other: codegen, which
+// emits CREATE INDEX ... WHERE, and introspect, which renders the declared
+// predicate for the drift matcher to compare against the live one through
+// pg_query. One renderer is what keeps the emitted and matched predicates
+// identical.
+//
+// A PredExpr is PredKindNull or PredKindCompare, the two structured shapes whose
+// SQL, diff key and cache suffix are byte-identical to the pre-tree encoding, or
+// PredKindExpr, holding canonical SQL text from pg_query.
 package predsql
 
 import (

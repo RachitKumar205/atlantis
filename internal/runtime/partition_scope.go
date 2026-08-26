@@ -17,53 +17,31 @@ type Querier interface {
 // ScopedRead runs fn against the database, inside a tenant-bound transaction
 // when the entity declares `partition by`.
 //
-// # Why this lives in runtime and not beside one of its callers
+// It lives in runtime because two code paths serve the same requests: the
+// dynamic dispatcher in internal/server/entity, and the Go server `tidectl
+// codegen` emits into a caller's repository. One function called by both cannot
+// drift. A second copy in the emitter binds on whichever verbs that copy
+// remembers, and one binding on none of Get, List, BatchGet, Create, Update or
+// Delete reads as working.
 //
-// atlantis serves entities from two places: the dynamic dispatcher in
-// internal/server/entity, and the Go server that `tidectl codegen` emits into a
-// caller's repository. They are separate code paths that answer the same
-// requests, and the second is the one callers actually deploy.
+// A read needs a transaction because the tenant is a transaction-local run-time
+// parameter, which is what makes it safe on a pooled connection: it reverts
+// when the transaction ends, so a later request reusing the backend cannot
+// inherit it. A statement on the bare pool has no transaction to bind and runs
+// with no tenant set, seeing nothing on a role RLS applies to and everything on
+// a role that bypasses it.
 //
-// The dispatcher was fixed to bind on all eight of its paths. The emitter was
-// not touched, and a review found the generated server binding on NONE of Get,
-// List, BatchGet, Create, Update or Delete — the whole feature was correct in
-// the surface that is easy to test and absent from the surface that ships.
+// An entity without `partition by` runs straight on the pool, so it pays no
+// transaction. Binding is cheap: since migration 0024 the discriminator is a
+// run-time parameter, so a bind writes nothing and assigns no transaction id.
 //
-// A second copy of this logic in the emitter would have the same future. One
-// function, called by both, cannot drift.
+// Fails closed. A partitioned entity with no tenant in context returns an error
+// and reads nothing rather than falling through to an unbound read, which is
+// correct only on a deployment whose database role obeys row-level security.
 //
-// # Why reads need a transaction at all
-//
-// The tenant is a transaction-local run-time parameter, which is what makes it
-// safe on a pooled connection: it reverts when the transaction ends, so a later
-// request reusing the same backend cannot inherit it. A statement on the bare
-// pool has no transaction to bind, so it would run with no tenant set — seeing
-// nothing on a role row-level security applies to, and everything on a role
-// that bypasses it.
-//
-// # Why only partitioned entities pay for it
-//
-// An entity without `partition by` runs exactly as before, straight on the
-// pool. That is the overwhelming majority of entities, and a transaction per
-// read is not a cost worth imposing on them to serve a clause they do not use.
-//
-// Binding itself is cheap: migration 0024 made the discriminator a run-time
-// parameter, so a bind writes nothing and assigns no transaction ID.
-//
-// # Fails closed
-//
-// For a partitioned entity with no tenant in context this returns an error and
-// reads nothing. It must not fall through to an unbound read: that is correct
-// only on a deployment whose database role obeys row-level security, and the
-// whole point of enforcing in the database is not to depend on the caller
-// having got something else right.
-//
-// # Errors are the caller's, not this function's
-//
-// fn's error is returned as-is. An earlier draft swallowed it and returned
-// whatever Commit said, which on an aborted transaction is
-// "commit unexpectedly resulted in rollback" — so permission denied, statement
-// timeout and undefined column all arrived as the same sentence.
+// fn's error is returned as-is. Returning Commit's error instead reports
+// "commit unexpectedly resulted in rollback" for permission denied, statement
+// timeout and undefined column alike.
 func ScopedRead(ctx context.Context, pool Pool, partitioned bool, fn func(q Querier) error) error {
 	if !partitioned {
 		return fn(pool)

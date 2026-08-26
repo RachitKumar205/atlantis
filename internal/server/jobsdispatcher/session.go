@@ -36,16 +36,15 @@ type session struct {
 	jobNames    map[string]struct{}
 	maxInFlight int
 
-	// outbox is the dispatch send queue. Buffered to maxInFlight + a
-	// small headroom so a brief flow-control stall doesn't drop us
-	// below saturation. Send blocks longer than leaseTTL/4 → treat
-	// the worker as dead (handled in runSender).
+	// outbox is the dispatch send queue, buffered to maxInFlight plus a little
+	// headroom so a brief flow-control stall does not drop the session below
+	// saturation. A send blocking longer than leaseTTL/4 marks the worker dead;
+	// see runSender.
 	outbox chan *DispatchEnvelope
 
-	// inflightMu guards inflight + inflightAck. We use a fast atomic
-	// counter for the hot path (read inflight count to compute slot
-	// budget without locking) plus the mu-guarded maps for accurate
-	// release-on-disconnect.
+	// inflightMu guards inflight and inflightAck. The hot path reads an atomic
+	// counter instead, to compute the slot budget without locking; the
+	// mu-guarded maps are what release-on-disconnect walks.
 	inflightMu      sync.Mutex
 	inflight        map[int64]inflightRow
 	inflightCounter atomic.Int32
@@ -148,10 +147,8 @@ func newSession(open *OpenSession, caller string, aliases []string, perJobHeartb
 	if len(aliases) > 0 {
 		aliasCopy = append([]string(nil), aliases...)
 	}
-	// Defensive copy of the per-job heartbeat overrides for the same
-	// reason — operator-facing config could mutate after Open and we
-	// want this session to bind to the snapshot it was authorized
-	// against.
+	// Copied for the same reason: operator-facing config can mutate after
+	// Open, and this session binds to the snapshot it was authorized against.
 	var hbCopy map[string]time.Duration
 	if len(perJobHeartbeat) > 0 {
 		hbCopy = make(map[string]time.Duration, len(perJobHeartbeat))

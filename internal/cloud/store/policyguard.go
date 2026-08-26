@@ -11,35 +11,21 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/storage/pg"
 )
 
-// catalogQuerier is the slice of a pool this check needs. Narrow on purpose, so
-// the check runs against a pool, a connection or a transaction — which is what
-// lets a test run it under SET LOCAL ROLE, and the role is half of what this
-// verifies.
+// catalogQuerier is satisfied by a pool, a connection or a transaction, so a
+// test can run VerifyPolicies under SET LOCAL ROLE.
 type catalogQuerier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// unpolicedTables are the Cloud tables that deliberately carry no per-user
-// boundary.
+// unpolicedTables are the tables in schema cloud that carry no per-user
+// boundary. VerifyPolicies fails on any table in the schema that is neither
+// policed nor listed here, so a new table cannot arrive undecided.
 //
-// Every entry is a decision, and it is here rather than in a comment so that
-// adding a table without deciding is impossible — see VerifyPolicies. The four
-// below are argued in full in migrations/cloud/0001; the one-liners are
-// reminders, not the reasoning.
-//
-// # What is exempt, and what is not
-//
-// Every entry below is a lookup that *discovers* who a request is, or a
-// registry, or a table read from both directions. None of them can be filtered
-// by the current user, because there is no current user until they have
-// answered.
-//
-// cloud.totp_secrets and cloud.backup_codes are deliberately absent: they are
-// only ever read for a user who has already been identified, so they carry the
-// boundary and this guard now enforces rather than merely watching. Their
-// arrival is also what arms the role check below — a policy binds the table's
-// owner under FORCE, but not a superuser.
+// Each entry is a lookup that discovers who a request is, a registry, or a
+// table read from both directions; none can be filtered by the current user,
+// because no user is known until the lookup answers. migrations/cloud/0001
+// carries the full reasoning.
 var unpolicedTables = map[string]string{
 	"users":          "the sign-in lookup is what discovers who the request is",
 	"identities":     "the OAuth callback lookup is the same, one step along: a policy here makes every sign-in create a duplicate account",
@@ -49,10 +35,10 @@ var unpolicedTables = map[string]string{
 	"sessions":       "the bootstrap table: the session lookup is what discovers which user a request is",
 	"pending_logins": "the same, one step earlier — a half-finished login is resolved by token before anybody is identified",
 
-	// The two below are written by the provisioner, which runs as no user at
-	// all: it claims work from a queue rather than serving a request. A policy
-	// keyed to current_user_id would match nothing and hide every row from the
-	// only process that has to read them.
+	// The two below are written by the provisioner, which claims work from a
+	// queue rather than serving a request. A policy keyed to current_user_id
+	// would match nothing and hide every row from the only process that reads
+	// them.
 	"org_provisioning": "a work queue claimed by a background process, which has no current user to be filtered by",
 	"audit_log":        "the record of what that process did; scoped by organisation rather than by user, and read by operators looking at an organisation they may not belong to",
 }
@@ -60,36 +46,15 @@ var unpolicedTables = map[string]string{
 // VerifyPolicies asks the live catalogue whether every table in schema cloud is
 // either policed or a recorded exemption.
 //
-// # Why the catalogue rather than the migrations
+// It reads the catalogue rather than the migrations, which record intent. A
+// policy can be ENABLE'd without being FORCE'd, and the owning role — the role
+// Cloud connects as — then reads through it while `\d` still lists it.
 //
-// Reading the migration files answers what was intended. The question is what
-// the database ended up with, and the two differ in the direction that matters:
-// a policy can be enabled without being FORCED, in which case the owning role —
-// which is the role Cloud connects as — reads straight through it while `\d`
-// still lists it. The console's equivalent was written after a review
-// reproduced exactly that on the server side.
-//
-// # Why unknown tables are a fault
-//
-// The dangerous case is not a policy that was removed; it is a table that never
-// had one. Somebody adds cloud.totp_secrets, nobody thinks about isolation, and
-// it holds every user's second factor from its first row onward. Requiring
-// every table to be either policed or named above turns that from an oversight
-// into a boot failure.
-//
-// # Why the connecting role is checked here rather than at startup
-//
-// FORCE ROW LEVEL SECURITY subjects a table's owner to its policies. It does
-// not subject a *superuser*, and it does not subject a role holding BYPASSRLS —
-// either of those reads straight through every policy in the schema while `\d`
-// keeps listing them.
-//
-// So the role is half of this check. It is folded in here rather than run as
-// its own startup gate because of when it starts mattering: while every table
-// is exempt, a bypassing role bypasses nothing, and refusing to start on one
-// would be friction with no protection behind it. The moment a policed table
-// exists the role decides whether that policy does anything, so the check arms
-// itself exactly then — see the count below.
+// The connecting role is checked too. FORCE ROW LEVEL SECURITY subjects a
+// table's owner to its policies, but not a superuser and not a role holding
+// BYPASSRLS; either reads through every policy in the schema. That check runs
+// only once a policed table exists, since a bypassing role bypasses nothing
+// while every table is exempt.
 func VerifyPolicies(ctx context.Context, q catalogQuerier) error {
 	rows, err := q.Query(ctx, `
 		SELECT c.relname,
@@ -108,7 +73,6 @@ func VerifyPolicies(ctx context.Context, q catalogQuerier) error {
 		   AND c.relispartition = false
 		 ORDER BY c.relname`)
 	if err != nil {
-		// A check that could not run is not a check that passed.
 		return fmt.Errorf("could not verify the user boundary: %w", err)
 	}
 	defer rows.Close()
@@ -151,14 +115,12 @@ func VerifyPolicies(ctx context.Context, q catalogQuerier) error {
 	}
 
 	// A policy only does something if the connecting role is subject to it.
-	// Asked only when there is a policy, so this costs nothing until there is
-	// something for it to protect — and arms itself the moment there is.
 	if policed > 0 {
 		privs, derr := pg.DetectRolePrivileges(ctx, pg.PgxRoleQuerier{Q: q})
 		if derr != nil {
-			// A check that could not run is not a check that passed. A
-			// locked-down pg_roles, or a pooler rewriting current_user, would
-			// otherwise leave the guard nominally present and never asked.
+			// A locked-down pg_roles, or a pooler rewriting current_user,
+			// leaves the guard nominally present and never asked, so failing
+			// to determine this is a failure to start.
 			return fmt.Errorf("could not determine whether Cloud's database role "+
 				"enforces row-level security: %w", derr)
 		}

@@ -12,14 +12,10 @@ import (
 // The console credential rotation request, which Cloud records and the
 // provisioner acts on.
 //
-// # What is actually at risk here
-//
-// Not much, on the happy path: a column is set and later cleared. The one place
-// this can go quietly wrong is the clear, because it runs after work that takes
-// time, and an operator during an incident is exactly the person likely to ask
-// twice. Losing the second request means the credential they asked twice to
-// replace is the one still in use, and nothing reports that — the command
-// printed success both times.
+// The clear is where this goes wrong. It runs after work that takes time, so a
+// request made inside that window can be discarded along with the one the pass
+// handled, leaving the credential the operator asked twice to replace in use.
+// The command reports success both times.
 
 func rotatable(t *testing.T, db *Store, org string) {
 	t.Helper()
@@ -67,7 +63,6 @@ func TestRequestingARotationIsVisibleToTheProvisioner(t *testing.T) {
 	}
 }
 
-// An organisation that does not exist is reported rather than silently accepted.
 func TestRequestingARotationForAnUnknownOrganisationFails(t *testing.T) {
 	db := newTestStore(t)
 	err := db.RequestConsoleRotation(context.Background(), "rotate-nope")
@@ -76,7 +71,6 @@ func TestRequestingARotationForAnUnknownOrganisationFails(t *testing.T) {
 	}
 }
 
-// Clearing removes the request the provisioner handled.
 func TestClearingARequestRemovesIt(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -103,14 +97,10 @@ func TestClearingARequestRemovesIt(t *testing.T) {
 	}
 }
 
-// The one that matters: a request made while the rotation was running survives.
-//
 // The provisioner reads the request, spends time reissuing certificates and
-// re-registering them, then clears. An operator who asks again inside that
-// window is asking for a rotation that starts after their second request — and
-// an unconditional `SET NULL` would discard it, leaving the credential they
-// asked twice to replace still in service with nothing to show a request was
-// dropped.
+// re-registering them, then clears. An unconditional SET NULL would discard a
+// request made inside that window, leaving the credential the operator asked
+// twice to replace still in service and nothing to show a request was dropped.
 func TestClearingDoesNotDiscardARequestMadeDuringTheRotation(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -125,13 +115,12 @@ func TestClearingDoesNotDiscardARequestMadeDuringTheRotation(t *testing.T) {
 	}
 	seen := reqs["rotate-race"]
 
-	// The operator asks again while the rotation is under way. NOW() moves the
-	// timestamp past what the pass observed, which is the whole mechanism.
+	// The operator asks again while the rotation is under way, moving the
+	// timestamp past what the pass observed.
 	//
 	// A sleep rather than a fabricated timestamp: the guard compares against
-	// what the database wrote, so a test that wrote its own would be testing its
-	// own arithmetic. Postgres timestamps have microsecond resolution, so this
-	// only has to be longer than that.
+	// what the database wrote. Postgres timestamps have microsecond resolution,
+	// so 5ms separates the two.
 	time.Sleep(5 * time.Millisecond)
 	if err := db.RequestConsoleRotation(ctx, "rotate-race"); err != nil {
 		t.Fatal(err)
@@ -157,12 +146,9 @@ func TestClearingDoesNotDiscardARequestMadeDuringTheRotation(t *testing.T) {
 	}
 }
 
-// Only organisations with a request are reported.
-//
 // The provisioner forces a rotation for everything this returns, so a query
-// that returned every row would rotate the whole fleet on every reconcile pass
-// — which works, and quietly reissues every organisation's credentials every
-// five minutes.
+// that returned every row would reissue every organisation's credentials on
+// every reconcile pass.
 func TestOnlyOrganisationsWithARequestAreReported(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()

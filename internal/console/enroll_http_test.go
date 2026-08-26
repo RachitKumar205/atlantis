@@ -337,10 +337,8 @@ func TestATokenCannotBeMintedForAnUnknownCaller(t *testing.T) {
 
 // A console with no signer says so, rather than answering 404.
 //
-// Its predecessor was configured in no deployment that ever ran and answered
-// 503 on a route nobody could tell was unconfigured until they pressed it. The
-// message is the difference between "we have not set this up" and "this console
-// is broken".
+// A route answering 503 gives no way to tell an unconfigured console from a
+// broken one until the button is pressed. The message is what separates them.
 func TestAConsoleWithoutASignerSaysSo(t *testing.T) {
 	f := newConsoleFixture(t) // no enrolment
 	admin := f.signIn(t, "admin@example.com", "admin")
@@ -358,11 +356,11 @@ func TestAConsoleWithoutASignerSaysSo(t *testing.T) {
 	}
 }
 
-// newKeyAndCSR builds a CSR and RETURNS the key, for tests that need the
-// machine to keep it — renewal presents the certificate it was issued.
+// newKeyAndCSR builds a CSR and returns the key, for tests where the machine
+// keeps it: renewal presents the certificate it was issued.
 //
-// newCSR above throws the key away on purpose, because enrolment is about the
-// key never leaving; this is the same operation from the machine's side.
+// newCSR above throws the key away, enrolment being about the key never
+// leaving. This is the same operation from the machine's side.
 func newKeyAndCSR(t *testing.T, cn string) (keyPEM, csrPEM string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

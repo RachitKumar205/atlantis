@@ -14,8 +14,6 @@ import (
 
 // The lock timeout must actually fire, not just appear in the text.
 //
-// # What it prevents
-//
 // ApplyMigration runs the whole script in one transaction. An ACCESS EXCLUSIVE
 // request that cannot be granted QUEUES, and every later statement on that
 // table — including plain SELECTs — queues behind the waiter. One unrelated
@@ -87,33 +85,24 @@ func TestMigrationGivesUpWaitingForALock(t *testing.T) {
 
 // Every script a caller runs inside a transaction must bound its lock wait.
 //
-// Needs no database, and sits beside the test above on purpose: the two are
-// halves of one property. That one proves the timeout FIRES; this one proves it
-// is PRESENT everywhere it has to be. Either alone is satisfied by a migration
+// Needs no database. The test above proves the timeout fires; this proves it is
+// present everywhere it has to be. Either alone is satisfied by a migration
 // that still hangs.
 //
-// # The gap this closes
-//
-// emitLockTimeout went onto Up and Down, and the backfill path kept none. That
-// is not a lesser path: PreBackfillUp carries ADD COLUMN and runs on the apply
-// tx (internal/server/admin/backfill.go), PostBackfillUp carries ALTER COLUMN
-// SET NOT NULL and runs on the worker's tx (internal/backfill/runner.go). Both
-// take ACCESS EXCLUSIVE, so both could queue every reader behind one unrelated
-// long-running query — the exact outage the timeout exists to prevent, reached
-// by `tide apply --backfill` instead of `tide apply`.
-//
-// # Why reflection, and why the registry is not a list of what to check
+// The backfill scripts are not a lesser path: PreBackfillUp carries ADD COLUMN
+// and runs on the apply tx (internal/server/admin/backfill.go), PostBackfillUp
+// carries ALTER COLUMN SET NOT NULL and runs on the worker's tx
+// (internal/backfill/runner.go). Both take ACCESS EXCLUSIVE, so both can queue
+// every reader behind one unrelated long-running query.
 //
 // A test naming four scripts is satisfied when a fifth is added and forgotten.
-// This walks the fields of SQLScripts and fails on any name it does not have a
-// decision for, so a new script cannot ship without someone answering whether
-// it runs in a transaction. The registry says which ANSWER each field got, not
-// which fields to look at.
+// This walks the fields of SQLScripts and fails on any name it has no decision
+// for, so the registry records which answer each field got rather than which
+// fields to look at.
 //
-// The index scripts must NOT carry it, and that is asserted rather than
+// The index scripts must not carry it, and that is asserted rather than
 // skipped. SET LOCAL outside a transaction is accepted, warns, and does
-// nothing — so copying the line there would read as protection and provide
-// none, which is worse than the absence because it stops anybody looking again.
+// nothing, so the line there would read as protection and provide none.
 func TestEveryTransactionalScriptBoundsItsLockWait(t *testing.T) {
 	type execKind int
 	const (

@@ -182,22 +182,17 @@ func TestValidateEntityExpressions_QuietOnEmpty(t *testing.T) {
 	}
 }
 
-// An expression that does not parse as a CHECK constraint must be REJECTED,
-// not waved through.
+// An expression that does not parse as a CHECK constraint is rejected, not
+// skipped as PostgreSQL's problem to report.
 //
-// This test previously asserted the opposite — that a syntax error was
-// PostgreSQL's to report, so skipping it here was safe. That was wrong, and an
-// adversarial review turned it into a working cross-tenant leak. The gate
-// parsed `SELECT (<expr>)` while codegen emits `CONSTRAINT c CHECK (<expr>)`,
-// so an expression that closes the CHECK's parenthesis early fails as a SELECT
-// — and was skipped — while remaining valid DDL that plants a second
-// constraint. Executed against PostgreSQL 17.8 as a NOSUPERUSER NOBYPASSRLS
-// role, an ordinary INSERT then fired the planted set_config and the rest of
-// the transaction read another tenant's rows.
+// A gate that parses `SELECT (<expr>)` while codegen emits
+// `CONSTRAINT c CHECK (<expr>)` skips exactly the expressions that close the
+// CHECK's parenthesis early: they fail as a SELECT while remaining valid DDL
+// that plants a second constraint. Executed against PostgreSQL 17.8 as a
+// NOSUPERUSER NOBYPASSRLS role, an ordinary INSERT then fires the planted
+// set_config and the rest of the transaction reads another tenant's rows.
 //
-// The lesson is narrower than "always reject syntax errors": validate the text
-// in the syntactic context it is emitted into, because a parse that succeeds
-// somewhere else proves nothing about the place it lands.
+// The text is validated in the syntactic context it is emitted into.
 func TestValidateEntityExpressions_RejectsExpressionsThatEscapeTheConstraint(t *testing.T) {
 	for _, tc := range []struct {
 		name string

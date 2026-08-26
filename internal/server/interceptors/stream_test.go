@@ -17,10 +17,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// ---------------------------------------------------------------------------
-// Stream test scaffolding
-// ---------------------------------------------------------------------------
-
 // fakeServerStream implements grpc.ServerStream just enough for the
 // interceptor tests. Context() returns the injected ctx; the rest are
 // safe no-ops because the interceptors under test don't call them.
@@ -47,10 +43,8 @@ func runAuthStream(t *testing.T, cfg AuthConfig, method, caller string) error {
 	return intr(nil, ss, info, noopStreamHandler)
 }
 
-// ---------------------------------------------------------------------------
-// AuthChecker.Stream tests — mirror the unary tests so the same
-// allowlist semantics are confirmed on both surfaces.
-// ---------------------------------------------------------------------------
+// The unary tests mirrored, so the same allowlist semantics are confirmed on
+// both surfaces.
 
 func TestAuthStream_DisabledIsNoOp(t *testing.T) {
 	if err := runAuthStream(t, AuthConfig{Enforce: false}, "/x.Y/Z", "anonymous"); err != nil {
@@ -91,11 +85,6 @@ func TestAuthStream_UnregisteredCallerRejected(t *testing.T) {
 		t.Errorf("unregistered stream caller should be PermissionDenied, got %v", status.Code(err))
 	}
 }
-
-// ---------------------------------------------------------------------------
-// CertBindingChecker tests — covers both Unary and Stream flavors plus
-// the shared-cache property.
-// ---------------------------------------------------------------------------
 
 // peerCtx builds a context with a fake mTLS peer presenting the
 // supplied raw cert bytes. Matches the layout leafCertFromContext
@@ -215,16 +204,13 @@ func TestCertBinding_UnknownCallerRejected(t *testing.T) {
 // Any certificate that passed the handshake is accepted for a registered
 // caller.
 //
-// This replaces three tests — a "bootstrap window" that accepted anything until
-// the first fingerprint was recorded, a mismatch rejection, and a match pass.
-// All three described pinning, which migration 0032 removed when the leaf
-// lifetime dropped to seven days.
+// Migration 0032 removed pinning when the leaf lifetime dropped to seven days,
+// so there is no fingerprint to match or mismatch against.
 //
-// The bootstrap window is the one worth remembering: it accepted ANY CA-signed
-// certificate for a caller whose fingerprint was NULL, and because the only
-// writer of that column never ran in any deployment, every caller everywhere sat
-// in it permanently. The behaviour below is what that window actually was, now
-// made deliberate and bounded by a short certificate rather than by an accident.
+// The pinning design's bootstrap window accepted any CA-signed certificate for
+// a caller whose fingerprint was NULL, and because the only writer of that
+// column never ran in any deployment, every caller sat in it permanently. This
+// is that behaviour, bounded by a short certificate lifetime instead.
 func TestCertBinding_AnyValidCertPassesForARegisteredCaller(t *testing.T) {
 	rl := &recordingLookup{results: map[string]cbLookupResult{
 		"alice": {exists: true},
@@ -399,13 +385,8 @@ func TestCertBinding_StreamMatchesUnary(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// WithStreamContext + ctxStream wrapper test
-// ---------------------------------------------------------------------------
-
-// TestWithStreamContext_PropagatesValue pins that the ctxStream
-// wrapper actually returns the supplied context — the whole point
-// of the stream-resolveCaller interceptor relies on this.
+// The ctxStream wrapper returns the supplied context, which is what the
+// stream-resolveCaller interceptor relies on.
 func TestWithStreamContext_PropagatesValue(t *testing.T) {
 	type k struct{}
 	base := &fakeServerStream{ctx: context.Background()}
@@ -415,10 +396,6 @@ func TestWithStreamContext_PropagatesValue(t *testing.T) {
 		t.Errorf("WithStreamContext: got value %q, want %q", got, "v")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// AuthChecker StreamMatchesUnary
-// ---------------------------------------------------------------------------
 
 // Equivalent to the cert binding cross-flavor test: both flavors of
 // the auth checker must reach identical verdicts for every input.

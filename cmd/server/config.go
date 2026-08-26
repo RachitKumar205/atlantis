@@ -69,10 +69,9 @@ type config struct {
 	// the deployment owns, written by `tidectl plan`/`approve` into its own
 	// repository after this binary was built.
 	//
-	// It no longer names the server's own schema. That tree (migrations/infra)
-	// is embedded in the binary, so there is no path that can point a server at
-	// a different version of the schema its code expects. See the migrations
-	// package.
+	// Not the server's own schema: migrations/infra is embedded in the binary,
+	// so no path points a server at another version of the schema its code
+	// expects. See the migrations package.
 	MigrationsDir string
 
 	// Schema-management toggles surfaced to the admin Service.
@@ -119,12 +118,9 @@ type config struct {
 
 	// CertBindingExemptCallers are CNs that bypass the cert-binding check.
 	//
-	// Empty by default. There is no fingerprint to bind against any more —
-	// migration 0032 removed pinning — so what an exemption skips is the check
-	// that the caller still has an identity row, and that is the only revocation
-	// the system has. Exempting a caller makes it one RevokeCaller cannot cut
-	// off, which is why nothing holds this by default and why the console, which
-	// held it longest, no longer does.
+	// Empty by default. Migration 0032 removed pinning, so what an exemption
+	// skips is the check that the caller still has an identity row — the only
+	// revocation there is. An exempt caller is one RevokeCaller cannot cut off.
 	CertBindingExemptCallers []string
 
 	// Trusted front-proxy mode. When TrustedProxyCallers is non-empty, a
@@ -248,24 +244,15 @@ func loadConfig() (config, error) {
 		AdminAllowApplyMutation: envBool("ATL_ALLOW_APPLY_MUTATION", true),
 		RequireApacheTimescale:  envBool("ATL_REQUIRE_APACHE_TIMESCALE", false),
 		RequireTenantIsolation:  envBool("ATL_REQUIRE_TENANT_ISOLATION", false),
-		// No default, deliberately.
+		// No default. An exemption skips the check that a caller_identities row
+		// exists, which since migration 0032 is the whole of cert binding.
+		// Migration 0019 seeds the console's row on every install, so exempting
+		// it gains nothing and costs its revocation: RevokeCaller deletes the
+		// row and the interceptor refuses within its five-second cache, and an
+		// exempt caller skips that.
 		//
-		// This defaulted to "atlantis-console" from the cert-binding rollout.
-		// Binding then meant a stored leaf fingerprint, the console had none of
-		// its own, and exempting it was how it kept reaching admin RPCs without
-		// an operator step.
-		//
-		// Migration 0032 removed pinning. The check an exemption now skips is
-		// only "does a caller_identities row exist", and migration 0019 seeds
-		// the console's row unconditionally on every install — so exempting it
-		// buys nothing. What it costs is the one thing 0032 kept when it dropped
-		// the fingerprints: RevokeCaller deleting a row cuts that caller off
-		// within the interceptor's five-second cache. An exempt caller has no
-		// revocation at all, and the console holds an admin credential for every
-		// organisation.
-		//
-		// The env var stays, for a bootstrap CN that genuinely authenticates by
-		// other means. It is an operator's deliberate act rather than a default.
+		// The variable remains for a bootstrap CN that authenticates by other
+		// means.
 		CertBindingExemptCallers: splitCSV(os.Getenv("ATL_CERT_BINDING_EXEMPT_CALLERS")),
 
 		TrustedProxyCallers:    splitCSV(os.Getenv("ATL_TRUSTED_PROXY_CALLERS")),
@@ -293,14 +280,11 @@ func loadConfig() (config, error) {
 	}
 	// mTLS is required. There is no dev mode without it.
 	//
-	// The empty configuration used to be accepted and select an insecure
-	// listener. That was never only about encryption: main.go reads
-	// `TLSCertFile != ""` as the answer to "is this deployment authenticated"
-	// and uses it to switch off the caller allowlist, the caller-to-cert
-	// binding, and admin capability enforcement. So the mode existed in which
-	// atlantis ran with no authorization, and it was the mode a developer
-	// reached by default — which is to say every authorization behaviour was
-	// unreachable locally, including the ones under active development.
+	// main.go reads `TLSCertFile != ""` as whether the deployment is
+	// authenticated, and switches off the caller allowlist, the caller-to-cert
+	// binding and admin capability enforcement when it is empty. Accepting an
+	// empty configuration therefore runs atlantis with no authorization, and
+	// makes that the mode reached by default.
 	//
 	// `make dev-certs` writes a local CA plus the leaf certs into ./certs.
 	var missing []string
@@ -335,13 +319,10 @@ func loadConfig() (config, error) {
 // rejectRetiredAuthzEnv refuses to start when a deployment still configures
 // authorization through the env vars that used to carry it.
 //
-// Ignoring them would be the dangerous option. An operator who wrote
-// ATL_OPERATOR_ALLOWED_CALLERS=console-ci did so to keep everyone else out;
-// booting with the variable present and inert would leave them believing a
-// restriction is in force that the server no longer reads. The equivalent is
-// now a row per grant in atlantis.caller_capabilities, which is auditable and
-// changeable without a restart — so the error carries the SQL rather than just
-// naming the problem, because the operator hitting this is mid-deploy.
+// Booting with the variable present and inert leaves a restriction configured
+// that nothing reads. The equivalent is a row per grant in
+// atlantis.caller_capabilities, so the error carries the SQL rather than only
+// naming the problem.
 func rejectRetiredAuthzEnv() error {
 	for _, name := range []string{"ATL_MUTATION_ALLOWED_CALLERS", "ATL_OPERATOR_ALLOWED_CALLERS"} {
 		v := os.Getenv(name)

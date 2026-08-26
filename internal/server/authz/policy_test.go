@@ -16,10 +16,9 @@ import (
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
 
-// TestEveryAdminMethodDeclaresACapability is the guard the whole package exists
-// for. It is the same check the server runs at startup, so an RPC added without
-// a required_capability fails here long before it can be deployed reachable by
-// anyone. A failure means: add the option to the new method in admin.proto.
+// The same check the server runs at startup, so an RPC added without a
+// required_capability fails here rather than being deployed reachable by
+// anyone. A failure means adding the option to the new method in admin.proto.
 func TestEveryAdminMethodDeclaresACapability(t *testing.T) {
 	policy, err := AdminPolicy()
 	if err != nil {
@@ -32,13 +31,12 @@ func TestEveryAdminMethodDeclaresACapability(t *testing.T) {
 	}
 }
 
-// TestBuildPolicyRejectsUndeclaredMethod proves the failure mode actually
-// fires. Without it, TestEveryAdminMethodDeclaresACapability passing would only
-// show that BuildPolicy returned nil, not that it can ever say no.
+// Without this, TestEveryAdminMethodDeclaresACapability passing shows only that
+// BuildPolicy returned nil, not that it can say no.
 //
 // The descriptor is synthesized here rather than borrowed from whatever
-// capability-free service happens to be linked into the test binary: that
-// approach silently skipped, which is the same as not having the test.
+// capability-free service happens to be linked into the test binary, which
+// skips silently when none is.
 func TestBuildPolicyRejectsUndeclaredMethod(t *testing.T) {
 	sd := syntheticService(t, "Alpha", "Beta")
 

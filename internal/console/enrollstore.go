@@ -80,18 +80,13 @@ func (o *orgStore) createEnrollToken(ctx context.Context, caller, createdBy stri
 
 // spendEnrollToken claims a token and returns the caller it was minted for.
 //
-// # Everything that decides redeemability is in this one statement
+// One statement decides redeemability: unused, unexpired, and belonging to the
+// bound organisation. Reading and then updating would leave a window in which
+// two requests both see the token unused.
 //
-// Unused, unexpired, and belonging to the bound organisation. Reading the row
-// and then updating it would leave a window where two requests both see it as
-// unused — the exact race single-use exists to close — and it would also invite
-// the expiry check to drift somewhere else and stop being consulted.
-//
-// The organisation is not a predicate here because it does not need to be: the
-// transaction is bound, and the RESTRICTIVE policy on the table compares it.
-// That is the boundary doing its job rather than a WHERE clause somebody could
-// forget. It also means a token from another organisation is indistinguishable
-// from one that never existed, which is the right answer to give.
+// The organisation is not a WHERE clause. The transaction is bound and the
+// RESTRICTIVE policy compares it, which also makes a token from another
+// organisation indistinguishable from one that never existed.
 //
 // A zero-row UPDATE surfaces as pgx.ErrNoRows on Scan rather than as a silent
 // success, which is what makes this shape safe to rely on.
@@ -218,24 +213,16 @@ func (o *orgStore) listCallerCerts(ctx context.Context) ([]callerCert, error) {
 
 // callerCertByFingerprint answers "whose certificate is this".
 //
-// The lookup renewal is built on, and the reason console.caller_certs carries no
-// row-level security: it runs before anything knows which organisation is
-// involved, which is the entire point of it. Not a search — the key is a
-// SHA-256 over a certificate nobody else holds, so the only row anybody can
-// find is the one for a certificate they already have.
+// The lookup renewal is built on, and the reason console.caller_certs carries
+// no row-level security: it runs before anything knows which organisation is
+// involved. Not a search — the key is a SHA-256 over a certificate nobody else
+// holds, so the only row reachable is the one for a certificate already held.
 //
-// # Superseded rows are accepted, and there is no window
-//
-// This had a window once, and before that it excluded superseded rows outright.
-// Both were consequences of certificate pinning, and migration 0032 removed it.
-//
-// The reasoning now is short. A certificate presented here has already passed
-// mTLS on the enrolment listener: it chains to the organisation's authority and
-// it has not expired. Whether this console later issued a newer one for the
-// same caller says nothing about whether this one is still that caller's
-// certificate — it is, for the seven days it lives. Refusing it would only
-// reintroduce the lockout the window existed to prevent: a machine whose
-// renewal response was lost holds nothing else.
+// Superseded rows are accepted, with no overlap window. A certificate presented
+// here has already passed mTLS on the enrolment listener, so it chains to the
+// organisation's authority and has not expired; a newer certificate issued for
+// the same caller does not make this one invalid for the seven days it lives.
+// Refusing it would lock out a machine whose renewal response was lost.
 //
 // Nor does accepting it grant anything. Renewal from a leaked certificate
 // produces another certificate for a caller the holder could already act as,

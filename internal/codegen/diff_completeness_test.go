@@ -16,18 +16,14 @@ import (
 // Assertions over the coverage registry in diff_coverage.go: it must be
 // exhaustive over the IR, and every claim in it must be checkable.
 //
-// # Why a registry rather than a source scan
+// A registry rather than a whole-file AST scan for field selectors. Such a scan
+// reports dsl.Entity.Kind as covered, because dsl.Index.Kind is read in
+// diffIndexes and a name-based scan cannot tell the two apart.
 //
-// The first version of this file AST-scanned the differ for field selectors.
-// It reported dsl.Entity.Kind as covered — because dsl.Index.Kind is read at
-// diff.go:1012 and a name-based scan cannot tell them apart. A completeness
-// guard fooled by a name collision is worse than none, because it reports
-// safety it has not checked.
-//
-// The registry names the differ, and the check below scans *that function's
-// body* for the field. Scoping the scan to one named function is what defeats
-// the collision the whole-file scan could not: diffIndexes reading .Kind is
-// scoped to diffIndexes, which is what covers Entity.Indexes.
+// The registry names the differ, and the check below scans that function's body
+// for the field. Scoping to one named function is what defeats the collision:
+// diffIndexes reading .Kind is scoped to diffIndexes, which covers
+// Entity.Indexes.
 
 func TestEveryEntityAttributeHasACoverageDecision(t *testing.T) {
 	assertDecided(t, reflect.TypeOf(dsl.Entity{}), entityCoverage, "dsl.Entity", "entityCoverage")
@@ -115,20 +111,17 @@ func assertDecided(t *testing.T, typ reflect.Type, cov map[string]coverage, labe
 // is not reachable from diffChecks, so claiming diffChecks covers Entity.Kind
 // still fails.
 //
-// The transitive step is necessary, not convenience — diffFields reads .Fields
-// through fieldsByName and diffChecks reads .Checks through resolvedChecks.
-// Requiring the access to sit in the differ's literal body would force those
-// helpers to be inlined to satisfy a test, which is the test dictating the
-// code's shape rather than checking it.
+// The walk is transitive because diffFields reads .Fields through fieldsByName
+// and diffChecks reads .Checks through resolvedChecks; requiring the access to
+// sit in the differ's literal body would force those helpers inline to satisfy
+// a test.
 //
-// But the walk stops at any function that is itself a claimed differ, and that
-// is what keeps the rooting meaningful. Without it, diffEntity — which calls
-// every sub-differ — reads every attribute any of them reads, so
-// {diffed, "diffEntity"} satisfied Kind, Checks, Indexes, Uniques, Cache,
-// QueryTimeoutMS, TableName and all seven diffed Field attributes. One
-// plausible name would have blanket-covered the registry, which is the
-// wildcard the scoping exists to prevent. A differ delegating to another differ
-// must claim the delegate by name.
+// It stops at any function that is itself a claimed differ. Without that,
+// diffEntity — which calls every sub-differ — reads every attribute any of them
+// reads, so {diffed, "diffEntity"} satisfies Kind, Checks, Indexes, Uniques,
+// Cache, QueryTimeoutMS, TableName and all seven diffed Field attributes: one
+// name blanket-covering the registry. A differ delegating to another must claim
+// the delegate by name.
 func readsField(all map[string]*ast.FuncDecl, root, name string, claimed map[string]bool) bool {
 	seen := map[string]bool{}
 	var walk func(string) bool
@@ -151,9 +144,9 @@ func readsField(all map[string]*ast.FuncDecl, root, name string, claimed map[str
 				}
 			case *ast.CallExpr:
 				// Package-local calls only. A method call (x.f()) is a
-				// SelectorExpr callee and is deliberately not followed —
-				// following methods would widen the closure to most of the
-				// package and give back the collision this scoping prevents.
+				// SelectorExpr callee and is not followed: following methods
+				// would widen the closure to most of the package and give back
+				// the collision this scoping prevents.
 				if id, ok := e.Fun.(*ast.Ident); ok {
 					callees = append(callees, id.Name)
 				}
@@ -417,16 +410,14 @@ func TestDiffAllCoversEveryBucket(t *testing.T) {
 // TestDiffClassesPresentCoversEveryBucket is the same guard for the method the
 // change policy iterates.
 //
-// The policy is four independent rules, and the gate used to consult only
-// HighestClass — so a diff that both broke a caller and dropped a column asked
-// the breaking rule alone. With breaking set to auto-apply, the DROP ran
-// unattended and no plan was filed, though the operator had explicitly
-// required approval for destructive changes.
+// The policy is four independent rules. A gate consulting only HighestClass
+// asks the breaking rule alone about a diff that both breaks a caller and drops
+// a column, so with breaking set to auto-apply the DROP runs unattended against
+// a policy requiring approval for destructive changes.
 //
-// ClassesPresent replaced that, which makes it the thing a new bucket must not
-// escape. A bucket it forgets is a class the policy silently stops governing,
-// and the symptom is an apply that does not stop — the failure nobody notices
-// until it has already run.
+// ClassesPresent is what the policy iterates, so a bucket missing from it is a
+// class the policy stops governing, and the symptom is an apply that does not
+// stop.
 func TestDiffClassesPresentCoversEveryBucket(t *testing.T) {
 	typ := reflect.TypeOf(Diff{})
 

@@ -8,9 +8,8 @@ import (
 )
 
 // The dialect is a published contract: `tide --format=json` output is what CI
-// pipelines and agents parse, and the whole premise of this package is that the
-// choice is made once. These assertions are the choice, written down. Changing
-// one should require editing this file and noticing that you did.
+// pipelines parse. These assertions are that contract written down, so a change
+// to it is a change to this file.
 //
 // Assertions are on parsed values, never on bytes — protojson randomizes its
 // whitespace per binary, so a golden-string test here would fail on an

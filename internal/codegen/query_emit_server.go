@@ -424,20 +424,19 @@ func extract%sCursor(ent *pb.%s, orders []*pb.%sOrderBy) []any {
 // proto as *timestamppb.Timestamp and need .AsTime(); other scalars
 // ride through unchanged.
 //
-// # Nullable columns go through runtime.PresentOrNil
-//
-// A getter cannot express NULL: it returns 0, "" or the epoch for an unset
+// Nullable columns go through runtime.PresentOrNil, because a getter cannot
+// express NULL: it returns 0, "" or the epoch for an unset
 // field, which is indistinguishable from a row that really holds that value.
 // A cursor built from those getters names a coordinate no row sits at, so the
 // next page comes back empty and — being shorter than the limit — carries no
 // token, leaving every row past the first NULL unreachable.
 //
-// The presence test is deliberately NOT emitted as `ent.Score != nil` against
-// the struct field. The emitted server is parsed by this package's tests but
-// never type-checked, so a wrong or renamed struct field would compile only in
-// the caller's repo. Naming the PROTO field instead keeps the string identical
-// to the one proto.go declared, and TestEmittedCursorFieldsExistInTheProto
-// holds the two emitters together.
+// The presence test names the proto field rather than the struct field. The
+// emitted server is parsed by this package's tests but never type-checked, so
+// `ent.Score != nil` against a renamed struct field would fail to compile only
+// in the caller's repo. Naming the proto field keeps the string identical to
+// the one proto.go declared, and TestEmittedCursorFieldsExistInTheProto holds
+// the two emitters together.
 func cursorExtractorExpr(f dsl.Field, _ *dsl.Entity) string {
 	getter := "ent.Get" + snakeToCamel(f.Name) + "()"
 	switch f.Type.Name {
@@ -563,25 +562,20 @@ func primaryPKName(e *dsl.Entity) string {
 	return "id"
 }
 
-// predicateKindForField maps a DSL field type to the query.PredicateKind
-// constant name. The constants are defined in
-// internal/codegen/query/spec.go. Returns ("", false) when the type
-// isn't filterable.
+// predicateKindForField forwards to schema.PredicateKindForField, which names
+// the query.PredicateKind constant for a DSL field type and returns
+// ("", false) when the type is not filterable.
 //
-// Mirrors predicateMessageForField in query_emit.go — keep both in sync;
-// adding a new filterable type means a new arm here, in query_emit.go,
-// AND a new switch arm in translator.translatePredicate.
-// predicateKindForField forwards to schema.PredicateKindForField.
+// A local copy of that table is how a type reaches the emitted .proto without
+// reaching the emitted FilterSpec: added to schema.PredicateKindForField and to
+// both predicateMessageForField tables but not to the copy, it produces a
+// filter message carrying the field and a FilterSpec with no entry for it, so
+// the column is advertised as filterable and then rejected as unknown at
+// request time.
 //
-// It used to be a byte-for-byte copy of it. The copy is how `real` and `double`
-// reached the emitted .proto without reaching the emitted FilterSpec: adding
-// them to schema.PredicateKindForField and to both predicateMessageForField
-// tables produced a filter message with a float field and a FilterSpec with no
-// entry for it, so the column was advertised as filterable and then rejected as
-// unknown at request time.
-//
-// Kept as a forwarder rather than deleted outright because the call site reads
-// better unqualified and the wrapper is where this note belongs.
+// Adding a filterable type means an arm in schema.PredicateKindForField, one in
+// query_emit.go's predicateMessageForField, and one in
+// translator.translatePredicate.
 func predicateKindForField(t dsl.FieldType) (string, bool) {
 	return schema.PredicateKindForField(t)
 }

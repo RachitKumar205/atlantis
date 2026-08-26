@@ -1,38 +1,30 @@
 // Package embedded is the fidelity backend for the atlantis sandbox.
 //
-// Where the sim under internal/runtime/sandbox/sim ships sub-millisecond
-// boot in pure Go at the cost of a whitelist-shaped SQL surface, the
-// embedded backend runs a real Postgres process in-process via
-// fergusstrange/embedded-postgres and exposes it as runtime.Pool. The
-// trade-off: ~4-8 second cold start in
-// exchange for 100% fidelity — every PG idiom (LATERAL, recursive CTE,
-// tsvector, pg_trgm, JSONB jsonb_array_elements, real HNSW index, etc.)
-// just works.
+// It runs a real Postgres in-process through fergusstrange/embedded-postgres
+// and exposes it as runtime.Pool: a 4–8 second cold start against the sim's
+// sub-millisecond one, in exchange for every PG idiom working — LATERAL,
+// recursive CTE, tsvector, pg_trgm, jsonb_array_elements, a real HNSW index.
+// The sim under internal/runtime/sandbox/sim parses a whitelist instead.
 //
-// Auto-routing wires this in at sandbox.New when Options.Backend is
-// BackendEmbedded or when BackendAuto sees a caller schema with custom
-// query / procedure / hypertable blocks (because the sim's whitelist
-// can't honor them without silent fidelity drift).
+// sandbox.New routes here when Options.Backend is BackendEmbedded, and when
+// BackendAuto sees a schema carrying custom query, procedure or hypertable
+// blocks, which the sim's whitelist cannot honour.
 //
-// Schema setup: the IR's CREATE TABLE / CREATE INDEX / trigger DDL is
-// applied at boot via internal/codegen's existing emitter (called with
-// an empty old-IR so every entity comes out as ClassAdditive). The
-// emitter is the canonical source of "what production DDL would
-// look like" — reusing it means the embedded backend's schema is
-// byte-equivalent to what a real `tide apply` produces.
+// The IR's CREATE TABLE, CREATE INDEX and trigger DDL is applied at boot by
+// internal/codegen's emitter, called with an empty old IR so every entity comes
+// out ClassAdditive. That makes the schema here byte-equivalent to what a real
+// `tide apply` produces.
 //
-// Features not supported on embedded (and the sim handles instead):
-//   - Mark / RestoreTo time-travel (would require pg_dump/pg_restore;
-//     too slow to be useful for the agent loop)
-//   - Fork (cloning a PG database means dump + restore; out of scope)
-//   - The Outbox + Cache no-op stubs aren't relevant here because real
-//     handlers can be pointed at the embedded URL and run for real.
+// Not supported, and served by the sim instead:
 //
-// Cost reminder: each embedded backend spawns its own PG process and
-// data directory. fixtures.Bulk and real CRUD operations are full
-// round-trip latencies (microseconds, not nanoseconds). Embedded is
-// the right choice for: (a) user-authored SQL paths the sim can't
-// parse, (b) production-shape fidelity testing.
+//   - Mark / RestoreTo. Time travel would need pg_dump and pg_restore.
+//   - Fork, for the same reason.
+//
+// The Outbox and Cache stubs do not apply: real handlers point at the embedded
+// URL and run against it.
+//
+// Each backend spawns its own PG process and data directory, and every
+// fixtures.Bulk or CRUD call is a round trip.
 package embedded
 
 import (
@@ -231,10 +223,9 @@ func New(ctx context.Context, ir *dsl.IR, opts Options) (*Backend, error) {
 // test asserting `rolsuper = false` has something to assert against.
 const sandboxRole = "atlantis_sandbox"
 
-// randomPassword returns a password nobody needs to know. The role is only
-// reachable over loopback on a kernel-assigned port, so the password is not the
-// boundary — the role's lack of privilege is. It is random anyway so that a
-// second process on the same host cannot connect by guessing.
+// randomPassword returns a password nothing records. The role is reachable only
+// over loopback on a kernel-assigned port, and its lack of privilege is the
+// boundary, not this; random so a second process on the host cannot guess it.
 func randomPassword() (string, error) {
 	var b [24]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -326,12 +317,10 @@ func (b *Backend) Close() error {
 // is called first so EmitSQL sees the same shape codegen-emitted
 // migrations land with.
 //
-// EmitSQL omits CREATE SCHEMA when the schema name is the canonical
-// "atlantis" one (production has it pre-created by the bootstrap
-// migration). On a fresh embedded PG nothing has been bootstrapped,
-// so we prepend CREATE SCHEMA IF NOT EXISTS for every schema the
-// catalog will reference. Idempotent — safe even when the emitter
-// already emits the CREATE.
+// EmitSQL omits CREATE SCHEMA for the canonical "atlantis" schema, which the
+// bootstrap migration creates in production. A fresh embedded PG has no
+// bootstrap, so CREATE SCHEMA IF NOT EXISTS is prepended for every schema the
+// catalog references — idempotent where the emitter already wrote one.
 func applySchema(ctx context.Context, b *Backend, ir *dsl.IR) error {
 	empty := &dsl.IR{}
 	codegen.AssignProtoNumbers(empty, ir)
@@ -385,10 +374,9 @@ var (
 	hypertableRE   = regexp.MustCompile(`(?is)SELECT\s+create_hypertable\s*\([^;]*?\)\s*;`)
 )
 
-// schemaPreamble emits `CREATE SCHEMA IF NOT EXISTS "<name>"` for
-// every distinct schema name the IR references. EmitSQL elides these
-// for the "atlantis" schema (assumed already bootstrapped in prod);
-// on a fresh embedded PG nothing exists yet so we synthesize them.
+// schemaPreamble emits `CREATE SCHEMA IF NOT EXISTS "<name>"` for every
+// distinct schema the IR references. EmitSQL elides them for "atlantis", which
+// production bootstraps and a fresh embedded PG does not.
 func schemaPreamble(ir *dsl.IR) string {
 	// Codegen places touch-trigger functions in the "atlantis" schema
 	// regardless of which schema the table lives in
@@ -444,11 +432,12 @@ func indexOf(s string, c byte) int {
 	return -1
 }
 
-// freePort asks the kernel for an unused TCP port. We bind, read the
-// assigned port, then close — there's an inherent TOCTOU window
-// (another process could grab the port between our close and PG's
-// listen), but in practice PG holds it for the whole process lifetime
-// and the race almost never fires.
+// freePort asks the kernel for an unused TCP port by binding, reading the
+// assigned port, then closing.
+//
+// The close-to-listen gap is a TOCTOU window another process can take the port
+// in. PG then holds it for its whole life, so the window is one moment per
+// backend.
 func freePort() (int, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -459,21 +448,20 @@ func freePort() (int, error) {
 	return addr.Port, nil
 }
 
-// tempDirPrefixes are the two shapes SweepAbandoned recognises. Kept beside
-// their creation site: the console used to carry its own copy of these
-// literals, which is how a sweep comes to delete something nobody told it
-// about.
+// tempDirPrefixes are the two shapes SweepAbandoned recognises, kept beside
+// their creation site. A second copy of these literals elsewhere is how a sweep
+// comes to delete a directory it was never told about.
 var tempDirPrefixes = []string{"atlantis-sandbox-data-", "atlantis-sandbox-runtime-"}
 
 // ownerFile records which process a sandbox tempdir belongs to. See
 // SweepAbandoned for why a directory without one is left alone.
 const ownerFile = ".atlantis-owner"
 
-// makeTempDir returns a uniquely-named subdir under os.TempDir().
-// Each Backend instance gets its own (data + runtime) tempdir pair so
-// embedded-postgres's cleanup-on-start dance doesn't fail when
-// multiple instances run back-to-back. The caller is responsible for
-// removing the dir on Close — we do that in Backend.Close().
+// makeTempDir returns a uniquely-named subdirectory under os.TempDir().
+//
+// Each Backend gets its own data and runtime pair, so embedded-postgres's
+// cleanup-on-start does not fail across instances running back to back.
+// Backend.Close removes them.
 //
 // The owner file is written before the directory is used, so a sweep that
 // runs between MkdirAll and the first write still sees a claimed directory.
@@ -495,34 +483,22 @@ func makeTempDir(prefix string) (string, error) {
 
 // SweepAbandoned removes sandbox tempdirs whose owning process is gone.
 //
-// # Why the ownership check is the whole function
-//
-// The previous version globbed the two prefixes and os.RemoveAll'd every
-// match. That cannot tell "left behind by a crashed predecessor" from "in use
-// by another process right now", and it ran on every console boot. One console
-// per host made it harmless; a rolling restart with overlap, a blue/green
-// deploy, or two people running `make dev` on one machine would have a live
-// sandbox deleted out from under an active session, surfacing as an unrelated
-// Postgres error somewhere else entirely.
-//
-// It was found when a console test called the real New(): `go test` runs
-// packages concurrently, and the sweep deleted three sandbox packages' working
-// directories while they were extracting a Postgres archive.
-//
-// # Which way it fails
-//
 // A directory is removed only when its owner file names a process that is no
 // longer running. Anything else — no owner file, an unreadable one, a PID that
-// still resolves — is kept and logged. That leaks disk in the cases it cannot
-// judge, which is the right direction: an abandoned directory costs space until
-// somebody clears it, while a deleted live one costs a running session.
+// still resolves — is kept and logged, so the cases this cannot judge leak disk
+// rather than deleting a live sandbox.
 //
-// PID reuse is possible and also falls the safe way: a recycled PID reads as
-// alive, so the directory is kept.
+// Globbing the prefixes and removing every match cannot separate a crashed
+// predecessor's directory from one in use right now, and this runs on every
+// console boot: a rolling restart, a blue/green deploy, or two `make dev` runs
+// on one host then delete a live sandbox mid-session, surfacing as an unrelated
+// Postgres error. `go test` runs packages concurrently and reaches it the same
+// way.
 //
-// Directories created before this marker existed have no owner file and are
-// therefore never swept. They are named in the log so an operator can remove
-// them deliberately.
+// PID reuse falls the same direction: a recycled PID reads as alive and the
+// directory is kept.
+//
+// A directory with no owner file is never swept, and is named in the log.
 func SweepAbandoned(logf func(string, ...any)) {
 	for _, prefix := range tempDirPrefixes {
 		matches, err := filepath.Glob(filepath.Join(os.TempDir(), prefix+"*"))

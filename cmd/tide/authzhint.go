@@ -38,9 +38,9 @@ var mutateCapabilities = map[string]bool{
 // explainAuthz returns err with an explanation appended when it is a capability
 // refusal, and unchanged otherwise.
 //
-// Appended rather than replacing: the original names the RPC and the
-// capability, which is what somebody reading a bug report needs. The
-// explanation is for the person at the terminal.
+// Appended rather than replacing. The original names the RPC and the
+// capability, which is what a bug report carries; the explanation is what the
+// terminal needs.
 func explainAuthz(err error) error {
 	if err == nil {
 		return nil

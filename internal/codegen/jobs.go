@@ -26,10 +26,9 @@ import (
 // untyped handler with the row's args JSON; the generated wrapper
 // unmarshals into Args before dispatching.
 //
-// No client codegen yet: callers submit jobs via the admin
-// SubmitJob RPC with a hand-marshaled args JSON. A typed Submit<Job>
-// method lands in a subsequent slice once we have a clean home for
-// the admin gRPC client in the generated tree.
+// No client codegen: callers submit jobs through the admin SubmitJob RPC with
+// a hand-marshaled args JSON. A typed Submit<Job> needs a home for the admin
+// gRPC client in the generated tree, which does not exist yet.
 func EmitJobsHandlers(ir *dsl.IR) ([]GoFile, error) {
 	if ir == nil {
 		return nil, fmt.Errorf("EmitJobsHandlers: ir is required")

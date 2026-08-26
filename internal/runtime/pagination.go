@@ -38,27 +38,21 @@ var ErrInvalidPageToken = errors.New("runtime: invalid page token")
 // absent. Generated cursor extractors call it for every nullable ordering
 // column.
 //
-// # Why the generated code cannot just check the struct field
-//
 // A NULL column is scanned into an unset proto field, and codegen emits
-// nullable columns with explicit presence, so the information is there — but
-// the getter erases it, returning 0 or "" exactly as if the row held a real
-// zero. The obvious fix is for the emitted code to test the pointer field
-// directly (`ent.Score != nil`), and that is a worse trade than it looks: the
-// emitted server is only ever PARSED by the test suite, never type-checked, so
-// a wrong or renamed struct field would compile in the caller's repo and
+// nullable columns with explicit presence, but the getter erases that and
+// returns 0 or "" as if the row held a real zero.
+//
+// The generated code does not test the pointer field directly (`ent.Score !=
+// nil`), because the emitted server is only parsed by the test suite and never
+// type-checked, so a wrong or renamed struct field would compile in the
+// caller's repo and
 // nowhere else. Routing through protoreflect means the emitted code names the
 // PROTO field, which is the same string codegen wrote into the .proto, and the
 // pairing is checkable inside this repo.
 //
-// # Behaviour when the field is unknown
-//
-// Returns v unchanged. That is the pre-existing behaviour for every column and
-// so cannot introduce a new failure, and codegen never emits a name it did not
-// also declare — TestEmittedCursorFieldsExistInTheProto holds those two
-// emitters together. Returning nil instead would turn a codegen slip into every
-// row looking NULL, which is a far worse silent outcome than the one this
-// function exists to remove.
+// An unknown field returns v unchanged. codegen never emits a name it did not
+// also declare, which TestEmittedCursorFieldsExistInTheProto holds together.
+// Returning nil would turn a codegen slip into every row looking NULL.
 func PresentOrNil(m proto.Message, protoField string, v any) any {
 	if m == nil {
 		return v
@@ -367,8 +361,6 @@ func KeysetPredicate(cols []KeysetColumn, cursor []any, placeholderStart int) (s
 // nullAwareKeysetPredicate builds the page-advance predicate when any ordering
 // column may be NULL.
 //
-// # The shape
-//
 // The same nested-OR expansion the mixed-direction case uses, with both halves
 // made null-aware. For column i with cursor value v, under the ordering
 // OrderByClauseFromKeyset writes (ASC NULLS LAST, DESC NULLS FIRST):
@@ -387,14 +379,10 @@ func KeysetPredicate(cols []KeysetColumn, cursor []any, placeholderStart int) (s
 // Descending, NULLs sort first, so a NULL cursor is followed by every non-NULL
 // row, and a non-NULL cursor has already left the NULLs behind.
 //
-// # Why FALSE rather than omitting the disjunct
-//
-// `after` returning FALSE for a NULL ascending cursor is not a degenerate case
-// to skip: the disjunct still has to exist so the LATER columns' equality
-// prefix is built on it. Dropping it would silently shorten the chain and let a
-// row equal on this column but past it on the tiebreaker escape the predicate.
-//
-// # Termination
+// `after` yields FALSE for a NULL ascending cursor rather than omitting the
+// disjunct, because the later columns' equality prefix is built on it. Dropping
+// it shortens the chain and lets a row equal on this column but past it on the
+// tiebreaker escape the predicate.
 //
 // The last column is the PK tiebreaker, which is never nullable, so the final
 // disjunct is always `... AND pk > $n` — a strict comparison over a total
@@ -466,14 +454,11 @@ func nullAwareKeysetPredicate(cols []KeysetColumn, cursor []any, placeholderStar
 // the keyset column list. The empty list yields the empty string —
 // callers concatenate directly without an interior conditional.
 //
-// # Why the NULLS placement is written out
-//
-// ASC NULLS LAST and DESC NULLS FIRST are already PostgreSQL's defaults, so
-// emitting them changes no plan and no index choice — a default btree provides
-// exactly these orderings. What they change is that KeysetPredicate can RELY on
-// them. Before, the predicate's correctness depended on an ordering nothing in
-// the query stated, which is a contract only in the sense that both halves
-// happened to agree.
+// The NULLS placement is written out even though ASC NULLS LAST and DESC NULLS
+// FIRST are PostgreSQL's defaults and a default btree provides exactly these
+// orderings, so emitting them changes no plan. Stating them is what lets
+// KeysetPredicate rely on them rather than on an ordering nothing in the query
+// declares.
 //
 // Stating it also makes the pair reviewable: flip one of these and the
 // corresponding arm in KeysetPredicate is wrong, and the test that walks a page

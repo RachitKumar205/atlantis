@@ -34,11 +34,9 @@ func replaceUserInfo(dsn, userinfo string) string {
 
 // The two properties migration 0024 exists for, executed rather than argued.
 //
-// Both were true of the design it replaced in exactly one direction: the table
-// discriminator was safe and expensive. Neither of these tests would have
-// passed against it, and that is the point — a change made for a measurement
-// needs the measurement under test, or the next person to "simplify" the
-// function has nothing telling them what they broke.
+// The table discriminator it replaced was safe and expensive, and neither of
+// these passes against it. A change made for a measurement needs the
+// measurement under test.
 
 func discriminatorConn(t *testing.T) (context.Context, *pgx.Conn, string) {
 	t.Helper()
@@ -83,13 +81,11 @@ func TestPartitionBindConsumesNoTransactionID(t *testing.T) {
 	// Measured per transaction from inside it, NOT as a delta on the cluster's
 	// xmax horizon.
 	//
-	// The horizon moves for every other backend too. A review reproduced both
-	// failure directions against the delta form: one concurrent writer running
-	// `SELECT txid_current()` made it fail 3 times out of 3 on unmutated code,
-	// with a message that reads as a security regression; and a mutation that
-	// burned an id on 45 of 50 binds — wraparound in 1.6 days instead of 1.43,
-	// materially the same failure — passed silently. At a full burn it landed
-	// on exactly the threshold, i.e. zero margin.
+	// The horizon moves for every other backend too, so the delta form fails
+	// both ways: one concurrent writer running `SELECT txid_current()` fails it
+	// 3 times out of 3 on unmutated code, and a mutation burning an id on 45 of
+	// 50 binds — wraparound in 1.6 days instead of 1.43 — passes silently. At a
+	// full burn it lands on exactly the threshold.
 	//
 	// txid_current_if_assigned() answers the question directly: it returns this
 	// transaction's id if one has been assigned and NULL if not, and no other

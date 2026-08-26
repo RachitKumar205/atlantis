@@ -5,8 +5,8 @@ package codegen
 // `tide generate` keeps emitting the same paths it always has.
 const defaultModulePrefix = "github.com/rachitkumar205/atlantis-go"
 
-// The server's two defaults are this repository's own paths, and that is the
-// whole point of them being different from the client's.
+// The server's two defaults are this repository's own paths, which is why they
+// differ from the client's.
 //
 // A generated CLIENT is caller code: it lives in the caller's module and
 // imports pb from wherever that module put it, which is why ModulePrefix is
@@ -20,10 +20,10 @@ const defaultModulePrefix = "github.com/rachitkumar205/atlantis-go"
 // repo (see buf.gen.yaml), and go.mod already carries the matching replace for
 // the clients/go sub-module.
 //
-// Both were previously hardcoded to the atlantis-go path, which appears in
-// neither go.mod nor go.sum — so an emitted server could not be built in any
-// module at all. Nothing caught it because this repo ships no .atl files, so
-// the Makefile's `go build ./gen/...` never had anything to build.
+// A prefix that appears in neither go.mod nor go.sum yields a server no module
+// can build. This repo ships no .atl files, so the Makefile's
+// `go build ./gen/...` compiles nothing and does not catch it; the compilecheck
+// fixture below is what does.
 const (
 	defaultServerPBPrefix  = "github.com/rachitkumar205/atlantis/clients/go/pb"
 	defaultServerPkgPrefix = "github.com/rachitkumar205/atlantis/gen/go/server"

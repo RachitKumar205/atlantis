@@ -9,33 +9,25 @@ import (
 
 // Every change class must reach a distinct, meaningful wire value.
 //
-// # The bug this makes impossible
-//
 // The path is codegen.ChangeClass -> translateClass -> ClassName ->
-// planClassToPB -> adminpb.PlanClass. Two hops, each a switch with a
-// fall-through, and ClassDestructive had an arm in neither.
-//
-// The result was not a compile error or a panic. translateClass's fall-through
-// means "the DSL did not compile", so a destructive plan arrived at the CLI as
-// PLAN_CLASS_UNPARSEABLE and `tide apply` printed
+// planClassToPB -> adminpb.PlanClass: two hops, each a switch with a
+// fall-through. A class missing an arm in both is neither a compile error nor a
+// panic. translateClass's fall-through means "the DSL did not compile", so the
+// plan arrives at the CLI as PLAN_CLASS_UNPARSEABLE and `tide apply` prints
 //
 //	tide: plan is unparseable — custom-query SQL validation failed.
 //
-// with both error lists empty, and exited 3. The plan had parsed perfectly
-// well. There was no CLI path that could apply a destructive change, and the
-// message named a subsystem that was not involved.
+// with both error lists empty, and exits 3, naming a subsystem that was not
+// involved for a plan that parsed.
 //
-// Fixing only the first hop moves it from UNPARSEABLE to UNSPECIFIED — still
-// exit 3, just a different wrong message. Both arms are required together,
-// which is why this asserts the COMPOSITION rather than either hop.
+// An arm in the first hop alone moves it from UNPARSEABLE to UNSPECIFIED, still
+// exit 3. Both are required together, so this asserts the composition rather
+// than either hop.
 //
-// # Why a loop and not a table
-//
-// A table of cases is a list someone maintains. This walks every value the Go
-// enum can hold, so a class added later fails here on the day it is added
-// rather than on the day a customer runs into it. That is the same argument
-// TestEveryDeclaredClassIsHandled makes on the proto side; this is its
-// counterpart, and the gap between the two enums is what let this through.
+// A loop rather than a table of cases: this walks every value the Go enum can
+// hold, so a class added later fails here on the day it is added.
+// TestEveryDeclaredClassIsHandled is the counterpart on the proto side, and the
+// gap between the two enums is what a single-sided check misses.
 func TestEveryCodegenClassReachesADistinctPlanClass(t *testing.T) {
 	// Every value of codegen.ChangeClass. It is an iota enum with no String()
 	// sentinel to walk, so the bound comes from its last member — and String()

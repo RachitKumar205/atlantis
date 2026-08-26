@@ -10,14 +10,13 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
-// DiscoverTables is the capability adopt never had: naming tables nobody has
-// declared. Everything it does is exclusion, and every exclusion is a chance
-// to drop a table the customer needed to see.
+// DiscoverTables names tables nothing has declared. All of it is exclusion, and
+// each exclusion can drop a table that needed listing.
 //
-// A missing table is invisible. Nothing downstream reports "we found 40 of your
-// 41 tables" — the customer adopts, the fortieth is never declared, and they
-// discover it when something queries a table atlantis does not know about. So
-// each exclusion is asserted individually rather than trusting one clean run.
+// A missing table is invisible: nothing downstream reports "40 of 41 tables",
+// so the fortieth is never declared and surfaces when a query reaches a table
+// atlantis does not know. Each exclusion is asserted separately rather than
+// inferred from one clean run.
 
 func discoverPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -102,12 +101,8 @@ func TestDiscoverTables(t *testing.T) {
 	}
 }
 
-// TestDiscoverTablesExcludesAtlantisOwnMachinery covers the exclusion that
-// would be most embarrassing to get wrong.
-//
 // atlantis.* holds the job queue, the IR checkpoint and caller registrations.
-// Discovering them would open onboarding by proposing that the customer adopt
-// our bookkeeping as their schema.
+// Discovering them proposes atlantis's own bookkeeping as the caller's schema.
 func TestDiscoverTablesExcludesAtlantisOwnMachinery(t *testing.T) {
 	pool := discoverPool(t)
 	ctx := context.Background()

@@ -87,8 +87,6 @@ func Parse(src string) (Stmt, error) {
 	}
 }
 
-// ─────────────────────────── statement translators ───────────────────────────
-
 func translateSelect(s *pg.SelectStmt) (*Select, error) {
 	if s == nil {
 		return nil, fmt.Errorf("%w: nil SELECT", ErrUnsupported)
@@ -329,8 +327,6 @@ func translateDelete(d *pg.DeleteStmt) (*Delete, error) {
 	return out, nil
 }
 
-// ─────────────────────────── ON CONFLICT ───────────────────────────
-
 func translateOnConflict(c *pg.OnConflictClause, ins *Insert) error {
 	switch c.Action {
 	case pg.OnConflictAction_ONCONFLICT_NOTHING:
@@ -369,8 +365,6 @@ func translateOnConflict(c *pg.OnConflictClause, ins *Insert) error {
 	}
 	return nil
 }
-
-// ─────────────────────────── projections ───────────────────────────
 
 func translateProjections(targets []*pg.Node) ([]Projection, error) {
 	out := make([]Projection, 0, len(targets))
@@ -481,8 +475,6 @@ func returningColumnName(rt *pg.ResTarget) (string, error) {
 	return columnRefName(cr)
 }
 
-// ─────────────────────────── ORDER BY ───────────────────────────
-
 func translateOrderBy(sort []*pg.Node) ([]OrderByCol, error) {
 	out := make([]OrderByCol, 0, len(sort))
 	for _, n := range sort {
@@ -526,8 +518,6 @@ func translateOrderBy(sort []*pg.Node) ([]OrderByCol, error) {
 	}
 	return out, nil
 }
-
-// ─────────────────────────── WHERE / predicates ───────────────────────────
 
 // translateWhere walks the WhereClause root. Top-level AND-chains
 // flatten to a flat []Pred (matching the existing executor contract);
@@ -784,8 +774,6 @@ func isCmpOp(op string) bool {
 	return false
 }
 
-// ─────────────────────────── expressions ───────────────────────────
-
 func translateExpr(n *pg.Node) (Expr, error) {
 	if n == nil {
 		return nil, fmt.Errorf("%w: nil expression", ErrUnsupported)
@@ -950,11 +938,8 @@ func translateExprAExpr(ax *pg.A_Expr) (Expr, error) {
 	return nil, fmt.Errorf("%w: operator %q in expression position", ErrUnsupported, op)
 }
 
-// ─────────────────────────── small helpers ───────────────────────────
-
-// translateRangeVar maps a pg_query RangeVar (table reference) to
-// our TableRef. Rejects everything that isn't a bare schema-qualified
-// table (JoinExpr, subselect, etc.).
+// translateRangeVar maps a pg_query RangeVar to a TableRef, rejecting anything
+// that is not a bare schema-qualified table: JoinExpr, subselect, and the rest.
 func translateRangeVar(n *pg.Node) (TableRef, error) {
 	if rv := n.GetRangeVar(); rv != nil {
 		if rv.Alias != nil {
@@ -998,9 +983,9 @@ func translateLimitExpr(n *pg.Node, ctx string) (Expr, error) {
 	return nil, fmt.Errorf("%w: %s must be an integer or placeholder ($N)", ErrUnsupported, ctx)
 }
 
-// translatePlaceholder reduces an expression node to a Placeholder,
-// erroring when the input isn't a bare $N (with an optional TypeCast
-// wrapper, which we strip — `$1::vector` is still a placeholder).
+// translatePlaceholder reduces an expression node to a Placeholder, erroring on
+// anything but a bare $N. A TypeCast wrapper is stripped first, so `$1::vector`
+// is still a placeholder.
 func translatePlaceholder(n *pg.Node, ctx string) (Placeholder, error) {
 	if tc := n.GetTypeCast(); tc != nil {
 		n = tc.Arg
@@ -1023,11 +1008,11 @@ func requireColumnRef(n *pg.Node, ctx string) (string, error) {
 	return columnRefName(cr)
 }
 
-// columnRefName extracts the column name from a ColumnRef. Accepts
-// either a 1-field (`col`) or 2-field (`tbl.col` / `schema.col`) ref;
-// returns the last field as the column. The executor doesn't currently
-// model table-qualified column references, so for 2-field refs we keep
-// the column name and let the executor's column-lookup do the matching.
+// columnRefName extracts the column name from a ColumnRef, taking either a
+// one-field `col` or a two-field `tbl.col` and returning the last field.
+//
+// The executor models no table-qualified column reference, so a two-field ref
+// keeps only the column name and its lookup does the matching.
 func columnRefName(cr *pg.ColumnRef) (string, error) {
 	if len(cr.Fields) == 0 {
 		return "", fmt.Errorf("%w: empty column reference", ErrUnsupported)

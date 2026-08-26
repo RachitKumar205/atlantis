@@ -7,11 +7,12 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
-// lowerWithCustom parses a fixture containing a query or procedure and
-// returns the lowered CustomQuery/CustomProcedure for the validator
-// tests. We use the IR-lowering path (which already passes the dep-
-// free checks) so the validator tests focus on pg_query_go semantics
-// rather than overlap with IR validation.
+// lowerWithCustom parses a fixture holding a query or procedure and returns the
+// lowered CustomQuery/CustomProcedure.
+//
+// Through the IR-lowering path, so a fixture reaching a test has already passed
+// the dependency-free checks and the assertions cover pg_query_go semantics
+// alone.
 func lowerWithCustom(t *testing.T, extra string) *dsl.IR {
 	t.Helper()
 	src := `
@@ -101,10 +102,9 @@ query Sneaky for SavedOutfit {
 }
 
 func TestValidateCustomQuery_RejectsDDL(t *testing.T) {
-	// DDL statements never expose a free `$arg` slot, so the IR
-	// validator's "input is unused" rule would also catch this. We
-	// dodge that by using the input inside a SELECT comment-style
-	// trick: input { x } is consumed by a no-op SELECT.
+	// A DDL statement exposes no free `$arg` slot, so the IR validator's
+	// "input is unused" rule fires first. A no-op SELECT consumes the input,
+	// leaving the DDL rejection as the only reason this fails.
 	ir := lowerWithCustom(t, `
 query DDL for SavedOutfit {
   input { x: bigint }

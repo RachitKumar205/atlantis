@@ -21,23 +21,17 @@ import (
 //
 // Everything here is env-gated on ATLANTIS_TEST_PG, the same as the console's
 // and the server's live-database tests. CI asserts no test skips for that
-// reason, so the gate is a local-development convenience rather than a way for
-// these to be quietly absent.
+// reason, so the gate is a local-development convenience.
 
 // newTestStore opens Cloud's database as the role a deployment runs as.
 //
-// # Why not the administrative role
-//
-// Since migration 0003 there are policed tables, and the connecting role
-// decides whether their policies do anything: FORCE ROW LEVEL SECURITY binds a
-// table's owner, and binds a superuser to nothing at all. A fixture that
-// connected as the test cluster's superuser would run every test with the
-// boundary inert, and every isolation assertion would pass for the wrong
-// reason — which is exactly the failure the boundary exists to prevent.
+// The connecting role decides whether the policies do anything: FORCE ROW LEVEL
+// SECURITY binds a table's owner, and binds a superuser to nothing. Connecting
+// as the test cluster's superuser would run every test with the boundary inert,
+// and every isolation assertion would pass.
 //
 // So the fixture creates a NOSUPERUSER NOBYPASSRLS role and migrates as it, so
-// that role also OWNS the tables. Ten other tests in this repository do the
-// same; the grants differ per test, which is why each has its own.
+// that role also owns the tables.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	db, _ := newTestStoreWithDSN(t)
@@ -108,14 +102,9 @@ func TestCreateAndReadAUser(t *testing.T) {
 	}
 }
 
-// The database refuses a second account for the same person under different
-// capitalisation, whatever Go did.
-//
-// This is the half that matters. Normalising in NormalizeEmail is uniqueness
-// enforced by remembering; one INSERT that skips the helper and the same person
-// has two accounts, two sets of memberships and two passwords. The CHECK moves
-// that from a bug to a refused write, so the test goes around the helper
-// deliberately.
+// One INSERT that skips NormalizeEmail and the same person holds two accounts,
+// two sets of memberships and two passwords. The CHECK constraint refuses the
+// write, so this goes around the helper.
 func TestTheDatabaseRefusesAnUnfoldedEmail(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -141,10 +130,8 @@ func TestTheDatabaseRefusesAnUnfoldedEmail(t *testing.T) {
 	if err == nil {
 		t.Fatal("a duplicate address was accepted")
 	}
-	// Reported as a named error rather than a raw constraint violation. A
-	// seeding script needs to tell "already there" from "the write failed", and
-	// the alternative it reaches for is ignoring every error from the command —
-	// which also ignores the ones that matter.
+	// Reported as a named error, so a seeding script can tell "already there"
+	// from "the write failed".
 	if !errors.Is(err, ErrAlreadyExists) {
 		t.Errorf("a duplicate came back as %v, not ErrAlreadyExists", err)
 	}
@@ -168,8 +155,7 @@ func TestMembershipIsTheGate(t *testing.T) {
 		t.Fatalf("create org: %v", err)
 	}
 
-	// Before any grant. This is what /authorize consults, and the answer has to
-	// be a refusal rather than a default.
+	// Before any grant. /authorize consults this.
 	if _, err := db.RoleIn(ctx, u.ID, "acme"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("a user with no membership got %v, want ErrNotFound", err)
 	}
@@ -209,12 +195,9 @@ func TestMembershipIsTheGate(t *testing.T) {
 	}
 }
 
-// Every role the product understands is a role the database accepts.
-//
-// The CHECK constraint duplicates identity.Role, which is deliberate — the
-// console refuses a role it does not recognise, so a row carrying one would
-// authenticate a user who could then do nothing. This is what stops the two
-// drifting: add a constant without adding it to the constraint and this fails.
+// The CHECK constraint duplicates identity.Role. The console refuses a role it
+// does not recognise, so a row carrying one authenticates a user who can then
+// do nothing. Adding a constant without adding it to the constraint fails here.
 func TestEveryRoleTheProductUnderstandsIsStorable(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -247,8 +230,6 @@ func TestEveryRoleTheProductUnderstandsIsStorable(t *testing.T) {
 	}
 }
 
-// Organisation names are constrained where they are stored, because of
-// everywhere they travel afterwards.
 func TestOrgNamesAreConstrained(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -273,8 +254,6 @@ func TestOrgNamesAreConstrained(t *testing.T) {
 	}
 }
 
-// A membership cannot name an organisation that does not exist.
-//
 // Without the foreign key, `cloud member add -org typo` succeeds, mints
 // assertions for an organisation nothing serves, and the failure lands on the
 // user at a console that answers 503.
@@ -291,13 +270,10 @@ func TestMembershipRequiresARealOrganisation(t *testing.T) {
 	}
 }
 
-// An OAuth link resolves to its account, and the lookup works unbound.
-//
-// The unbound part is the point. UserByIdentity runs during a callback, before
-// anyone is signed in — it is the query that establishes who they are. An
-// earlier draft of this schema put a per-user RLS policy on cloud.identities,
-// under which this would have matched nothing and every sign-in would have
-// created a second account for the same person, silently.
+// UserByIdentity runs during a callback, before anyone is signed in, so the
+// lookup has to work unbound. Under a per-user RLS policy on cloud.identities
+// it would match nothing, and every sign-in would create a second account for
+// the same person.
 func TestAnOAuthLinkResolvesToItsAccount(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -331,8 +307,6 @@ func TestAnOAuthLinkResolvesToItsAccount(t *testing.T) {
 	}
 }
 
-// One provider account cannot be claimed by two Cloud accounts.
-//
 // Without the primary key, a sign-in would have to pick one of two users, and
 // whichever it picked would be an account-takeover route for the other.
 func TestOneProviderAccountBelongsToOneUser(t *testing.T) {
@@ -352,17 +326,8 @@ func TestOneProviderAccountBelongsToOneUser(t *testing.T) {
 		t.Fatalf("first link: %v", err)
 	}
 
-	// Straight at the table, going around LinkIdentity on purpose — the same
-	// reasoning as TestTheDatabaseRefusesAnUnfoldedEmail. LinkIdentity's own
-	// refusal is asserted in identity_pg_test.go; what this proves is that the
-	// primary key would stop a second claim even from a statement that never
-	// went through it.
-	//
-	// This test previously called LinkIdentity twice and asserted the row count
-	// was still one, above a comment saying the upsert "re-points the link". It
-	// did not: the conflict branch only ever touched provider_email, so the
-	// second call changed nothing and the count was one for a reason unrelated
-	// to what was being claimed.
+	// Straight at the table, around LinkIdentity, so the primary key is what is
+	// under test. LinkIdentity's own refusal is asserted in identity_pg_test.go.
 	_, err = db.pool.Exec(ctx, `
 		INSERT INTO cloud.identities (provider, provider_subject, user_id)
 		VALUES ('github', '555', $1)
@@ -380,8 +345,6 @@ func TestOneProviderAccountBelongsToOneUser(t *testing.T) {
 	}
 }
 
-// Deleting an account takes its memberships and links with it.
-//
 // A membership row surviving its user would grant an organisation to an id
 // nothing resolves, and MembersOf would silently drop it on the join — an
 // organisation whose member list is shorter than its membership count, with
@@ -450,11 +413,10 @@ func TestMembershipsListPerUserAndPerOrg(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MembershipsOf: %v", err)
 	}
+	// Ordered by name, so the switcher does not reshuffle between loads.
 	if len(mine) != 2 || mine[0].Org != "alpha" || mine[1].Org != "beta" {
 		t.Fatalf("MembershipsOf returned %+v, want alpha then beta", mine)
 	}
-	// Ordered, so the switcher does not reshuffle between loads and move the
-	// entry under the cursor.
 	if mine[0].Role != identity.RoleAdmin || mine[1].Role != identity.RoleViewer {
 		t.Errorf("roles came back as %+v", mine)
 	}
@@ -481,13 +443,8 @@ func TestPolicyGuardPassesOnAFreshSchema(t *testing.T) {
 	}
 }
 
-// A new table with no boundary and no recorded decision fails the boot.
-//
-// This is the whole point of the guard, and it has already done its job once:
-// this test used to create `cloud.totp_secrets` as its hypothetical, and had to
-// be renamed when migration 0003 made that table real and policed. The
-// hypothetical name below is deliberately one nothing will ever add, so the
-// next person to hit this failure is hitting the real thing.
+// The fixture table's name is one no migration will add, so a failure here is
+// the guard firing rather than a collision with a table that became real.
 func TestPolicyGuardRefusesAnUndecidedTable(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -517,8 +474,6 @@ func TestPolicyGuardRefusesAnUndecidedTable(t *testing.T) {
 	}
 }
 
-// ENABLE without FORCE is the trap, and the guard catches it.
-//
 // Without FORCE the owning role — which is the role Cloud connects as — reads
 // straight through the policy. `\d` lists it, every query returns everything,
 // and nothing observable differs from a boundary that works.
@@ -549,11 +504,9 @@ func TestPolicyGuardRefusesEnabledButNotForced(t *testing.T) {
 	}
 }
 
-// A check that could not run is not a check that passed.
 func TestPolicyGuardReportsAFailedProbe(t *testing.T) {
-	// No database needed: the point is that a querier which cannot answer
-	// produces a refusal rather than a pass. A revoked SELECT on pg_policy is
-	// what this looks like in a deployment.
+	// No database needed: a querier that cannot answer must produce a refusal.
+	// A revoked SELECT on pg_policy is what this looks like in a deployment.
 	if err := VerifyPolicies(context.Background(), brokenQuerier{}); err == nil {
 		t.Fatal("the guard reported success when it could not read the catalogue")
 	}
@@ -571,16 +524,10 @@ type brokenRow struct{}
 
 func (brokenRow) Scan(...any) error { return errors.New("permission denied for table pg_roles") }
 
-// The role check has armed, and a superuser now fails where in C1 it passed.
-//
-// This test inverted when migration 0003 landed, and the inversion is the
-// point. While every table was exempt the guard deliberately did not ask about
-// the role, because a role that bypasses row-level security bypasses nothing
-// when there is nothing to bypass. cloud.totp_secrets and cloud.backup_codes
-// changed that: a policy now exists, and whether it does anything depends
-// entirely on who is connected.
-//
-// So the assertion is no longer "the check stays quiet" but "the check fires".
+// The role check runs only once a policed table exists: a role that bypasses
+// row-level security bypasses nothing while every table is exempt.
+// cloud.totp_secrets and cloud.backup_codes are policed, so whether the
+// policies do anything depends on who is connected.
 func TestTheRoleCheckHasArmed(t *testing.T) {
 	adminDSN := os.Getenv("ATLANTIS_TEST_PG")
 	if adminDSN == "" {
@@ -613,7 +560,7 @@ func TestTheRoleCheckHasArmed(t *testing.T) {
 	if !strings.Contains(err.Error(), "superuser") {
 		t.Errorf("refused, but not because of the role: %v", err)
 	}
-	// Named, because the operator's next question is how much is at stake.
+	// Named, so an operator can see how many tables are affected.
 	if !strings.Contains(err.Error(), "2 table(s)") {
 		t.Errorf("the error does not say how many tables are affected: %v", err)
 	}

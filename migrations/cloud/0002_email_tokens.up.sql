@@ -6,7 +6,7 @@
 -- because the spend logic — single use, short TTL, constant-time lookup — is
 -- the part that has to be right and duplicating it is how one copy drifts.
 
--- ── The token ───────────────────────────────────────────────────────────────
+-- The token.
 --
 -- What is stored is a HASH of the token, not the token.
 --

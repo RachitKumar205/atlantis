@@ -217,12 +217,12 @@ func TestComputeMergedSchemaVersion_ShiftsOnContentChange(t *testing.T) {
 	}
 }
 
-// Length-prefix-free encodings can collide when values contain the
-// separator. We use NUL bytes to avoid that — pin it.
+// Length-prefix-free encodings collide when a value contains the separator.
+// NUL bytes terminate each field instead.
 func TestComputeMergedSchemaVersion_FieldBoundariesDoNotCollide(t *testing.T) {
 	a := []mergedEntry{{caller: "ab", path: "cd", content: "ef"}}
-	// Splice in a way that would collide if we joined fields without a
-	// terminator byte: (caller="a", path="bcd", content="ef").
+	// Spliced so it collides if the fields are joined with no terminator byte:
+	// (caller="a", path="bcd", content="ef").
 	b := []mergedEntry{{caller: "a", path: "bcd", content: "ef"}}
 	if computeMergedSchemaVersion(a) == computeMergedSchemaVersion(b) {
 		t.Errorf("field boundaries must be preserved in the hash; got collision")
@@ -297,8 +297,6 @@ func TestIndexOf(t *testing.T) {
 	}
 }
 
-// ---- buildEntityOwnership tests ----
-
 func TestBuildEntityOwnership_AssignsCallerCorrectly(t *testing.T) {
 	callerFiles := parseSrc(t, "vendor", `entity Product in vendor { id bigint primary }`)
 	otherFiles := parseSrc(t, "consumer", `entity Account in consumer { id bigint primary }`)
@@ -311,8 +309,6 @@ func TestBuildEntityOwnership_AssignsCallerCorrectly(t *testing.T) {
 		t.Errorf("consumer.Account should be owned by consumer, got %q", own["consumer.Account"])
 	}
 }
-
-// ---- buildCrossCallerRefs tests ----
 
 func TestBuildCrossCallerRefs_DetectsFK(t *testing.T) {
 	otherFiles := parseSrc(t, "consumer", `
@@ -338,8 +334,6 @@ func TestBuildCrossCallerRefs_EmptyWhenNoRefs(t *testing.T) {
 		t.Errorf("expected empty refs, got %v", refs)
 	}
 }
-
-// ---- impact report fix test ----
 
 func TestImpactReport_OnlyAffectedCallersMarked(t *testing.T) {
 	d := &codegen.Diff{
@@ -528,10 +522,9 @@ query Mine for Cart {
 //
 // ATL_ALLOW_APPLY_MUTATION=false is the regulated posture: SQL is reviewed on a
 // deployment-repo PR and applied by tidectl, and no grant may route around it.
-// It regressed once already — the check used to live inside the same helper as
-// the per-CN allowlist, and removing the allowlist took the switch with it,
-// which nothing caught because nothing asserted on it. The nil pool is
-// deliberate: reaching Postgres would mean the guard let the request through.
+// With the check inside the same helper as the per-CN allowlist, removing the
+// allowlist takes the switch with it and nothing asserts on the difference. The
+// pool is nil: reaching Postgres means the guard let the request through.
 func TestMutatingPlaneSwitchRefusesApply(t *testing.T) {
 	s := New(nil, Config{
 		AllowApplyMutation: false,

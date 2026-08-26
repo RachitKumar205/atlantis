@@ -1,28 +1,26 @@
 package introspect
 
-// drift.go detects one specific, high-confidence kind of schema drift that
-// the v1 adopt/diff path is structurally blind to (see the package comment
-// in postgres.go): a *bare* UNIQUE index — one created by `CREATE UNIQUE
-// INDEX`, with no backing UNIQUE constraint — on columns the declared schema
-// manages but does NOT declare unique.
+// drift.go detects a bare UNIQUE index — one from `CREATE UNIQUE INDEX` with no
+// backing UNIQUE constraint — on columns the declared schema manages and does
+// not declare unique. The adopt/diff path is blind to it; see the package
+// comment in postgres.go.
 //
-// Why only this shape:
-//   - Uniqueness atlantis itself declares (`unique`, `unique by ...`) is
-//     emitted as a UNIQUE *constraint*, which Postgres backs with an
-//     auto-created unique index whose `pg_index` row is owned by a
-//     `pg_constraint` row (conindid). We exclude those structurally so the
-//     detector can never fire on atlantis's own output.
-//   - A legacy `CREATE UNIQUE INDEX` (e.g. a pre-adopt migration) has no
-//     constraint row, so it survives the filter. This is exactly the class
-//     that silently rejects legitimate writes — a uniqueness the schema
-//     author never asked for and cannot see.
-//   - The DSL's only unique-index form is `unique index partial` (a partial
-//     unique index — Postgres UNIQUE constraints can't be partial). A bare
-//     unique index is therefore undeclared unless it's a partial one that a
-//     `unique index partial` declares with a matching predicate.
+// Only that shape, for three reasons:
 //
-// The detector is read-only and reports; it never drops anything. The
-// apply path decides policy (refuse vs. ATLANTIS_ALLOW_INDEX_DRIFT override).
+//   - Uniqueness atlantis declares (`unique`, `unique by ...`) is emitted as a
+//     UNIQUE constraint, which Postgres backs with an auto-created index whose
+//     `pg_index` row names its `pg_constraint` row in conindid. Excluding those
+//     structurally means the detector cannot fire on atlantis's own output.
+//   - A `CREATE UNIQUE INDEX` from a pre-adopt migration has no constraint row
+//     and survives the filter. That is the class that rejects legitimate
+//     writes under a uniqueness the schema never declared.
+//   - The DSL's only unique-index form is `unique index partial`, since a
+//     Postgres UNIQUE constraint cannot be partial. A bare unique index is
+//     undeclared unless it is a partial one matching such a declaration's
+//     predicate.
+//
+// Read-only: it reports and drops nothing. The apply path decides whether to
+// refuse, subject to ATLANTIS_ALLOW_INDEX_DRIFT.
 
 import (
 	"context"

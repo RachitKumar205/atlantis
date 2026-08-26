@@ -64,25 +64,11 @@ func TestReadyzFailsOnceShutdownHasBegun(t *testing.T) {
 	}
 }
 
-// /metrics carries this package's own series, not an empty page.
+// The health listener does not serve metrics.
 //
-// The trap this guards: promhttp.Handler() serves the default registry, and
-// nothing in this binary's import graph declares an atlantis collector —
-// neither internal/cloud/store nor internal/cloud/provision pulls in prometheus
-// at all. Mounted without the collectors in metrics.go, /metrics answers 200
-// with go_* and process_* and nothing about provisioning, which looks wired and
-// reports nothing. Asserting "200 and non-empty" would pass against exactly
-// that, so this asserts a named family instead.
-// The health listener must not serve metrics.
-//
-// It is the listener the kubelet probes, so it binds every interface and cannot
-// require a credential. Anything on it is readable by every pod in the cluster:
-// tenant namespaces restrict ingress, not egress, so a tenant workload can open
-// a connection to any address it can reach.
-//
-// This is the assertion, not a tidiness check. Moving /metrics to its own
-// address is undone by one line, and the undo looks like a merge conflict
-// resolved the obvious way.
+// The kubelet probes it, so it binds every interface and can require no
+// credential, and everything on it is readable by every pod in the cluster:
+// tenant namespaces restrict ingress, not egress.
 func TestTheHealthListenerDoesNotServeMetrics(t *testing.T) {
 	srv := NewHealthServer(":0", nil, context.Background())
 
@@ -105,6 +91,14 @@ func TestTheHealthListenerDoesNotServeMetrics(t *testing.T) {
 	}
 }
 
+// /metrics carries this package's own series, not an empty page.
+//
+// promhttp.Handler() serves the default registry, and nothing else in this
+// binary's import graph declares an atlantis collector — neither
+// internal/cloud/store nor internal/cloud/provision pulls in prometheus. Mounted
+// without the collectors in metrics.go, /metrics still answers 200 with go_*
+// and process_*, so a "200 and non-empty" assertion passes. This names a family
+// instead.
 func TestMetricsCarriesProvisioningSeries(t *testing.T) {
 	srv := NewMetricsServer(":0")
 

@@ -183,14 +183,10 @@ func TestQuotedCTENameCannotShadowAQualifiedTable(t *testing.T) {
 			}
 			stmt := tree.Stmts[0].GetStmt()
 
-			// realTableRefs, not a copy of it.
-			//
-			// This block used to re-implement the production guard inline —
-			// collectTableRefs, then the same qualification test, then the same
-			// skip. Reverting the production code to the shape that leaks left
-			// the ENTIRE repository suite green, because the assertion was
-			// running against the test's own copy of the fix. A review measured
-			// exactly that.
+			// realTableRefs, not a copy of it. Re-implementing the guard here —
+			// collectTableRefs, the same qualification test, the same skip —
+			// asserts against the test's own copy, and reverting the production
+			// code to the shape that leaks leaves the whole suite green.
 			kept := realTableRefs(stmt)
 
 			found := false

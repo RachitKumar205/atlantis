@@ -8,41 +8,33 @@
 // taken from the request. That name must not be on the reserved-CN denylist,
 // which covers atlantis's own infrastructure identities.
 //
-// # Who may ask
-//
 // /issue is mTLS, verified against SIGNER_CLIENT_CA, and the peer's CN must be
 // in SIGNER_ALLOWED_CLIENT_CNS. Both are required; the signer refuses to start
 // without them.
 //
-// SIGNER_CLIENT_CA must NOT be the CA this signer issues from. Every leaf it
+// SIGNER_CLIENT_CA must not be the CA this signer issues from. Every leaf it
 // signs carries ExtKeyUsage: ClientAuth, so a signer trusting its own issuing
-// authority would accept every certificate it has ever produced as a
-// credential — and one caller could then mint another's identity. The
-// allowlist is the second answer to the same question, because "a separate
-// authority" is a property of how somebody deployed this, and an allowlist is
-// a property of the code.
+// authority accepts every certificate it has produced as a credential, and one
+// caller can mint another's identity.
+//
+// The allowlist answers the same question in code, where a separate authority
+// is a property of the deployment.
 //
 // /healthz answers on SIGNER_HEALTH_LISTEN in plaintext, because the container
 // health check holds no certificate.
 //
-// # This is platform code living in the product repo
+// This is the only component that issues caller certificates. Every caller
+// authenticates by client certificate, and the multi-organisation console needs
+// one certificate per organisation so a scoping bug is refused at the handshake
+// rather than returning another organisation's data.
 //
-// It arrived with the self-host bundle, which is gone — the compose file, the
-// systemd unit and the reverse-proxy configs went with it. The signer did not,
-// because it is the only thing that issues caller certificates, and a managed
-// atlantis needs that more than a self-hosted one did: every caller
-// authenticates by client certificate, and the multi-org console needs one
-// certificate per org so a scoping bug is refused at the handshake instead of
-// returning another org's data.
+// It belongs in atlantis-cloud, beside provisioning and the CA it would serve,
+// and stays here until that move: nothing else can issue a caller a
+// certificate.
 //
-// It belongs in atlantis-cloud, alongside provisioning and the CA it would
-// serve. It is kept here until that move so the capability is not lost in the
-// gap — deleting it would leave nothing able to issue a caller a certificate.
-//
-// The console dials it from the enrolment routes, through ATL_SIGNER_ADDR. That
-// setting was documented and set by nothing for the whole time cert issuance
-// was a button in the console that answered 503; `make dev-signer` is what runs
-// this locally.
+// The console dials it from the enrolment routes through ATL_SIGNER_ADDR. With
+// that unset, console cert issuance answers 503. `make dev-signer` runs it
+// locally.
 package main
 
 import (
@@ -80,24 +72,15 @@ var reservedCNs = map[string]bool{
 
 // certTTL is the lifetime of an issued leaf.
 //
-// Seven days. It was ninety, with a comment saying that expiry "acts as a
-// natural revocation mechanism" — which was the intent and not the effect: a
-// leaked certificate that keeps working for three months is not revoked by its
-// expiry in any sense an operator would recognise. What actually provided
-// revocation was fingerprint pinning, and pinning is what produced the lockout
-// class, the overlap window and the one-way door around enrolment.
+// Seven days is short enough for expiry to serve as passive revocation, which
+// is what migration 0032 left in place of fingerprint pinning. smallstep puts
+// step-ca service certificates at one month or less for the same reason; SPIRE
+// defaults SVIDs to one hour and pins nothing, which is not reachable here,
+// where callers are laptops and build runners rather than workloads beside a
+// co-located agent.
 //
-// Seven days makes the original claim true instead. It sits inside smallstep's
-// published guidance for step-ca, which puts service certificates at "one month
-// or less" and defaults to passive revocation for this reason; SPIRE issues
-// SVIDs with a one-hour default and pins nothing at all. One hour is not
-// reachable here — atlantis callers are laptops and build runners, not
-// workloads beside a co-located agent — but ninety days was well outside the
-// band anybody operates in.
-//
-// tide renews at two thirds elapsed, so a machine refreshes around day five and
-// has two days of slack before anything stops working. Migration 0032 removed
-// the pinning this replaces.
+// tide renews at two thirds elapsed, so a machine refreshes near day five with
+// two days of slack.
 const certTTL = 7 * 24 * time.Hour
 
 var (
@@ -175,13 +158,9 @@ func run(log *slog.Logger) error {
 	// Connect to atlantis's Postgres so issuance is gated on a registered
 	// caller_identities row.
 	//
-	// Required, not optional. It used to be skipped entirely when PG_URL was
-	// unset, and the comment here claimed that was fatal "in production
-	// posture" — which was true only of the case that does not matter. A DSN
-	// that is set and broken exited; a DSN that was absent silently reduced the
-	// signer to a reserved-CN denylist, which is not a check on anything an
-	// operator registered. An unset setting must not be a way to turn a gate
-	// off, the same rule CLOUD_ISSUER is held to in the console.
+	// Required. Absent, the signer falls back to a reserved-CN denylist, which
+	// checks nothing that was registered — an unset setting is not a way to
+	// turn a gate off.
 	pgURL := os.Getenv("PG_URL")
 	if pgURL == "" {
 		return errors.New("PG_URL is required: without it the signer cannot tell " +
@@ -289,7 +268,7 @@ func run(log *slog.Logger) error {
 // loadClientCAs reads the pool of authorities whose certificates may CALL the
 // signer.
 //
-// # This must not be the CA the signer issues from
+// This must not be the CA the signer issues from.
 //
 // signCSR stamps every caller leaf with ExtKeyUsage: ClientAuth off the issuing
 // CA. Trust that same CA here and every certificate the signer has ever issued
@@ -320,8 +299,7 @@ func loadClientCAs(path string) (*x509.CertPool, error) {
 // parseAllowedCNs reads the comma-separated allowlist.
 //
 // Refuses empty rather than defaulting to a name, so a deployment that means
-// `atlantis-console` has to say so. A default here would be a value nobody
-// chose, protecting the most sensitive endpoint in the product.
+// `atlantis-console` has to say so.
 func parseAllowedCNs(raw string) (map[string]bool, error) {
 	out := map[string]bool{}
 	for _, cn := range strings.Split(raw, ",") {
@@ -345,9 +323,8 @@ func parseAllowedCNs(raw string) (map[string]bool, error) {
 // instead of one.
 func requireClientAuth(w http.ResponseWriter, r *http.Request, log *slog.Logger) bool {
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-		// Unreachable while ClientAuth is RequireAndVerifyClientCert, and
-		// checked anyway: the day somebody relaxes that to debug something, this
-		// is what stops the relaxation from being silent.
+		// Unreachable while ClientAuth is RequireAndVerifyClientCert. Checked
+		// anyway, so relaxing that setting is not silent.
 		jsonError(w, "client certificate required", http.StatusUnauthorized)
 		return false
 	}
@@ -362,23 +339,13 @@ func requireClientAuth(w http.ResponseWriter, r *http.Request, log *slog.Logger)
 
 // callerMayBeIssuedTo reports whether this caller still has a live identity.
 //
-// # Why it reads a view
+// It reads atlantis.active_caller_identities, not the table. Since migration
+// 0033 a revoked caller keeps its caller_identities row, so the table answers
+// "it exists" for exactly the caller this refuses, and the signer would go on
+// issuing certificates to a caller the server rejects.
 //
-// A revoked caller keeps its caller_identities row since migration 0033, so the
-// table would answer "yes, it exists" for precisely the caller this refuses.
-// atlantis.active_caller_identities is the filtered set.
-//
-// Getting this wrong is quiet in the worst way. The server would refuse the
-// revoked caller while the signer kept issuing it fresh certificates — a
-// revocation that looks complete from the console and is contradicted by the
-// component whose whole job is handing out credentials.
-//
-// # Why it is a function rather than a query inside the handler
-//
-// So that it can be tested. It was inline, and nothing exercised it: the fuzz
-// test sets pgPool to nil and says the identity check is "tested elsewhere",
-// and elsewhere did not exist. A handler test would need CA material and a
-// signed request to reach one SELECT; this needs a database and a caller.
+// A function rather than a query inline in the handler, so a test can reach it
+// with a database and a caller instead of CA material and a signed request.
 func callerMayBeIssuedTo(ctx context.Context, caller string) (bool, error) {
 	var registered bool
 	err := pgPool.QueryRow(ctx,
@@ -417,13 +384,11 @@ func handleIssue(w http.ResponseWriter, r *http.Request, log *slog.Logger) {
 		return
 	}
 
-	// Defence in depth. The console verifies the caller is registered before
-	// reaching us, and this is the layer that holds if the console is the thing
-	// that is wrong.
+	// The console checks registration before the request arrives; this is the
+	// layer that holds when the console is what is wrong.
 	//
-	// No longer conditional: run() refuses to start without PG_URL, so pgPool is
-	// never nil here. It used to be skipped when the DSN was absent, which meant
-	// the deployment with the least configuration had the fewest checks.
+	// Unconditional: run() refuses to start without PG_URL, so pgPool is never
+	// nil here.
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	registered, err := callerMayBeIssuedTo(ctx, caller)
@@ -473,19 +438,13 @@ func handleIssue(w http.ResponseWriter, r *http.Request, log *slog.Logger) {
 
 // signCSR issues a leaf for caller, using only the public key from the request.
 //
-// # The subject is built here, not copied from the CSR
+// The subject is built here, not copied from the CSR. `Subject: csr.Subject`
+// takes organisation, unit and locality from a document the requester wrote
+// while validating only the common name.
 //
-// It used to be `Subject: csr.Subject`, which took the whole subject from a
-// document the requester wrote — organisation, unit, locality, everything —
-// and validated only the common name. Nothing downstream reads those fields
-// today, which is the sort of thing that stops being true quietly.
-//
-// Building it from `caller` also removes a step from the client: `tide login`
-// no longer has to be told which caller it is enrolling as, because the CSR's
-// common name has stopped deciding anything. The token decides, the console
-// reads the caller off the row it spent, and that name is what appears here.
-// A CSR that asks for something else is not refused — it is ignored, which is
-// a stronger property than a comparison somebody has to remember to make.
+// `caller` comes from the token row the console spent, so the CSR's common name
+// decides nothing. A CSR asking for another name is ignored rather than
+// refused, which needs no comparison to stay true.
 func signCSR(csr *x509.CertificateRequest, caller string) (string, time.Time, error) {
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {

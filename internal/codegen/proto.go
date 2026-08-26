@@ -149,16 +149,11 @@ func entityHasTimestampField(e *dsl.Entity) bool {
 // entityHasIntervalField reports whether any field needs
 // atlantis/common/v1/interval.proto imported.
 //
-// Its absence was not cosmetic: the emitted .proto named a type the file never
-// imported, and protoc refused it. The failure landed at `tide generate`, after
-// `tide apply` had run the DDL and written the checkpoint, because nothing in
-// this package compiled what it emitted.
-//
-// It was fixed once already, for google.protobuf.Duration, and broke again the
-// moment interval's wire type changed — the predicate was right and the import
-// it guarded was stale. That is the argument for the compile fixture in
-// internal/codegen/compilecheck: this exact class is invisible to a test that
-// only parses.
+// Without it the emitted .proto names a type the file never imports and protoc
+// refuses it, at `tide generate` — after `tide apply` has run the DDL and
+// written the checkpoint. A stale import guarded by a correct predicate fails
+// the same way, which is what internal/codegen/compilecheck exists to catch: a
+// test that only parses cannot see this class.
 func entityHasIntervalField(e *dsl.Entity) bool {
 	for _, f := range e.Fields {
 		if f.Type.Name == "interval" {

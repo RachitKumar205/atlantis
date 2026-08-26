@@ -24,8 +24,6 @@ type Inspector struct{ sb *Sandbox }
 // Inspect returns the LLM tool-use surface for this sandbox.
 func (s *Sandbox) Inspect() *Inspector { return &Inspector{sb: s} }
 
-// ─────────────────────────── Describe ───────────────────────────
-
 // TableDescription is the structured shape Describe returns: schema +
 // columns + PK + row count, plus the IR-derived metadata captured
 // during catalog construction. Agents read this to understand what an
@@ -87,8 +85,6 @@ func (i *Inspector) Describe(qualified string) (*TableDescription, error) {
 	}, nil
 }
 
-// ─────────────────────────── Sample ───────────────────────────
-
 // Sample returns up to n rows from the named table as
 // column-name → value maps. Rows are returned in insertion order; the
 // sim already sorts its scan iteration deterministically so two
@@ -117,8 +113,6 @@ func (i *Inspector) Sample(qualified string, n int) ([]map[string]any, error) {
 	}
 	return out, nil
 }
-
-// ─────────────────────────── Find ───────────────────────────
 
 // Predicate is the closed-grammar filter shape Find accepts: a column,
 // a comparison op, and a value. Agents construct one of these per AND
@@ -176,8 +170,6 @@ func (i *Inspector) Find(qualified string, preds ...Predicate) ([]map[string]any
 	}
 	return out, nil
 }
-
-// ─────────────────────────── Diff ───────────────────────────
 
 // DiffResult is what Diff returns: per-table counts of how many rows
 // were added, removed, or modified between two Marks. An agent loop
@@ -274,8 +266,6 @@ func diffMarkPair(desc *sim.TableDesc, before, after *sim.RowMap) TableDiff {
 	_ = desc // descriptor reserved for future per-column normalisation
 	return td
 }
-
-// ─────────────────────────── helpers ───────────────────────────
 
 // rowToMap converts the positional Row to a name-keyed map for the
 // agent-facing output shape.

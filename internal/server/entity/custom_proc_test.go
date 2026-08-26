@@ -13,8 +13,6 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 )
 
-// --- test doubles for the runtime tx/pool/outbox interfaces ----------
-
 type fakeTag struct{ n int64 }
 
 func (t fakeTag) RowsAffected() int64 { return t.n }
@@ -102,8 +100,6 @@ func rawProcIR(name string, inputs []dsl.QueryParam, steps ...dsl.ProcedureStepI
 func rawStep(sql string, touches ...string) dsl.ProcedureStepIR {
 	return dsl.ProcedureStepIR{Raw: &dsl.RawSQLIR{SQL: sql, Touches: touches}}
 }
-
-// --- tests ----------------------------------------------------------
 
 func TestBuildCustomProcedureDescs_ResponseIsRowsAffected(t *testing.T) {
 	cp := &dsl.CustomProcedure{

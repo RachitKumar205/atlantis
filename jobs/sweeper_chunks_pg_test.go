@@ -21,7 +21,7 @@ import (
 //     value to bind
 //   - enumerate tenants: needs the cross-tenant read the policy prevents, and
 //     there is no tenant registry
-//   - a BYPASSRLS role: pg.RequireIsolatedRole refuses one at boot, deliberately
+//   - a BYPASSRLS role: pg.RequireIsolatedRole refuses one at boot
 //
 // Dropping chunks sidesteps all three because it is DDL, and row-level security
 // filters DML only. This test is the proof of that claim rather than the
@@ -86,12 +86,10 @@ func TestSweeperDropsChunksOnATenantIsolatedHypertable(t *testing.T) {
 
 	// A role the policy actually applies to.
 	//
-	// The default test role is a SUPERUSER with BYPASSRLS, so every policy
-	// above is inert for it — the first version of this test ran as that role
-	// and its own probe caught the mistake: the "blocked" DELETE removed rows.
-	// pg.RequireIsolatedRole refuses a superuser at boot precisely so
-	// production cannot be in that state, and a test asserting an RLS property
-	// has to match.
+	// The default test role is a superuser with BYPASSRLS, for which every
+	// policy above is inert and the "blocked" DELETE removes rows.
+	// pg.RequireIsolatedRole refuses a superuser at boot, so production is
+	// never in that state and a test asserting an RLS property must not be.
 	//
 	// Ownership is transferred because FORCE ROW LEVEL SECURITY only binds the
 	// owner, and drop_chunks requires ownership.
@@ -260,11 +258,9 @@ ON CONFLICT (id) DO UPDATE SET ir = EXCLUDED.ir`, raw); err != nil {
 
 	// A sweep that drops nothing still has to publish a zero.
 	//
-	// A counter added only when n > 0 leaves an entity with nothing to expire and
-	// an entity whose expiry broke in January reporting identically: no series at
-	// all. `rate() == 0` is a question an operator can ask of a zero; a missing
-	// series answers nothing. That distinction is the whole of #48, and gating
-	// the Add on n > 0 was a mutation this test did not previously catch.
+	// A counter added only when n > 0 reports an entity with nothing to expire
+	// and one whose expiry broke months ago identically: no series at all.
+	// `rate() == 0` is answerable on a zero; a missing series is not.
 	if got := testutil.CollectAndCount(sweptChunksTotal); got != seriesBefore+1 {
 		t.Errorf("the sweep dropped no chunks and published %d series where %d "+
 			"were expected, so an entity whose expiry has silently stopped looks "+
@@ -277,10 +273,8 @@ ON CONFLICT (id) DO UPDATE SET ir = EXCLUDED.ir`, raw); err != nil {
 // `table` actually apply to, and hands it ownership so FORCE ROW LEVEL
 // SECURITY binds it and drop_chunks is permitted.
 //
-// It exists because the default test role is a superuser with BYPASSRLS, for
-// which every policy is inert. A test asserting an RLS property as that role
-// asserts nothing — the first version of the test above did exactly that, and
-// only its own probe assertion caught it.
+// The default test role is a superuser with BYPASSRLS, for which every policy
+// is inert, so a test asserting an RLS property as that role asserts nothing.
 //
 // pg.RequireIsolatedRole refuses a superuser at boot, so production is never in
 // the state the default test role is in; this closes the gap between them.

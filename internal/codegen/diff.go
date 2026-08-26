@@ -41,12 +41,12 @@ const (
 	// it — a caller can be the sole owner of an entity and still be destroying
 	// its own production data.
 	//
-	// Before this existed, dropping a column you owned classified as ADDITIVE
-	// and `tide apply` applied it unattended: one deleted line in a .atl, one
-	// ALTER TABLE ... DROP COLUMN, and the only recovery was point-in-time
-	// restore of the whole database.
+	// Without this class, dropping a column classifies as ADDITIVE and `tide
+	// apply` applies it unattended: one deleted line in a .atl, one ALTER TABLE
+	// ... DROP COLUMN, and the only recovery is a point-in-time restore of the
+	// whole database.
 	//
-	// The classification is deliberately not derived from reference analysis.
+	// The classification is not derived from reference analysis.
 	// "Nobody reads this column" is a statement about code, not about data, and
 	// it is defeated by decomposition: drop the foreign key in one PR, the
 	// column in the next, and each step looks unreferenced. Removal of anything
@@ -206,18 +206,12 @@ func (d *Diff) IsEmpty() bool {
 	return len(d.Additive)+len(d.BackfillRequired)+len(d.Breaking)+len(d.Destructive) == 0
 }
 
-// HighestClass returns the most-restrictive class present, which drives
-// whether `tide apply` can auto-apply, requires backfill, or escalates to a PR.
 // All returns every change in the diff, in class order.
 //
-// Use this rather than enumerating the buckets by hand. Adding Destructive
-// found six places that listed the three existing buckets literally — change
-// counts, lineage, plan reporting — every one of which would have dropped
-// destructive changes silently: the plan would report fewer changes than it
-// contained, and the one kind that destroys data would be the kind omitted.
-//
-// TestDiffAllCoversEveryBucket asserts this stays exhaustive by reflection, so
-// a future bucket cannot repeat it.
+// Use this rather than enumerating the buckets by hand: code that lists them
+// literally silently drops any bucket added later, so the plan reports fewer
+// changes than it holds. TestDiffAllCoversEveryBucket asserts by reflection
+// that this stays exhaustive.
 func (d *Diff) All() []Change {
 	out := make([]Change, 0, len(d.Additive)+len(d.BackfillRequired)+len(d.Destructive)+len(d.Breaking))
 	out = append(out, d.Additive...)
@@ -232,10 +226,9 @@ func (d *Diff) Len() int { return len(d.All()) }
 
 // HighestClass returns the most-restrictive class present.
 //
-// Breaking outranks Destructive deliberately. A destructive change is parked
-// rather than dropped, so it is recoverable for the retention window by whoever
-// made it; a cross-caller break needs somebody from another team, which is the
-// slower gate and therefore the one that should decide.
+// Breaking outranks Destructive. A destructive change is parked rather than
+// dropped and stays recoverable for the retention window; a cross-caller break
+// needs another team, which is the slower gate.
 func (d *Diff) HighestClass() ChangeClass {
 	if len(d.Breaking) > 0 {
 		return ClassCrossCallerBreaking
@@ -263,9 +256,8 @@ func (d *Diff) HighestClass() ChangeClass {
 // the floor: a deployment can require approval for every change, and omitting
 // it would make that setting silently unenforceable on an additive-only diff.
 //
-// Kept exhaustive by TestDiffClassesPresentCoversEveryBucket, the same way
-// All() is — a new bucket that this forgets is a class the policy stops
-// governing, which is the quietest possible way to lose a gate.
+// Kept exhaustive by TestDiffClassesPresentCoversEveryBucket, as All() is: a
+// new bucket this forgets is a class the policy stops governing.
 func (d *Diff) ClassesPresent() []ChangeClass {
 	var out []ChangeClass
 	if len(d.Breaking) > 0 {
@@ -307,23 +299,19 @@ func WithCallerContext(caller string, ownership map[string]string, refs map[stri
 	}
 }
 
-// classifyRemoval returns ClassAdditive when the submitting caller owns the
-// entity and no other caller references the given key (entityID or
-// entityID.field). Falls back to ClassCrossCallerBreaking when context is
-// absent or conditions aren't met.
-// classifyRemoval decides how removing a column or entity is gated.
+// classifyRemoval decides how removing a column or entity is gated. It returns
+// ClassCrossCallerBreaking or ClassDestructive, never ClassAdditive.
 //
-// The floor is ClassDestructive, not ClassAdditive. Owning the thing you are
-// deleting says nothing about whether the deletion loses data: before this, a
-// caller dropping its own column produced an ADDITIVE plan that `tide apply`
-// applied unattended, and the only recovery was a point-in-time restore of the
-// entire database.
+// The floor is ClassDestructive. Owning the thing being deleted says nothing
+// about whether the deletion loses data, and an ADDITIVE plan is one `tide
+// apply` applies unattended, where the only recovery is a point-in-time restore
+// of the whole database.
 //
-// Reference analysis still runs, and still escalates to cross-caller-breaking
-// when somebody else reads the thing. What it must never do is de-escalate
-// below destructive, because "no other caller references this" is a claim about
-// code and the rows are still there. It is also defeated by decomposition: drop
-// the foreign key in one PR and the column in the next, and each step passes.
+// Reference analysis still runs and still escalates to cross-caller-breaking
+// when another caller reads it. It never de-escalates below destructive: "no
+// other caller references this" is a claim about code while the rows are still
+// there, and decomposition defeats it — drop the foreign key in one change and
+// the column in the next, and each step passes.
 func (ctx *diffCtx) classifyRemoval(entityID, refKey string) ChangeClass {
 	if ctx.submittingCaller == "" {
 		return ClassCrossCallerBreaking
@@ -514,8 +502,6 @@ func customProcContentEqual(a, b *dsl.CustomProcedure) bool {
 	return bytes.Equal(ja, jb)
 }
 
-// ---- per-entity diffs ----
-
 func diffEntity(oldE, newE *dsl.Entity, d *Diff, ctx *diffCtx) {
 	diffTableName(oldE, newE, d)
 	diffFields(oldE, newE, d, ctx)
@@ -531,27 +517,22 @@ func diffEntity(oldE, newE *dsl.Entity, d *Diff, ctx *diffCtx) {
 // diffChecks diffs CHECK constraints — both the entity-level `check "..."`
 // declarations and the per-field `check` modifier.
 //
-// Adding a CHECK is backfill-required, not additive, and the distinction is the
-// point: Postgres validates the predicate against every existing row when the
-// constraint is added, so a table with one violating row takes an
-// ACCESS EXCLUSIVE lock, scans, and fails. That is a data-dependent outcome the
-// plan must surface before apply, which is exactly what a rehearsal probe would
-// check — and could not, while this differ did not exist and the emitted DDL
-// therefore contained no CHECK at all.
+// Adding a CHECK is backfill-required, not additive: Postgres validates the
+// predicate against every existing row when the constraint is added, so a table
+// with one violating row takes an ACCESS EXCLUSIVE lock, scans, and fails. That
+// is a data-dependent outcome the plan has to surface before apply.
 //
-// Changing a predicate is modelled as one change rather than remove+add,
-// because the emitted DDL must drop and re-add in that order within the same
-// statement group; splitting it risks a re-ordering that leaves the table
-// briefly unconstrained.
+// Changing a predicate is one change rather than remove+add, because the
+// emitted DDL must drop and re-add in that order within the same statement
+// group; splitting it risks a re-ordering that leaves the table briefly
+// unconstrained.
 //
-// A note for whoever writes the rehearsal probe for this kind: Postgres accepts
-// a row when a CHECK evaluates TRUE *or* NULL, so `CHECK (total > 0)` does not
-// reject rows where total IS NULL. The Detail below says the constraint is
-// validated against every existing row, which is true — but the set of rows it
-// can reject is narrower than the predicate reads. A probe counting
-// `WHERE NOT (expr)` matches that semantics exactly, because NOT NULL is NULL
-// and the row is excluded; a probe counting `WHERE expr IS NOT TRUE` would
-// over-report.
+// For a rehearsal probe over this kind: Postgres accepts a row when a CHECK
+// evaluates TRUE or NULL, so `CHECK (total > 0)` does not reject rows where
+// total IS NULL, and the set of rows the constraint can reject is narrower than
+// the predicate reads. A probe counting `WHERE NOT (expr)` matches that,
+// because NOT NULL is NULL and the row is excluded; `WHERE expr IS NOT TRUE`
+// over-reports.
 //
 // Entity-level checks are keyed by resolved constraint name, matching how
 // EmitInitial names them, so an unnamed check that shifts position is not
@@ -570,8 +551,7 @@ func diffChecks(oldE, newE *dsl.Entity, d *Diff) {
 	//	ERROR:  constraint "shop_order_total_check" for relation "shop_order" already exists
 	//
 	// and takes the whole migration down. `total int check "total > 0"` on a
-	// new column is the most ordinary thing in this grammar, so this guard
-	// covers common usage rather than an edge case.
+	// new column is ordinary usage in this grammar.
 	//
 	// diffUniques makes the same argument one level up, for a brand-new
 	// entity whose constraints come from EmitInitial.
@@ -682,11 +662,11 @@ type checkRef struct {
 // carry in the database.
 //
 // Identity is the constraint name, not the predicate, because the name is what
-// a later ALTER has to target. Keying by predicate conflated constraints that
-// Postgres considers distinct: two checks sharing a predicate collapsed to one
-// map entry, so deleting one produced no change at all, and — worse — the
-// emitter's predicate-scan resolved the survivor's name, emitting a DROP for
-// the constraint the author had kept while the one they removed stayed live.
+// a later ALTER has to target. Keying by predicate conflates constraints
+// Postgres considers distinct: two checks sharing a predicate collapse to one
+// map entry, so deleting one produces no change, and the emitter's
+// predicate-scan resolves the survivor's name — emitting a DROP for the
+// constraint the author kept while the one they removed stays live.
 //
 // The three name forms mirror what actually ends up in the catalog:
 //
@@ -697,24 +677,18 @@ type checkRef struct {
 //   - entity-level `check "..."` — derived from the predicate by
 //     unnamedCheckName, matching EmitInitial.
 //
-// COMPATIBILITY: unnamed entity-level checks were previously named positionally
-// (<table>_check_1, _2, …). A database created by an earlier build therefore
-// holds the positional name, and a later removal emits DROP CONSTRAINT IF
-// EXISTS against the predicate-derived one, which misses silently.
+// A database created before predicate-derived naming holds the positional name
+// <table>_check_1, _2, and a removal there emits DROP CONSTRAINT IF EXISTS
+// against the predicate-derived one, which misses silently.
 //
-// Taken deliberately. Positional naming has a permanent defect — reordering two
-// unnamed checks renames both, so the differ must either report a spurious
-// DROP + ADD (an ACCESS EXCLUSIVE revalidation for an unchanged schema) or stay
-// silent and let a migrated database diverge from a freshly created one.
-// Predicate-derived naming has no such defect; its only cost is this one-time
-// break.
+// That break is one-time. Positional naming renames both checks when two
+// unnamed ones are reordered, so the differ must either emit a spurious
+// DROP + ADD — an ACCESS EXCLUSIVE revalidation for an unchanged schema — or
+// stay silent and let a migrated database diverge from a fresh one.
 //
-// The 19 .atl files in this repository declare four entity-level checks, and
-// all four are named (`check "..." as <name>`), which this scheme does not
-// touch — an author-supplied name is used verbatim. Zero are unnamed, so the
-// affected population here is empty. .atl files live in caller repositories too
-// (see the schema-in-caller-repos convention), so this belongs in release notes
-// rather than only in a comment.
+// Every entity-level check in this repository's .atl files is named
+// (`check "..." as <name>`), which this scheme leaves verbatim, so nothing here
+// is affected. .atl files live in caller repositories too.
 func resolvedChecks(e *dsl.Entity) map[string]checkRef {
 	refs := resolveCheckNames(e)
 	out := make(map[string]checkRef, len(refs))
@@ -735,18 +709,16 @@ func resolvedChecks(e *dsl.Entity) map[string]checkRef {
 // wrong one.
 //
 // Author-supplied names are reserved first, then generated names are assigned
-// around them. The ordering matters: a user who copies a constraint name out of
-// a live database can land on exactly the form unnamedCheckName produces, and
-// whoever loses that collision disappears — two checks map to one name, one
-// vanishes from the diff in both directions, and no DDL is emitted for it. The
-// author asked for their name, so the generated one yields.
+// around them. An author who copies a constraint name out of a live database
+// can land on exactly the form unnamedCheckName produces, and whichever loses
+// that collision disappears: two checks map to one name, one vanishes from the
+// diff in both directions, and no DDL is emitted for it. The generated name
+// yields.
 //
-// Two identical author-supplied names DO collapse here — the result is a map
-// keyed by name, and nothing can distinguish them. That is tolerable only
-// because such a schema never reaches a database: checkNameCollisions rejects
-// it in both EmitSQL and EmitInitial, so the collapsed diff is never emitted.
-// The ordering matters and is easy to get wrong — if the guard were ever
-// removed or bypassed, this map would silently lose a constraint.
+// Two identical author-supplied names collapse here — the result is a map keyed
+// by name, and nothing distinguishes them. checkNameCollisions rejects such a
+// schema in both EmitSQL and EmitInitial, so the collapsed diff is never
+// emitted; without that guard this map loses a constraint silently.
 func resolveCheckNames(e *dsl.Entity) []checkRef {
 	taken := map[string]bool{}
 	for _, c := range e.Checks {
@@ -1233,24 +1205,17 @@ func diffQueryTimeout(oldE, newE *dsl.Entity, d *Diff) {
 	})
 }
 
-// ---- helpers ----
-
 // append files a Change under its class.
 //
-// The default is the whole point of the function. Without it, a Change whose
-// class this switch does not handle is silently discarded: it appears in no
-// bucket, so the plan reports no such change, no DDL is emitted for it, and
-// rehearsal examines DDL that does not contain it. That is the same failure the
-// coverage registry in diff_coverage.go exists to prevent, reached by a
-// different route — there, a differ never produced the Change; here, the Change
-// was produced and then dropped.
+// The default case carries the work. Without it, a Change whose class this
+// switch does not handle is silently discarded: it appears in no bucket, so the
+// plan reports no such change, no DDL is emitted for it, and rehearsal examines
+// DDL that does not contain it. diff_coverage.go guards the same failure
+// arriving the other way, where a differ never produced the Change at all.
 //
-// Filing it as breaking rather than panicking is deliberate. An unknown class
-// is a programming error, but this runs inside a server handler, and the
-// correct response to "we do not know how dangerous this is" is to treat it as
-// the most dangerous thing it could be. Breaking stops the apply and surfaces
-// the change to a human, which is both loud and safe; a panic is loud and takes
-// the request with it.
+// An unknown class files as breaking rather than panicking. This runs inside a
+// server handler, so breaking stops the apply and surfaces the change to a
+// human; a panic takes the request with it.
 func (d *Diff) append(c Change) {
 	switch c.Class {
 	case ClassAdditive:
@@ -1566,70 +1531,29 @@ func sliceEq(a, b []string) bool {
 // diffPartition detects `partition by` appearing, disappearing or moving to
 // another column on an entity that already exists.
 //
-// # Why this was a gap, and what the gap cost
+// The policy, FORCE ROW LEVEL SECURITY and the backing index are otherwise
+// emitted on CREATE TABLE only, so adding `partition by` to an existing entity
+// produces an empty plan: no migration, no policy, no output, and a schema
+// claiming a partition the database has never heard of. The observable
+// signal — omit the tenant, get refused — behaves the same whether or not a
+// policy exists.
 //
-// The policy, FORCE ROW LEVEL SECURITY and the backing index were emitted on
-// CREATE TABLE only. Adding `partition by` to an existing entity therefore
-// produced an empty plan: no migration, no policy, no output. The schema
-// claimed a partition the database had never heard of.
+// Neither direction is ClassAdditive, which `tide apply` applies without
+// asking. Adding the clause changes every read of the table for every caller,
+// since a request carrying no tenant then sees nothing; removing it exposes
+// every tenant's rows to every caller.
 //
-// That was survivable while the clause did nothing in either direction. It
-// stopped being survivable once the server began binding a tenant per request,
-// because the only signal an operator could observe — omit the tenant, get
-// refused — then worked whether or not a policy existed. A review executed
-// exactly that: the differ emitted nothing, the server refused an unbound
-// request, and a bound request returned every tenant's rows. Three separate
-// checks were built to detect the resulting drift; this removes the drift.
+// Filed through d.append rather than appended to a bucket. Change.Class is
+// persisted in the diff JSON in atlantis.schema_versions, and a hand-append
+// leaves it at its zero value, which is ClassAdditive — so the durable record
+// would call this additive while the plan_class column beside it said
+// otherwise.
 //
-// # Why these are not additive
+// CrossCallerBreaking rather than Destructive: this destroys no rows, and it
+// changes what every caller of the table can read.
 //
-// `tide apply` auto-applies ClassAdditive without asking. Neither direction
-// here can be auto-applied.
-//
-// Adding the clause changes every read of the table for every caller: after
-// apply, a request that carries no tenant sees nothing. That is correct and it
-// is also a behaviour change no operator should discover from a migration that
-// applied itself.
-//
-// Removing it silently exposes every tenant's rows to every caller. Classifying
-// that as additive would route the single most dangerous change in this grammar
-// through the class nobody looks at twice.
-//
-// Filed through d.append, not by appending to a bucket directly.
-//
-// The bucket is only half the record. Change.Class is persisted inside the diff
-// JSON in atlantis.schema_versions, and appending to a slice by hand leaves it
-// at its zero value — which is ClassAdditive. A review read the stored plan
-// back: every partition change carried "class": 0 while the plan_class column
-// beside it said otherwise, so the durable audit record described the single
-// most consequential change in this grammar as additive.
-//
-// # Why CrossCallerBreaking and not Destructive
-//
-// Destructive was the first choice, on the reasoning that it is the class
-// requiring an explicit decision. A review showed that wrong three ways, all
-// executed:
-//
-//   - `translateClass` has no arm for ClassDestructive, so it falls through to
-//     ClassUnclean and the wire reports PLAN_CLASS_UNPARSEABLE. `tide apply`
-//     then prints "plan is unparseable — custom-query SQL validation failed",
-//     lists no errors and exits 3. There was no CLI path that could enable
-//     tenant isolation at all.
-//   - `tide rollback --dry-run` and `tide diff` decode only additive,
-//     backfill_required and breaking. A rollback across this change printed
-//     "(no changes — schemas are identical)" and then dropped the policy off a
-//     populated table.
-//   - `tidectl plan --destructive` gates BackfillRequired and
-//     CrossCallerBreaking, not Destructive, so the plan staged with no flag.
-//
-// The plumbing gap is older than this change — entity_removed already produced
-// ClassDestructive — but routing a new feature through it is what made the
-// feature unusable.
-//
-// CrossCallerBreaking is also the better description. Destructive asks "does
-// this destroy rows"; this destroys none. Breaking asks "does this break
-// somebody else", and enabling or removing tenant isolation changes what every
-// caller of the table can read. That is the question an operator needs asked.
+// Destructive would also stage unflagged — `tidectl plan --destructive` gates
+// BackfillRequired and CrossCallerBreaking, and not Destructive.
 func diffPartition(oldE, newE *dsl.Entity, d *Diff) {
 	oldField, newField := oldE.PartitionField, newE.PartitionField
 
@@ -1643,10 +1567,9 @@ func diffPartition(oldE, newE *dsl.Entity, d *Diff) {
 	//
 	//	ERROR: cannot alter type of a column used in a policy definition
 	//
-	// so `varchar(64)` to `uuid` emitted a bare ALTER COLUMN TYPE, the apply
-	// rolled back on DDL nobody hand-wrote, and no further schema edit could
-	// get past it. The schema was wedged until someone dropped the policy by
-	// hand. Found by execution, not by reading.
+	// so `varchar(64)` to `uuid` emitting a bare ALTER COLUMN TYPE rolls the
+	// apply back on DDL nobody hand-wrote, and no further schema edit gets past
+	// it until someone drops the policy by hand.
 	//
 	// Treated as a move from the column to itself: drop the policy and its
 	// index, then recreate both against the new type. The column change itself
@@ -1663,10 +1586,9 @@ func diffPartition(oldE, newE *dsl.Entity, d *Diff) {
 			//
 			// varchar(16) -> varchar(32) leaves it byte-identical: both are
 			// text-shaped, so neither takes a cast and the comparison is the
-			// same comparison. Classifying that cross-caller-breaking made an
-			// apply wait for a reviewer over a change nobody could observe —
-			// 0026 seeds that class require_approval=true — while telling the
-			// reviewer, accurately, that nothing about visibility changed.
+			// same comparison. Classifying that cross-caller-breaking makes an
+			// apply wait for a reviewer — 0026 seeds that class
+			// require_approval=true — over a change nobody can observe.
 			//
 			// varchar -> uuid does move it: the discriminator gains a ::uuid
 			// cast, so the policy matches on different terms and the class is

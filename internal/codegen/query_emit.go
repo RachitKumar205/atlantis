@@ -231,12 +231,11 @@ func computeInboundRefs(ir *dsl.IR) map[string][]inboundRef {
 }
 
 // screamingSnake turns "AccountOrderField" into "ACCOUNT_ORDER_FIELD".
-// Buf's ENUM_VALUE_PREFIX lint rule computes the expected enum prefix via
-// the same heuristic — insert `_` before an uppercase character if (the
-// previous char was lowercase) OR (the next char is lowercase). The
-// downside is that `OAuthProvider` becomes `O_AUTH_PROVIDER`; we live
-// with it because matching buf's heuristic is more valuable than a nicer
-// enum variant for one entity.
+//
+// The rule is buf's ENUM_VALUE_PREFIX heuristic, which the lint compares
+// against: insert `_` before an uppercase character when the previous character
+// is lowercase or the next one is. That renders `OAuthProvider` as
+// `O_AUTH_PROVIDER`, and matching buf is what keeps the emitted proto lint-clean.
 func screamingSnake(camel string) string {
 	rs := []rune(camel)
 	var b strings.Builder

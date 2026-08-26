@@ -76,8 +76,6 @@ func (c *fakeCache) seedBody(entity, id string, ver int64, body []byte) {
 	c.bodies[runtime.CacheKey(entity, id, ver)] = body
 }
 
-// ---- read-path tests ----
-
 func TestReader_CacheHit_ReturnsBytes(t *testing.T) {
 	c := newFakeCache()
 	c.seedPointer("x.A", "1", 5)

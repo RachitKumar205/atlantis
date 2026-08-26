@@ -56,8 +56,8 @@ func TestNormalizeNamed_RejectsUndeclared(t *testing.T) {
 }
 
 func TestNormalizeNamed_PassesThroughLiterals(t *testing.T) {
-	// String literals containing `$name` patterns must not be rewritten,
-	// otherwise we'd corrupt user data the query is comparing against.
+	// A `$name` inside a string literal is data the query compares against;
+	// rewriting it changes the value.
 	inputs := []dsl.QueryParam{{Name: "x", Type: dsl.FieldType{Name: "text"}}}
 	got, _, err := NormalizeNamed(
 		`SELECT * FROM t WHERE col = $x AND label = 'looks like $x but is a literal'`,

@@ -11,6 +11,12 @@ import (
 
 // Config holds all console BFF configuration, sourced from environment
 // variables.
+//
+// One console serves many organisations, each behind its own CA, so an
+// atlantis address and the credentials for it live in console.orgs rather than
+// in this struct. An unregistered organisation is refused: a process-wide
+// default endpoint would route one into another organisation's atlantis with
+// every page rendering. tide and tidectl read ATL_ENDPOINT for themselves.
 type Config struct {
 	Listen string // CONSOLE_LISTEN — default :3000
 	PGURL  string // CONSOLE_PG_URL — required
@@ -23,35 +29,14 @@ type Config struct {
 	// intact and permanently unopenable.
 	DataKeyset string // CONSOLE_DATA_KEY
 
-	// There is deliberately no ATL_ENDPOINT, ATL_TLS_CERT/KEY/CA or
-	// ATL_HEALTH_LISTEN here any more.
-	//
-	// One console serves many organisations, each with its own atlantis behind
-	// its own CA, so an address and a certificate are properties of an
-	// organisation rather than of the process. They live in console.orgs and
-	// are registered by `cloud org register`.
-	//
-	// Removed rather than kept as a fallback, which is the whole point: an
-	// organisation nobody registered is refused. A default endpoint would mean
-	// one missing row silently routes an unprovisioned organisation into
-	// somebody else's atlantis, and every page would render.
-	//
-	// The env var names stay meaningful elsewhere — tide and tidectl still read
-	// ATL_ENDPOINT for their own connections. Only the console stopped.
 	SessionSecret string // CONSOLE_SESSION_SECRET — required, ≥32 chars
 	CookieSecure  bool   // CONSOLE_COOKIE_SECURE — default false
 
-	// ── Enrolment ───────────────────────────────────────────────────────────
+	// Enrolment: how a machine gets a client certificate.
 	//
-	// How a machine gets a client certificate. All of it is optional, and it is
-	// all-or-nothing: a console with some of it set refuses to start, because
-	// the half-configured states are the ones that fail late and quietly.
-	// Leaving every field empty turns enrolment off, and the route that mints a
-	// token says so rather than 404ing.
-	//
-	// SignerAddr used to stand alone here as "optional; cert issuance requires
-	// it", and nothing anywhere set it — so the console shipped with an
-	// issuance button that answered 503 in every deployment it ever ran in.
+	// Optional as a group. A console with some of it set refuses to start,
+	// because half-configured states fail late and quietly. All empty turns
+	// enrolment off, and the token route says so rather than answering 404.
 	SignerAddr string // ATL_SIGNER_ADDR — the signer's https:// base URL
 	// The console's own client credentials to the signer. CN must be in the
 	// signer's SIGNER_ALLOWED_CLIENT_CNS.
@@ -59,52 +44,32 @@ type Config struct {
 	SignerKey  string // ATL_SIGNER_KEY
 	SignerCA   string // ATL_SIGNER_CA — verifies the signer, not the callers
 
-	// The enrolment listener. Separate from Listen, and separate for a reason
-	// that is not tidiness: Listen serves browsers behind a TLS terminator the
-	// console does not control, so it cannot inspect a client certificate.
-	// This one terminates its own TLS and asks for one.
+	// The enrolment listener, separate from Listen: Listen sits behind a TLS
+	// terminator the console does not control and cannot inspect a client
+	// certificate, while this one terminates its own TLS and requests one. It
+	// carries two routes and never the console's API or SPA.
 	//
-	// It carries two routes and never the console's API or SPA. Every machine
-	// that enrols can reach this port.
-	// There is deliberately no client-CA setting here any more.
-	//
-	// CONSOLE_ENROLL_CLIENT_CA named one pool for the listener to verify every
-	// renewing machine against, which worked while every caller in the
-	// deployment chained to one authority. Each organisation now has its own,
-	// and one pool cannot verify them all — so the check moved into handleRenew,
-	// which knows whose certificate it is holding and can therefore ask the
-	// right authority. See buildEnrollListener.
-	//
-	// Removed rather than left set and ignored. A required setting that nothing
-	// reads is worse than an absent one: it tells an operator a rule is in force
-	// that no longer exists.
+	// There is no client-CA setting. Each organisation has its own authority
+	// and one pool cannot verify them all, so handleRenew does the check.
 	EnrollListen  string // CONSOLE_ENROLL_LISTEN
 	EnrollTLSCert string // CONSOLE_ENROLL_TLS_CERT
 	EnrollTLSKey  string // CONSOLE_ENROLL_TLS_KEY
 
-	// EnrollPublicURL is the address a machine reaches the enrolment listener
-	// at, which is not EnrollListen: that is a bind address, often `:3443` or a
-	// loopback, and says nothing about how anything outside gets here.
+	// EnrollPublicURL is the address a machine reaches the listener at, which
+	// EnrollListen is not: that is a bind address, often `:3443`.
 	//
-	// The console cannot derive it. It could read the Host header, and must
-	// not — the same reasoning CLOUD_PUBLIC_URL is held to: the header is
-	// attacker-controlled, and a wrong value here does not fail, it prints an
-	// enrolment command pointing somewhere else. That command carries a live
-	// token, so a wrong host is a token handed to whoever owns it.
+	// Not derived from the Host header, which is caller-controlled. A wrong
+	// value does not fail; it prints an enrolment command carrying a live token
+	// and pointing elsewhere.
 	//
-	// Without it the console still enrols; it just cannot print a command
-	// anybody can run, and says so rather than printing one that looks right.
+	// Without it the console still enrols but cannot print a runnable command.
 	EnrollPublicURL string // CONSOLE_ENROLL_PUBLIC_URL
 
-	// Who this console accepts identity from. All three are required and
-	// none has a default.
+	// Who this console accepts identity from. All three required, no defaults.
 	//
-	// A default would be the wrong kind of convenience here. CloudIssuer and
-	// CloudAudience are compared for exact equality, and an empty expected
-	// value means the corresponding check does not run — so a console started
-	// with either one missing would not fail, it would run and accept
-	// assertions from any issuer, for any console. The failure has to happen
-	// at startup because it cannot be noticed afterwards.
+	// CloudIssuer and CloudAudience are compared for exact equality, and an
+	// empty expected value skips the check, so a console missing either would
+	// run and accept assertions from any issuer for any console.
 	CloudIssuer   string // CLOUD_ISSUER — the iss value to require
 	CloudAudience string // CLOUD_AUDIENCE — this console's own name, required in aud
 	CloudJWKSURL  string // CLOUD_JWKS_URL — where the issuer publishes its keys
@@ -115,10 +80,10 @@ type Config struct {
 	// the default of 365 covers the SOC 2 / PCI-DSS minimum.
 	AuditRetentionDays int
 
-	// SandboxPerUserLimit caps how many active sandboxes one user can
-	// hold at once. (N+1)th boot returns 429. Default 100; tune via
-	// SANDBOX_PER_USER_LIMIT. The default is intentionally generous —
-	// fanned-out agent workflows boot dozens of forks per task.
+	// SandboxPerUserLimit caps how many active sandboxes one user can hold at
+	// once; the (N+1)th boot returns 429. Default 100, set by
+	// SANDBOX_PER_USER_LIMIT, which is generous because a fanned-out agent
+	// workflow boots dozens of forks per task.
 	SandboxPerUserLimit int
 
 	// SandboxTTL is the idle window after which the TTL janitor evicts
@@ -180,19 +145,12 @@ func ConfigFromEnv() (Config, error) {
 	if len(c.SessionSecret) < 32 {
 		return Config{}, fmt.Errorf("CONSOLE_SESSION_SECRET must be at least 32 characters")
 	}
-	// mTLS is still required on every channel to atlantis — what changed is
-	// where the credentials come from.
+	// mTLS is required on every channel to atlantis, but the credentials live
+	// in each organisation's console.orgs row, so there is no process-wide
+	// certificate to validate here. dialOrg has no insecure branch, and an
+	// organisation with no credentials is refused rather than dialled clear.
 	//
-	// They used to be three process-wide file paths, which is why this function
-	// used to demand them. One console now serves many organisations, each with
-	// its own atlantis behind its own CA, so a certificate belongs to an
-	// organisation and lives in its console.orgs row. There is no process-wide
-	// certificate left to validate here, and no mode that skips mTLS: dialOrg
-	// has no insecure branch, and an organisation with no credentials is
-	// refused rather than dialled in the clear.
-	//
-	// What this function validates instead is the key those credentials are
-	// sealed with, without which none of them can be read.
+	// What is validated here is the key those credentials are sealed with.
 	if c.DataKeyset == "" {
 		return Config{}, fmt.Errorf(
 			"CONSOLE_DATA_KEY is required.\n\n" +
@@ -246,20 +204,12 @@ func envInt(key string, fallback int) int {
 
 // EnrollmentEnabled reports whether this console can issue caller certificates.
 //
-// All of it or none of it — validateEnrollment refuses the states in between —
-// so one field answers for the whole feature.
-// It is the LISTENER that decides this, not a signer address.
+// validateEnrollment refuses the half-configured states, so one field answers
+// for the whole feature. That field is the LISTENER, not a signer address.
 //
-// It used to read SignerAddr, from when a console talked to one signer. Each
-// organisation now carries its own (console.orgs, migration 0009) and signerFor
-// prefers it, so a hosted console has every signer it needs and no process-wide
-// address at all — and under the old rule that console reported enrolment as
-// disabled while being perfectly able to issue certificates.
-//
-// The listener is the right question because it is the part that cannot be
-// resolved per organisation: without it there is nowhere for a machine to
-// redeem a token, whatever signer the organisation has. Which signer to use is
-// answered later, per organisation, by signerFor.
+// The listener is the part that cannot be resolved per organisation: without it
+// a machine has nowhere to redeem a token, whatever signer the organisation
+// has. signerFor answers which signer, per organisation, later.
 func (c Config) EnrollmentEnabled() bool { return c.EnrollListen != "" }
 
 // FallbackSignerConfigured reports whether this console has a process-wide
@@ -269,30 +219,12 @@ func (c Config) EnrollmentEnabled() bool { return c.EnrollListen != "" }
 // own. `make dev-signer` is what it exists for.
 func (c Config) FallbackSignerConfigured() bool { return c.SignerAddr != "" }
 
-// validateEnrollment refuses a half-configured enrolment.
-//
-// # Why this is a startup error and not a runtime one
-//
-// The setting this replaces was documented as "optional" and read at request
-// time, so a console with no signer configured looked completely healthy and
-// answered 503 the first time somebody pressed the button — which, in every
-// deployment that ever ran, was the only behaviour it had. An operator cannot
-// tell "we chose not to enable this" from "somebody mistyped a path" at the
-// moment they need a certificate.
-//
-// Partial configuration is worse than either. A signer address with no client
-// certificate produces a handshake failure the signer logs and the console
-// reports as "signer unreachable"; an enrolment listener with no key does not
-// listen at all. Both are silent until used.
 // rejectRetiredEnrolmentEnv refuses to start when a removed setting is still
 // set, rather than booting with it inert.
 //
-// Same shape and same reasoning as cmd/server's rejectRetiredAuthzEnv, and the
-// reasoning transfers exactly. An operator who wrote
-// CONSOLE_ENROLL_CLIENT_CA=./certs/ca.crt did it to say which authority may
-// renew. Starting with the variable present and unread would leave them
-// believing a restriction is in force that this console no longer applies —
-// and unlike a missing setting, nothing would ever prompt them to look.
+// Same shape as cmd/server's rejectRetiredAuthzEnv. CONSOLE_ENROLL_CLIENT_CA
+// named the authority permitted to renew; starting with it present and unread
+// would leave a restriction believed to be in force that nothing applies.
 func rejectRetiredEnrolmentEnv() error {
 	const name = "CONSOLE_ENROLL_CLIENT_CA"
 	v := strings.TrimSpace(os.Getenv(name))
@@ -307,30 +239,17 @@ func rejectRetiredEnrolmentEnv() error {
 		name, v)
 }
 
-// validateEnrollment checks two independent groups.
+// validateEnrollment refuses a half-configured enrolment at startup, because
+// partial configuration is silent until used. See validateGroup.
 //
-// # Why they are two groups and not one
-//
-// They were one, and the single group encoded an assumption that stopped being
-// true: that a console talks to ONE signer, named by ATL_SIGNER_ADDR. Since
-// migration 0009 each organisation carries its own signer in console.orgs, and
-// signerFor prefers it — the process-wide settings are a fallback for
-// organisations registered before that, and for `make dev-signer`.
-//
-// Keeping them in one group meant a console could not run an enrolment listener
-// without also being given a process-wide signer address. In a hosted
-// deployment there is no such address to give: every signer belongs to a
-// tenant, and pointing the fallback at one of them would route an organisation
-// with no row of its own into somebody else's signer — the same silent
-// cross-organisation read that removing ATL_ENDPOINT was meant to prevent.
-//
-// So: the listener is all-or-nothing, the fallback signer is all-or-nothing,
-// and neither requires the other.
+// Two independent groups: the listener, and the fallback signer. Neither
+// requires the other. One group would mean an enrolment listener could not run
+// without a process-wide signer address, which a hosted deployment has none of,
+// so the fallback would route an unregistered organisation into another
+// tenant's signer.
 func (c Config) validateEnrollment() error {
-	// Both groups are reported together when both are wrong. Returning the first
-	// would restart the operator's edit-and-retry loop once per group, which is
-	// the same "one variable per restart" this refusal exists to avoid — just at
-	// a coarser grain.
+	// Both groups are reported together, so a wrong configuration costs one
+	// restart rather than one per group.
 	var problems []string
 	for _, g := range []struct {
 		what string
@@ -361,30 +280,11 @@ func (c Config) validateEnrollment() error {
 
 // validateGroup refuses a group that is partly filled in.
 //
-// All of it or none of it, per group. The states in between are the ones that
-// fail late and quietly: a signer address with no client certificate produces a
-// handshake failure the console reports as "signer unreachable", and an
-// enrolment listener with no key does not listen at all. Neither is visible
-// until somebody needs a certificate.
+// The states between fail late and quietly: a signer address with no client
+// certificate produces a handshake failure reported as "signer unreachable",
+// and an enrolment listener with no key does not listen at all.
 //
-// # Two settings that used to live here
-//
-// CONSOLE_ENROLL_CLIENT_CA named one pool for the listener to verify every
-// renewing machine against. buildEnrollListener set ClientCAs only when it was
-// non-empty, and Go's VerifyClientCertIfGiven with a nil ClientCAs verifies
-// against the SYSTEM roots, where no caller certificate chains — so a console
-// configured exactly as the Makefile and the documentation described advertised
-// enrolment as working and rejected every renewal inside the handshake. The
-// suite stayed green because the fixture set it explicitly, and a setting only
-// the fixture supplies is not configuration but a test passing for the wrong
-// reason. One pool could never cover many authorities, so the check moved into
-// handleRenew, where the organisation is known.
-//
-// CONSOLE_ENROLL_PUBLIC_URL stays, in the listener group: without it the
-// console can enrol but cannot print a command anybody can run, because the
-// address a machine reaches the listener at is not something it can derive. It
-// must not be read from the Host header — that header is attacker-controlled
-// and the page in question prints a live token.
+// CONSOLE_ENROLL_PUBLIC_URL is in the listener group.
 func (c Config) validateGroup(what string, set map[string]string) error {
 	var missing []string
 	filled := 0

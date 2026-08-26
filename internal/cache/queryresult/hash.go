@@ -9,9 +9,8 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// Hash derives the tier-2 cache-key digest from the request inputs.
-// The canonical layout below is the authoritative — keep it in sync
-// with the codegen-side hash construction.
+// Hash derives the tier-2 cache-key digest from the request inputs. The layout
+// below is the authority; the codegen-side hash construction matches it.
 //
 // Inputs:
 //
@@ -22,10 +21,9 @@ import (
 //     folded into entityID, so a tenant literally named
 //     "x" cannot collide with an entity suffix.
 //
-//     This is a correctness boundary, not a tuning knob. The
-//     cached value is a list of primary keys, and the fetch
-//     that follows a hit is `WHERE id = ANY($1)` — the PK
-//     fetch is not the filtered query. Without this segment,
+//     The cached value is a list of primary keys, and the
+//     fetch after a hit is `WHERE id = ANY($1)`, not the
+//     filtered query. Without this segment,
 //     tenant A runs a filter, its PKs are stored, and tenant B
 //     running the identical filter hits the entry and fetches
 //     A's rows by primary key. On a role that obeys row-level

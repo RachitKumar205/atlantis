@@ -16,14 +16,13 @@ import (
 // permit. So a hosted atlantis on the Community build has no carve-out.
 //
 // Only hypertable functionality is used, and create_hypertable /
-// set_chunk_time_interval are Apache-2.0 (timescaledb sql/ddl_api.sql). So the
-// Apache build is sufficient, and the whole problem is making sure that is the
-// build actually running.
+// set_chunk_time_interval are Apache-2.0 (timescaledb sql/ddl_api.sql), so the
+// Apache build is sufficient. What remains is confirming it is the build
+// running.
 //
-// The trap is that the DEFAULT package is Community. Getting Apache means
-// installing timescaledb-apache or building with -DAPACHE_ONLY=1 — a deliberate
-// act on every image rebuild, which is exactly the kind of step that is quietly
-// lost. Hence a check rather than a runbook note.
+// The default package is Community. Apache means installing timescaledb-apache
+// or building with -DAPACHE_ONLY=1, once per image rebuild, which a check
+// enforces and a runbook note does not.
 
 func TestRequireApacheTimescale(t *testing.T) {
 	for _, tc := range []struct {
@@ -49,8 +48,7 @@ func TestRequireApacheTimescale(t *testing.T) {
 		}
 	}
 
-	// The message has to be actionable. Someone hitting this at deploy time
-	// needs to know what to install, not merely that something is wrong.
+	// The refusal names what to install, since it fires at deploy time.
 	err := RequireApacheTimescale(TimescaleCommunity)
 	for _, want := range []string{"APACHE_ONLY", "timescaledb-apache"} {
 		if !strings.Contains(err.Error(), want) {

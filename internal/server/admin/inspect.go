@@ -13,29 +13,18 @@ import (
 // InspectSchema reports how the live database differs from a declaration, and
 // writes nothing.
 //
-// # Why this exists separately from AdoptBaseline
+// Separate from AdoptBaseline, which both compares and records agreement.
+// Asking only the comparison through `adopt --allow-drift` rewrites the shared
+// checkpoint for every caller. This runs at CAPABILITY_SCHEMA_READ, so CI can
+// ask it against production.
 //
-// Adopt answers two questions at once: "how do these differ" and "record that
-// they agree". Operators were using `adopt --allow-drift` for the first one,
-// which meant reaching for a flag whose name promises a write in order to ask
-// a question. On a hosted deployment that is worse than awkward — the flag
-// rewrites the shared checkpoint for every caller, so finding out required a
-// privilege nobody should hold to look.
+// The transaction is opened READ ONLY, so a write added to this path fails at
+// Postgres. compareToLive is shared with adopt, where the following line is
+// persistCheckpoint.
 //
-// This is the first question on its own, at CAPABILITY_SCHEMA_READ, so a
-// caller can run it against production from CI.
-//
-// # How "writes nothing" is enforced
-//
-// The transaction is opened READ ONLY, so a write introduced on this path
-// later fails at Postgres rather than in review. That matters because the
-// path is SHARED with adopt: compareToLive is the same function both call,
-// and the line after it in AdoptBaseline is persistCheckpoint. A guard that
-// depends on nobody adding a write to a shared helper is not a guard.
-//
-// No advisory lock, unlike adopt. Adopt takes one because it rewrites the
-// checkpoint and must serialise against apply. Reading does not, and taking
-// the lock here would let a `tide inspect` in CI block a deploy.
+// No advisory lock, unlike adopt, which takes one because it rewrites the
+// checkpoint and must serialise against apply. Taking it here would let a
+// `tide inspect` in CI block a deploy.
 func (s *Service) InspectSchema(ctx context.Context, req *adminpb.InspectSchemaRequest) (*adminpb.InspectSchemaResponse, error) {
 	subs := callerSubmissionsFromPB(req.GetSubmissions())
 	if len(subs) == 0 {

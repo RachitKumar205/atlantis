@@ -180,9 +180,9 @@ func TestPKConflict(t *testing.T) {
 // TestUnsupportedSurfacesErrUnsupported asserts the whitelist boundary:
 // constructs the executor doesn't model surface as ErrUnsupported with
 // a helpful snippet, not a parse-time crash or a silently-wrong result.
-// GROUP BY is the load-bearing example here — the parser accepts it
-// (pg_query handles full PG grammar), the translator rejects it
-// up-front because the executor doesn't aggregate.
+// GROUP BY is the case that separates the two layers: pg_query handles the
+// full PG grammar and accepts it, and the translator rejects it up front
+// because the executor does not aggregate.
 func TestUnsupportedSurfacesErrUnsupported(t *testing.T) {
 	pool := makeAccountTable(t)
 	ctx := context.Background()

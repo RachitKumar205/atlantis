@@ -23,30 +23,21 @@ const orgClientRefresh = 5 * time.Minute
 
 // orgClients holds one admin channel per organisation.
 //
-// # Why this exists
+// The console serves many organisations, each with its own atlantis behind its
+// own CA. A single shared client would reach one of them and return its data
+// for every organisation, with no error, because the connection is healthy and
+// points at the wrong stack.
 //
-// The console serves many organisations, and each has its own atlantis behind
-// its own CA. A single shared client would reach one of them and silently
-// return its data to everybody — which is not a hypothetical: it is exactly
-// what the console did before this, and there was no error anywhere, because
-// the connection was perfectly healthy and pointed at the wrong stack.
+// A lookup rather than a field, as with orgStore in orgscope.go: a handler that
+// has not named an organisation cannot obtain a channel. The organisation comes
+// from the session, which came from an assertion Cloud signed, so a request
+// cannot choose it.
 //
-// # Why it is a lookup rather than a field
-//
-// Same argument as orgStore (internal/console/orgscope.go): a handler that has
-// not said which organisation it is acting for cannot obtain a channel at all.
-// The organisation comes from the session, which came from an assertion Cloud
-// signed, so it is not a value a request can choose for itself.
-//
-// # What it does NOT do
-//
-// It does not make a mixed-up lookup safe. Ask for organisation B's client
-// while serving organisation A and you will get a working channel to B — the
-// pool cannot know that was wrong. What the per-organisation CA buys is that a
-// *mismatched pair* fails: A's credentials against B's endpoint is refused
-// inside the TLS handshake, before any atlantis code runs. The pool's job is to
-// make the pair impossible to mismatch by construction, since both halves come
-// from one row.
+// This does not make a mixed-up lookup safe: asking for organisation B's client
+// while serving A returns a working channel to B. What the per-organisation CA
+// gives is that a mismatched pair fails — A's credentials against B's endpoint
+// are refused in the TLS handshake — and both halves of the pair come from one
+// row.
 type orgClients struct {
 	db  *store
 	now func() time.Time
@@ -86,9 +77,8 @@ type orgClientEntry struct {
 	// whose certificate has been replaced.
 	updatedAt time.Time
 
-	// checkedAt is when the row was last re-read, which is not the same thing
-	// and must not be conflated: one tracks the credential, the other tracks
-	// our knowledge of it.
+	// checkedAt is when the row was last re-read, which is a different fact:
+	// one tracks the credential, the other tracks how current this cache is.
 	checkedAt time.Time
 }
 
@@ -101,12 +91,10 @@ func newOrgClients(db *store) *orgClients {
 // One place rather than three, because the signer arrived after the channel and
 // the three existing teardown paths would each have had to remember it. An
 // *http.Client has no Close, so its transport's idle connections are what there
-// is to release — leaking those is not fatal, which is exactly why it would go
-// unnoticed.
-//
-// The health client is the third, and it proved the point: it arrived when the
-// health listener started demanding a certificate, and this function is the
-// only place that had to change to release it.
+// is to release, and leaking those is not fatal, which is why it goes
+// unnoticed. Every handle an entry acquires is released here: the health client
+// arrived when the health listener began demanding a certificate, and this was
+// the only place that changed.
 func closeEntry(e *orgClientEntry) {
 	if e == nil {
 		return
@@ -124,12 +112,10 @@ func closeEntry(e *orgClientEntry) {
 
 // get returns the channel for an organisation, dialling it if necessary.
 //
-// Fails closed and by name. There is deliberately no fallback endpoint: an
-// organisation nobody has registered is refused, because falling back to a
-// shared address is precisely the silent cross-organisation read this whole
-// step exists to prevent. One missing row would otherwise route an
-// unprovisioned organisation into somebody else's atlantis, and every page
-// would render.
+// Fails closed and by name. There is no fallback endpoint: an organisation
+// nobody has registered is refused, since falling back to a shared address
+// routes an unprovisioned organisation into somebody else's atlantis on one
+// missing row, with every page rendering.
 func (p *orgClients) get(ctx context.Context, org string) (*orgClientEntry, error) {
 	if org == "" {
 		return nil, ErrNoOrg
@@ -165,9 +151,9 @@ func (p *orgClients) get(ctx context.Context, org string) (*orgClientEntry, erro
 		// hiccup into an outage. Same rule as the JWKS cache next door, for
 		// the same reason.
 		//
-		// Note what this does NOT extend to: an organisation with no cached
-		// client still gets the error. Failing open on first use would mean
-		// dialling nothing at all, which cannot be right.
+		// It does not extend to an organisation with no cached client, which
+		// still gets the error: failing open on first use would mean dialling
+		// nothing at all.
 		if ok {
 			return e, nil
 		}
@@ -271,9 +257,9 @@ func (p *orgClients) close() {
 
 // atlFor returns the admin channel for an organisation.
 //
-// `s.atl` used to be a field, which meant no call site could be wrong about
-// which atlantis it was talking to — and also meant they were all wrong
-// together, because there was only one.
+// A single `s.atl` field leaves no call site able to name the wrong atlantis,
+// and every call site talking to the same one whichever organisation it is
+// serving.
 func (s *Server) atlFor(ctx context.Context, org string) (*adminClient, error) {
 	e, err := s.orgs.get(ctx, org)
 	if err != nil {
@@ -287,11 +273,9 @@ func (s *Server) atlFor(ctx context.Context, org string) (*adminClient, error) {
 //
 // Separate from orgATL because two surfaces need an address rather than a
 // channel: the Settings page shows the gRPC endpoint, and the Health page
-// reaches atlantis over **plain HTTP** on a different port entirely. That
-// second one is the easy one to forget — it never touches the gRPC client, so
-// nothing about moving the client per organisation would have flagged it, and
-// an unmoved health address would have every organisation's Health page
-// reporting one server's status.
+// reaches atlantis over plain HTTP on a different port. The health address
+// never touches the gRPC client, so a per-organisation client alone leaves
+// every organisation's Health page reporting one server's status.
 func (s *Server) orgAddrs(w http.ResponseWriter, r *http.Request) *orgClientEntry {
 	u, ok := r.Context().Value(ctxUser).(*User)
 	if !ok {
@@ -359,20 +343,15 @@ const healthTimeout = 5 * time.Second
 // orgHealthClient builds the client that reads an organisation's health
 // listener.
 //
-// # Why this needs a certificate now
+// /status and /metrics on that listener require a client certificate, which
+// this presents. A NetworkPolicy is not a portable substitute: `ipBlock` covers
+// pod traffic under Calico, does not under GKE Dataplane V2, and excludes
+// nothing on EKS.
 //
-// That listener used to be plain HTTP, and /status and /metrics were open on
-// it. The only thing keeping another tenant's pod away was a NetworkPolicy, and
-// that policy is not portable — `ipBlock` covers pod traffic under Calico,
-// never covers it under GKE Dataplane V2, and on EKS excludes nothing at all.
-// So the routes that describe an organisation's system now demand a client
-// certificate, and this is what presents it.
-//
-// The organisation's own atlantis credentials, not the signer's: it is the same
-// authority the admin channel authenticates against, so one rotation moves
-// both. Mirrors orgSignerClient deliberately — same shape, different roots, and
-// the two would be a single function if they shared a trust root, which is
-// exactly what they must not do.
+// It presents the organisation's atlantis credentials, not its signer
+// credentials — the same authority the admin channel authenticates against, so
+// one rotation moves both. orgSignerClient is the same shape against the other
+// root; they are separate functions because the roots must stay separate.
 func orgHealthClient(creds *orgCredentials) (*http.Client, error) {
 	cert, err := tls.X509KeyPair([]byte(creds.CertPEM), creds.KeyPEM)
 	if err != nil {

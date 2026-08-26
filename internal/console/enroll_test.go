@@ -16,9 +16,8 @@ import (
 // enrolmentEnv is a complete enrolment configuration.
 //
 // Paths, not files: validateEnrollment decides on presence, and whether the
-// files parse is New()'s problem. Keeping them apart is deliberate — a test
-// about "is this configured" that also needed a real certificate authority
-// would be testing two things and failing for either reason.
+// files parse is New()'s problem. A test about whether something is configured
+// that also needed a real certificate authority would fail for either reason.
 var enrolmentEnv = map[string]string{
 	"ATL_SIGNER_ADDR":         "https://signer.internal:7070",
 	"ATL_SIGNER_CERT":         "/certs/console.crt",
@@ -75,14 +74,11 @@ func TestACompleteEnrolmentConfigurationIsAccepted(t *testing.T) {
 
 // Every one-setting-missing case is refused, and the message names the setting.
 //
-// # Why each of these is worth refusing rather than tolerating
-//
 // None of them fails at startup on its own. A signer address with no client
-// certificate produces a TLS handshake failure that reads as "signer
-// unreachable". A listener with no key does not listen, and nothing says so —
-// the console serves its normal port perfectly. Every one of them is discovered
-// by whoever first needs a certificate, which is the worst moment to find out
-// that somebody mistyped a path three deployments ago.
+// certificate produces a TLS handshake failure reading as "signer unreachable".
+// A listener with no key does not listen and says nothing, while the console
+// serves its normal port. Each surfaces at the first request for a certificate,
+// which is a long way from the mistyped path that caused it.
 func TestHalfConfiguredEnrolmentIsRefused(t *testing.T) {
 	for missing := range enrolmentEnv {
 		t.Run("without "+missing, func(t *testing.T) {
@@ -122,8 +118,8 @@ func TestTheRefusalNamesEveryMissingSetting(t *testing.T) {
 			t.Errorf("the error does not name %s: %v", name, err)
 		}
 	}
-	// And it does not name the one that IS set, which would send somebody
-	// looking at the wrong line.
+	// And it does not name a setting that is present, which would point at the
+	// wrong line.
 	if strings.Contains(err.Error(), "ATL_SIGNER_ADDR is unset") {
 		t.Errorf("the error names a setting that is present: %v", err)
 	}
@@ -163,9 +159,9 @@ func TestTheRefusalNamesBothGroupsAtOnce(t *testing.T) {
 // there is no fleet-wide signer address to give — pointing the fallback at one
 // tenant's signer would route an unregistered organisation into somebody else's.
 //
-// It used to be refused. The two groups were one, so a listener could not be
-// configured without a signer address, and the console crash-looped on a
-// configuration that is the only correct one for production.
+// Treating the two as one group makes a listener impossible to configure
+// without a signer address, and crash-loops the console on the only
+// configuration correct for production.
 func TestAListenerWithNoFallbackSignerIsAccepted(t *testing.T) {
 	setConsoleEnv(t)
 	for _, name := range []string{
@@ -191,24 +187,18 @@ func TestAListenerWithNoFallbackSignerIsAccepted(t *testing.T) {
 
 // CONSOLE_ENROLL_CLIENT_CA is gone, and a console starts without it.
 //
-// # The history, because the shape is worth remembering
-//
 // It named one pool for the enrolment listener to verify every renewing machine
 // against, and it was optional. buildEnrollListener set ClientCAs only when it
 // was non-empty, and Go's VerifyClientCertIfGiven with a nil ClientCAs verifies
-// against the SYSTEM roots, where no caller certificate chains. So a console
-// started from the Makefile's own CONSOLE_ENROLL_ENV — which did not set it —
-// advertised enrolment as fully configured and refused every renewal inside the
-// handshake, before handleRenew ran.
+// against the system roots, where no caller certificate chains, so a console
+// started without it advertised enrolment as fully configured and refused every
+// renewal inside the handshake, before handleRenew ran. Every renewal test
+// passed throughout, because the fixture set a variable the product did not
+// require.
 //
-// **Every renewal test passed throughout, because the fixture set the variable
-// the product did not require.** That is the shape to watch for: a setting only
-// the test supplies is not configuration.
-//
-// Making it required fixed that. What it could never fix is one pool against
-// many authorities, which per-organisation signers made the ordinary case — so
-// the verification moved into handleRenew, where the organisation is known, and
-// the setting had nothing left to name.
+// One pool cannot cover many authorities, which per-organisation signers make
+// the ordinary case, so the verification moved into handleRenew where the
+// organisation is known and the setting had nothing left to name.
 func TestEnrolmentDoesNotNeedAClientCASetting(t *testing.T) {
 	setConsoleEnv(t)
 	setEnrolmentEnv(t)
@@ -265,9 +255,9 @@ func TestEnrolmentRequiresThePublicURL(t *testing.T) {
 
 // And the field is actually read from the environment.
 //
-// It was declared, documented, and never populated by ConfigFromEnv — so it was
-// permanently empty and no test noticed, because none of them looked at a value
-// rather than at an error.
+// A field declared and documented but never populated by ConfigFromEnv is
+// permanently empty, and no test that looks only at errors rather than at
+// values notices.
 func TestThePublicURLIsReadFromTheEnvironment(t *testing.T) {
 	setConsoleEnv(t)
 	setEnrolmentEnv(t)

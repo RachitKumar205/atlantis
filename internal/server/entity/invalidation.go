@@ -116,10 +116,9 @@ func inboundColumns(rules []inboundRule) []string {
 // meta.inboundCols order.
 //
 // Runs inside the caller's transaction, so a parent invalidation is committed
-// with the write that caused it or not at all. Enqueuing after commit would
-// leave a window where the child is visible and the parent's cache still holds
-// the pre-write row — which is the exact staleness this feature exists to
-// close, reintroduced by the fix for it.
+// with the write that caused it or not at all. Enqueuing after commit leaves a
+// window where the child is visible and the parent's cache still holds the
+// pre-write row.
 //
 // A NULL parent key is skipped: the row points at no parent, so there is
 // nothing to invalidate. Duplicate (parent, id) pairs are collapsed, which
@@ -203,24 +202,17 @@ func (s *Server) readInboundValues(ctx context.Context, tx runtime.Tx, meta *ent
 
 // procedureWrittenEntities returns every entity id some procedure writes.
 //
-// Read-through caching is disabled for these, and that is a deliberate
-// fail-closed choice rather than a limitation being tolerated.
+// Read-through caching is disabled for these, failing closed.
 //
 // A procedure runs raw SQL steps. It declares which entities it touches, but
-// nothing reports which ROWS it changed, and a row body is cached under a
-// per-row version pointer — so there is no way to invalidate the bodies it
-// invalidated. The generation bump the procedure does emit clears cached query
+// nothing reports which rows it changed, and a row body is cached under a
+// per-row version pointer, so there is no way to invalidate the bodies it
+// invalidated. The generation bump a procedure does emit clears cached query
 // results and leaves row bodies untouched.
 //
-// Before Get was served from the cache this cost nothing, because nothing was
-// cached. It is live now: without this, HardDeleteProduct would delete a
-// product and leave its cached body being served until TTL, and
-// UpdateOrderFinancialStatusIfFresh would leave a stale order. Ten procedures
-// in the shipped schemas write entities that declare read_through.
-//
-// Serving those entities uncached is strictly correct and merely slower. The
-// alternative — caching them and hoping the TTL is short enough — is the class
-// of silent staleness this whole area has been about.
+// Without this, HardDeleteProduct deletes a product and leaves its cached body
+// served until TTL, and UpdateOrderFinancialStatusIfFresh leaves a stale order.
+// Serving those entities uncached is correct and slower.
 func procedureWrittenEntities(ir *dsl.IR) map[string]bool {
 	if ir == nil {
 		return nil

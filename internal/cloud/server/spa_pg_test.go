@@ -150,8 +150,6 @@ func TestAConfiguredProviderStillWorks(t *testing.T) {
 	}
 }
 
-// ── Content-Security-Policy ─────────────────────────────────────────────────
-
 // Every route except the app keeps `default-src 'none'`.
 //
 // Asserted as the EXACT policy, not as a substring. `default-src 'none'` is a

@@ -205,12 +205,10 @@ func (s *Service) SubmitJob(ctx context.Context, req *adminpb.SubmitJobRequest) 
 	// RBAC: when the job declares `visible_to`, only the named caller (or "*"
 	// for any) can submit.
 	//
-	// This reads the VERIFIED identity, not req.SubmittedBy. It used to read
-	// the latter, which cmd/tide fills from $USER, and a gate whose input the
-	// client chooses is not a gate: any authenticated caller could name the
-	// identity the job declared and submit. The "cli:" prefix strip went with
-	// it — it existed only to make a client-supplied string match, and there
-	// is nothing to normalise about a common name.
+	// This reads the verified identity, not req.SubmittedBy, which cmd/tide
+	// fills from $USER: a gate whose input the client chooses lets any
+	// authenticated caller name the identity the job declared and submit. A
+	// common name needs no normalising, so no prefix is stripped either.
 	//
 	// An operator is allowed through. `visible_to` says which caller a job
 	// belongs to, and an operator already reads, retries and cancels across
@@ -222,12 +220,11 @@ func (s *Service) SubmitJob(ctx context.Context, req *adminpb.SubmitJobRequest) 
 	// deployment has already been warned its admin plane is open.
 	// Aliases count, and the predicate is the dispatcher's own.
 	//
-	// This gate used to compare the CN alone, so it disagreed with
-	// jobsdispatcher about who a caller is. Rename a caller from `vendor` to
-	// `vendor-v2` with aliases={'vendor'} — the flow migration 0017 exists to
-	// enable — and the same caller could still HANDLE a job declared
-	// `visible_to "vendor"` while being refused permission to ENQUEUE it. Two
-	// authorization gates on one field, each correct-looking alone.
+	// Comparing the CN alone makes this disagree with jobsdispatcher about who
+	// a caller is. Rename a caller from `vendor` to `vendor-v2` with
+	// aliases={'vendor'} — the flow migration 0017 enables — and it can still
+	// handle a job declared `visible_to "vendor"` while being refused
+	// permission to enqueue it: two gates on one field, each correct alone.
 	if submitter := s.jobReadScope(ctx); submitter != "" {
 		aliases, err := s.LookupCallerAliases(ctx, submitter)
 		if err != nil {
@@ -408,13 +405,11 @@ func (s *Service) RetryDeadJob(ctx context.Context, req *adminpb.RetryDeadJobReq
 	//
 	// The DELETE repeats the scope and, as the code stands, does not need to:
 	// the RowsAffected check returns before it, so it is unreachable for a row
-	// the caller does not own. Mutating it to match everything leaves every
-	// test green, which is worth stating rather than leaving for someone to
-	// rediscover. It stays because the two statements are one operation and
+	// the caller does not own, and mutating it to match everything leaves every
+	// test green. It stays because the two statements are one operation and
 	// only their conjunction is safe — move the early return, or add a branch
-	// that reaches the DELETE another way, and an id-only predicate deletes a
-	// row this caller was refused. A guard that depends on a return statement
-	// twenty lines up is not a guard.
+	// reaching the DELETE another way, and an id-only predicate deletes a row
+	// this caller was refused.
 	const moveSQL = `
 INSERT INTO atlantis.jobs
     (id, job_name, queue, args, status, attempts, max_retries,
@@ -514,9 +509,8 @@ func formatNullable(t *time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// --- Wire conversion ---
-//
-// Two asymmetries need preserving in both directions, plus one narrowing.
+// Wire conversion. Two asymmetries need preserving in both directions, plus one
+// narrowing.
 //
 // Args is json.RawMessage on the JSON side and bytes on the wire. Both carry
 // opaque JSON the server never interprets, so the copy is verbatim — but nil

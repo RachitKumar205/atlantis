@@ -12,27 +12,18 @@ import (
 // IsolatedRoleDSN creates a NOSUPERUSER NOBYPASSRLS role and returns a DSN for
 // it against the same database.
 //
-// # Why a test needs this at all
+// Row-level security is a boundary only for a role subject to it. FORCE ROW
+// LEVEL SECURITY binds a table's owner and binds neither a superuser nor a role
+// holding BYPASSRLS, so a fixture connecting as the cluster's administrative
+// role runs every case with the policies attached and inert.
 //
-// Row-level security is only a boundary if the connecting role is subject to
-// it. FORCE ROW LEVEL SECURITY binds a table's owner; it binds a superuser to
-// nothing, and it binds a role holding BYPASSRLS to nothing. A test fixture
-// that connects as the cluster's administrative role therefore runs every case
-// with the policies attached and inert — and an isolation assertion under those
-// conditions passes for precisely the reason the isolation was meant to
-// prevent.
+// The caller migrates as this role too: creating the tables is what makes it
+// their owner.
 //
-// So the returned role is also the one the caller should MIGRATE as, because
-// creating the tables is what makes it their owner.
-//
-// # Why it lives here
-//
-// Three packages needed the same thing within a few weeks of each other:
-// internal/console, internal/cloud/store and internal/cloud/server. The copies
-// would drift in the way that matters — one grows a grant the others lack, and
-// the difference shows up as a permission error in whichever fixture was not
-// updated. The console keeps its own for now because its grants are commented
-// against its own schema; new callers should use this.
+// Shared by internal/cloud/store, internal/cloud/server and cmd/cloud. Separate
+// copies drift — one grows a grant the others lack, and the difference surfaces
+// as a permission error in whichever fixture was not updated. internal/console
+// keeps its own, whose grants are written against its own schema.
 func IsolatedRoleDSN(t *testing.T, dbDSN, dbName, role string) string {
 	t.Helper()
 

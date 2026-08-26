@@ -15,23 +15,18 @@ import (
 
 // `partition by` added to an entity that already exists must actually isolate.
 //
-// # The property
-//
 // A table is created without the clause and filled with two tenants' rows. The
 // clause is then added and the emitted migration applied. After that, a caller
 // bound to one tenant must read only its own rows.
 //
-// # Why this is the test
-//
-// Every other check around this feature detects the ABSENCE of the policy —
+// Every other check around this feature detects the absence of the policy —
 // VerifyPartitionPolicies at boot, the reload hook, the backfill guard. All
-// three exist because the differ did not read `partition by`, so adding it to
-// an existing entity produced an empty plan and the schema claimed a partition
-// the database had never heard of. Those checks are how you survive the gap.
-// This is the test that says the gap is closed.
+// three exist for a differ that does not read `partition by`, where adding it
+// to an existing entity produces an empty plan and the schema claims a
+// partition the database has never heard of.
 //
-// It runs as a NOBYPASSRLS role that OWNS the table, which is the production
-// posture and what makes FORCE load-bearing. As a superuser the policy is inert
+// It runs as a NOBYPASSRLS role that owns the table, which is the production
+// posture and what makes FORCE do anything. As a superuser the policy is inert
 // and this would pass with the whole migration deleted.
 func TestPartitionByCanBeAddedToAnExistingEntity(t *testing.T) {
 	dsn := os.Getenv("ATLANTIS_TEST_PG")
@@ -96,7 +91,7 @@ INSERT INTO atlantis.pdiff_doc VALUES (1, 'acme', 'acme-secret'), (2, 'globex', 
 		t.Fatalf("seed: %v", err)
 	}
 
-	// The whole point: the differ must SEE the clause appear.
+	// The differ has to see the clause appear.
 	d := ComputeDiff(oldIR, newIR)
 	if d.IsEmpty() {
 		t.Fatal("adding `partition by` to an existing entity produced an EMPTY plan. " +
@@ -135,7 +130,7 @@ INSERT INTO atlantis.pdiff_doc VALUES (1, 'acme', 'acme-secret'), (2, 'globex', 
 		t.Fatalf("apply the partition migration: %v\n%s", err, scripts.Up)
 	}
 
-	// A restricted role that OWNS the table, so FORCE is load-bearing.
+	// A restricted role that owns the table, so FORCE applies to it.
 	pgcatalog.Do(t, dsn, func(conn *pgx.Conn) error {
 		_, err := conn.Exec(context.Background(), `
 CREATE ROLE pdiff_tenant LOGIN PASSWORD 'probe' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
@@ -573,25 +568,19 @@ SELECT coalesce(max(pg_get_expr(p.polqual, p.polrelid)), '')
 // The class of a tenant-column type change follows the POLICY PREDICATE, not
 // the column type.
 //
-// # Why this is not pedantry
-//
 // 0026 seeds PLAN_CLASS_CROSS_CALLER_BREAKING with require_approval=true, so
 // the class decides whether an apply stops and waits for a human. Widening
-// varchar(16) to varchar(32) on a tenant column used to stop it — while the
-// policy it rebuilt was byte-identical before and after, because both types are
-// text-shaped and neither takes a cast. The reviewer was being asked to approve
-// a change to what callers can read, and nothing about what callers can read
-// had moved.
+// varchar(16) to varchar(32) on a tenant column rebuilds a policy that is
+// byte-identical before and after, because both types are text-shaped and
+// neither takes a cast: nothing about what callers can read has moved.
 //
-// The rebuild is not in question and happens either way: PostgreSQL refuses to
-// alter a column a policy depends on. Only the class moves.
+// The rebuild happens either way — PostgreSQL refuses to alter a column a
+// policy depends on. Only the class moves.
 //
-// # Both directions, deliberately
-//
-// Asserting only that a widening is additive would pass against a differ that
-// classified EVERYTHING additive — which would send a genuine change to what
-// the policy matches through unattended. The uuid case is what makes the
-// additive case mean something.
+// Both directions. Asserting only that a widening is additive would pass
+// against a differ that classified everything additive, sending a genuine
+// change to what the policy matches through unattended. The uuid case is what
+// makes the additive case mean something.
 func TestAWideningThatCannotMoveVisibilityIsNotBreaking(t *testing.T) {
 	partitioned := func(tenantDecl string) string {
 		return `
@@ -656,39 +645,21 @@ entity Doc in pclass {
 // A bracketed partition change must never reach a class group, whatever its
 // class.
 //
-// # The guard this protects
-//
 // emitClass's KindPartitionChanged arm carries `if oldE.PartitionField ==
 // newE.PartitionField { break }`, because a same-column rebuild is owned by the
-// prologue/epilogue bracket — emitting it in the group as well creates the
-// policy twice, and on the DOWN path the group's copy recreates it BEFORE the
-// column is reverted, which is the SQLSTATE 0A000 wedge the bracket exists to
-// remove.
+// prologue/epilogue bracket. Emitting it in the group as well creates the policy
+// twice, and on the DOWN path the group's copy recreates it before the column is
+// reverted, which is the SQLSTATE 0A000 wedge the bracket exists to remove.
 //
-// That guard was unreachable and therefore untestable: withoutBracketedPartitionChanges
-// stripped bracketed partition changes from BREAKING, and every partition change
-// was breaking, so nothing ever reached the arm. Deleting the guard changed
-// nothing and the whole package stayed green.
+// Two mechanisms prevent this for a same-column change: the group filter, which
+// withoutBracketedPartitionChanges runs on every class group, and the arm guard.
+// Removing either alone leaves this test green; it fails only when both go.
 //
-// Classifying a predicate-preserving widening as ADDITIVE changes that. Additive
-// is a different group, and the filter used to run on BREAKING alone — so the
-// change would have arrived in emitClass with only that dead guard between it
-// and a duplicate policy. The filter now runs on every group.
-//
-// # Two mechanisms, and neither is individually killable
-//
-// Stated rather than implied, because the mutation results are otherwise
-// confusing. The group filter and the arm guard BOTH prevent this for a
-// same-column change, so removing either alone leaves this test green. It fails
-// only when both go.
-//
-// They are not duplicates of each other. The filter is the general rule —
-// class-independent, and the only thing covering KindPartitionAdded and
-// KindPartitionRemoved on a bracketed entity, which the guard's same-column
-// condition cannot see. The guard is the narrow backstop inside the arm. Keeping
-// both is deliberate; what is asserted here is the OUTCOME they exist for,
-// because a test tied to either one would pass while the other did the work and
-// tell you nothing about which.
+// They are not duplicates. The filter is class-independent and is the only
+// thing covering KindPartitionAdded and KindPartitionRemoved on a bracketed
+// entity, which the guard's same-column condition cannot see. The guard is the
+// backstop inside the arm. What is asserted here is the outcome, because a test
+// tied to either one would pass while the other did the work.
 func TestABracketedPartitionChangeReachesNoClassGroup(t *testing.T) {
 	before := lower(t, `
 entity Doc in pbrk {

@@ -81,8 +81,6 @@ func itoa(n int) string {
 	return string(buf[i:])
 }
 
-// ────────────────────────── tests ──────────────────────────
-
 // TestBatchGetANY exercises `WHERE pk = ANY($1)` — the BatchGet path
 // codegen emits when the handler receives a list of IDs.
 func TestBatchGetANY(t *testing.T) {

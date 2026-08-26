@@ -1,23 +1,21 @@
 package console
 
-// Sandbox console integration — wraps the in-process *sandbox.Server
-// with per-user attribution, ephemeral TTL, a startup tempdir sweep,
-// and the BFF-custom endpoints (boot/list/destroy) that the runtime's
-// HTTP control plane intentionally excludes.
+// Sandbox console integration. Wraps the in-process *sandbox.Server with
+// per-user attribution, ephemeral TTL, a startup tempdir sweep, and the
+// boot/list/destroy endpoints the runtime's HTTP control plane does not carry.
 //
-// Architecture:
-//
-//   - Sub-routes under /api/sandbox/{pubID}/* PROXY to the runtime's
+//   - Sub-routes under /api/sandbox/{pubID}/* proxy to the runtime's
 //     /v1/sandbox/{internalID}/* after the BFF rewrites the path.
-//   - POST /api/sandbox (boot), GET /api/sandbox (list),
+//   - POST /api/sandbox (boot), GET /api/sandbox (list) and
 //     DELETE /api/sandbox/{pubID} are BFF-custom handlers; the runtime
-//     does not expose listing.
-//   - PubIDs are 128-bit opaque (crypto/rand) and never leak the
-//     runtime's enumerable int36 ids to the browser.
-//   - Meta map is guarded by sync.RWMutex; TTL janitor reads under
-//     RLock to collect candidates, then evicts under write-lock per id.
-//   - "Activity" for TTL = any sub-route request. GET /api/sandbox
-//     (the list poll) does NOT touch lastActive.
+//     exposes no listing.
+//   - PubIDs are 128 opaque bits from crypto/rand, so the runtime's
+//     enumerable int36 ids never reach the browser.
+//   - The meta map is guarded by a sync.RWMutex. The TTL janitor reads
+//     under RLock to collect candidates, then evicts under the write
+//     lock per id.
+//   - Activity for TTL means any sub-route request. GET /api/sandbox,
+//     the list poll, leaves lastActive alone.
 
 import (
 	"context"
@@ -48,10 +46,9 @@ const defaultSandboxTTL = 30 * time.Minute
 // loop) routinely fans out across many sandboxes — checkpoint /
 // rewind / fork / compare are designed for the workflow where you
 // spin up dozens of forks per task. A default of 3 actively
-// contradicts that pitch and forces the operator to bump the env on
-// day one. Self-host operators on resource-constrained hosts can
-// still cap lower via SANDBOX_PER_USER_LIMIT; multi-tenant deployments
-// should ALWAYS set their own ceiling rather than trusting this
+// contradicts that pitch and forces the env to be bumped on day one.
+// SANDBOX_PER_USER_LIMIT caps it lower on a constrained host, and a
+// multi-tenant deployment sets its own ceiling rather than taking this
 // default.
 const defaultSandboxPerUserLimit = 100
 
@@ -62,7 +59,7 @@ const maxSnapshotBytes = 256 << 20 // 256 MiB
 // sandboxMeta is the BFF-side bookkeeping for one active sandbox. The
 // runtime itself doesn't know about owners or TTL — that's the BFF's
 // job. internalID is the runtime's enumerable id; pubID is the
-// 128-bit opaque token we hand to the browser.
+// 128-bit opaque token the browser is handed.
 type sandboxMeta struct {
 	pubID      string
 	internalID string
@@ -113,8 +110,8 @@ func newSandboxLayer(perUser int, ttl time.Duration) *sandboxLayer {
 }
 
 // lookup returns meta + ownership-check result. Called from the proxy
-// path; if ok=false the caller returns 404 (we don't distinguish
-// "not yours" from "doesn't exist" to avoid pubID enumeration leaks).
+// path; ok=false means the caller returns 404. "Not yours" and "does not
+// exist" are the same answer, so a pubID cannot be enumerated.
 func (l *sandboxLayer) lookup(pubID string, ownerSubject, ownerOrg string) (*sandboxMeta, bool) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -131,9 +128,9 @@ func (l *sandboxLayer) lookup(pubID string, ownerSubject, ownerOrg string) (*san
 	return m, true
 }
 
-// touchActivity bumps lastActive. Called from the proxy on every
-// sub-route request (NOT from the list endpoint — that would defeat
-// TTL eviction for tab-with-list-open-but-otherwise-idle users).
+// touchActivity bumps lastActive. Called from the proxy on every sub-route
+// request, and not from the list endpoint, which would keep a tab polling the
+// list from ever being evicted.
 func (l *sandboxLayer) touchActivity(pubID string) {
 	l.mu.Lock()
 	if m, ok := l.byPub[pubID]; ok {
@@ -227,9 +224,9 @@ func (l *sandboxLayer) runJanitor(ctx context.Context, interval time.Duration) {
 			}
 		}
 		l.mu.RUnlock()
-		// Evict one at a time. destroy() takes the write-lock briefly
-		// per call; we hold no aggregate lock so concurrent boots
-		// during eviction don't queue up behind a long Close().
+		// Evict one at a time. destroy() takes the write lock briefly per
+		// call, and no aggregate lock is held, so a concurrent boot does not
+		// queue behind a long Close().
 		for _, pub := range stale {
 			l.destroy(pub)
 		}
@@ -255,17 +252,13 @@ func mintPubID() (string, error) {
 // Linux (systemd-tmpfiles default 10 days), so this sweep is the actual
 // cleanup path.
 //
-// The work is embedded.SweepAbandoned's, not this package's, and that move is
-// the fix rather than a tidy-up. This function used to carry its own copy of
-// the directory-name prefixes and delete every match — so it deleted
-// directories belonging to any process on the host, including live ones. The
-// package that creates those directories is the only one that can say whose
-// they are, so it is the one that decides what may be removed.
+// The work belongs to embedded.SweepAbandoned. A copy of the directory-name
+// prefixes here that deleted every match would take directories belonging to
+// any process on the host, live ones included. The package that creates those
+// directories is the only one that can say whose they are.
 func sweepEmbeddedTempdirs(logf func(string, ...any)) {
 	embedded.SweepAbandoned(logf)
 }
-
-// ─────────────────────────── HTTP handlers ───────────────────────────
 
 // mountSandbox registers the BFF's /api/sandbox/* routes on mux. The
 // passed user-context middleware (auth + csrf) is already applied at
@@ -276,8 +269,8 @@ func (s *Server) mountSandbox(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/sandbox", s.auth(s.handleSandboxList))
 	mux.HandleFunc("DELETE /api/sandbox/{pubID}", s.auth(s.csrf(s.handleSandboxDestroy)))
 
-	// Proxy sub-routes. Wildcards in net/http 1.22+ let us match
-	// `/{pubID}/{rest...}` with `{path...}` capture. Phase 1 mounts
+	// Proxy sub-routes. Wildcards in net/http 1.22+ match
+	// `/{pubID}/{rest...}` with a `{path...}` capture. Phase 1 mounts
 	// each verb-path pair explicitly so the routing table is easy
 	// to audit; a wildcard mount would also work but obscures the
 	// surface.
@@ -397,9 +390,8 @@ func (s *Server) handleSandboxBoot(w http.ResponseWriter, r *http.Request) {
 }
 
 // bootResolveIR centralizes the GetCanonicalIR call so handleSandboxBoot
-// reads cleanly. The admin server returns { ir, content_hash } per
-// admin.go; we forward both into sandbox.Options + the meta map's
-// schemaVersion field.
+// reads cleanly. The admin server returns { ir, content_hash } per admin.go,
+// and both go into sandbox.Options and the meta map's schemaVersion field.
 // The organisation is threaded in rather than read from a field: a sandbox is
 // seeded from its own organisation's schema, and there is no longer a single
 // atlantis to ask.
@@ -439,10 +431,9 @@ type sandboxListResponse struct {
 	Sandboxes []sandboxListEntry `json:"sandboxes"`
 }
 
-// handleSandboxList returns the user's active sandboxes. This endpoint
-// does NOT touch lastActive — the TTL janitor needs to be able to
-// evict sandboxes from a tab that's polling the list but doing nothing
-// else.
+// handleSandboxList returns the user's active sandboxes, leaving lastActive
+// alone so the TTL janitor can evict sandboxes from a tab that polls the list
+// and does nothing else.
 func (s *Server) handleSandboxList(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(ctxUser).(*User)
 	metas := s.sandboxes.listForUser(user.Subject, user.Org)
@@ -523,11 +514,11 @@ type sandboxForkRequest struct {
 	N int `json:"n"`
 }
 
-// handleSandboxFork implements the ownership-propagating Fork. Rather
-// than proxy to /v1/sandbox/{id}/fork (which would auto-register
-// children under runtime-mint ids the BFF doesn't know about), we
-// call Sandbox.Fork directly via the runtime accessor and mint pubIDs
-// for each child at the same point as the parent's bookkeeping.
+// handleSandboxFork implements the ownership-propagating Fork. It calls
+// Sandbox.Fork through the runtime accessor and mints pubIDs for each child at
+// the same point as the parent's bookkeeping. Proxying to
+// /v1/sandbox/{id}/fork instead auto-registers children under runtime-mint ids
+// the BFF does not know about.
 //
 // Per-user limit check applies to the parent + total active children;
 // asking for more children than slots remain returns 429 before any
@@ -584,24 +575,24 @@ func (s *Server) handleSandboxFork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Register children and mint pubIDs. If anything fails halfway, we
-	// best-effort tear down the partial state — better than leaking
-	// runtime-registered children the BFF can't reach.
+	// Register children and mint pubIDs. A failure halfway tears the partial
+	// state down best-effort, rather than leaking runtime-registered children
+	// the BFF cannot reach.
 	ids := make([]string, 0, len(kids))
 	now := time.Now()
 	for i, k := range kids {
 		internalID := s.sandboxes.srv.Register(k)
 		newPub, err := mintPubID()
 		if err != nil {
-			// Rollback: close + unregister the kids we just minted, plus
-			// the runtime-registered one that didn't get a pubID.
+			// Rollback: close and unregister the children minted so far,
+			// plus the runtime-registered one that got no pubID.
 			s.sandboxes.srv.Unregister(internalID)
 			_ = k.Close()
 			for _, p := range ids {
 				s.sandboxes.destroy(p)
 			}
-			// Also close any later children that Fork already produced
-			// but we haven't registered.
+			// Also close any later children Fork produced that were never
+			// registered.
 			for _, kk := range kids[i+1:] {
 				_ = kk.Close()
 			}

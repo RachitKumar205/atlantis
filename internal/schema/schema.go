@@ -272,40 +272,29 @@ const (
 
 // ExpiryFor reports how an entity's expired rows can be removed.
 //
-// # Why a partitioned entity cannot be swept with DELETE
+// A partitioned entity cannot be swept with DELETE. The sweeper runs on a
+// schedule with no request behind it and binds no tenant, so under FORCE ROW
+// LEVEL SECURITY the tenant policy applies to its DELETE even though it owns
+// the table: current_partition() is NULL, `tenant = NULL` is NULL, no ctids
+// match, and the DELETE succeeds having removed nothing.
 //
-// The sweeper runs on a schedule with no request behind it, so it binds no
-// tenant. Under FORCE ROW LEVEL SECURITY the tenant policy applies to the
-// sweeper's DELETE even though it owns the table:
-// atlantis.current_partition() is NULL, `tenant = NULL` is NULL, no ctids
-// match, and the DELETE SUCCEEDS having removed nothing. Expired rows then
-// accumulate with no error anywhere.
+// Binding a tenant is not an option either. Expiry covers every tenant, so
+// there is no single correct value, and enumerating tenants needs the
+// cross-tenant read the policy prevents.
 //
-// Binding a tenant would be wrong rather than incomplete — expiry must cover
-// every tenant, so there is no single correct value — and enumerating tenants
-// requires the cross-tenant read the policy exists to prevent.
-//
-// # Why drop_chunks escapes that entirely
-//
-// Dropping a chunk is DDL. Row-level security filters DML; it does not filter
-// DROP TABLE. So a hypertable's expiry needs no tenant bound, no registry to
-// iterate and no role exempt from the policy — the three routes that each
-// collided with a decision already made. It is also O(chunks) rather than
+// drop_chunks avoids this because dropping a chunk is DDL, and row-level
+// security filters DML rather than DROP TABLE. It is also O(chunks) rather than
 // O(rows).
 //
-// drop_chunks is Apache-2 licensed, which is what makes this usable here: the
-// automated add_retention_policy scheduler is TSL-only, and atlantis pins the
-// Apache-2 build (see ChunkTimeIntervalMS's comment on why that pin is
-// load-bearing rather than incidental). atlantis schedules the call itself
-// through its own sweeper job, so it never needs the TSL scheduler.
+// drop_chunks is Apache-2 licensed, which is what makes it usable here:
+// add_retention_policy, the automated scheduler, is TSL-only, and atlantis pins
+// the Apache-2 build. Its own sweeper job schedules the call, so the TSL
+// scheduler is never needed. See ChunkTimeIntervalMS in internal/dsl/ir.go.
 //
-// # Why ttl_field must BE the time field
-//
-// drop_chunks selects chunks by the hypertable's TIME DIMENSION, not by an
-// arbitrary column. If ttl_field named a different column, a chunk whose time
-// range has passed could still hold rows whose ttl_field has not — and
-// dropping it would delete live data. The equality is therefore a correctness
-// condition, not a simplification.
+// ttl_field must be the time field. drop_chunks selects chunks by the
+// hypertable's time dimension, so if ttl_field named another column, a chunk
+// whose time range has passed could still hold rows whose ttl_field has not,
+// and dropping it would delete live data.
 func ExpiryFor(e *dsl.Entity) ExpiryMechanism {
 	if e == nil || e.TtlField == "" {
 		return ExpiryNone

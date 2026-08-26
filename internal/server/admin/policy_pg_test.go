@@ -127,10 +127,9 @@ func TestChangePolicyRoundTrip(t *testing.T) {
 // A row an operator deleted, and a row an operator mistyped, must both read
 // back as requiring approval.
 //
-// This is the property the Go side carries because the table deliberately has
-// no CHECK on the class name. Asserting it against the real table is the point:
-// a CHECK added later would turn the mistyped case into an INSERT failure, and
-// this test would notice the rule had moved.
+// The Go side carries this because the table has no CHECK on the class name.
+// Asserted against the real table, so a CHECK added later turns the mistyped
+// case into an INSERT failure and this notices the rule moved.
 func TestADeletedOrMistypedRuleReadsAsRequiringApproval(t *testing.T) {
 	svc := policyTestService(t)
 	ctx := context.Background()
@@ -319,9 +318,9 @@ entity Ledger in dspol {
 // or every existing customer's pipeline stopping on the release that adds a
 // feature they did not ask for.
 //
-// The version-stepped migrate is the whole point. Running the tree to the end
-// and then inspecting rows would only ever exercise the fresh-install branch,
-// because the other one needs schema history to exist BEFORE 0026 runs.
+// The migrate is version-stepped. Running the tree to the end and then
+// inspecting rows exercises only the fresh-install branch, because the other
+// needs schema history to exist before 0026 runs.
 func TestTheMigrationSeedsByInstallAge(t *testing.T) {
 	adminDSN := os.Getenv("ATLANTIS_TEST_PG")
 	if adminDSN == "" {
@@ -417,8 +416,8 @@ func freshMigrationDatabase(t *testing.T, adminDSN, name string) string {
 }
 
 // openInfraMigrate drives the infra migration tree by version, which
-// internal/migrate deliberately does not expose — the server only ever runs
-// everything, and a partial migration is a test-only need.
+// internal/migrate does not expose: the server runs everything, and a partial
+// migration is a test-only need.
 func openInfraMigrate(t *testing.T, dsn string) *migrate.Migrate {
 	t.Helper()
 	url := strings.TrimPrefix(strings.TrimPrefix(dsn, "postgres://"), "postgresql://")

@@ -63,10 +63,10 @@ func (dispatchJSONCodec) Name() string { return dispatchCodecName }
 
 func init() { encoding.RegisterCodecV2(dispatchJSONCodec{}) }
 
-// WorkerDispatchServer is the typed interface gRPC.RegisterService
-// uses for runtime conformance checking. The handler signature
-// matches grpc.ServiceDesc's Streams.Handler — a raw ServerStream
-// that we adapt via RecvMsg / SendMsg with the jsonMsg envelope.
+// WorkerDispatchServer is the typed interface gRPC.RegisterService uses for
+// runtime conformance checking. The handler signature matches
+// grpc.ServiceDesc's Streams.Handler: a raw ServerStream, adapted through
+// RecvMsg and SendMsg with the jsonMsg envelope.
 type WorkerDispatchServer interface {
 	WorkerSession(stream grpc.ServerStream) error
 }
@@ -119,9 +119,9 @@ func handleWorkerSession(srv any, stream grpc.ServerStream) error {
 // adapter in handleWorkerSession; runs until the worker disconnects
 // or the dispatcher shuts down.
 //
-// stream is typed loosely as ServerStream because gRPC's
-// stream-handler signature predates generics; we use SendMsg / RecvMsg
-// with the jsonMsg envelope.
+// stream is typed loosely as ServerStream because gRPC's stream-handler
+// signature predates generics, so SendMsg and RecvMsg carry the jsonMsg
+// envelope.
 func (d *Dispatcher) WorkerSession(stream grpc.ServerStream) error {
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -292,13 +292,13 @@ func (d *Dispatcher) WorkerSession(stream grpc.ServerStream) error {
 
 // runSender pulls envelopes off s.outbox and writes them to the wire.
 // Returns when:
-//   - outbox is closed (won't happen — outbox is unbuffered-by-default but
-//     we use a buffered chan and never close it)
+//   - outbox is closed, which does not happen: it is a buffered chan and
+//     nothing closes it
 //   - the stream's context cancels
 //   - the session is signaled closed
 //
-// Slow sends (worker not Recv-ing) are bounded: we use SetWriteDeadline-
-// like semantics by racing send against the close signal.
+// A slow send, from a worker not calling Recv, is bounded by racing the send
+// against the close signal.
 func (d *Dispatcher) runSender(stream grpc.ServerStream, s *session) error {
 	for {
 		select {

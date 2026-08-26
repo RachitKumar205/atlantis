@@ -17,7 +17,7 @@ const (
 	TimescaleAbsent TimescaleEdition = "absent"
 	// TimescaleApache is the Apache 2.0 build. May be offered as a service.
 	TimescaleApache TimescaleEdition = "apache"
-	// TimescaleCommunity is the Timescale License build. Free to self-host,
+	// TimescaleCommunity is the Timescale License build. Free to run in-house,
 	// and forbidden to offer as a database service.
 	TimescaleCommunity TimescaleEdition = "timescale"
 )
@@ -28,23 +28,19 @@ var ErrTimescaleNotApache = errors.New("pg: TimescaleDB is the Community (TSL) b
 
 // DetectTimescaleEdition reports which TimescaleDB build the database runs.
 //
-// Why this exists, rather than a note in a runbook: the DEFAULT TimescaleDB
-// package is the Community build. Getting the Apache one requires deliberately
-// installing timescaledb-apache or building with -DAPACHE_ONLY=1, so "we
-// installed the right package" is a thing someone has to remember on every
-// image rebuild — which is not a control.
+// The default TimescaleDB package is the Community build. Apache comes from
+// installing timescaledb-apache or building with -DAPACHE_ONLY=1, once per
+// image rebuild.
 //
-// The stake is licensing, not correctness. The Timescale License forbids using
-// TSL software to provide "database-as-a-service ... to third parties", and its
-// Value Added exception requires that users be "contractually or technically
-// prohibited from modifying the database schema via Data Definition
-// Interfaces". atlantis exists to let users modify schema via DDL, so that
-// exception cannot apply to a hosted atlantis by construction. A hosted product
-// on the Community build has no carve-out to stand on.
+// The stake is licensing. The Timescale License forbids using TSL software to
+// provide "database-as-a-service ... to third parties", and its Value Added
+// exception requires that users be "contractually or technically prohibited
+// from modifying the database schema via Data Definition Interfaces" — which is
+// what atlantis exists to permit, so a hosted atlantis on the Community build
+// has no exception to stand on.
 //
-// Self-hosting is unaffected: the TSL restricts offering the software as a
-// service, not running it. So this reports rather than refuses, and refusing is
-// the caller's decision — see RequireApacheTimescale.
+// Reports rather than refuses; RequireApacheTimescale turns the answer into an
+// error.
 func DetectTimescaleEdition(ctx context.Context, q interface {
 	QueryRow(ctx context.Context, sql string, args ...any) runtime.Row
 }) (TimescaleEdition, error) {
@@ -87,11 +83,10 @@ func RequireApacheTimescale(edition TimescaleEdition) error {
 // classifyLicenseError separates "the extension is not installed" from "the
 // query failed".
 //
-// The distinction is load-bearing and easy to get wrong in the dangerous
-// direction: treating every error as absent would turn a refused connection, a
-// permission problem or a timeout into a satisfied licence check. Most
-// deployments genuinely have no TimescaleDB, so the absent path must be exact
-// rather than a catch-all.
+// Treating every error as absent turns a refused connection, a permission
+// problem or a timeout into a satisfied licence check. Most deployments have no
+// TimescaleDB at all, so the absent path matches one message rather than
+// catching everything.
 func classifyLicenseError(err error) (TimescaleEdition, error) {
 	if strings.Contains(strings.ToLower(err.Error()), "unrecognized configuration parameter") {
 		return TimescaleAbsent, nil

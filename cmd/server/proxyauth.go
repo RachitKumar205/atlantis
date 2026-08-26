@@ -28,9 +28,9 @@ import (
 // pin rejects any leaf that carries a non-clientAuth extended key usage (a
 // serverAuth-only cert, say); a leaf with no EKU is valid for any usage and
 // passes, so it is the cert-binding registration check that ultimately
-// keeps a non-caller cert from being asserted. Without the validity check,
-// an expired cert would authenticate indefinitely — the proxy now owns the
-// TLS-handshake expiry check that used to be the only one.
+// keeps a non-caller cert from being asserted. The proxy terminates the
+// handshake, so without the validity check here an expired cert would
+// authenticate indefinitely.
 
 // maxForwardedCertHeaderBytes caps the forwarded-cert header before any
 // parsing/verification work, so a flood of junk headers can't amplify into

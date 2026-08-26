@@ -25,8 +25,8 @@ func createLegacySchema(t *testing.T, svc *Service) {
 			email  varchar(255) NOT NULL UNIQUE,
 			joined timestamptz NOT NULL DEFAULT now()
 		)`,
-		// A foreign key BETWEEN two discovered tables. Introspecting the two
-		// separately would drop this reference, so it is here deliberately.
+		// A foreign key between two discovered tables. Introspecting the two
+		// separately drops this reference.
 		`CREATE TABLE legacy.order_line (
 			id          bigint PRIMARY KEY,
 			customer_id bigint NOT NULL REFERENCES legacy.customer(id) ON DELETE CASCADE,
@@ -193,7 +193,7 @@ func TestGenerateSchemaWillNotReuseADeclaredEntityName(t *testing.T) {
 		_, _ = svc.pool.Exec(context.Background(), `DROP SCHEMA IF EXISTS legdup CASCADE`)
 	})
 
-	// Declares shop.Customer against a table that is NOT legdup.customer.
+	// Declares shop.Customer against a table other than legdup.customer.
 	const declared = `
 entity Customer in shop {
   table "legdup.other"

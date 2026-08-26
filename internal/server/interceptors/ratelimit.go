@@ -62,10 +62,10 @@ func (c RateLimitConfig) withDefaults() RateLimitConfig {
 	return c
 }
 
-// NewRateLimit wires a token-bucket-per-caller interceptor. Token buckets
-// are created lazily on first request from a caller; the goroutine-safe
-// map carries them indefinitely (callers are a low-cardinality set —
-// callers are a low-cardinality set; expect O(10) even for large deployments).
+// NewRateLimit wires a token-bucket-per-caller interceptor. Token buckets are
+// created lazily on first request from a caller, and the goroutine-safe map
+// carries them indefinitely: callers are a low-cardinality set, O(10) even for
+// large deployments.
 //
 // Load shedding policy:
 //   - When the pgxpool is below the saturation cutoff, every request
@@ -75,13 +75,11 @@ func (c RateLimitConfig) withDefaults() RateLimitConfig {
 //     unconditionally so the pool stays reserved for write-shaped
 //     traffic. Classification is hard-coded today: any RPC whose method
 //     name starts with `List` or `Search` is low priority; CRUD and Get
-//     never shed via this gate. A future DSL extension for per-RPC
-//     priority annotations would make this table-driven.
+//     never shed via this gate.
 //
-// The `pool` argument is the pgx pool the server uses for entity reads.
-// We never *call* the pool here — only inspect Stat() to decide whether
-// to shed. A nil pool disables saturation-aware shedding (the bucket
-// limit still applies).
+// The `pool` argument is the pgx pool the server uses for entity reads. Only
+// Stat() is read, never the pool itself. A nil pool disables saturation-aware
+// shedding; the bucket limit still applies.
 func NewRateLimit(pool *pgxpool.Pool, cfg RateLimitConfig) grpc.UnaryServerInterceptor {
 	cfg = cfg.withDefaults()
 	buckets := newBucketRegistry(cfg)
@@ -130,9 +128,9 @@ func saturationRatio(pool *pgxpool.Pool) (float64, bool) {
 // so today the rule is "list/search are low, Get and the mutators are
 // high."
 //
-// The string match is on the *method* component of the gRPC path:
-// "/atlantis.v1.<entity>.<Service>/<Method>" → we look at
-// what comes after the final "/".
+// The string match is on the method component of the gRPC path,
+// "/atlantis.v1.<entity>.<Service>/<Method>", which is what follows the final
+// "/".
 func isLowPriority(fullMethod string) bool {
 	i := strings.LastIndex(fullMethod, "/")
 	if i < 0 || i == len(fullMethod)-1 {
@@ -142,10 +140,9 @@ func isLowPriority(fullMethod string) bool {
 	return strings.HasPrefix(name, "List") || strings.HasPrefix(name, "Search")
 }
 
-// bucketRegistry is a goroutine-safe map of caller → token bucket. It's
-// the simplest correct shape: a sync.RWMutex around a map keyed by caller
-// name. Cardinality is tiny (a handful of internal services), so we don't
-// bother with sharded maps.
+// bucketRegistry is a goroutine-safe map of caller → token bucket: a mutex
+// around a map keyed by caller name. Callers number a handful of internal
+// services, so the map is not sharded.
 type bucketRegistry struct {
 	cfg     RateLimitConfig
 	mu      sync.Mutex
@@ -175,10 +172,9 @@ func (r *bucketRegistry) take(caller string) bool {
 // to burst; take() consumes one. The math is a single multiplication on
 // each call — cheaper than maintaining a goroutine that ticks.
 //
-// Refill formula: the bucket holds at most `burst` tokens and refills at
-// `qps` tokens per second. We track "tokens available as of lastRefill"
-// rather than running a goroutine ticker — the lazy compute is cache-
-// friendly and avoids per-bucket goroutine overhead.
+// Refill formula: the bucket holds at most `burst` tokens and refills at `qps`
+// tokens per second. It stores the tokens available as of lastRefill and
+// computes the rest on read, so there is no goroutine ticker per bucket.
 type tokenBucket struct {
 	mu         sync.Mutex
 	qps        float64

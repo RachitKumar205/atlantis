@@ -189,12 +189,11 @@ func TestSudoNeedsAFreshAssertion(t *testing.T) {
 
 	// Nor does an unspent one, which is the half that changed.
 	//
-	// This used to be the passing case: any fresh assertion elevated, because
-	// the only way to obtain one was an operator with the signing key. Cloud's
-	// /authorize ends that — a live Cloud session mints a fresh assertion on
-	// request, and that session can be twelve hours old with no second factor
-	// anywhere near it. Accepting this would be a step-up that any signed-in
-	// browser could clear by itself.
+	// Elevating on any fresh assertion holds only while obtaining one requires
+	// the signing key. Cloud's /authorize mints a fresh assertion on request
+	// from a live session, which can be twelve hours old with no second factor
+	// near it, so accepting this is a step-up any signed-in browser clears by
+	// itself.
 	fresh := f.post(t, "/api/auth/sudo", exchangeBody(f.assertion(t, "sudo@example.com", "admin")), token)
 	if fresh.Code == http.StatusOK {
 		t.Fatal("an assertion minted from a session, with no second factor behind it, " +
@@ -269,10 +268,9 @@ func TestSudoRefusesAnAssertionForSomebodyElse(t *testing.T) {
 // TestAuditLogNamesAssertionAuthenticatedActors is the reason this step was
 // sequenced before the org work.
 //
-// listAuditLog used to INNER JOIN console.users. With identity at Cloud there
-// is no row there for anyone, so every audited action would have been written
-// and then omitted from the listing — a log that looks healthy and empty
-// rather than broken.
+// An INNER JOIN to console.users in listAuditLog finds no row for anyone, since
+// identity lives at Cloud, so every audited action is written and then omitted
+// from the listing: a log that looks healthy and empty rather than broken.
 func TestAuditLogNamesAssertionAuthenticatedActors(t *testing.T) {
 	f := newConsoleFixture(t)
 

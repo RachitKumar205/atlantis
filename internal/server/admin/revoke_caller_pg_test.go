@@ -13,12 +13,10 @@ import (
 
 // Revocation, after migration 0033 stopped it deleting the caller.
 //
-// # Why these need a real Postgres
-//
-// Every property here is a property of SQL. The one that matters most —
-// capabilities surviving a revoke — is the absence of a cascade, and an absence
-// cannot be faked convincingly: a stub that simply does not delete would pass a
-// Go-level test whether or not the real schema still cascades.
+// Every property here is a property of SQL, which is why they need a real
+// Postgres. Capabilities surviving a revoke is the absence of a cascade, and a
+// stub that does not delete passes a Go-level test whether or not the real
+// schema still cascades.
 //
 // The other half is the two views. `(regs UNION ids) EXCEPT revoked` either
 // subtracts the right set or quietly subtracts nothing, and a revocation that
@@ -47,9 +45,8 @@ func revokeTestPool(t *testing.T) (*pgxpool.Pool, context.Context) {
 // not manage.
 //
 // CAPABILITY_OPERATOR specifically, because it is outside ManagedCapabilities:
-// re-registering deliberately will not restore it, so if a revoke destroys it
-// there is no ordinary path that brings it back. That is the grant whose loss
-// was invisible before 0033.
+// re-registering does not restore it, so a revoke that destroys it leaves no
+// ordinary path back.
 func seedRevokeCaller(t *testing.T, pool *pgxpool.Pool, ctx context.Context, caller string) {
 	t.Helper()
 	drop := func() {
@@ -260,10 +257,9 @@ func TestRestoringARevokedCallerReturnsItIntact(t *testing.T) {
 // Re-registering a revoked caller is refused rather than silently ineffective.
 //
 // The upsert does not clear revoked_at, so without the guard RegisterCaller
-// returns success and the caller stays cut off. The operator finds out from
-// whoever is still locked out. Refusing is also the safe direction: registration
-// is routine and revocation is deliberate, and a routine act must not undo a
-// deliberate one.
+// returns success and the caller stays cut off. Refusing is the safe direction:
+// registration is routine and revocation is not, so the routine act must not
+// undo the other one.
 func TestRegisteringARevokedCallerIsRefused(t *testing.T) {
 	pool, ctx := revokeTestPool(t)
 	const caller = "test-revoke-reregister"

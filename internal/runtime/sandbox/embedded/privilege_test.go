@@ -31,9 +31,8 @@ func testIR() *dsl.IR {
 	}}}
 }
 
-// TestSandboxPoolIsNotSuperuser is the single load-bearing assertion. Almost
-// every other privilege check below passes only because this one holds, so it
-// is pinned directly rather than inferred from its consequences.
+// Almost every privilege check below passes only because the pool's role is not
+// a superuser, so that is asserted directly rather than inferred from them.
 func TestSandboxPoolIsNotSuperuser(t *testing.T) {
 	if testing.Short() {
 		t.Skip("boots an embedded Postgres")

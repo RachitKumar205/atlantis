@@ -1,29 +1,21 @@
 // Package testpki mints the mTLS material a test needs to start atlantis.
 //
-// atlantis accepts no plaintext connection: the listener requires a client
+// atlantis accepts no plaintext connection. The listener requires a client
 // certificate, and the caller allowlist, the caller-to-cert binding and the
-// capability grants are all keyed to the CN it carries. So a test that boots
-// the server, or that stands up an in-process admin service for the console to
-// dial, needs a CA and leaf certificates before it can do anything at all.
+// capability grants are keyed to the CN it carries, so a test that boots the
+// server or stands up an in-process admin service needs a CA and leaves first.
 //
-// # Why generated rather than committed
+// Generated per test, at a few milliseconds of P-256. A committed certificate
+// expires and then reads as a broken test, and a committed CA key is a private
+// key in the repository signing certificates the server trusts.
 //
-// A checked-in certificate expires, and the failure lands years later on
-// whoever is unlucky, reading as a broken test rather than an expired fixture.
-// A checked-in CA key is a private key in a public repository, and this one
-// signs certificates the server trusts. Generating per test costs a few
-// milliseconds of P-256 and has neither problem.
-//
-// # Why one package rather than a helper per caller
-//
-// Two packages needed it within an hour of each other — cmd/server for its boot
+// One package rather than a helper per caller: cmd/server needs it for its boot
 // and reload children, internal/console for the admin service its harness
-// dials. A third will want it. The copies would drift in the way that matters
-// here: one grows a SAN or an EKU the others lack, and the difference shows up
-// as a handshake failure in whichever test was not updated.
+// dials, cmd/signer for the CA it issues from. Separate copies drift, and one
+// growing a SAN or an EKU the others lack surfaces as a handshake failure in
+// whichever test was not updated.
 //
-// Not usable from clients/go: that is a separate module, and internal/ is
-// unreachable from outside the module that declares it.
+// Unreachable from clients/go, which is a separate module.
 package testpki
 
 import (
@@ -59,14 +51,11 @@ type PKI struct {
 
 	// CAKeyFile is the authority's own private key, beside CAFile.
 	//
-	// Written because cmd/signer loads a CA from a directory holding both —
-	// it issues certificates, so it needs the key, unlike every other consumer
-	// here which only verifies against the certificate. A test that wanted to
-	// boot the signer otherwise had to build a second, near-identical CA of its
-	// own.
+	// cmd/signer issues certificates, so it loads a CA from a directory holding
+	// the key as well; every other consumer here only verifies against CAFile.
 	//
-	// It is a private key on disk under t.TempDir(), which is the same posture
-	// as every other key this package writes.
+	// A private key on disk under t.TempDir(), the same as every other key this
+	// package writes.
 	CAKeyFile string
 
 	caCert *x509.Certificate
@@ -153,10 +142,10 @@ func (p *PKI) ClientCert(t *testing.T, cn string) (certFile, keyFile string) {
 
 // ExpiredClientCert mints a client leaf that expired an hour ago.
 //
-// For tests about what happens when a certificate is past its validity, which
-// is otherwise only reachable by waiting. The files are named apart from
-// ClientCert's so both can be minted from one PKI — ClientCert derives its
-// filenames from the CN, so two leaves with one CN would overwrite each other.
+// The validity window is otherwise reachable only by waiting.
+//
+// The filenames differ from ClientCert's, which derives them from the CN, so
+// both leaves can be minted from one PKI under the same CN.
 func (p *PKI) ExpiredClientCert(t *testing.T, cn string) (certFile, keyFile string) {
 	t.Helper()
 	der, keyDER := p.issueUntil(t, cn,
@@ -192,25 +181,20 @@ func (p *PKI) ServerTLS(t *testing.T) *tls.Config {
 // SignCSR issues a client certificate for a certificate signing request,
 // returning it PEM-encoded alongside this authority's own certificate.
 //
-// What a fake signer needs to be a fake of something real. Every other method
-// here generates the keypair too, which is exactly what enrolment exists to
-// stop: the point of a CSR is that the private key stayed on the machine that
-// made it, and a stand-in that quietly minted its own key would let a console
-// pass a test it should fail.
+// The key stays where it was generated: every other method here mints the
+// keypair as well, and a stand-in doing that under enrolment would pass a
+// console that never kept its own key.
 //
-// The subject is built from cn, not copied from the request — the same as
+// The subject is built from cn rather than copied from the request, the same as
 // cmd/signer, which names the leaf from the caller it was handed and takes only
-// the public key from the CSR. A stand-in that copied the CSR's subject would
-// let a console that stopped sending the token row's caller still look correct.
+// the public key from the CSR. Copying the CSR's subject passes a console that
+// stopped sending the token row's caller.
 //
-// # Why this returns an error rather than taking a *testing.T
-//
-// It is called from an HTTP handler, which runs on the server's goroutine.
-// t.Fatalf there calls runtime.Goexit on a goroutine that is not the test's:
-// the test is marked failed but the handler never answers, so the client waits
-// on a connection nobody will close and the run hangs somewhere unrelated. A
-// returned error becomes a 4xx, which is what the code under test should see
-// anyway.
+// Returns an error rather than taking a *testing.T: this runs inside an HTTP
+// handler on the server's goroutine, where t.Fatalf calls runtime.Goexit on a
+// goroutine that is not the test's — the test is marked failed, the handler
+// never answers, and the client waits on a connection nothing closes. An error
+// becomes a 4xx, which is what the code under test sees in production.
 func (p *PKI) SignCSR(csrPEM, cn string) (certPEM, caPEM string, err error) {
 	block, _ := pem.Decode([]byte(csrPEM))
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
@@ -232,8 +216,8 @@ func (p *PKI) SignCSR(csrPEM, cn string) (certPEM, caPEM string, err error) {
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
-	// csr.PublicKey — the key the requester holds. Nothing here ever sees its
-	// private half, which is the whole property under test.
+	// csr.PublicKey is the key the requester holds; nothing here sees its
+	// private half.
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, p.caCert, csr.PublicKey, p.caKey)
 	if err != nil {
 		return "", "", fmt.Errorf("testpki: sign CSR: %w", err)
@@ -261,10 +245,9 @@ func (p *PKI) issueUntil(
 	if err != nil {
 		t.Fatalf("testpki: %s key: %v", cn, err)
 	}
-	// NotBefore is pinned behind NotAfter rather than to a fixed hour ago, or
-	// an expired certificate would also be one that is not yet valid — and a
-	// test asserting on "expired" would pass against code that only checks the
-	// other end.
+	// NotBefore sits behind NotAfter rather than at a fixed hour ago. Pinned,
+	// an expired certificate is also one that is not yet valid, and a test
+	// asserting "expired" passes against code checking only the other end.
 	notBefore := time.Now().Add(-time.Hour)
 	if !notAfter.After(notBefore) {
 		notBefore = notAfter.Add(-time.Hour)

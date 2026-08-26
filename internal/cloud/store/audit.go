@@ -6,26 +6,16 @@ import (
 	"time"
 )
 
-// ── The audit log ───────────────────────────────────────────────────────────
-//
-// Cloud has never had one. The console has, and Cloud's user id was designed to
-// be its actor — cloud.users' own comment says the id becomes the `sub` claim
-// "and therefore the audit actor" — but nothing on this side ever wrote a row.
-// `cloud org register`, `cloud user create` and `cloud member add` leave no
-// trace beyond the row they wrote and the line they printed.
-//
-// Provisioning is where that stops being tolerable. It creates a namespace,
-// mints a certificate authority and writes an organisation's credentials, and
-// "when was acme's CA minted, and by which provisioner" should be answerable
-// from the database rather than from whatever log retention happens to exist.
+// Cloud's audit log. Provisioning creates a namespace, mints a certificate
+// authority and writes an organisation's credentials, and those have to be
+// answerable from the database rather than from log retention.
 
 // ProvisionerActor is the actor recorded for work the provisioner does on its
 // own initiative.
 //
-// A named constant rather than an empty string, following the console's
-// enrolmentActor: a blank actor reads as a bug in the logging rather than as a
-// machine acting on its own behalf. The human who caused it is traceable
-// through the paired row their own action wrote.
+// A named constant, so a row the provisioner wrote is distinguishable from one
+// that lost its actor. The human who caused it is traceable through the row
+// their own action wrote.
 const ProvisionerActor = "provisioner"
 
 // AuditEntry is one recorded action.
@@ -41,23 +31,19 @@ type AuditEntry struct {
 
 // LogAction records an action against an organisation.
 //
-// Returns nothing, deliberately: an action that succeeded is not undone because
-// recording it failed. But the error is *logged* rather than discarded, which
-// the console learned the hard way — its comment records months of a DELETE
-// that matched nothing looking exactly like months with nothing to delete.
+// Returns nothing: an action that succeeded is not undone because recording it
+// failed. A failed write is logged, so the gap in the log has something beside
+// it saying why.
 //
-// The actor's email is written onto the row rather than resolved when the log
-// is read. An entry should say who acted at the time it happened; a lookup
-// reports whoever holds that identity now, which is a different claim and
-// occasionally a false one.
+// The actor's email is written onto the row rather than resolved at read time,
+// so an entry records who acted then and not who holds that identity now.
 func (s *Store) LogAction(ctx context.Context, org, actor, actorEmail, action string, detail map[string]any) {
 	var detailJSON []byte
 	if detail != nil {
 		b, err := json.Marshal(detail)
 		if err != nil {
-			// Record the action without its detail rather than losing the
-			// action. A detail map that will not marshal is a bug in the
-			// caller, and it should not also cost us the evidence.
+			// The action is recorded without its detail, rather than the row
+			// being lost to an unmarshalable map.
 			s.log.Warn("audit detail could not be encoded",
 				"org", org, "action", action, "err", err)
 		} else {
@@ -100,9 +86,8 @@ func (s *Store) AuditFor(ctx context.Context, org string, limit int) ([]AuditEnt
 			return nil, err
 		}
 		if len(detail) > 0 {
-			// A row whose detail will not decode is still a row worth
-			// returning: the action, the actor and the time are the parts
-			// somebody is asking about.
+			// A row whose detail will not decode still carries its action,
+			// actor and time.
 			if err := json.Unmarshal(detail, &e.Detail); err != nil {
 				s.log.Warn("audit detail could not be decoded",
 					"org", org, "id", e.ID, "err", err)

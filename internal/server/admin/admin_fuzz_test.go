@@ -100,15 +100,15 @@ func FuzzValidCallerName(f *testing.F) {
 // the handlers after capabilities moved to the interceptor.
 //
 // The invariant: when the cert CN is a real identity (non-empty,
-// non-"anonymous") and req.Caller does not match it, the guard MUST return an
-// error naming the mismatch. A bypass is direct privilege escalation — a
+// non-"anonymous") and req.Caller does not match it, the guard returns an error
+// naming the mismatch. A bypass is direct privilege escalation — a
 // caller holding CAPABILITY_SCHEMA_APPLY for its own namespace could push
 // schema into someone else's. The interceptor cannot catch this: it sees the
 // method and the connection, never the request body that names the target.
 //
-// The converse is deliberately weaker. A matching CN, or no CN at all, means
-// this guard has nothing to say; whether the RPC proceeds is then the
-// capability check's business, and that lives elsewhere.
+// The converse is weaker. A matching CN, or no CN at all, leaves this guard
+// with nothing to say, and whether the RPC proceeds is the capability check's
+// business elsewhere.
 func FuzzBindCallerIdentity(f *testing.F) {
 	seeds := []struct {
 		cn, reqCaller string

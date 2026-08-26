@@ -15,13 +15,10 @@ const keyPEMType = "PRIVATE KEY"
 // LoadOrCreateKey reads the signing key at path, generating and writing one if
 // the file does not exist. It reports whether it created the key.
 //
-// Persisting matters more than it first appears. A key generated per process
-// would change on every restart, and because the JWKS is served from the same
-// process the key set would change with it — so every assertion issued before
-// a restart stops verifying, and every console holding a cached key set is
-// briefly verifying against a key that no longer exists. Sign-ins would fail
-// in a way that looks like an outage at the consoles rather than a restart at
-// the issuer.
+// The JWKS is served from this process, so a key generated per process changes
+// the published key set on every restart: assertions issued before it stop
+// verifying, and consoles holding a cached set verify against a key that is
+// gone.
 func LoadOrCreateKey(path string) (*Key, bool, error) {
 	pemBytes, err := os.ReadFile(path)
 	if err == nil {
@@ -75,19 +72,17 @@ func writeKey(path string, priv *ecdsa.PrivateKey) error {
 		return fmt.Errorf("encode signing key: %w", err)
 	}
 
-	// 0700 on the directory and 0600 on the file. Anyone who can read this
-	// file can mint an assertion for any user in any organisation, and the
-	// result would verify perfectly at every console — there is no downstream
-	// check that could tell the difference.
+	// 0700 on the directory, 0600 on the file. This key mints an assertion for
+	// any user in any organisation, and no downstream check distinguishes one
+	// from a legitimate assertion.
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create key directory %s: %w", dir, err)
 		}
 	}
 
-	// O_EXCL so a key is never written over one that appeared between the
-	// read above and this write — losing a signing key that way would
-	// invalidate every assertion already in flight, silently.
+	// O_EXCL, so a key that appeared between the read above and this write is
+	// not overwritten, which would invalidate every assertion in flight.
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("create signing key %s: %w", path, err)

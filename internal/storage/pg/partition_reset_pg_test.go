@@ -16,10 +16,9 @@ import (
 //
 // atlantis binds atlantis.tenant transaction-locally, so its own binds revert
 // on their own. A value can still arrive from outside this process, and the
-// role default used below is the easiest of those to reproduce: an operator
-// runs ALTER ROLE ... SET for some unrelated reason, every new backend starts
-// with that value, and the first request on each connection that does not bind
-// reads that tenant's rows instead of nothing.
+// role default used below is the easiest of those to reproduce: ALTER ROLE ...
+// SET makes every new backend start with that value, and the first request on
+// each connection that does not bind reads that tenant's rows.
 //
 // Clear at connect rather than at release, and the difference was measured
 // before it was chosen. A reset per release costs a round trip on every
@@ -27,16 +26,12 @@ import (
 // `partition by` costs in total. Once per physical connection amortises to
 // nothing.
 //
-// # The role is created here rather than borrowed
-//
-// The first version of this test ran ALTER ROLE against the role the DSN
-// already names, which is the role every other package's tests connect as. A
-// role default is cluster-wide and takes effect on the next connection, so for
-// as long as this test ran, every concurrent package inherited
-// atlantis.tenant and every set_partition call in the repository failed with
-// "partition already set". Five tests across three packages went red, none of
-// them for their own reasons. A test that mutates shared server state has to
-// bring its own subject.
+// The role is created here rather than borrowed. ALTER ROLE against the role
+// the DSN names — the one every other package's tests connect as — sets a
+// cluster-wide default that takes effect on the next connection, so every
+// concurrent package inherits atlantis.tenant and every set_partition call in
+// the repository fails with "partition already set". A test that mutates shared
+// server state brings its own subject.
 //
 //	ATLANTIS_TEST_PG=postgres://atlantis:atlantis@localhost:5432/atlantis?sslmode=disable \
 //	  go test ./internal/storage/pg/ -run TenantResetAtConnect -v
@@ -51,14 +46,12 @@ func TestTenantResetAtConnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	// t.Cleanup, not defer. Deferred closes run when the test function
-	// returns, which is BEFORE any t.Cleanup registered later — so a cleanup
-	// that undoes server state through this connection would run against a
-	// closed one. That happened: the first version of this test reset its role
-	// default through a connection its own defer had already closed, the error
-	// was discarded, and the default stayed on the shared role. Every
-	// set_partition call in the repository failed with "partition already set"
-	// until it was cleared by hand. Cleanups run last-registered-first, so this
+	// t.Cleanup, not defer. Deferred closes run when the test function returns,
+	// before any t.Cleanup registered later, so a cleanup that undoes server
+	// state through this connection runs against a closed one: the error is
+	// discarded, the role default survives on a shared role, and every
+	// set_partition call in the repository fails with "partition already set"
+	// until it is cleared by hand. Cleanups run last-registered-first, so this
 	// one runs after the state cleanup below.
 	t.Cleanup(func() { _ = admin.Close(context.Background()) })
 
@@ -72,14 +65,15 @@ SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronames
 		t.Skip("partition migrations not applied to this database")
 	}
 
-	// Catalog writes — CREATE, GRANT and both DROPs — go through pgcatalog.
+	// Catalog writes — CREATE, GRANT and both DROPs — go through pgcatalog,
+	// which holds the lock across each one.
 	//
-	// The first version took the lock around CREATE ROLE only, released it with
-	// a defer, and dropped the role from t.Cleanup. Go runs a test function's
-	// defers BEFORE its cleanups, so the unlock happened first and two of the
-	// three catalog writes ran unprotected — in a test whose own comment named
-	// DROP ROLE as the hazard. The lock also lived in this package and could not
-	// be named by the other three that create roles.
+	// Taking the lock around CREATE ROLE and releasing it with a defer leaves
+	// the DROPs unprotected: Go runs a test function's defers before its
+	// cleanups, so the unlock happens first.
+	//
+	// The lock lives in pgcatalog because the other packages that create roles
+	// take the same one.
 	cleanup := func() {
 		pgcatalog.Exec(t, dsn,
 			`DROP OWNED BY tenantreset_probe`,

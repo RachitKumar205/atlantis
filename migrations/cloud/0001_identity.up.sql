@@ -6,27 +6,20 @@
 -- exist. The console has been trusting an `org` claim that nothing wrote. This
 -- is the record behind it.
 --
--- # Why a third migration tree
+-- A third migration tree beside infra/ and console/, each with its own history
+-- table, because Cloud is deployed, upgraded and rolled back separately from
+-- both and is the only writer of these tables.
 --
--- infra/ is the server's, console/ is the console's, and each rides its own
--- history table so one can move without the other. Cloud is a third binary with
--- a third lifecycle: it is deployed, upgraded and rolled back separately from
--- both, and it is the only thing that should ever write these tables.
---
--- It also gets its own DSN (CLOUD_PG_URL). During development that points at
--- the same PostgreSQL instance as the console, which is convenient and not
--- load-bearing — nothing here joins across the boundary, so splitting them
--- later is a connection-string change rather than a migration.
+-- It has its own DSN (CLOUD_PG_URL), which in development points at the same
+-- PostgreSQL instance as the console. Nothing here joins across the boundary,
+-- so separating them later is a connection-string change.
 
 CREATE SCHEMA IF NOT EXISTS cloud;
 
--- ── Why nothing here carries a row-level boundary ───────────────────────────
---
--- The console polices its tables with a transaction-local discriminator and a
--- RESTRICTIVE policy (migrations/console/0004), and the obvious move is to do
--- the same here with the user in place of the organisation. It does not work
--- for these four tables, and the reason is structural rather than a matter of
--- effort:
+-- None of these four tables carries a row-level boundary. The console polices
+-- its tables with a transaction-local discriminator and a RESTRICTIVE policy
+-- (migrations/console/0004); the same shape with the user in place of the
+-- organisation does not work here:
 --
 --   users       The sign-in lookup is what *discovers* who the request is, so
 --               it cannot be filtered by who the request is. Authentication is
@@ -63,9 +56,9 @@ CREATE SCHEMA IF NOT EXISTS cloud;
 -- table is exempt, so the check arms itself at exactly the point it starts
 -- mattering.
 
--- ── Users ───────────────────────────────────────────────────────────────────
+-- Users.
 --
--- password_hash is NULLABLE, and that is a decision rather than laxity. An
+-- password_hash is NULLABLE. An
 -- account created by signing in with GitHub has no password and may never gain
 -- one. What it may NOT do is skip the second factor — see 0002; Cloud cannot
 -- verify that a provider's MFA happened, so it keeps its own regardless of how
@@ -87,7 +80,7 @@ CREATE TABLE IF NOT EXISTS cloud.users (
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- ── Organisations ───────────────────────────────────────────────────────────
+-- Organisations.
 --
 -- The name is constrained here because of everywhere it travels. It is the RLS
 -- discriminator in the console's audit log, the associated data the console's
@@ -107,7 +100,7 @@ CREATE TABLE IF NOT EXISTS cloud.orgs (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- ── Memberships ─────────────────────────────────────────────────────────────
+-- Memberships.
 --
 -- This is what the `org` claim has been asserting all along and what nothing
 -- wrote. Cloud's /authorize checks it before minting, so it is the gate between
@@ -129,7 +122,7 @@ CREATE TABLE IF NOT EXISTS cloud.memberships (
 
 CREATE INDEX IF NOT EXISTS memberships_org ON cloud.memberships (org);
 
--- ── OAuth identities ────────────────────────────────────────────────────────
+-- OAuth identities.
 --
 -- One provider account links to exactly one user, which the primary key
 -- enforces. Without that, two Cloud accounts could both claim the same GitHub

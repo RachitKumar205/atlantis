@@ -12,22 +12,29 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Config tunes the worker pool.
-//
-// Defaults are picked to be safe on a multi-pod deployment without
-// further tuning: 1s drain interval matches LISTEN/NOTIFY's notify-
-// or-poll cadence, 50-row batches are small enough to make progress
-// visible from /metrics yet large enough that a quiet queue costs ~1
-// SQL round-trip per second. Lease defaults assume the typical job
-// finishes within timeout * 1.5; tune Lease down for short jobs to
-// recover from pod crashes faster.
+// Config tunes the worker pool. The defaults are safe on a multi-pod
+// deployment with no further tuning.
 type Config struct {
-	Schema          string
-	PodID           string
-	BatchSize       int
-	DrainInterval   time.Duration
+	// Schema is defaulted to "atlantis" and read by nothing: sql.go names
+	// atlantis.jobs literally in every statement. Setting it changes no query.
+	Schema string
+
+	PodID string
+
+	// BatchSize is how many rows one claim takes. Fifty keeps a quiet queue at
+	// about one SQL round trip per drain while leaving progress visible.
+	BatchSize int
+
+	// DrainInterval is the poll cadence when LISTEN/NOTIFY delivers nothing.
+	DrainInterval time.Duration
+
+	// HeartbeatBudget is the claim lease: drainOnce sets claimed_until this far
+	// ahead, and a ticker at a third of it extends the lease while a handler
+	// runs. A pod that dies frees its rows one budget later, so a shorter one
+	// recovers faster and leaves less room for a slow heartbeat.
 	HeartbeatBudget time.Duration
-	Logger          *slog.Logger
+
+	Logger *slog.Logger
 }
 
 // DefaultConfig returns a Config with safe defaults populated.
@@ -138,25 +145,9 @@ func (w *Worker) SetTraceHook(h TraceHook) { w.traceHook = h }
 // propagates up. The expected production pattern is to launch
 // Run in a goroutine from cmd/server/main.go.
 func (w *Worker) Run(ctx context.Context) error {
-	// Refuse to start against a server whose schema this SDK is ahead of.
-	//
-	// clients/go is its own module, versioned independently of the server
-	// that applies the migrations, so an app can bump the SDK past a release
-	// the server has not caught up to. MoveToDLQ and SweepExhaustedToDLQ name
-	// owner_caller, added in migration 0028.
-	//
-	// Without this check the skew is invisible until the first job exhausts
-	// its retries. ReportFailure then fails with `column "owner_caller" does
-	// not exist`, reportFailure logs it at Warn and carries on, and the row is
-	// left status='running' with attempts == max_retries — which
-	// buildClaimSQL's `attempts < GREATEST(max_retries, 1)` excludes from
-	// every future claim. SweepExhaustedToDLQ, the documented safety net for
-	// exactly that state, fails on the same missing column. The job is stuck
-	// forever, never reaches the dead-letter queue, and the only trace is one
-	// Warn line.
-	//
-	// Failing at start is loud, immediate, and names the fix. One catalogue
-	// query per worker lifetime.
+	// Refuse to start against a server schema older than this SDK. One
+	// catalogue query per worker lifetime; see requireOwnerCallerColumn for
+	// what the skew does if it is not caught here.
 	if err := requireOwnerCallerColumn(ctx, w.pool); err != nil {
 		return err
 	}
@@ -234,26 +225,23 @@ func (w *Worker) drainOnce(ctx context.Context) {
 	}
 }
 
-// handleOne dispatches a single claimed row through the registry.
-// Wrapped in its own deadline (timeout_ms) so a hung handler can't
-// freeze the drainer; the lease covers the lease-expiry side of the
-// same pact.
+// handleOne dispatches one claimed row through the registry, under its own
+// timeout_ms deadline so a hung handler cannot freeze the drainer.
 //
-// Lifecycle:
+// Three outcomes:
 //
-//   - Look up handler in registry. Missing -> bump attempts via
-//     reportFailure(transient), leave status='running' until lease
-//     expires so a peer with the handler can pick it up.
-//   - Handler returns nil -> mark complete in its own tx.
-//   - Handler returns err -> bump attempts; if exceeds max_retries,
-//     move to atlantis.jobs_dead. Otherwise mark pending again so
-//     the next drain pass retries (with last_error_at gating the
-//     backoff in claim's predicate, added in a later iteration).
+//   - No handler registered. reportTransientFailure bumps attempts and leaves
+//     status='running' until the lease expires, so a peer that has the handler
+//     can claim it.
+//   - Handler returns nil. Marked complete in its own transaction.
+//   - Handler returns an error. attempts is bumped; past max_retries the row
+//     moves to atlantis.jobs_dead, otherwise it returns to 'pending' and the
+//     next drain pass retries it. buildClaimSQL gates on scheduled_for, so a
+//     retry is immediate unless something moved that column.
 //
-// Heartbeat: handlers that need more than HeartbeatBudget should
-// extend the lease via the checkpoint API. Callers without the
-// checkpoint wiring should keep their timeouts within
-// HeartbeatBudget.
+// A handler running longer than HeartbeatBudget extends its lease through the
+// checkpoint API. Without that wiring, a timeout longer than HeartbeatBudget
+// lets a peer claim the row mid-work.
 func (w *Worker) handleOne(ctx context.Context, r ClaimedRow) {
 	handler := w.registry.Lookup(r.JobName)
 	if handler == nil {
@@ -336,11 +324,12 @@ func (w *Worker) reportFailure(ctx context.Context, r ClaimedRow, handlerErr err
 	}
 }
 
-// reportTransientFailure handles errors the operator can fix at
-// runtime without a code change — currently only the missing-handler
-// case. We bump attempts so a persistently-missing handler eventually
-// DLQ's, but we keep the row in `running` until the lease expires so
-// a peer pod with the handler can claim it.
+// reportTransientFailure handles errors fixable at runtime with no code change,
+// which today is the missing-handler case alone.
+//
+// It bumps attempts, so a handler that stays missing reaches the DLQ, and
+// leaves the row in `running` until the lease expires, so a peer pod that has
+// the handler can claim it.
 func (w *Worker) reportTransientFailure(ctx context.Context, r ClaimedRow, err error) {
 	if r.Attempts >= r.MaxRetries {
 		_ = MoveToDLQ(ctx, w.pool, r.ID, err.Error())

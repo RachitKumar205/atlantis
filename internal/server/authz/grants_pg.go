@@ -37,10 +37,8 @@ type PostgresGrantsConfig struct {
 	CallerFromContext CallerFromContext
 
 	// CacheTTL bounds how long a revocation takes to take effect. Defaults to
-	// 5s to match the cert-binding checker — the two answer adjacent questions
-	// about the same identity, and staggering their windows would only make
-	// "why is this caller still allowed" harder to reason about during an
-	// incident.
+	// 5s, matching the cert-binding checker, so both answers about one identity
+	// go stale over the same window.
 	CacheTTL time.Duration
 
 	// Logger receives a warning when a stored grant names a capability this
@@ -77,17 +75,15 @@ type postgresGrants struct {
 
 // For resolves the calling identity's capabilities.
 //
-// An unauthenticated request returns the empty set rather than an error. The
-// distinction matters at the interceptor: an empty set denies every non-public
-// method, while an error would also deny but would be reported as a lookup
-// failure and send whoever is debugging it toward the database instead of
-// toward the missing client certificate.
+// An unauthenticated request returns the empty set rather than an error. Both
+// deny every non-public method at the interceptor, but an error is reported as
+// a lookup failure and names the database rather than the missing client
+// certificate.
 //
-// Both spellings of "no identity" are handled. cmd/server's extractor returns
-// the literal "anonymous" when no cert CN is available, and other callers
-// return the empty string; treating only one would send the other through a
-// pointless query for a caller that cannot exist, since "anonymous" is a
-// reserved name RegisterCaller refuses.
+// Both spellings of "no identity" are handled: cmd/server's extractor returns
+// the literal "anonymous" when no cert CN is available, other callers return
+// the empty string, and "anonymous" is a reserved name RegisterCaller refuses,
+// so a query for it can match nothing.
 func (g *postgresGrants) For(ctx context.Context) (Set, error) {
 	caller := g.caller(ctx)
 	if caller == "" || caller == "anonymous" {

@@ -12,25 +12,21 @@ import (
 // `req.Files[*].Content` is a raw []byte chosen by the caller (subject
 // only to mTLS authentication, not authorization on content).
 //
-// The safety contract this fuzz asserts:
+// Two properties:
 //
-//  1. Parse never panics on any input. A parse error is fine; a runtime
-//     crash is not — we never want a malformed .atl to take down the
+//  1. Parse never panics. A parse error is a result; a crash takes down the
 //     server process.
-//  2. When Parse returns NO error, the resulting *File must be safe to
-//     Lower without panicking. Lower's error returns may still fire
-//     (multi-file invariant checks happen there) but a runtime crash
-//     means an unenforced post-parse invariant.
+//  2. A *File that Parse returned with no error survives Lower without
+//     panicking. Lower may still return errors — the multi-file invariants run
+//     there — but a panic means a post-parse invariant nothing enforces.
 //
-// Note: Parse intentionally returns both *File AND error on failure
-// (a partial AST is more useful than nothing for incremental tooling).
-// The admin layer drops the partial on error so it never reaches Lower
-// in production; this fuzz mirrors that contract — Lower is only run
-// when Parse signalled clean.
+// Parse returns both *File and error on failure, the partial AST being useful
+// to incremental tooling. The admin layer drops the partial, so Lower runs here
+// only when Parse signalled clean.
 //
-// Seeded with every .atl file in the repo's testdata + a few
-// hand-crafted adversarial cases (nested braces, UTF-8 boundary chars,
-// extremely long identifiers, ambiguous keyword/identifier mixes).
+// Seeded with every .atl under the repo's testdata plus adversarial cases:
+// nested braces, UTF-8 boundary characters, long identifiers, and
+// keyword/identifier ambiguity.
 func FuzzParseAndLower(f *testing.F) {
 	// Seed corpus: every .atl in the repo's testdata trees plus
 	// pathological hand-crafted inputs.

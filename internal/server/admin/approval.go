@@ -37,46 +37,30 @@ const defaultPlanTTL = 7 * 24 * time.Hour
 // gateOnChangePolicy decides whether this change may apply now, and records the
 // request when it may not.
 //
-// # Why this is in the handler and not an interceptor
+// In the handler rather than an interceptor: an interceptor sees the method
+// name and the connection, never the request body, and the change class is a
+// property of the submitted files, unknown until they are parsed, lowered,
+// diffed and emitted. Same category as bindCallerIdentity.
 //
-// An interceptor sees the method name and the connection. It never sees the
-// request body, and "which class of change is this" is a property of the
-// submitted files — it is not knowable until they have been parsed, lowered,
-// diffed and emitted. Same category as bindCallerIdentity, and documented there
-// at length for the same reason.
+// The name avoids the looksLikeAuthz prefixes handler_authz_test.go scans for.
+// This is not an authorization decision; the interceptor settled the caller's
+// right to apply before this ran.
 //
-// The name deliberately avoids the looksLikeAuthz prefixes that
-// handler_authz_test.go scans for. This is not an authorization decision: the
-// caller's right to apply was settled by the interceptor before any of this
-// ran. This asks a different question — whether what they are applying is the
-// kind of thing a human has to see first.
+// The decision reads tx, under the advisory lock the apply already holds, so a
+// policy edit or approval landing concurrently either precedes this read or
+// waits behind the lock.
 //
-// # Why it runs inside the caller's transaction
-//
-// The policy read and the plan-state read both happen on tx, under the advisory
-// lock the apply already holds. That is what serialises this against a
-// concurrent policy edit or a concurrent approval: a rule tightened halfway
-// through an apply either lands before this reads it or waits behind the lock,
-// and never splits the difference.
-//
-// # Why the decision reads tx but the record is written on the pool
-//
-// The decision has to be serialised, so it reads under the advisory lock the
-// apply already holds. The RECORD must not be: a refusal returns an error, the
-// apply transaction rolls back, and anything written inside it goes with it —
-// so the request an operator is supposed to approve would vanish at the exact
-// moment it started to matter. The first version of this did precisely that,
-// and the tests found a gate that refused correctly and left nothing behind.
-//
-// The two are safe to split. Nothing else writes schema_plans, and the upsert
-// refuses to touch a row that is already approved or rejected, so the worst a
-// race can do is rewrite a pending row with the same content.
+// The record is written on the pool, not tx. A refusal returns an error and the
+// apply transaction rolls back, which would take the recorded request with it.
+// Splitting is safe: nothing else writes schema_plans, and the upsert refuses
+// to touch a row that is already approved or rejected, so a race can at worst
+// rewrite a pending row with identical content.
 //
 // Returns nil when the apply may proceed. Otherwise the error carries
 // codes.FailedPrecondition so a client can branch on the code rather than on
 // message text.
 func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateRequest) error {
-	// EVERY class the diff contains, not just the worst one.
+	// Every class the diff contains, not just the worst one.
 	//
 	// The policy is four independent rules. Consulting only the highest class
 	// meant a diff that both renamed a table and dropped a column asked the
@@ -114,7 +98,7 @@ func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateReque
 		// class maps to, and UNPARSEABLE, meaning the DSL did not compile and
 		// the apply was refused long before here. Neither may proceed quietly.
 		//
-		// UNREACHABLE as written, and deliberately kept. policyClassIsSettable
+		// Unreachable as written, and kept. policyClassIsSettable
 		// is defined as the image of ChangeClasses(), and ClassesPresent()
 		// returns those same four values, so pb is always settable. There is
 		// therefore no test that drives this arm — one would have to fabricate a
@@ -179,7 +163,7 @@ func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateReque
 
 	case plan.State == planApproved:
 		if plan.Expired(g.Now) {
-			// Same reasoning: void the approval AND re-open, so the expiry is
+			// Same reasoning: void the approval and re-open, so the expiry is
 			// a renewal rather than a dead end.
 			if err := s.recordPendingPlan(ctx, g, class); err != nil {
 				return fmt.Errorf("re-open expired plan %s: %w", g.PlanID, err)
@@ -341,29 +325,24 @@ FROM atlantis.schema_plans WHERE plan_id = $1`, planID)
 
 // recordPendingPlan records a request for approval, on its own connection.
 //
-// Deliberately s.pool and not the apply's transaction. See the note on
-// gateOnChangePolicy: this is written on a path that is about to return an
-// error, and the caller's transaction is about to roll back.
+// Writes on s.pool, not the apply's transaction: this runs on a path that is
+// about to return an error and roll that transaction back. See
+// gateOnChangePolicy.
 //
-// # What the WHERE clause on the update arm actually does
+// The WHERE clause on the update arm is a concurrency backstop. It is not what
+// stops a retrying pipeline undoing an approval — gateOnChangePolicy returns
+// before calling this for a rejected plan, an applied one, and an approved one
+// whose content still matches, so no single-threaded path reaches the upsert
+// with a row in an excluded state. The clause covers the interleaving: two
+// applies racing on one plan id while an operator decides. 'rejected' and
+// 'applied' are terminal and excluded, so a concurrent write cannot resurrect
+// either.
 //
-// It is a CONCURRENCY backstop, not the thing that stops a retrying pipeline
-// from undoing an approval. That distinction was wrong here for a while, and
-// the comment asserting it survived a test that named it — because no
-// single-threaded path reaches the upsert with a row in a state the clause
-// excludes. gateOnChangePolicy returns before calling this for a rejected plan,
-// for an applied one, and for an approved one whose content still matches.
-//
-// What protects the sequential retry is that early return. What the clause
-// protects is the interleaving: two applies racing on the same plan id while an
-// operator decides. `rejected` and `applied` are terminal and excluded, so a
-// concurrent write cannot resurrect either.
-//
-// `approved` is INCLUDED, and deliberately. The approved arm calls this only
-// when the stored content has diverged from what would now run — the approval
-// is void at that point, and the row has to go back to pending or the plan id
-// becomes permanently undecidable. Excluding it is what made a server upgrade
-// that changed emitted SQL brick every approved-but-unapplied plan, with an
+// `approved` is included. The approved arm calls this only when the stored
+// content has diverged from what would now run: the approval is void at that
+// point, and the row has to go back to pending or the plan id becomes
+// permanently undecidable. Excluding it makes a server upgrade that changes
+// emitted SQL brick every approved-but-unapplied plan, with an
 // error advising a re-plan that returns the same dead id.
 func (s *Service) recordPendingPlan(ctx context.Context, g gateRequest, class adminpb.PlanClass) error {
 	filesJSON, err := json.Marshal(readableFiles(g.Files))
@@ -458,16 +437,12 @@ UPDATE atlantis.schema_plans
 // deleted, so the console can show what happened to a request somebody was
 // waiting on rather than having it vanish.
 //
-// # Only when the checkpoint really moved
-//
-// newCheckpointHash gates it, because the premise above is not always true. An
-// apply that changes no schema still runs: a comment-only edit produces
-// different file bytes, an identical IR and an empty diff, which classifies
-// additive and passes ungated. Retiring every outstanding plan on the strength
-// of that retired requests that were still perfectly valid — and because the
-// plan id is deterministic in (caller, files, dependency hash), the caller
-// could not file a fresh one either. The id came back identical and already
-// superseded.
+// Gated on newCheckpointHash, because an apply that changes no schema still
+// runs: a comment-only edit produces different file bytes, an identical IR and
+// an empty diff, which classifies additive and passes ungated. Retiring
+// outstanding plans on that would retire valid requests, and the plan id is
+// deterministic in (caller, files, dependency hash), so refiling returns the
+// same id already marked superseded.
 //
 // IS DISTINCT FROM rather than <>, so a row with no recorded base hash is
 // superseded rather than skipped. Not knowing what a plan was computed against

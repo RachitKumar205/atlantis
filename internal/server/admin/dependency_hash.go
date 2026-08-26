@@ -13,24 +13,17 @@ import (
 // callerDependencyHash reduces the checkpoint to the part of it that decides
 // what this caller's next apply will do, and hashes that.
 //
-// # Why the whole checkpoint is the wrong thing to hash
+// The apply must refuse if the state the caller planned against moved. Hashing
+// atlantis.ir_checkpoint, one row holding every caller's schema merged
+// together, makes that promise "nothing anywhere changed", so any caller's
+// apply invalidates every other caller's outstanding plan and two teams
+// deploying on the same afternoon re-plan each other over schemas that never
+// touched.
 //
-// A plan is a promise about a world: the caller planned against some state,
-// and the apply must refuse if that state moved underneath it. atlantis used
-// to write the promise as the content hash of atlantis.ir_checkpoint, which is
-// one row holding every caller's schema merged together. So the promise read
-// "nothing anywhere changed", and any caller's apply invalidated every other
-// caller's outstanding plan. Two teams deploying on the same afternoon
-// re-planned each other in a loop over schemas that never touched.
+// Once a plan can be approved by a human, that token expires the approval for
+// reasons the approver cannot see.
 //
-// That is an annoyance while a plan is only a plan. It stops being one once a
-// plan can be approved by a human: an approval keyed to a token that unrelated
-// deploys move is an approval that expires for reasons the approver cannot
-// see, at a moment nobody chose.
-//
-// # What a caller actually depends on
-//
-// Three things, and their union is what this hashes:
+// It hashes the union of three sets:
 //
 //   - Members the caller owns. Its own schema is the from-side of its diff.
 //   - Members it reads — entities its fields reference, entities its queries
@@ -46,16 +39,13 @@ import (
 //     what the rollback removed. Including the diff means that apply is
 //     refused rather than silently undoing the rollback.
 //
-// # Everything else fails closed
-//
-// A member is dropped only when it can be shown to belong to another caller
-// AND shown to be none of the three. Attribution comes from the "caller:path"
-// prefix the parser stamps onto every source path, and for entities — which
-// carry no source path in the IR — from the same ownership map the differ was
-// given, so the hash and the classification cannot disagree about who owns
-// what. A member nobody can attribute stays in the hash. The cost of that is a
-// re-plan nobody needed; the cost of the opposite would be an apply that
-// should have been refused.
+// A member is dropped only when it can be shown to belong to another caller and
+// to be none of the three. Attribution comes from the "caller:path" prefix the
+// parser stamps onto every source path, and for entities, which carry no source
+// path in the IR, from the same ownership map the differ was given, so the hash
+// and the classification cannot disagree about ownership. An unattributable
+// member stays in the hash, costing a re-plan rather than admitting an apply
+// that should have been refused.
 func callerDependencyHash(caller string, prior *dsl.IR, ownership map[string]string,
 	callerFiles []*dsl.File, d *codegen.Diff) (string, error) {
 	// No checkpoint means no world to have moved. Returning "" here matches

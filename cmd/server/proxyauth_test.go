@@ -23,8 +23,6 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/testsupport/testpki"
 )
 
-// --- test PKI helpers ---
-
 type testCA struct {
 	cert *x509.Certificate
 	key  crypto.Signer
@@ -130,8 +128,6 @@ func ctxWith(peerCert *x509.Certificate, header string, headerVals ...string) co
 	}
 	return ctx
 }
-
-// --- tests ---
 
 func TestForwardedAuth_Resolve(t *testing.T) {
 	ca := newTestCA(t)

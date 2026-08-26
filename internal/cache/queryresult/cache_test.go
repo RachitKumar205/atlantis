@@ -64,9 +64,6 @@ func (f *fakeMC) CounterValue(_ context.Context, key string) (int64, error) {
 	return f.counters[key], nil
 }
 
-// ---------------------------------------------------------------------------
-// Cache: Lookup / Store
-
 func TestCache_StoreThenLookup_RoundTrips(t *testing.T) {
 	mc := newFakeMC()
 	c := New(mc)
@@ -167,9 +164,6 @@ func TestCache_Lookup_InfraErrorSurfaced(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Cache: Generation counter
-
 func TestCache_Generation_StartsAtZero(t *testing.T) {
 	c := New(newFakeMC())
 	v, err := c.Generation(context.Background(), "consumer.Account")
@@ -214,9 +208,6 @@ func TestCache_Generation_PerEntityIsolated(t *testing.T) {
 		t.Errorf("Product gen = %d, want 1", p)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Codec
 
 func TestCodec_V2RoundTrips(t *testing.T) {
 	cases := []payload{
@@ -293,9 +284,6 @@ func TestCodec_RejectsOversizedToken(t *testing.T) {
 		t.Errorf("expected error on oversized token")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Hash
 
 func TestHash_DeterministicAcrossCalls(t *testing.T) {
 	f := &commonv1.StringPredicate{Op: &commonv1.StringPredicate_Eq{Eq: "alice"}}

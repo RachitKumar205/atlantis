@@ -178,14 +178,12 @@ func sortedKeys(m map[string]struct{}) []string {
 // touchesPartitioned reports whether any of the named entities declares
 // `partition by`.
 //
-// Resolved once here rather than looked up per request, and deliberately an OR
-// across everything touched: a procedure that writes one partitioned entity and
-// one ordinary one still needs the tenant bound, because the policy on the
-// first applies to every statement in the transaction regardless of what else
-// the transaction does.
+// Resolved once here rather than per request, and an OR across everything
+// touched: a procedure writing one partitioned entity and one ordinary one
+// still needs the tenant bound, because the policy on the first applies to
+// every statement in the transaction.
 func touchesPartitioned(ir *dsl.IR, ids []string) bool {
-	// Delegates to the IR so the code generator reaches the same answer. The
-	// emitter had no equivalent of this at all and emitted unbound custom
-	// handlers.
+	// Delegates to the IR so the code generator reaches the same answer;
+	// without a shared one the emitter emits unbound custom handlers.
 	return ir.TouchesPartitioned(ids)
 }

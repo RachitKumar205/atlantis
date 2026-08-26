@@ -47,8 +47,6 @@ func TestProtoToTime_NilIsZero(t *testing.T) {
 	}
 }
 
-// ---- nullable scalar bind ----
-
 func TestNullableString(t *testing.T) {
 	if got := NullableString(nil); got.Valid {
 		t.Errorf("NullableString(nil) should be invalid, got %+v", got)
@@ -108,8 +106,6 @@ func TestNullableFloat64(t *testing.T) {
 	}
 }
 
-// ---- nullable scalar scan ----
-
 func TestStringPtrFromNull(t *testing.T) {
 	if got := StringPtrFromNull(sql.NullString{}); got != nil {
 		t.Errorf("invalid NullString should produce nil, got %v", *got)
@@ -149,8 +145,6 @@ func TestPtrFromNull_Integers(t *testing.T) {
 	}
 }
 
-// ---- vector ----
-
 func TestVectorToFloat32(t *testing.T) {
 	if got := VectorToFloat32(nil); got != nil {
 		t.Errorf("nil → nil, got %v", got)
@@ -166,8 +160,6 @@ func TestVectorToFloat32(t *testing.T) {
 		t.Errorf("VectorToFloat32 should defensively copy; out alias of in")
 	}
 }
-
-// ---- shape sanity ----
 
 func TestNullableHelpers_ReturnConcreteSQLTypes(t *testing.T) {
 	// Compile-time check that the bind helpers return the exact sql.Null

@@ -27,8 +27,8 @@ func TestAuditRecordsWhatHappened(t *testing.T) {
 	if e.Action != "org_provisioned" {
 		t.Errorf("action = %q", e.Action)
 	}
-	// A machine names itself. An empty actor reads as a bug in the logging
-	// rather than as a machine acting on its own behalf.
+	// The provisioner names itself, so its rows are not read as rows that lost
+	// their actor.
 	if e.Actor != ProvisionerActor {
 		t.Errorf("actor = %q, want %q", e.Actor, ProvisionerActor)
 	}
@@ -37,8 +37,6 @@ func TestAuditRecordsWhatHappened(t *testing.T) {
 	}
 }
 
-// Entries are scoped to the organisation they concern. Without this the log is
-// a single stream nobody can answer a question from.
 func TestAuditIsScopedToItsOrganisation(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -57,13 +55,9 @@ func TestAuditIsScopedToItsOrganisation(t *testing.T) {
 	}
 }
 
-// An action that succeeded is not undone because recording it failed — but the
-// failure must not be silent either.
-//
-// The console learned this the hard way and its comment records it: an audit
-// log that silently stops recording looked exactly like months with nothing to
-// record. So this asserts both halves — no panic, no error propagated, and a
-// warning actually emitted.
+// LogAction returns nothing, so the log line is the only trace of a failed
+// write. An audit log that silently stopped recording looks like a period with
+// nothing to record.
 func TestAFailedAuditWriteIsLoggedRatherThanDiscarded(t *testing.T) {
 	_, dsn := newTestStoreWithDSN(t)
 
@@ -73,8 +67,7 @@ func TestAFailedAuditWriteIsLoggedRatherThanDiscarded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Close the pool so the write cannot succeed. Crude, and the only failure
-	// available without reaching into the driver.
+	// Close the pool so the write cannot succeed.
 	db.Close()
 
 	db.LogAction(context.Background(), "gone", ProvisionerActor, "", "org_provisioned", nil)
@@ -84,8 +77,7 @@ func TestAFailedAuditWriteIsLoggedRatherThanDiscarded(t *testing.T) {
 	}
 }
 
-// Detail that will not marshal costs the detail, never the entry. The action,
-// the actor and the time are the parts somebody is asking about.
+// Detail that will not marshal costs the detail, not the entry.
 func TestUnencodableDetailStillRecordsTheAction(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()

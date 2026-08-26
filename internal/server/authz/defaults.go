@@ -4,18 +4,16 @@ import adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/
 
 // The default capability bundles a caller receives from its can_mutate flag.
 //
-// can_mutate is a boolean, and a boolean cannot express an authorization model
-// — that is the whole reason caller_capabilities exists. It survives here as an
-// input, not as the model: RegisterCaller translates it into an explicit set of
-// grants that are then the thing the server reads. An operator who wants
-// something other than these bundles grants it directly, and RegisterCaller
-// will not take it away (see ManagedCapabilities).
+// can_mutate is an input, not the model: RegisterCaller translates it into an
+// explicit set of grants, and those are what the server reads. An operator
+// wanting something other than these bundles grants it directly, and
+// RegisterCaller does not take it away (see ManagedCapabilities).
 //
-// These sets are the same ones migrations/infra/0018_caller_capabilities.up.sql
-// backfilled onto callers that predate the table. The migration applied the
-// rule once, historically; this applies it going forward. A test asserts the
-// two agree, because a caller registered before and after the migration having
-// different authority would be a bug nobody would notice until an incident.
+// These are the sets migrations/infra/0018_caller_capabilities.up.sql
+// backfilled onto callers predating the table. The migration applied the rule
+// once; this applies it going forward, and a test asserts the two agree, so a
+// caller registered before the migration and one registered after hold the same
+// authority.
 var (
 	// baseCapabilities go to every registered caller. A caller that can
 	// authenticate at all can read the schema it is being asked to conform to,
@@ -52,10 +50,9 @@ func DefaultCapabilities(canMutate bool) []adminpb.Capability {
 //
 // Registration is a full reconciliation of this set and nothing else: flipping
 // can_mutate off revokes the mutating grants, and a capability outside this set
-// (CAPABILITY_OPERATOR, CAPABILITY_LOGS_READ) is left exactly as an operator
-// left it. Without the boundary, re-registering a caller to correct a typo in
-// its created_by would silently strip operator authority someone deliberately
-// granted; with it, the two mechanisms compose instead of fighting.
+// (CAPABILITY_OPERATOR, CAPABILITY_LOGS_READ) is left as an operator left it.
+// Without the boundary, re-registering a caller to correct a typo in its
+// created_by strips operator authority somebody granted separately.
 func ManagedCapabilities() []adminpb.Capability {
 	out := make([]adminpb.Capability, 0, len(baseCapabilities)+len(mutateCapabilities))
 	out = append(out, baseCapabilities...)

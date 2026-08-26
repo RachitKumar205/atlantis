@@ -23,10 +23,9 @@
 //     periodic sweeper revokes rows whose Ack deadline has passed
 //     and releases them.
 //
-// Coexistence pact with the SDK Worker: both ALWAYS use
-// `clients/go/jobs.ClaimRows` (or its wrapper). Any divergence in
-// claim SQL would break the SKIP LOCKED invariant. New behavior goes
-// in sql.go.
+// Both this and the SDK Worker claim through `clients/go/jobs.ClaimRows` or its
+// wrapper. Divergent claim SQL breaks the SKIP LOCKED invariant, so new
+// behaviour goes in sql.go.
 
 package jobsdispatcher
 
@@ -369,8 +368,8 @@ func (d *Dispatcher) drainOnce(ctx context.Context, queue string) {
 
 		s := d.pickSession(queue, row.JobName, perSessSlot)
 		if s == nil {
-			// Race: session for this jobName disconnected after we
-			// computed the union. Release back to pending.
+			// The session for this jobName disconnected after the union was
+			// computed. Released back to pending.
 			d.releaseClaimed(ctx, row.ID, "dispatcher/"+d.cfg.PodID, "no_session_post_claim")
 			revokedTotal.WithLabelValues(queue, "no_session_post_claim").Inc()
 			continue
@@ -394,7 +393,7 @@ func (d *Dispatcher) drainOnce(ctx context.Context, queue string) {
 		// Rewrite claimed_by + worker_session_id to bind the row to this
 		// specific session. The initial Claim set claimed_by to a
 		// pod-scoped placeholder so ExtendLease's predicate can guard
-		// per-session ownership. We update with one row-targeted UPDATE.
+		// per-session ownership; one row-targeted UPDATE narrows it.
 		if err := d.bindClaimToSession(ctx, row.ID, s); err != nil {
 			d.cfg.Logger.Warn("dispatcher: bind claim to session", "session", s.id, "row", row.ID, "err", err)
 			d.releaseClaimed(ctx, row.ID, "dispatcher/"+d.cfg.PodID, "bind_failed")
@@ -406,9 +405,8 @@ func (d *Dispatcher) drainOnce(ctx context.Context, queue string) {
 		// resets this single row's lease. Symmetric: a longer override
 		// extends past the queue-wide default; a shorter override
 		// narrows the recovery window so a dead worker is reclaimed
-		// sooner. Apply via ExtendLease so the underlying claimed_until
-		// matches what we tell the SDK and what the ack-timeout sweeper
-		// expects.
+		// sooner. Applied via ExtendLease so claimed_until matches both what
+		// the SDK is told and what the ack-timeout sweeper expects.
 		rowLeaseUntil := leaseUntil
 		if perJob, ok := s.perJobHeartbeat[row.JobName]; ok && perJob > 0 && perJob != d.cfg.HeartbeatBudget {
 			rowLeaseUntil = time.Now().Add(perJob)
@@ -554,10 +552,9 @@ func (d *Dispatcher) untrackInflight(jobID int64) *session {
 	return s
 }
 
-// handleHeartbeat is a batched lease bump. Validates that the
-// supplied job ids actually belong to this session before enqueueing
-// them onto the batched lease processor — synchronous PG hits used
-// to wedge the recv loop here under load.
+// handleHeartbeat is a batched lease bump. It validates that the supplied job
+// ids belong to this session before enqueueing them onto the batched lease
+// processor; a synchronous PG hit here wedges the recv loop under load.
 func (d *Dispatcher) handleHeartbeat(_ context.Context, s *session, hb *Heartbeat) {
 	if len(hb.JobIDs) == 0 {
 		return
@@ -618,9 +615,8 @@ func (d *Dispatcher) handleCheckpoint(ctx context.Context, s *session, cp *Check
 		msg = msg[:MaxCheckpointMsgChars]
 	}
 
-	// Ownership check: validate the row belongs to this session
-	// before we write — protects against a buggy worker pushing
-	// progress for a job that was revoked under it.
+	// The row must belong to this session before the write, so a buggy worker
+	// cannot push progress for a job revoked under it.
 	s.inflightMu.Lock()
 	row, ok := s.inflight[cp.JobID]
 	if ok {
@@ -676,8 +672,8 @@ UPDATE atlantis.jobs
 func (d *Dispatcher) handleAck(s *session, a *Ack) {
 	ok, lat := s.recordAck(a.JobID)
 	if !ok {
-		// Ack for a job we don't know about — likely a stale Ack from
-		// a row we already revoked. Ignore.
+		// An Ack for an unknown job, most likely a stale one for a row
+		// already revoked.
 		return
 	}
 	if lat > 0 {

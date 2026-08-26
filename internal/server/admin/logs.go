@@ -8,11 +8,8 @@ import (
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 )
 
-// ---------------------------------------------------------------------------
-// GetLogs — paginated read of the in-process slog ring buffer
-// ---------------------------------------------------------------------------
-
-// GetLogsRequest is a cursor-style query. Pass Since=0 on the first call
+// GetLogsRequest is a cursor-style query over the in-process slog ring buffer.
+// Pass Since=0 on the first call
 // to receive the whole ring; on subsequent calls pass back LastSeq from
 // the previous response to receive only newer records.
 type GetLogsRequest struct {

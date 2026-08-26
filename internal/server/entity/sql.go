@@ -26,13 +26,13 @@ func buildGetSQL(e *dsl.Entity) string {
 // soft-delete filter.
 //
 // Create and Update read the row back inside their own transaction, and they
-// read a row they just wrote — so its existence is not in question and the
+// read a row they just wrote, so its existence is not in question and the
 // soft-delete filter has nothing to decide. Applying it here loses writes:
 // sqlUpdate carries no such filter and the soft-delete column is not excluded
-// from the update set, so updating an already-soft-deleted row (or soft-deleting
-// through Update) made the read-back return nothing, and the error propagated
-// before the commit. The write was rolled back, the caller saw an error, and a
-// client that retries on error looped forever.
+// from the update set, so updating an already-soft-deleted row, or
+// soft-deleting through Update, makes the read-back return nothing and the
+// error propagate before the commit. The write rolls back, the caller sees an
+// error, and a client retrying on error loops forever.
 func buildWriteBackSQL(e *dsl.Entity) string {
 	selectList := strings.Join(schema.QuoteAll(schema.FieldColumns(e)), ", ")
 	return fmt.Sprintf("SELECT %s FROM %s WHERE %s",
@@ -141,17 +141,13 @@ func buildUpdateSQL(e *dsl.Entity, extraReturning []string) string {
 	// readable: `soft_delete by` means the row is gone as far as the API is
 	// concerned, and every generated read already filters it out.
 	//
-	// Without this, Update was an undelete. The soft-delete column is in the
-	// SET list above, so a caller holding the primary key could clear it and
-	// bring back a row that Delete had removed — on entities where soft-delete
-	// means revoked or deactivated, that is a privilege-restore primitive. It
-	// became reachable when the post-write read-back moved inside the
-	// transaction and stopped filtering: before, the filtered read-back
-	// returned nothing and the whole transaction rolled back, so the row
-	// stayed deleted by accident rather than by rule.
+	// Without this, Update is an undelete: the soft-delete column is in the SET
+	// list above, so a caller holding the primary key clears it and brings back
+	// a row Delete removed. Where soft-delete means revoked or deactivated,
+	// that is a privilege-restore primitive.
 	//
-	// handleUpdate already maps zero rows affected to ErrNotFound, so a caller
-	// updating a deleted row now gets the same answer Get gives it.
+	// handleUpdate maps zero rows affected to ErrNotFound, so a caller updating
+	// a deleted row gets the answer Get gives it.
 	softFilter := ""
 	if e.SoftDeleteField != "" {
 		softFilter = " AND " + schema.QuoteIdent(e.SoftDeleteField) + " IS NULL"

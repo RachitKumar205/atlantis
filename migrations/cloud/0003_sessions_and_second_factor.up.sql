@@ -5,7 +5,7 @@
 -- are those tables, so this migration also creates the discriminator 0001
 -- deliberately left out.
 
--- ── The user discriminator ──────────────────────────────────────────────────
+-- The user discriminator.
 --
 -- Same mechanism as the console's organisation boundary (migrations/console/
 -- 0004): a transaction-local GUC read through a STABLE function, with a
@@ -31,7 +31,7 @@ RETURNS void LANGUAGE sql AS $$
     SELECT pg_catalog.set_config('cloud.user', COALESCE(v, ''), true)
 $$;
 
--- ── Sessions ────────────────────────────────────────────────────────────────
+-- Sessions.
 --
 -- A signed-in browser. Reached by token, so like console.sessions it is the
 -- table that *discovers* who a request is and cannot be filtered by who the
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS cloud.sessions (
 CREATE INDEX IF NOT EXISTS sessions_user ON cloud.sessions (user_id);
 CREATE INDEX IF NOT EXISTS sessions_expiry ON cloud.sessions (expires_at);
 
--- ── Half-finished logins ────────────────────────────────────────────────────
+-- Half-finished logins.
 --
 -- A password has been verified and a second factor has not. This is its own
 -- table, and that is the single most important decision in this migration.
@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS cloud.pending_logins (
 
 CREATE INDEX IF NOT EXISTS pending_logins_expiry ON cloud.pending_logins (expires_at);
 
--- ── The second factor ───────────────────────────────────────────────────────
+-- The second factor.
 --
 -- The secret is ENCRYPTED, not hashed, and the difference is forced: verifying
 -- a code means recomputing it, which needs the secret back. A password can be
@@ -126,7 +126,7 @@ CREATE TABLE IF NOT EXISTS cloud.backup_codes (
 
 CREATE INDEX IF NOT EXISTS backup_codes_user ON cloud.backup_codes (user_id);
 
--- ── The boundary ────────────────────────────────────────────────────────────
+-- The boundary.
 --
 -- These two are the first Cloud tables that can carry it: both are read only
 -- for a user who has already been identified, so there is always something to

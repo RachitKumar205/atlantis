@@ -29,14 +29,11 @@ const (
 
 var testNow = time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
 
-// ---------------------------------------------------------------------------
-// A cloud we control completely.
+// A stand-in cloud, signing by hand.
 //
 // The end-to-end test at the bottom uses the real issuer package. Everything
-// else needs to mint assertions the real issuer deliberately refuses to
-// produce — no expiry, an unknown role, alg none — so it signs by hand.
-// ---------------------------------------------------------------------------
-
+// else mints assertions the real issuer refuses to produce: no expiry, an
+// unknown role, alg none.
 type testKey struct {
 	priv *ecdsa.PrivateKey
 	kid  string
@@ -213,8 +210,6 @@ func newVerifier(t *testing.T, c *testCloud, clk *testClock, tune ...func(*Confi
 	}
 	return v
 }
-
-// ---------------------------------------------------------------------------
 
 func TestVerifyAcceptsAValidAssertion(t *testing.T) {
 	key := newTestKey(t)
@@ -518,8 +513,8 @@ func TestRotation(t *testing.T) {
 	if _, err := v.Verify(context.Background(), newKey.sign(t, newKey.kid, claimsAt(clk.now()))); err != nil {
 		t.Errorf("assertion from the new key was refused, so every sign-in fails until the cache expires: %v", err)
 	}
-	// The overlap is the point: an assertion minted moments before the switch
-	// is still in flight and must still verify.
+	// The overlap window: an assertion minted moments before the switch is
+	// still in flight and must still verify.
 	if _, err := v.Verify(context.Background(), oldKey.sign(t, oldKey.kid, claimsAt(clk.now()))); err != nil {
 		t.Errorf("assertion from the retired key was refused during the overlap window: %v", err)
 	}

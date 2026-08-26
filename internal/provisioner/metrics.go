@@ -1,21 +1,9 @@
-// Observability for provisioning. Same shape as the other obs subsystems
-// (internal/obs/metrics.go, jobs/metrics.go): package-level promauto vars
-// registered against the default registerer at import time, with
-// bounded-cardinality labels.
+// Observability for provisioning. Same shape as internal/obs/metrics.go and
+// jobs/metrics.go: package-level promauto vars registered at import time.
 //
-// # Why this package declares its own rather than importing internal/obs
-//
-// Because /metrics on this binary would otherwise be empty, and empty in a way
-// that looks wired. internal/obs registers at import time, but nothing in this
-// process's import graph reaches it: neither internal/cloud/store nor
-// internal/cloud/provision pulls in prometheus at all. Mounting
-// promhttp.Handler() here without declaring anything serves go_* and process_*
-// and no atlantis series whatsoever.
-//
-// Importing internal/obs to fix that is the opposite mistake. It would register
-// twelve server-shaped collectors this process never increments — a permanent
-// row of zeros that reads as a broken server rather than as a worker with a
-// surface of its own.
+// Declared here rather than imported from internal/obs, which this process's
+// import graph does not reach, and whose collectors are server-shaped and would
+// register unincremented.
 
 package provisioner
 
@@ -26,16 +14,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// markConsoleCertUnmeasured puts the fleet countdown into its "no reading yet"
-// state.
+// markConsoleCertUnmeasured sets consoleCertSecondsLeft to NaN.
 //
-// A named function rather than an inline Set so the property can be tested
-// without depending on which test file happens to run first — every other test
-// in this package writes that gauge.
-//
-// See consoleCertSecondsLeft: zero seconds left means "expiring now", so the
-// zero a gauge defaults to would page on every start of this process. NaN means
-// "no reading", which is what is actually true until the first reconcile pass.
+// A gauge defaults to zero, which on that metric means "expiring now" and would
+// page on every start. NaN reads as no measurement.
 func markConsoleCertUnmeasured() {
 	consoleCertSecondsLeft.Set(math.NaN())
 }
@@ -45,18 +27,11 @@ func init() {
 }
 
 var (
-	// attemptsTotal counts provisioning attempts by how they ended.
+	// attemptsTotal counts provisioning attempts by how they ended. An idle
+	// queue and a queue failing on its head both produce no log output.
 	//
-	// The distinction this exists to make is the one a log line cannot: an
-	// idle queue and a queue whose head has been failing since Tuesday both
-	// produce no output at all, because a provisioner with nothing to do says
-	// nothing and a provisioner failing the same organisation says the same
-	// thing every time.
-	//
-	// The label is a closed set of three, chosen here rather than read from
-	// the database. A label taken from a column is not bounded — the reason
-	// NormalizeOutboxKind exists — and "outcome" is exactly the kind of field
-	// somebody later adds a state to.
+	// The outcome label is a closed set of three, fixed here rather than read
+	// from a column, which would be unbounded cardinality.
 	attemptsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "atlantis",
 		Subsystem: "provisioning",
@@ -65,16 +40,11 @@ var (
 	}, []string{"outcome"})
 
 	// purgesTotal counts teardowns after a retention window has run out.
+	// Separate from attemptsTotal: provisioning failure is a continuous rate,
+	// and a purge is rare and irreversible.
 	//
-	// Separate from attemptsTotal rather than another outcome on it, because
-	// the two answer different questions and mixing them would make both
-	// useless: "how much provisioning is failing" is a rate an operator watches
-	// continuously, and a purge is a rare, deliberate, irreversible act.
-	//
-	// A rising `failed` here is the alarming one on this counter. It means
-	// organisations whose owners asked for deletion are not being deleted, and
-	// there is no backoff on that path — a customer who asked to be removed and
-	// quietly was not is the failure this number exists to make visible.
+	// A rising `failed` means organisations asked to be deleted are not being
+	// deleted. There is no backoff on that path.
 	purgesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "atlantis",
 		Subsystem: "provisioning",
@@ -83,14 +53,12 @@ var (
 	}, []string{"outcome"})
 
 	// attemptSeconds is how long an attempt took, whatever the outcome.
+	// Measured claim-to-mark rather than around Ensure, since most of the wait
+	// is initdb.
 	//
-	// Measured around the whole claim-to-mark span rather than around Ensure,
-	// because the number an operator wants is "how long does an organisation
-	// wait", and most of that is initdb rather than anything this code does.
-	//
-	// Buckets run to ~8 minutes: a first provision on a cold cluster was
-	// measured at ~48 seconds, and the default ReadyTimeout is five minutes, so
-	// the interesting range is wider than prometheus.DefBuckets covers.
+	// Buckets run to 8 minutes. A first provision on a cold cluster measured
+	// ~48s and the default ReadyTimeout is five minutes, both past
+	// prometheus.DefBuckets.
 	attemptSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "atlantis",
 		Subsystem: "provisioning",
@@ -101,10 +69,8 @@ var (
 
 	// claimFailuresTotal counts errors reaching the queue at all.
 	//
-	// Separate from a failed attempt, and the separation matters: an
-	// organisation that will not provision is a customer problem, while a
-	// provisioner that cannot read its queue is an outage that provisions
-	// nobody and — without this — increments nothing.
+	// Separate from a failed attempt: a provisioner that cannot read its queue
+	// provisions none of them and would otherwise increment nothing.
 	claimFailuresTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: "atlantis",
 		Subsystem: "provisioning",
@@ -116,10 +82,9 @@ var (
 	// cluster no longer had them.
 	//
 	// Expected to be zero. A non-zero value means something removed a
-	// customer's namespace outside this system — or that the cluster was
-	// rebuilt — and every caller certificate in those organisations is about to
-	// be invalidated, because the authority went with the namespace. That is
-	// worth alerting on rather than reading about afterwards.
+	// customer's namespace outside this system, or the cluster was rebuilt, and
+	// every caller certificate in those organisations is about to be
+	// invalidated because the authority went with the namespace.
 	reconciledTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: "atlantis",
 		Subsystem: "provisioning",
@@ -130,10 +95,8 @@ var (
 	// consoleRotationsTotal counts console credentials actually replaced.
 	//
 	// Expected to be quiet, and to move in step with the renewal window rather
-	// than with the reconcile interval. A rate close to one per organisation per
-	// pass means the "is it due" test is answering yes every time — a rotation
-	// loop, which is harmless to customers and burns through certificates while
-	// looking like the feature working.
+	// than with the reconcile interval. A rate close to one per organisation
+	// per pass means the "is it due" test is answering yes every time.
 	consoleRotationsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: "atlantis",
 		Subsystem: "provisioning",
@@ -142,37 +105,11 @@ var (
 	})
 
 	// consoleCertSecondsLeft is how long the soonest-expiring console credential
-	// in the fleet has left.
+	// in the fleet has left. Alert well above ConsoleCertRenewWithin.
 	//
-	// This is the alarm that fires before the outage rather than with it, and it
-	// is deliberately a countdown rather than a count of overdue organisations.
-	// A count only leaves zero once something is already wrong; a countdown is
-	// visibly falling for weeks first, and one threshold covers every way
-	// rotation can stop — the provisioner wedged, its Kubernetes credentials
-	// expired, the console database unreachable, a bug in the renewal test.
-	// None of those raise an error anybody sees, and all of them look identical
-	// from here: the number stops going back up.
-	//
-	// The minimum across the fleet rather than a series per organisation,
-	// because the question is "is anything about to expire" and one tenant is
-	// enough to need answering. Which one is in the log line beside it.
-	//
-	// Expect it to sit near the certificate lifetime and saw-tooth as
-	// credentials renew. Alert well above the renewal window — the window is
-	// when rotation should HAVE happened, so reaching it already means a pass
-	// was missed.
-	//
-	// It starts as NaN rather than zero, which init below does. A Prometheus
-	// gauge defaults to zero, and zero here reads as "a credential expires this
-	// instant" — so every `console_cert_seconds_left < threshold` rule would
-	// fire the moment this process started and keep firing until the first
-	// reconcile pass, up to a reconcile interval later. An alert that goes off
-	// on every deploy is one that gets silenced, and this is a metric nobody can
-	// afford to have silenced.
-	//
-	// NaN is the honest value for "not measured yet": comparisons against it are
-	// false, so no threshold rule fires, and it renders as a gap rather than a
-	// cliff. The first pass replaces it with a real reading.
+	// init below sets it to NaN. A gauge defaults to zero, which here reads as
+	// expiring now, so every threshold rule would fire until the first
+	// reconcile pass. Comparisons against NaN are false.
 	consoleCertSecondsLeft = promauto.NewGauge(prometheus.GaugeOpts{
 		Namespace: "atlantis",
 		Subsystem: "provisioning",
@@ -180,19 +117,10 @@ var (
 		Help:      "Seconds until the soonest-expiring console credential in the fleet expires. NaN before the first reconcile pass.",
 	})
 
-	// consoleRotationFailures counts rotations that did not complete.
-	//
-	// This is the one that has to be alerted on, and the reason it exists at all.
-	// A failing rotation changes nothing an operator or a customer can see: the
-	// organisation stays ready, its pods stay up, its callers keep working, and
-	// the console keeps using a certificate that is running down. The failure is
-	// silent right up to the moment the credential expires and every browser
-	// loses that organisation at once.
-	//
-	// So the alarm has to come from here rather than from the outage. With a
-	// renewal window of ten days, a sustained non-zero value is a warning with
-	// more than a week of margin on it; ignored, it becomes a fleet-wide
-	// incident with no proximate cause.
+	// consoleRotationFailures counts rotations that did not complete. A failing
+	// rotation is otherwise invisible: the organisation stays ready and the
+	// console keeps using a certificate running down, until it expires and
+	// every browser loses that organisation at once.
 	consoleRotationFailures = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: "atlantis",
 		Subsystem: "provisioning",
@@ -204,8 +132,8 @@ var (
 	//
 	// A failure here means this process no longer owns the row it is working
 	// on, which is the one condition under which two provisioners can be
-	// building the same organisation. It should be zero, and a non-zero value
-	// is worth looking at even though the work usually still completes.
+	// building the same organisation. Expected to be zero; the work in progress
+	// usually still completes.
 	leaseExtensionFailuresTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: "atlantis",
 		Subsystem: "provisioning",

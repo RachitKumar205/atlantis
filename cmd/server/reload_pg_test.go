@@ -27,23 +27,18 @@ import (
 
 // The partition gate on the HOT-RELOAD path, driven through a running server.
 //
-// # What this covers that the boot test does not
-//
 // partitionGate has two call sites. TestServerRefusesToBootWhenAPartitionedTableHasNoPolicy
-// proves the one at startup. The other runs from the LISTEN/NOTIFY reload hook,
-// and until now was covered only by an AST tripwire — a test that asserts the
-// call is present in the source, never that it fires.
+// covers the one at startup; this covers the one in the LISTEN/NOTIFY reload
+// hook, which an AST tripwire can only show is present in the source, never
+// that it fires.
 //
-// That gap is the one a review previously walked through: a checkpoint adding
-// `partition by` to an existing entity arrives at a server that is already up,
-// the reload turns on `partitioned` in the dispatcher for a table carrying no
-// policy, and the only signal an operator has — omit the tenant, get refused —
-// goes on reporting healthy. Boot-time verification cannot see it, because the
-// server booted before the schema changed.
+// The case: a checkpoint adding `partition by` to an existing entity reaches a
+// server that is already up, the reload turns on `partitioned` in the
+// dispatcher for a table carrying no policy, and the observable signal — omit
+// the tenant, get refused — goes on reporting healthy. Boot-time verification
+// ran before the schema changed.
 //
-// # How the assertion is made
-//
-// The child logs at info, so both outcomes are observable and distinguishable:
+// The child logs at info, so both outcomes are distinguishable:
 //
 //	"schema reload: rebuild failed"   the hook refused; snapshot.Store is never
 //	                                  reached, so the OLD schema keeps serving
@@ -378,35 +373,25 @@ func reloadProbeRole(t *testing.T, dsn string) string {
 	return strings.Replace(dsn, "//atlantis:atlantis@", "//reloadgate_probe:probe@", 1)
 }
 
-// The reload hook must refuse when it could not ASK, just as boot does.
+// The reload hook refuses when it could not ask, as boot does.
 //
-// # The gap this closes
+// partitionGate's probe-failure branch has two call sites.
+// TestServerRefusesToBootWhenThePolicyProbeCannotRun covers startup; this covers
+// the reload hook. Without both, replacing `perr` with nil at either site leaves
+// the suite green, and the gate sees no error and no problems and swaps in a
+// schema whose isolation nothing verified.
 //
-// partitionGate's probe-failure branch is reached from two call sites.
-// TestServerRefusesToBootWhenThePolicyProbeCannotRun covers the one at startup;
-// this covers the reload hook. Until both existed, replacing `perr` with nil at
-// either site left the whole suite green — the gate would see "no error, no
-// problems" and swap in a schema whose isolation nothing had verified.
+// A boot refusal is loud — the process does not come up. A reload that wrongly
+// accepts keeps serving with the health surface green, and the dispatcher
+// believes a table is tenant-isolated on the word of a check that errored.
 //
-// The reload site is the worse of the two to leave uncovered. Boot refusing is
-// loud: the process does not come up. A reload that wrongly accepts is silent —
-// the server keeps serving, the health surface stays green, and the dispatcher
-// now believes a table is tenant-isolated on the word of a check that errored.
+// The revoke lands after the child is listening. The boot-time probe runs
+// against an intact catalogue and passes, so only the reload's probe fails; a
+// revoke before boot refuses at startup and never reaches this call site.
 //
-// # Why the revoke happens AFTER the child is listening
-//
-// The boot-time probe runs against an intact catalogue and passes, so the child
-// gets all the way up. Only the RELOAD's probe fails. A revoke before boot would
-// refuse at startup and never reach this call site at all — the test would pass
-// while proving nothing about the reload.
-//
-// # Why both cases use a table WITH a valid policy
-//
-// The two cases differ by exactly one thing: whether pg_policy is readable. The
-// fixture is identical and correct in both. So an accepted verdict cannot be
-// explained by the probe failing, and a refused verdict cannot be explained by
-// the policy being wrong — which is what makes the refusal attributable to the
-// probe rather than merely coincident with it.
+// Both cases use a table with a valid policy, so they differ only in whether
+// pg_policy is readable. An acceptance cannot be explained by the probe failing
+// and a refusal cannot be explained by the policy being wrong.
 func TestReloadRefusesWhenThePolicyProbeCannotRun(t *testing.T) {
 	if os.Getenv(reloadChildEnv) != "" {
 		reloadChild()

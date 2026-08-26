@@ -52,9 +52,8 @@ func (c *Cache) Get(_ context.Context, _ string) ([]byte, error) {
 	return nil, runtime.ErrCacheMiss
 }
 
-// Set silently records the write. Production code uses Cache to keep
-// hot bodies warm; the sim doesn't need that, so we just remember the
-// call for tests.
+// Set records the write and stores nothing. Production caches hot bodies; sim
+// serves from its tables, so the call is kept only for tests to read.
 func (c *Cache) Set(_ context.Context, key string, value []byte, ttl time.Duration) error {
 	c.mu.Lock()
 	c.lastSets = append(c.lastSets, SetCall{

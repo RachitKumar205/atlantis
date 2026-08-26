@@ -31,40 +31,24 @@ import (
 
 // The console's first HTTP test harness.
 //
-// # Why this exists, and why it is this shape
-//
-// Until this existed, internal/console had one test, of a bcrypt hash (since
-// deleted along with local passwords). Every route was
-// covered by nothing — including the approve route, which is the control that
-// lets production DDL run, and which is wrapped in four middlewares whose
-// order matters.
+// Without it, routes are covered by nothing — including the approve route, the
+// control that lets production DDL run, wrapped in four middlewares whose order
+// matters.
 //
 // The obstacle is that the console talks to atlantis over a concrete gRPC
-// channel — once a field, now one per organisation from orgClients. Either way
-// there is no working *Server without something answering on the other end.
-// Two ways past that were available:
+// channel, one per organisation from orgClients, so there is no working *Server
+// without something answering on the other end. It runs the real admin service
+// in-process rather than putting an interface in front of it and passing a
+// fake: New() is used as production uses it, and the assertions below run
+// against real plan rows created by a real apply.
 //
-//   - Make it an interface and pass a fake. Rejected: it changes shipped code
-//     to suit a test, and it would test the console against a fake whose
-//     behaviour somebody has to keep in step with the real server by hand.
-//   - Run the real admin service in-process. Chosen: New() is then used exactly
-//     as production uses it.
+// The listener speaks mTLS because the console has no insecure transport at all
+// — dialOrg has no plaintext branch — so a plain listener is a channel it
+// cannot dial.
 //
-// The second is slower to set up and tests the thing that ships. It also means
-// the assertions below run against real plan rows created by a real apply,
-// rather than fixtures shaped like what the code hopes it will be handed.
-//
-// The listener speaks mTLS, which is not extra rigour for its own sake. The
-// console has no insecure transport at all — dialOrg has no plaintext branch —
-// so a plain listener would be a channel it could not dial. An earlier version
-// of this comment said the opposite, describing a fallback that has since been
-// deleted.
-//
-// # What is deliberately absent
-//
-// No capability interceptor. cmd/server installs it; RegisterGenerated does
-// not. That is correct here: these tests are about the console's HTTP gates,
-// and admin-side authorization has its own tests in internal/server/authz.
+// No capability interceptor: cmd/server installs it and RegisterGenerated does
+// not. These tests are about the console's HTTP gates, and admin-side
+// authorization has its own tests in internal/server/authz.
 
 // consoleFixture is a console server wired to a real admin service, both
 // backed by one private database.
@@ -91,8 +75,8 @@ type consoleFixture struct {
 	audience string
 
 	// atl is the default organisation's stack, kept so a test about the
-	// boundary can reach its CA and its certificate — the two halves it needs
-	// to build a deliberately mismatched pair.
+	// boundary can reach its CA and its certificate, which are the two halves
+	// a mismatched pair is built from.
 	atl *atlStack
 
 	// signer is the fake certificate signer, or nil when the fixture was built
@@ -126,9 +110,8 @@ func newFixture(t *testing.T, enrolment bool) *consoleFixture {
 	// atlantis-sandbox-{data,runtime}-* under os.TempDir(). `go test` runs
 	// packages concurrently, so without this the console's tests delete the
 	// working directories of internal/runtime/sandbox and its two sibling
-	// packages while they are extracting a Postgres archive into them. The
-	// first version of this harness did exactly that: three packages failed
-	// with "rename ...: no such file or directory" and the cause was two
+	// packages while they are extracting a Postgres archive into them, which
+	// fails those packages with "rename ...: no such file or directory" two
 	// directories away from anything the console changed.
 	//
 	// t.Setenv is process-wide and forbidden alongside t.Parallel, which is
@@ -264,8 +247,8 @@ func requireTestPG(t *testing.T) string {
 // atlStack is one organisation's atlantis: its own database, its own
 // certificate authority, and a listener that demands a certificate from it.
 //
-// One per organisation, and the CA is per stack rather than shared. That is
-// not tidiness — it is the property the per-organisation client pool rests on.
+// One per organisation, with the CA per stack rather than shared, which is what
+// the per-organisation client pool rests on.
 // With one CA behind two servers, credentials issued for either organisation
 // chain at both, every cross-organisation dial succeeds, and a test asserting
 // "A's client returned A's data" passes for the weaker reason that the pool
@@ -366,10 +349,9 @@ func (f *consoleFixture) assertion(t *testing.T, email, role string) string {
 
 // assertionForOrg mints a signed assertion, as Cloud would.
 //
-// The organisation is a parameter because it is the boundary under test. It
-// used to be hardcoded, which meant every test in the package ran as one
-// organisation and no test could observe the boundary at all — a policy that
-// isolated nothing would have passed the whole suite.
+// The organisation is a parameter because it is the boundary under test.
+// Hardcoded, every test in the package runs as one organisation, no test can
+// observe the boundary, and a policy that isolates nothing passes the suite.
 func (f *consoleFixture) assertionForOrg(t *testing.T, org, email, role string) string {
 	t.Helper()
 	return f.mint(t, org, email, role, false, nil)
@@ -553,11 +535,9 @@ func (f *consoleFixture) auditCount(t *testing.T, action string) int {
 // isolatedRoleDSN creates a role the console can legitimately run as, and
 // returns a DSN for it against the same database.
 //
-// NOSUPERUSER NOBYPASSRLS is the whole point: the console refuses to start on
-// anything else, because a role that reads through row-level security makes the
-// organisation boundary inert. Ten other tests in this repo create a role this
-// way for the same reason; the grants differ per test, which is why each does
-// its own rather than sharing one helper.
+// NOSUPERUSER NOBYPASSRLS, because the console refuses to start on anything
+// else: a role that reads through row-level security makes the organisation
+// boundary inert.
 //
 // CREATE on the database because console.New runs its own migrations. The role
 // creates the console schema and therefore owns it, which is the state FORCE

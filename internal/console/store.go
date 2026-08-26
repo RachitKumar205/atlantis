@@ -29,11 +29,11 @@ func jsonMarshalBytes(v any) ([]byte, error) { return json.Marshal(v) }
 // bounded lifetime.
 const sessionTTL = 12 * time.Hour
 
-// sessionTouchThreshold defines the "sliding renewal" zone. When an
-// authenticated request comes in and the session's remaining TTL is
-// below this fraction of the full window, we bump expires_at. This
-// throttles renewal writes — at 0.5 with 12h TTL, an active user incurs
-// roughly one renewal write every 6h, not one per request.
+// sessionTouchThreshold defines the sliding-renewal zone. An authenticated
+// request whose session has less than this fraction of the full window left
+// bumps expires_at, which throttles renewal writes: at 0.5 with a 12h TTL, an
+// active user incurs roughly one renewal write every 6h rather than one per
+// request.
 const sessionTouchThreshold = 0.5
 
 // sudoTTL is how long a successful re-auth keeps the session in
@@ -46,9 +46,9 @@ var ErrNotFound = errors.New("not found")
 
 // ErrAssertionSpent reports an assertion that has already been exchanged.
 //
-// It is deliberately distinct from a verification failure. The assertion is
-// genuine and unexpired; what is wrong is that it is being presented a second
-// time, which is either a replay or a page that submitted twice.
+// Distinct from a verification failure: the assertion is genuine and unexpired,
+// and what is wrong is that it is being presented a second time, which is
+// either a replay or a page that submitted twice.
 var ErrAssertionSpent = errors.New("assertion has already been used")
 
 // User is who is making the current request.
@@ -88,8 +88,8 @@ type store struct {
 	// internal/secrets for what that does and does not defend.
 	keys secrets.Keyring
 
-	// log exists because audit writes are best-effort and their errors used to
-	// be discarded outright. See logAction.
+	// log carries the errors from best-effort audit writes, which have nowhere
+	// else to go. See logAction.
 	log *slog.Logger
 }
 
@@ -117,29 +117,27 @@ func (s *store) close() { s.pool.Close() }
 // The console's schema lives in migrations/console, applied by internal/migrate
 // from the tree embedded in this binary.
 //
-// It used to be built here, by one idempotent CREATE-IF-NOT-EXISTS block re-run
-// on every boot, with one-shot DROP statements appended as features were
-// removed. That has no version, so nothing could distinguish "already applied"
-// from "applied halfway" — survivable while every statement was CREATE TABLE,
-// and not once one of them is an ALTER or a policy.
+// One idempotent CREATE-IF-NOT-EXISTS block re-run on every boot, with one-shot
+// DROP statements appended, carries no version, so nothing distinguishes
+// "already applied" from "applied halfway". That is survivable while every
+// statement is CREATE TABLE and not once one is an ALTER or a policy.
 
 // ensureAuditPartitions creates the audit_log partitions the console needs to
 // start: this month's and next month's.
 //
-// Separate from the migration tree on purpose. audit_log is partitioned by
-// month, so its children are a function of the calendar rather than of the
-// schema version — a static migration written today cannot create next March's
-// partition. The migration creates the partitioned parent; this creates the
-// children, and the retention worker keeps the window rolling.
+// Separate from the migration tree. audit_log is partitioned by month, so its
+// children are a function of the calendar rather than of the schema version,
+// and a static migration cannot create next March's partition. The migration
+// creates the partitioned parent, this creates the children, and the retention
+// worker keeps the window rolling.
 func (s *store) ensureAuditPartitions(ctx context.Context) error {
 	// Ensure the current and next month's partitions exist so the very
 	// first logAction call after a cold start lands somewhere. The
 	// retention worker keeps this rolling.
 	//
-	// We pass the first-of-month, not `now`, into the "next" calculation
-	// — calling AddDate(0, 1, 0) on a day-31 normalizes through whichever
-	// shorter month follows and silently skips a month. (May 31 + 1 month
-	// = June 31 → normalized to July 1.)
+	// The "next" calculation takes the first of the month, not `now`:
+	// AddDate(0, 1, 0) on a day-31 normalizes through whichever shorter month
+	// follows and skips one. May 31 + 1 month = June 31, normalized to July 1.
 	now := time.Now().UTC()
 	firstOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	if err := s.ensureAuditPartition(ctx, firstOfMonth); err != nil {
@@ -160,9 +158,9 @@ func (s *store) ensureAuditPartition(ctx context.Context, t time.Time) error {
 	end := start.AddDate(0, 1, 0)
 	name := fmt.Sprintf("audit_log_p%04d%02d", start.Year(), start.Month())
 
-	// Postgres DDL does not accept $-parameter substitution. We construct
-	// `name` and both bounds from a time.Time we built ourselves (never
-	// user input), so splicing into the literal SQL is safe. The bounds
+	// Postgres DDL does not accept $-parameter substitution. `name` and both
+	// bounds are built here from a time.Time, never from user input, so
+	// splicing them into the literal SQL is safe. The bounds
 	// are rendered as ISO 8601 with explicit UTC offset so Postgres
 	// parses them deterministically regardless of session timezone.
 	stmt := fmt.Sprintf(`
@@ -176,17 +174,16 @@ func (s *store) ensureAuditPartition(ctx context.Context, t time.Time) error {
 		return err
 	}
 
-	// A partition inherits NONE of its parent's row-level security.
+	// A partition inherits none of its parent's row-level security.
 	//
-	// Measured on PostgreSQL 17 rather than assumed: a table created by
-	// CREATE TABLE ... PARTITION OF has relrowsecurity false,
-	// relforcerowsecurity false, and no policies — and reading it DIRECTLY
-	// returned every organisation's rows, bound or unbound, while the parent
-	// behaved correctly. The organisation boundary simply is not there.
+	// On PostgreSQL 17, a table created by CREATE TABLE ... PARTITION OF has
+	// relrowsecurity false, relforcerowsecurity false and no policies, and
+	// reading it directly returns every organisation's rows, bound or unbound,
+	// while the parent behaves correctly.
 	//
 	// Enabling and forcing RLS with no policy of its own makes the child
-	// deny-all on direct access, which is what we want: the console only ever
-	// queries the parent, and dropAuditPartitionsOlderThan uses DROP TABLE,
+	// deny-all on direct access. The console only ever queries the parent, and
+	// dropAuditPartitionsOlderThan uses DROP TABLE,
 	// which is DDL and outside RLS entirely. So a direct read of a partition is
 	// either a bug or an attack, and both deserve nothing.
 	//
@@ -207,39 +204,20 @@ func (s *store) ensureAuditPartition(ctx context.Context, t time.Time) error {
 // dropAuditPartitionsOlderThan removes every audit_log partition whose upper
 // bound is at or before `cutoff`. Idempotent.
 //
-// # Three things this got wrong, all of which meant nothing was ever dropped
+// Partitions are selected by joining pg_inherits to the parent rather than by
+// name, which selects direct children by construction and excludes
+// grandchildren. Selecting on relispartition alone also matches the partitions'
+// indexes, which have relpartbound NULL.
 //
-// It selected on `relispartition = true AND relname LIKE 'audit_log_p%'` and
-// scanned pg_get_expr into a non-nullable string.
+// relkind IN ('r','p'), as elsewhere in this codebase: a partition that is
+// itself partitioned is 'p', and DROP TABLE on a 'p' takes its children without
+// CASCADE. Filtering to 'r' would abandon it while dropping its grandchildren,
+// whose bounds are sub-ranges the parent never had.
 //
-//  1. That predicate matches the partitions' INDEXES as well as their tables.
-//     An index has relispartition true and relpartbound NULL, so the scan failed
-//     on the first one and discarded every candidate already read. The sweep had
-//     never dropped a partition; the only symptom was one ERROR line a day, on a
-//     24-hour timer, which is why it went unnoticed.
-//
-//  2. Filtering to relkind 'r' would have been the next mistake: a partition
-//     that is itself partitioned is 'p', so retention would silently abandon it
-//     while dropping its grandchildren — whose bounds are sub-ranges the parent
-//     never had. `relkind IN ('r','p')` is what the rest of this codebase uses
-//     (policyguard.go, internal/introspect), and DROP TABLE on a 'p' takes its
-//     children with it without CASCADE.
-//
-//  3. The name filter contradicted this function's own comment about not
-//     trusting partition names. Joining pg_inherits to the real parent selects
-//     direct children by construction, which also excludes grandchildren.
-//
-// # And why the bound is compared in SQL
-//
-// It used to be rendered by pg_get_expr and parsed back with time.Parse.
-// pg_get_expr renders using the SESSION's TimeZone and DateStyle, so on a
-// connection carrying anything but UTC/ISO the output is
-// `TO ('2026-09-01 05:30:00+05:30')` or `TO ('01/09/2026 00:00:00 UTC')` —
-// neither of which the two layouts matched. The loop then `continue`d, silently.
-//
-// That is worse than the bug it sat behind: no error, no log line, and nothing
-// dropped, forever. Comparing in SQL lets Postgres parse its own output, and
-// removes the round trip through a rendered string entirely.
+// The bound is compared in SQL rather than rendered and parsed in Go.
+// pg_get_expr renders using the session's TimeZone and DateStyle, so the same
+// bound arrives as `TO ('2026-09-01 05:30:00+05:30')` or
+// `TO ('01/09/2026 00:00:00 UTC')` depending on the connection.
 func (s *store) dropAuditPartitionsOlderThan(ctx context.Context, cutoff time.Time) (dropped []string, err error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT c.relname
@@ -312,10 +290,9 @@ func (o *orgStore) logAction(ctx context.Context, actor, actorEmail, action stri
 	// row's organisation disagree — and that is a bug in this file rather than
 	// a database being unavailable.
 	//
-	// This used to discard the error entirely (`_, _ = s.pool.Exec(...)`). An
-	// audit log that silently stops recording is the failure this codebase has
-	// already been bitten by once, in the TTL sweeper: months of a DELETE that
-	// matched nothing looked exactly like months with nothing to delete.
+	// Discarding the error outright (`_, _ = s.pool.Exec(...)`) leaves an audit
+	// log that silently stops recording, which reads the same as months with
+	// nothing to record.
 	if err != nil {
 		o.db.log.Warn("audit write failed",
 			"action", action, "org", o.org, "actor", actor, "err", err)
@@ -332,11 +309,10 @@ func (o *orgStore) logAction(ctx context.Context, actor, actorEmail, action stri
 // to be written.
 // listAuditLog reads the most recent entries for this organisation.
 //
-// There is no `WHERE org = …` here and that is deliberate: the RESTRICTIVE
-// policy on console.audit_log supplies it, so a query written without one
-// returns nothing rather than everything. A predicate in the SQL would be a
-// second boundary that has to be remembered, and the first thing to go wrong
-// would be somebody adding a query and not remembering it — which is exactly
+// There is no `WHERE org = …` here: the RESTRICTIVE policy on
+// console.audit_log supplies it, so a query written without one returns nothing
+// rather than everything. A predicate in the SQL would be a second boundary to
+// remember, and a query added without it is exactly
 // how this method came to read every organisation's rows in the first place.
 func (o *orgStore) listAuditLog(ctx context.Context, limit int) ([]auditEntry, error) {
 	var out []auditEntry
@@ -426,9 +402,8 @@ func (s *store) createSession(ctx context.Context, c *identity.Claims) (string, 
 		return "", err
 	}
 	// 256 bits of entropy encoded as URL-safe base64 (no padding).
-	// 43 chars vs 64 for hex — same entropy, smaller cookie. Existing
-	// hex-encoded tokens stay valid because session lookup is a plain
-	// string compare; we only emit the new shape going forward.
+	// 43 characters against 64 for hex, at the same entropy. A hex-encoded
+	// token stays valid because session lookup is a plain string compare.
 	token := base64.RawURLEncoding.EncodeToString(b)
 
 	// Never nil.
@@ -480,10 +455,10 @@ var ErrOrgNotProvisioned = errors.New("organisation has no atlantis registered")
 // ErrOrgSignerIncomplete reports a row with some of the four signer columns and
 // not all of them.
 //
-// A third answer, distinct from ErrOrgNotProvisioned on purpose. That one means
-// "there is no atlantis here" and the connection pool treats it as grounds to
-// evict a cached client; this one means "the atlantis is fine, its certificate
-// signer is misconfigured", which must not close a working connection.
+// A third answer, distinct from ErrOrgNotProvisioned. That one means there is
+// no atlantis here, and the connection pool treats it as grounds to evict a
+// cached client; this one means the atlantis is fine and its certificate signer
+// is misconfigured, which must not close a working connection.
 //
 // Distinct from "no signer at all" too: an organisation with none of the four
 // falls back to the process-wide settings, which is the ordinary state of every
@@ -523,10 +498,10 @@ type orgCredentials struct {
 	// handshake. SignerConfigured reports which case this is, and
 	// ErrOrgSignerIncomplete is the third answer for the states in between.
 	//
-	// Deliberately NOT part of the all-or-nothing provisioning check below: a
-	// missing signer means "enrolment is not configured for this organisation",
-	// which is a different thing from "this organisation does not exist", and
-	// conflating them evicts a live client.
+	// Not part of the all-or-nothing provisioning check below: a missing signer
+	// means enrolment is unconfigured for this organisation, which is not the
+	// same as the organisation not existing, and conflating them evicts a live
+	// client.
 	SignerAddr          string
 	SignerCAPEM         string
 	SignerClientCertPEM string
@@ -571,8 +546,8 @@ func (s *store) orgCredentials(ctx context.Context, org string) (*orgCredentials
 		publicEndpoint *string
 
 		// The signer four, read raw. Whether they are usable is decided as a
-		// group, below, and deliberately NOT by the all-or-nothing check that
-		// governs the columns above.
+		// group below, not by the all-or-nothing check governing the columns
+		// above.
 		signerAddr, signerCAPEM, signerCertPEM *string
 		signerKeyCT                            []byte
 	)
@@ -657,31 +632,25 @@ func deref(s *string) string {
 	return *s
 }
 
-// registerOrg stores an organisation's address and credentials, sealing the
-// private key.
-//
-// Used by `cloud org register`. Upserts, so re-registering rotates a
-// certificate in place — and touches updated_at, which is how a running console
-// notices.
 // Associated data for the sealed columns on console.orgs.
 //
-// # Why these are not both the organisation name
+// The two differ. internal/secrets authenticates associated data without
+// storing it, so two ciphertexts sealed with the same associated data are
+// interchangeable: an UPDATE could move one column's bytes into the other and
+// it would decrypt cleanly. Binding to the organisation prevents a key being
+// lifted between organisations, not between columns of one row, and these two
+// keys authenticate to different systems.
 //
-// internal/secrets authenticates the associated data without storing it, so two
-// ciphertexts sealed with the SAME associated data are interchangeable: anybody
-// who can UPDATE this table could move one column's bytes into the other and it
-// would decrypt cleanly. The binding that stops a key being lifted between
-// organisations does nothing about lifting it between columns of one row, and
-// the two keys here authenticate to different systems — one to the
-// organisation's atlantis, one to its signer.
-//
-// clientKeyAAD is the bare organisation name because that is what every row
-// written before this was sealed with, and changing it would make those rows
-// unopenable. New columns name their field as well.
+// clientKeyAAD is the bare organisation name, which is what the existing rows
+// were sealed with; changing it makes them unopenable. New columns name their
+// field as well.
 func clientKeyAAD(org string) []byte { return []byte(org) }
 
 func signerKeyAAD(org string) []byte { return []byte(org + "/signer-client-key") }
 
+// registerOrg stores an organisation's address and credentials, sealing the
+// private key. Upserts, so re-registering rotates a certificate in place and
+// touches updated_at, which is how a running console notices.
 func (s *store) registerOrg(ctx context.Context, c orgCredentials) error {
 	// Refuse a registration that cannot dial, here rather than in the exported
 	// wrapper, so this is the only door and there is no second one that skips
@@ -846,10 +815,9 @@ func (s *store) deleteSession(ctx context.Context, token string) error {
 
 // nullIfEmpty writes an unset optional column as NULL rather than as "".
 //
-// The difference is load-bearing for atl_public_endpoint: NULL means "fall back
-// to atl_endpoint" through the COALESCE in orgCredentials, while an empty
-// string is a value that satisfies COALESCE and hands every caller an address
-// of "".
+// The difference decides atl_public_endpoint: NULL falls back to atl_endpoint
+// through the COALESCE in orgCredentials, while an empty string satisfies
+// COALESCE and hands every caller an address of "".
 func nullIfEmpty(s string) *string {
 	if s == "" {
 		return nil

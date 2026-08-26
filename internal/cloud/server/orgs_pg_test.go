@@ -164,9 +164,9 @@ func TestAnOutsiderCannotTellAnOrganisationExists(t *testing.T) {
 
 // srvOrigin is the origin the fixture's server considers its own.
 //
-// Matches the fixture's PublicURL, which is what sameOrigin compares against —
-// deliberately, rather than the request Host, so that Vite's proxy does not
-// refuse every write in development.
+// Matches the fixture's PublicURL, which sameOrigin compares against rather
+// than the request Host, so Vite's proxy does not refuse every write in
+// development.
 func (f *fixture) srvOrigin() string { return "https://cloud.test" }
 
 // postJSON sends a JSON body with a session cookie and an Origin.
@@ -198,7 +198,7 @@ func (f *fixture) signedIn(t *testing.T, email string) string {
 	return session
 }
 
-// Creating an organisation, which is the whole point of P4.
+// Creating an organisation queues it for provisioning.
 func TestCreatingAnOrganisationQueuesIt(t *testing.T) {
 	f := newFixture(t)
 	session := f.signedIn(t, "creator@example.com")
@@ -351,12 +351,10 @@ func TestCreatingAnOrganisationIsAudited(t *testing.T) {
 	}
 }
 
-// /authorize no longer tells anybody to run a CLI command.
+// /authorize names no CLI command.
 //
-// It said "An operator finishes this with `cloud org register`" for the whole
-// time that was true. It stopped being true when organisations began
-// provisioning themselves, and a message naming a command the reader has no way
-// to run — and no longer needs — is worse than no message.
+// Organisations provision themselves, so a message naming `cloud org register`
+// points at a step nothing performs and no browser can reach.
 func TestAuthorizeDoesNotNameACLICommand(t *testing.T) {
 	f := newFixture(t)
 	session := f.signedIn(t, "waiting@example.com")

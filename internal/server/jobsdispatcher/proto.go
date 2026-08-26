@@ -5,19 +5,16 @@
 // nested pointer fields is non-nil per envelope, which the package's own
 // `atl-json-dispatch` codec encodes directly.
 //
-// Why a tagged union instead of separate RPCs per message type? A
-// single bidi stream is the cleanest way to multiplex (a) server-
-// pushed Dispatch envelopes (b) worker-pushed Ack/Heartbeat/Complete/
-// Fail envelopes over one TLS session per worker pod. Streaming RPCs
-// give us free stream-close detection (worker death) and natural
-// back-pressure (the server's Send blocks when the worker's flow-
-// control window fills).
+// A tagged union rather than one RPC per message type, so a single bidi stream
+// multiplexes server-pushed Dispatch envelopes and worker-pushed
+// Ack/Heartbeat/Complete/Fail envelopes over one TLS session per worker pod.
+// A streaming RPC also carries stream-close detection, which is worker death,
+// and back-pressure: the server's Send blocks when the worker's flow-control
+// window fills.
 //
-// JSON over gRPC is intentional: the admin service already uses this
-// codec and `tide` / the console call it the same way. Adding a
-// streaming JSON service is one more entry in the JSON envelope
-// universe rather than introducing protobuf descriptors that the
-// admin surface deliberately avoids.
+// JSON over gRPC, because the admin service uses this codec and `tide` and the
+// console call it the same way. Protobuf descriptors here would be the only
+// ones on a surface that otherwise has none.
 
 package jobsdispatcher
 

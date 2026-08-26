@@ -33,8 +33,7 @@ func TestAuditForbiddenCalls_FindsStoredSQL(t *testing.T) {
 		src  string
 	}{
 		{
-			// The vector an adversarial review used to defeat the whole design:
-			// a CHECK is emitted verbatim into DDL and PostgreSQL does not
+			// A CHECK is emitted verbatim into DDL, and PostgreSQL does not
 			// require it to be IMMUTABLE, so it fires on every write.
 			name: "entity-level check",
 			src: `

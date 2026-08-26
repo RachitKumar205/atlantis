@@ -25,21 +25,17 @@ import (
 //	2 — mismatch: both sides exist and disagree
 //	3 — operational error (parse / network / config)
 //
-// 3 stays "operational" as it does for plan and apply, so a CI step can tell
-// "your schema and your database differ" from "the command could not run"
-// without parsing output. 1 and 2 are separated because they call for
-// different actions: 1 is usually a `tide apply` away, 2 means somebody
-// changed the database out from under the declaration and no apply will
-// reconcile it.
+// 3 is operational here as it is for plan and apply, so a CI step tells a
+// schema that differs from a command that could not run without parsing output.
 //
-// # What this replaces
+// 1 and 2 are separate because the remedies are: 1 is usually one `tide apply`
+// away, and 2 means the database changed under the declaration, which no apply
+// reconciles.
 //
-// `tidectl adopt --allow-drift` was how an operator found out what differed.
-// That is a flag whose name promises a write, on a command that rewrites the
-// shared checkpoint for every caller — so answering a question required a
-// privilege that could change everything, and a manifest, and a binary
-// callers do not have. This asks the question on its own, at
-// CAPABILITY_SCHEMA_READ, from the caller's own repo.
+// Runs at CAPABILITY_SCHEMA_READ from the caller's own repository and asks only
+// for the comparison. `tidectl adopt --allow-drift` rewrites the shared
+// checkpoint for every caller, and needs a manifest and a binary callers do not
+// have.
 func cmdInspect(args []string) int {
 	fs := flag.NewFlagSet("inspect", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -127,27 +123,15 @@ func cmdInspect(args []string) int {
 	}
 }
 
-// runGenerate writes .atl for tables no declaration mentions.
-//
-// One file per entity. A single file would be one merge conflict for every
-// pair of people onboarding different parts of a schema, and a customer
-// reviewing forty generated tables wants to delete the ones they do not want
-// by deleting files.
-//
-// Never overwrites. A generated file the customer has since edited is the
-// worst thing this command could destroy, and "re-run to refresh" is not worth
-// that risk — they can delete a file to regenerate it.
 // refuseMissingSchema decides whether cmdInspect can proceed without any .atl
 // files, and returns the walk error to report when it cannot.
 //
-// A pure function with the decision in it, rather than two conditions inline,
-// because the inline version could only be tested by grepping cmdInspect's body
-// for identifier names — and that tripwire could not see a `!`. Flipping either
-// negation restored the original bug (`--generate` refusing in the repo it
-// exists for) with the test still green, because a negation is a UnaryExpr and
-// the walk only collected identifiers and literals.
+// A pure function so the decision can be called. Inline, it is testable only by
+// walking cmdInspect's AST for identifiers, and a walk that collects identifiers
+// and literals does not see a `!` — a negation is a UnaryExpr, so flipping
+// either one leaves the test green.
 //
-// The rules, and each one is a case the caller depends on:
+// Four rules:
 //
 //   - Generating tolerates a schema directory that does not exist yet. That is
 //     the fresh-repo case the flag was built for.
@@ -173,24 +157,21 @@ func refuseMissingSchema(generating bool, walkErr error, fileCount int) (bool, e
 // refuses.
 //
 // An entity name reaching here was derived from a table name, and a Postgres
-// identifier is only constrained by what fits inside quotes — `/` and `..`
-// included, and filepath.Join CLEANS its result, so a name containing ".."
-// resolves outside the output directory rather than being neutralised.
+// identifier is bounded only by what fits inside quotes — `/` and `..`
+// included. filepath.Join cleans its result, so a name holding ".." resolves
+// outside the output directory rather than being neutralised.
 //
-// The test is dsl.IsIdentifier, the lexer's own rule, and not a local
-// approximation of it. The first version WAS a local approximation —
-// [A-Za-z0-9_] — and it was wrong in both directions:
+// The test is dsl.IsIdentifier, the lexer's own rule. A local approximation of
+// it, [A-Za-z0-9_], is wrong in both directions:
 //
-//   - Too permissive. "2024Events", from the ordinary legacy table
-//     `2024_events`, passed. A leading digit lexes as a number, so the file it
-//     wrote did not parse, and the customer got a syntax error in a file they
-//     had not written.
-//   - Too strict. "CaféOrders", from `café_orders`, was refused, though
-//     isIdentStart is unicode.IsLetter and the name is a perfectly good
-//     identifier that generated fine before the check existed.
+//   - Too permissive. "2024Events", from the legacy table `2024_events`,
+//     passes. A leading digit lexes as a number, so the emitted file does not
+//     parse.
+//   - Too strict. "CaféOrders", from `café_orders`, is refused, though
+//     isIdentStart is unicode.IsLetter and the name is a valid identifier.
 //
-// Checking identifier validity also settles path safety on its own: no valid
-// identifier contains a separator or a dot.
+// Identifier validity settles path safety on its own: no valid identifier holds
+// a separator or a dot.
 func generatedFileName(entity string) (string, error) {
 	if entity == "" {
 		return "", errors.New("skipped: the server returned an entity with no name")
@@ -202,6 +183,13 @@ func generatedFileName(entity string) (string, error) {
 	return strings.ToLower(entity) + ".atl", nil
 }
 
+// runGenerate writes .atl for tables no declaration mentions.
+//
+// One file per entity, so onboarding different parts of a schema does not
+// collide and unwanted tables are removed by deleting files.
+//
+// Never overwrites: a generated file that has since been edited by hand would
+// be lost. Deleting a file regenerates it.
 func runGenerate(ctx context.Context, client *adminClient, cfg *tideConfig,
 	files []*adminpb.SubmittedFile, outDir, pgSchemas string,
 ) int {

@@ -12,7 +12,7 @@ import (
 )
 
 // execEnv is the per-statement context the executor passes around. It
-// pairs the catalog (schema we trust) with the engine's tables map,
+// pairs the catalog with the engine's tables map,
 // the placeholder args supplied by the caller, and the clock used for
 // now(). proposedRow is non-nil while resolving an ON CONFLICT DO
 // UPDATE assignment — it carries the would-be-inserted row so
@@ -32,10 +32,9 @@ type execEnv struct {
 	scanDesc     *TableDesc // descriptor for the current scan row
 }
 
-// arg returns the value bound to $n. Returns nil for out-of-range
-// references; the parser already validates that placeholders look like
-// positive ints, so the only way to land here is the caller supplied
-// too few args — we signal that as a typed error.
+// arg returns the value bound to $n, and errors when n is out of range. The
+// parser has already checked that placeholders are positive ints, so the only
+// way here is a caller supplying too few args.
 func (e *execEnv) arg(n int) (any, error) {
 	if n < 1 || n >= len(e.args) {
 		return nil, fmt.Errorf("sandbox exec: $%d not bound (got %d args)", n, len(e.args)-1)
@@ -437,10 +436,10 @@ func evalPred(desc *TableDesc, row Row, p simsql.Pred, env *execEnv) (bool, erro
 	return false, fmt.Errorf("sandbox exec: unknown predicate type %T", p)
 }
 
-// equalValues compares two Go values for SQL equality. Nil on either
-// side never equals — matches PG's NULL-as-unknown semantics. Otherwise
-// we rely on Go's == via interface comparison, which works for the
-// scalar types stored in the sim (int64, string, bool, time.Time).
+// equalValues compares two Go values for SQL equality. Nil on either side never
+// equals, matching PG's NULL-as-unknown. Everything else goes through Go's ==
+// on interfaces, which holds for the scalars sim stores: int64, string, bool,
+// time.Time.
 func equalValues(a, b any) bool {
 	if a == nil || b == nil {
 		return false
@@ -1257,12 +1256,10 @@ func toInt64(v any) (int64, bool) {
 	return 0, false
 }
 
-// scanInto writes the named columns from a projected row into the
-// caller-supplied scan destinations. labels[i] is the column / alias
-// name; desc provides catalog-driven type info for column columns; for
-// window-count aliases (which the catalog doesn't know about) the
-// projector pre-assigned int64 values and we route those through the
-// *int64 / *any branches of assign().
+// scanProjected writes a projected row into the caller-supplied scan
+// destinations. desc carries catalog type information for real columns. The
+// catalog does not know window-count aliases, so the projector pre-assigns
+// int64 values for those and they route through assign's *int64 and *any arms.
 func scanProjected(desc *TableDesc, projs []simsql.Projection, row []any, dest []any) error {
 	if len(projs) != len(dest) {
 		return fmt.Errorf("sandbox scan: %d projections vs %d dest", len(projs), len(dest))
@@ -1281,10 +1278,9 @@ func scanProjected(desc *TableDesc, projs []simsql.Projection, row []any, dest [
 	return nil
 }
 
-// scanInto writes the named columns from a row (laid out per the
-// descriptor) into the caller-supplied scan destinations. Used by the
-// INSERT RETURNING / DELETE RETURNING paths where the projection is
-// just `[]string` of column names.
+// scanInto writes the named columns from a row, laid out per desc, into the
+// caller-supplied scan destinations. Used by the INSERT RETURNING and DELETE
+// RETURNING paths, where the projection is a []string of column names.
 func scanInto(desc *TableDesc, row Row, cols []string, dest []any) error {
 	if len(cols) != len(dest) {
 		return fmt.Errorf("sandbox scan: %d cols vs %d dest", len(cols), len(dest))

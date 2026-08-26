@@ -8,23 +8,17 @@ import (
 
 // Turning on `partition by` must not silently strand rows nobody can read.
 //
-// # The failure
-//
 // `''` is legal in a NOT NULL text column and is what a legacy discriminator
 // carries after an ADD COLUMN with a default. Migration 0024 refuses to bind an
-// empty tenant — set_partition('') errors, and current_partition() NULLIFs ''
-// — which is what makes an unbound request fail closed. The consequence at the
-// moment isolation is switched on over that data is that those rows become
-// readable by nobody, with nothing reporting it, because the policy is doing
-// exactly what it says.
+// empty tenant — set_partition('') errors, and current_partition() NULLIFs '' —
+// which is what makes an unbound request fail closed. Switching isolation on
+// over that data leaves those rows readable by nobody, with nothing reporting
+// it, because the policy is doing what it says.
 //
-// # The three cases, and why all three
-//
-// Refusing when rows are stranded is only half a guard. A check that refused
-// every partition_added would also pass that case, and would make the feature
-// unusable — so the clean table is driven too. And the override has to work,
-// or an operator who has decided those rows are expendable has no way through
-// except editing data they meant to abandon.
+// Three cases, because refusing when rows are stranded is half a guard: a check
+// refusing every partition_added passes that case too and makes the feature
+// unusable, so the clean table is driven as well. And the override has to work,
+// or abandoning those rows means editing the data first.
 
 const unreachV1 = `
 entity Doc in unre {

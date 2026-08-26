@@ -158,8 +158,8 @@ func TestSession_FindExpiredLeasesTimeoutBackstop(t *testing.T) {
 func TestSession_FindExpiredLeasesTimeoutNoneNeverFires(t *testing.T) {
 	s := newTestSession(t)
 	now := time.Now()
-	// timeout none → TimeoutMS=0; healthy lease. Nothing should ever
-	// trip the backstop no matter how far in the future we look.
+	// timeout none → TimeoutMS=0, healthy lease. The backstop must not trip at
+	// any point in the future.
 	s.recordDispatch(&Dispatch{JobID: 1, TimeoutMS: 0}, now.Add(100*time.Hour), now.Add(-time.Hour))
 	s.recordAck(1)
 	if got := s.findExpiredLeases(now.Add(50*time.Hour), leaseExpiryGrace, timeoutBackstopGrace); len(got) != 0 {

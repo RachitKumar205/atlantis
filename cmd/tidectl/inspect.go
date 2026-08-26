@@ -20,20 +20,12 @@ import (
 //	2 — mismatch: both sides exist and disagree
 //	3 — operational error (parse / network / config)
 //
-// The same code map as `tide inspect`, deliberately. An operator comparing a
-// deployment-wide run against a caller's own CI run should not have to
-// translate.
+// The same code map as `tide inspect`, so a deployment-wide run and a caller's
+// CI run compare directly.
 //
-// # Why this exists alongside `tide inspect`
-//
-// They answer the same question at different scopes. A caller can only submit
-// files for its own namespace, so `tide inspect` sees its own tables. An
-// operator asking "is this whole deployment consistent with what every caller
-// declares" needs the union, which is what the workspace manifest already
-// resolves for adopt and codegen.
-//
-// This is what an operator used `adopt --allow-drift` for: finding out. Adopt
-// remains for the doing.
+// The same question at a wider scope: `tide inspect` sees one caller's
+// namespace, and this reads the union the workspace manifest resolves for adopt
+// and codegen. `adopt --allow-drift` does the reconciling.
 func cmdInspect(args []string) int {
 	fs := flagSet("inspect")
 	workspaceFile := fs.String("workspace", "atlantis.workspace.yaml", "Path to the workspace manifest.")

@@ -11,37 +11,18 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 )
 
-// Creating an organisation from a browser, which is a different act from
-// creating one at a terminal.
-//
-// `cloud org create` is run by somebody with a shell on the machine, and it is
-// documented as safe to re-run — so CreateOrgWithOwner upserts, and re-running
-// it for an organisation that exists is a no-op by design.
-//
-// Exposed as an HTTP route that anybody who signed up can reach, those same
-// semantics are a privilege-escalation bug: post the name of somebody else's
-// organisation and the memberships upsert makes you its admin, while the orgs
-// upsert overwrites their display name. Nothing refuses, and the response says
-// success.
-//
-// That is why this is a separate function and not a flag on the other one. A
-// shared implementation with `upsert bool` is how the two behaviours get
-// confused again by somebody who has not read this comment.
-
 // ErrOrgLimitReached reports an account that already has as many organisations
 // as it may create.
 //
-// A distinct sentinel because the route answers it differently from every other
-// refusal: it is not the caller's input that is wrong, and telling them to
-// choose another name would be useless advice.
+// A distinct sentinel: the input is not what is wrong, so the route answers it
+// differently from every other refusal.
 var ErrOrgLimitReached = errors.New("organisation limit reached")
 
 // OrgSummary is one organisation as its member sees it.
 //
-// Deliberately does not carry LastError. That column is written for an operator
-// and holds image references, cluster hostnames and API paths — a real one from
-// the local walkthrough contained the full Kubernetes API server URL. The
-// screen gets a state and a count; the detail stays in `cloud org status`.
+// It does not carry LastError, which is written for an operator and holds image
+// references, cluster hostnames and API paths; one produced locally contained
+// the whole Kubernetes API server URL. `cloud org status` reads it.
 type OrgSummary struct {
 	Name        string
 	DisplayName string
@@ -57,45 +38,37 @@ type OrgSummary struct {
 	// what the limit counts. False for the organisations that predate
 	// created_by.
 	//
-	// Deletion is NOT gated on this, though an earlier version of this comment
-	// said it would be. created_by is nullable — ON DELETE SET NULL — so an
-	// organisation whose creator closed their account would have nobody able to
-	// delete it. SoftDeleteOrg checks for an admin membership instead.
+	// Deletion is not gated on this. created_by is nullable under ON DELETE SET
+	// NULL, so an organisation whose creator closed their account would be
+	// undeletable; SoftDeleteOrg checks for an admin membership.
 	CreatedByMe bool
 
 	// PurgeAfter is when a deleted organisation stops being restorable. Nil in
 	// every other state.
 	//
-	// Surfaced rather than left in the database because it is the one fact
-	// somebody looking at a deleted organisation needs: "restorable" and
-	// "restorable until Tuesday" are different messages, and only the second is
-	// actionable.
+	// Surfaced so the screen can render the date rather than compute it: the
+	// window is a property of the row.
 	PurgeAfter *time.Time
 }
 
-// CreateOrgForOwner creates an organisation nobody has taken.
+// CreateOrgForOwner creates an organisation under an unclaimed name. This is
+// the browser-reachable path; CreateOrgWithOwner upserts, so posting a name
+// already in use through it grants admin on the existing organisation.
 //
 // Returns ErrAlreadyExists for a name in use, ErrOrgLimitReached when the
 // account is at its limit, and refuses an invalid or reserved name before it
 // reaches the database.
 //
-// # Why the account's row is locked
+// The transaction locks the account's row and reads the limit in the same
+// statement, which serialises creates for that account. Counting and then
+// inserting bounds nothing under READ COMMITTED, which this pool uses: two
+// concurrent creates both count n-1 and both pass. No constraint expresses "at
+// most N rows per user".
 //
-// The limit is a count, and a count is not a constraint. Counting rows and then
-// inserting inside one transaction bounds nothing under READ COMMITTED, which
-// is what this pool uses: two concurrent creates both count n-1, both pass, and
-// the account ends up one over. There is no constraint that expresses "at most
-// N rows per user" to fall back on.
-//
-// So the transaction takes the account's row first and reads the limit from the
-// same statement. That serialises creates for this account and nothing else.
-//
-// FOR NO KEY UPDATE rather than FOR UPDATE: cloud.memberships, cloud.sessions
-// and cloud.identities all reference cloud.users, and every insert into them
-// takes FOR KEY SHARE on the parent row. FOR UPDATE conflicts with that, so it
-// would block every concurrent sign-in and membership change for this account
-// until the create finished. FOR NO KEY UPDATE excludes another create and
-// nothing else.
+// FOR NO KEY UPDATE rather than FOR UPDATE. cloud.memberships, cloud.sessions
+// and cloud.identities all reference cloud.users, and inserts into them take
+// FOR KEY SHARE on the parent row, which FOR UPDATE conflicts with; that would
+// block every concurrent sign-in for this account until the create finished.
 func (s *Store) CreateOrgForOwner(
 	ctx context.Context, org, displayName, ownerUserID string, role identity.Role,
 ) error {
@@ -156,16 +129,12 @@ func (s *Store) CreateOrgForOwner(
 	})
 }
 
-// OrgsForUser lists what this account can see, with enough to render it.
+// OrgsForUser lists what this account can see, with enough to render it:
+// display name, provisioning state, and whether there is a console to send
+// anybody to. MembershipsOf returns org and role only.
 //
-// MembershipsOf returns org and role only, which is all /authorize needed. A
-// screen needs the display name, how far provisioning has got, and whether
-// there is a console to send anybody to — three tables.
-//
-// LEFT JOIN on org_provisioning because the two organisations registered by
-// hand have no queue row and never will; they are provisioned, just not by the
-// provisioner. They report an empty state rather than being dropped from
-// somebody's list.
+// LEFT JOIN on org_provisioning: an organisation registered by hand has no
+// queue row and would otherwise drop out of its members' lists.
 func (s *Store) OrgsForUser(ctx context.Context, userID string) ([]OrgSummary, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT o.name,
@@ -201,9 +170,9 @@ func (s *Store) OrgsForUser(ctx context.Context, userID string) ([]OrgSummary, e
 
 // OrgForUser reads one organisation this account belongs to.
 //
-// ErrNotFound when the organisation does not exist *or* the account is not a
-// member, and deliberately the same error for both: a route that distinguished
-// them would report which organisations exist to anybody who asked.
+// ErrNotFound when the organisation does not exist or the account is not a
+// member. The same error for both: distinguishing them would enumerate
+// organisations.
 func (s *Store) OrgForUser(ctx context.Context, userID, org string) (*OrgSummary, error) {
 	var o OrgSummary
 	err := s.pool.QueryRow(ctx, `
@@ -226,11 +195,9 @@ func (s *Store) OrgForUser(ctx context.Context, userID, org string) (*OrgSummary
 	return &o, nil
 }
 
-// OrgLimitFor reports how many organisations this account may create.
-//
-// Read separately from the create path, which reads it under a lock in the same
-// statement. This one is for a screen deciding whether to offer a create form
-// at all, rather than offering one that refuses every time.
+// OrgLimitFor reports how many organisations this account may create. For a
+// screen deciding whether to offer a create form; the create path reads the
+// same column under a lock.
 func (s *Store) OrgLimitFor(ctx context.Context, userID string) (int, error) {
 	var limit int
 	err := s.pool.QueryRow(ctx,

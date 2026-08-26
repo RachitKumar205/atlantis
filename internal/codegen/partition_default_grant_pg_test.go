@@ -18,17 +18,16 @@ import (
 //
 // `<table>_default_access` is documented — in partitionDefaultPolicyName's own
 // doc comment and in the reference docs — as the policy an operator drops when
-// they define their own access control. emitPartitionPolicy used to drop and
-// re-create it unconditionally, so the next apply restored `USING (true)`.
+// they define their own access control. An emitPartitionPolicy that dropped and
+// re-created it unconditionally would restore `USING (true)` on the next apply.
 // Permissive policies OR, so that does not put a policy back beside the
 // operator's narrow grants: it makes every one of them stop constraining
-// anything, while pg_policy still lists them all, unchanged, exactly as
-// written.
+// anything, while pg_policy still lists them all exactly as written.
 //
-// The reach is what makes it more than a corner: this function runs from
-// diffPartition when the clause is added and from the partition-rebuild bracket
-// at the end of any migration that moves the discriminator column. A change
-// classified ADDITIVE is enough to undo an access-control model.
+// This function runs from diffPartition when the clause is added, and from the
+// partition-rebuild bracket at the end of any migration that moves the
+// discriminator column, so a change classified ADDITIVE is enough to undo an
+// access-control model.
 //
 // Behavioural rather than a string assertion on the emitted DDL, because the
 // failure is about what a bound caller can READ afterwards — a check on the SQL
@@ -152,9 +151,8 @@ entity Doc in pgrant {
 			t.Fatalf("EmitSQL: %v", err)
 		}
 		// Rolled back: the rest of the test asserts against `partition by
-		// tenant`. Running it inside a transaction still exercises every
-		// statement, which is the point — the DO block either creates the
-		// grant or does not.
+		// tenant`. Running it inside a transaction still executes every
+		// statement, so the DO block either creates the grant or does not.
 		tx, err := admin.BeginTx(ctx)
 		if err != nil {
 			t.Fatalf("begin: %v", err)

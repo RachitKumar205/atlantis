@@ -68,8 +68,8 @@ INSERT INTO atlantis.parked_objects
 		t.Fatalf("got %v, want the 3 unreaped rows. A reaped object listed as "+
 			"recoverable tells somebody their data is still there when it is not", got)
 	}
-	// Soonest to expire first: the question this answers is "what am I about to
-	// lose", so the ordering is part of the answer.
+	// Soonest to expire first: the list answers what is about to be lost, so
+	// the ordering is part of the answer.
 	if got[0] != "lpo_soon" {
 		t.Errorf("first row is %q, want lpo_soon. Rows must be ordered by how "+
 			"soon they stop being recoverable", got[0])
@@ -156,8 +156,7 @@ INSERT INTO atlantis.parked_objects
 // Reaped registrations are retained indefinitely by design, so an unbounded
 // limit is a request to serialize the entire audit history into one message —
 // measured at ~146 MB of heap for 300k rows, on a capability every registered
-// caller holds. And a list whose whole purpose is "what can I still get back"
-// must not silently stop.
+// caller holds. A list of what is still recoverable must not stop silently.
 func TestListParkedObjectsClampsAndReportsTruncation(t *testing.T) {
 	url := os.Getenv("ATLANTIS_TEST_PG")
 	if url == "" {
@@ -188,7 +187,7 @@ SELECT 'table', 'atlantis_tombstone', 'clamp_' || i || '__parked', 'shop', 'clam
 
 	svc := New(pool, Config{})
 
-	// A small explicit limit must truncate AND say so.
+	// A small explicit limit must truncate and report that it did.
 	resp, err := svc.ListParkedObjects(ctx, &adminpb.ListParkedObjectsRequest{Limit: 5})
 	if err != nil {
 		t.Fatalf("ListParkedObjects: %v", err)
@@ -203,9 +202,8 @@ SELECT 'table', 'atlantis_tombstone', 'clamp_' || i || '__parked', 'shop', 'clam
 	}
 
 	// An absurd limit must be clamped rather than honoured. The fixture seeds
-	// more than the ceiling on purpose: with fewer rows than the clamp, an
-	// unclamped server returns the same answer as a clamped one and the
-	// assertion cannot fail.
+	// more rows than the ceiling: below the clamp, an unclamped server returns
+	// the same answer as a clamped one and the assertion cannot fail.
 	huge, err := svc.ListParkedObjects(ctx, &adminpb.ListParkedObjectsRequest{Limit: 2147483647})
 	if err != nil {
 		t.Fatalf("ListParkedObjects(huge): %v", err)

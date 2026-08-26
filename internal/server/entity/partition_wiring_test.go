@@ -213,9 +213,8 @@ func TestEveryTransactionBindsTheTenant(t *testing.T) {
 
 // The exemption list must not quietly grow.
 //
-// Adding a file to poolExempt is how this test gets defeated without anybody
-// noticing — the diff reads as one line of config. Pinning the contents makes
-// widening it a deliberate edit to an assertion that says why.
+// Adding a file to poolExempt defeats the test above in one line of config.
+// Pinning the contents makes widening it an edit to an assertion that says why.
 func TestPoolExemptionsAreOnlyTheScopingItself(t *testing.T) {
 	if len(poolExempt) != 1 {
 		t.Errorf("poolExempt has %d entries, want exactly 1. Every addition is a "+

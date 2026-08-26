@@ -16,11 +16,9 @@ import (
 // Lists objects a destructive migration parked instead of dropping, and how
 // long each one is still recoverable for.
 //
-// The question this answers is "I removed something, can I still get it back",
-// and until this existed the only way to ask it was a SELECT against
-// atlantis.parked_objects — a table no command, page or doc mentioned. A
-// recovery window nobody can see is not meaningfully different from no
-// recovery window.
+// It answers whether a removed object can still be recovered. The only other
+// route to that is a SELECT against atlantis.parked_objects, which no command,
+// page or doc names.
 func cmdParked(args []string) int {
 	fs := flag.NewFlagSet("parked", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -104,8 +102,8 @@ func printParkedTable(resp *adminpb.ListParkedObjectsResponse, all bool) {
 			state = cliout.Green("recoverable")
 			if reapAfter, err := time.Parse(time.RFC3339, o.GetReapAfter()); err == nil {
 				window = humanUntil(reapAfter.Sub(now))
-				// Under a week is roughly the window in which somebody
-				// returning from leave can still change their mind.
+				// Under a week is the window a return from leave still fits
+				// inside.
 				if reapAfter.Sub(now) < 7*24*time.Hour {
 					window = cliout.Yellow(window)
 				}
@@ -145,8 +143,8 @@ func printParkedTable(resp *adminpb.ListParkedObjectsResponse, all bool) {
 // in printParkedTable.
 const stuckAttempts = 2
 
-// humanUntil renders a retention window the way somebody deciding whether they
-// still have time would read it.
+// humanUntil renders a retention window as a short duration, or "due now" once
+// it has passed.
 func humanUntil(d time.Duration) string {
 	if d <= 0 {
 		return "due now"

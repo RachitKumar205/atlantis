@@ -6,21 +6,19 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
-// atlantisTableRe matches `atlantis.<ident>` — atlantis's flat-name
-// convention for entity tables (`<namespace>_<snake_entity>` under the
-// `atlantis` schema). User-authored SQL inside `procedure` and `query`
-// touches blocks references tables by this form because it's where
-// atlantis stored them historically. When an entity declares `table
-// "..."` to point at a pre-existing prod table, the auto-emitted CRUD
-// follows the override but the user's hand-written SQL still names the
-// atlantis-managed location — so we rewrite the references at emit
-// time. Entities without an override map back to the same name they
-// started with (modulo proper quoting); the function is a no-op for
-// schemas that use atlantis's default layout.
+// atlantisTableRe matches `atlantis.<ident>` — atlantis's flat-name convention
+// for entity tables (`<namespace>_<snake_entity>` under the `atlantis` schema),
+// which is the form user-authored SQL inside `procedure` and `query touches`
+// blocks names them by.
 //
-// Matched against the raw SQL rather than its parsed AST because in
-// practice users never put table names inside string literals; if a
-// real case emerges we'd switch to a pg_query_go walk.
+// When an entity declares `table "..."` to point at a pre-existing table, the
+// auto-emitted CRUD follows the override while the hand-written SQL still names
+// the atlantis-managed location, so the references are rewritten at emit time.
+// Entities without an override map back to the name they started with, modulo
+// quoting, so this is a no-op for the default layout.
+//
+// Matched against the raw SQL rather than its parsed AST: a table name inside a
+// string literal would need a pg_query_go walk instead.
 var atlantisTableRe = regexp.MustCompile(`\batlantis\.([a-zA-Z_][a-zA-Z0-9_]*)\b`)
 
 // rewriteAtlantisTableRefs substitutes atlantis-flat-name table

@@ -8,29 +8,18 @@ import (
 // The code `tidectl codegen` emits is what callers deploy, and it has to bind
 // the tenant on every path that touches a partitioned table.
 //
-// # Why this test exists
+// atlantis serves entities from two places, and only one of them is the
+// dynamic dispatcher in internal/server/entity. An emitter that calls
+// set_partition on no handler and carries a tenant predicate only in Query
+// leaves scoped: Get, List and BatchGet on a single-PK entity, which delegate
+// to Query and inherit its predicate. Unscoped: the primary-key fetch after a
+// query-cache hit, the Create and Update read-backs, Delete, vector search, the
+// include-attach helper, and every custom query and procedure. The cache key
+// omits the tenant too, so one tenant is served another tenant's primary keys.
 //
-// atlantis serves entities from two places. The dynamic dispatcher in
-// internal/server/entity was fixed to bind on all eight of its paths, tested
-// end to end against a restricted role, and mutation-tested. The emitter was
-// never touched. A review emitted a `partition by` entity and found:
-//
-// no handler called set_partition, and only Query carried a tenant predicate.
-//
-// Be precise about what that did and did not mean, because the first version
-// of this comment overstated it and a review corrected me. On a single-PK
-// entity, Get, List and BatchGet DELEGATE to Query, so they inherited its
-// predicate and were scoped. What was genuinely unscoped: the primary-key
-// fetch after a query-cache hit, the Create and Update read-backs, Delete,
-// vector search, the include-attach helper, and every custom query and
-// procedure. The cache key also omitted the tenant, so one tenant could be
-// served another tenant's primary keys.
-//
-// A predicate is also not the same guarantee as a binding. It is what the
-// emitter can forget, and it forgot on every path above.
-//
-// So this asserts the property in the terms a caller would state it: **no
-// statement against a partitioned entity runs without the tenant bound.**
+// A predicate is not the same guarantee as a binding, and it is what the
+// emitter can forget. The property asserted is that no statement against a
+// partitioned entity runs without the tenant bound.
 func TestEmitGoServer_PartitionedEntityBindsEveryRead(t *testing.T) {
 	ir := lower(t, `
 entity Doc in shop {
@@ -202,15 +191,11 @@ entity Line in shop {
 // EVERY emitted shape, for a partitioned entity, must reach the database only
 // through a bound transaction.
 //
-// # Why this test replaces a narrower one
-//
-// The first version of the "no statement on the bare pool" assertion ran
-// against a single entity with one primary key and no inbound references. It
-// read like a class assertion and was not one: the fixture simply never caused
-// the leaking code to be emitted. A review added an entity with an inbound
-// reference to that same fixture and the count went from 0 to 1 — the
-// include-attach helper read the child table unbound, and returned another
-// tenant's rows in a live database.
+// A "no statement on the bare pool" assertion run against a single entity with
+// one primary key and no inbound references reads like a class assertion and is
+// not one: the fixture never causes the leaking code to be emitted. Adding an
+// entity with an inbound reference takes the count from 0 to 1, because the
+// include-attach helper reads the child table unbound.
 //
 // Two more shapes had a bind that no test could kill: the fallback BatchGet
 // (chosen when the primary-key type has no typed in-list arm) and vector
@@ -340,10 +325,9 @@ procedure BlankDoc for Doc {
 // it with runtime.BindWrite as the first statement, and ScopedRead/ScopedQuerier
 // call BeginTx themselves.
 //
-// Matching on "s.DB." rather than on a list of method names is deliberate. A
-// list of Query/Exec misses QueryRow, SendBatch, CopyFrom and anything added to
-// the interface later, and this defect was created twice by reasoning about a
-// list of call sites instead of the property.
+// Matching on "s.DB." rather than on a list of method names: a list of
+// Query/Exec misses QueryRow, SendBatch, CopyFrom and anything added to the
+// interface later.
 func assertNoBarePoolStatements(t *testing.T, path, src string) {
 	t.Helper()
 	// "s.DB", not "s.DB." — the trailing dot lets an ALIAS through:

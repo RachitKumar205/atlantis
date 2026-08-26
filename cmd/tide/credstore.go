@@ -19,25 +19,21 @@ import (
 //	    endpoint      the address callers dial
 //	    enroll_url    where to renew
 //
-// # Keyed by organisation AND caller
+// Keyed by organisation and caller. One developer with two repositories in one
+// organisation is ordinary, and keying by organisation alone would make the
+// second `tide login` overwrite a key whose certificate is still live.
 //
-// One developer with two repositories in one organisation is ordinary. Keyed by
-// organisation alone, the second `tide login` would have to overwrite the first
-// machine's key — and the certificate that key belongs to is still live.
-//
-// # One file for the key and the certificate
-//
-// Renewal replaces them together. As two files there is a window where a crash
-// pairs a new certificate with an old key, and tls.LoadX509KeyPair then fails
-// with "private key does not match public key" — which is unrecoverable by
-// running login again, because login refuses to overwrite a key. As one file it
-// is a single atomic rename and no such state exists.
+// The key and the leaf share one file, because renewal replaces them together.
+// As two files, a crash can pair a new certificate with an old key, and
+// tls.LoadX509KeyPair then fails with "private key does not match public key",
+// which running login again cannot fix because it refuses to overwrite a key.
+// One file is a single atomic rename.
 //
 // ca.crt and endpoint are not rewritten by renewal in the ordinary case, so
 // they carry no such requirement.
 
-// storeRoot is the directory the store lives under. Overridable for tests, and
-// for anybody who keeps their home directory somewhere unusual.
+// storeRoot is the directory the store lives under. Overridable, for tests and
+// for an unusual home directory.
 func storeRoot() (string, error) {
 	if v := os.Getenv("ATLANTIS_HOME"); v != "" {
 		return v, nil
@@ -176,16 +172,12 @@ func leafOf(clientPEM []byte) (*x509.Certificate, error) {
 
 // writeNewCredentials creates a store entry, refusing to replace one.
 //
-// # O_EXCL, and why only here
+// Opened O_EXCL. The key in an existing entry belongs to a certificate that is
+// probably still live at atlantis, so overwriting it would leave the machine
+// holding material for an identity it can no longer prove.
 //
-// The key in an existing entry belongs to a certificate that is very likely
-// still live at atlantis. Overwriting it silently would leave a machine holding
-// material for an identity it can no longer prove, with nothing to say what
-// happened. So a second `tide login` for the same pair is refused and says so.
-//
-// Renewal is the opposite case and uses replaceClientPEM below: it is *meant*
-// to replace, it has just proved possession of the certificate being replaced,
-// and it writes by rename so there is no torn state.
+// Renewal uses replaceClientPEM below, which is meant to replace, has just
+// proved possession of the certificate it replaces, and writes by rename.
 func writeNewCredentials(c *storedCredentials) error {
 	dir, err := credDir(c.Org, c.Caller)
 	if err != nil {
@@ -264,8 +256,8 @@ func replaceClientPEM(dir string, clientPEM []byte) error {
 
 // callersInStore lists the callers enrolled for an organisation.
 //
-// Used to resolve `caller` when a repository does not name one, and to tell
-// somebody what they have when a lookup misses.
+// Resolves `caller` when a repository names none, and fills the error when a
+// lookup misses.
 func callersInStore(org string) ([]string, error) {
 	root, err := storeRoot()
 	if err != nil {

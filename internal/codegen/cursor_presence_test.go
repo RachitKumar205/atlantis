@@ -13,28 +13,20 @@ import (
 // The emitted server names proto fields as strings; this holds the two
 // emitters together.
 //
-// # What this guards
-//
 // A nullable ordering column's cursor value goes through
-// runtime.PresentOrNil(ent, "score", ent.GetScore()), where "score" is a
-// STRING that has to name a real field of the entity's proto message.
-// PresentOrNil returns its input unchanged for a name it cannot resolve, which
-// is the right failure mode at runtime — the alternative, returning nil, would
-// make every row look NULL — but it means a misspelled or renamed field is
-// silent: paging quietly goes back to the pre-fix behaviour of dropping every
-// row past the first NULL, with nothing failing anywhere.
+// runtime.PresentOrNil(ent, "score", ent.GetScore()), where "score" is a string
+// that has to name a real field of the entity's proto message. PresentOrNil
+// returns its input unchanged for a name it cannot resolve — returning nil
+// would make every row look NULL — so a misspelled or renamed field is silent,
+// and paging goes back to dropping every row past the first NULL.
 //
-// Nothing else can catch this. The emitted server is only PARSED by these tests
-// (#68), never type-checked, so a bad string is not a compile error here, and in
-// the caller's repo it is not a compile error at all — it is a valid string
-// literal. So the pairing has to be asserted directly, against the proto this
-// same run emits.
+// The emitted server is parsed by these tests, never type-checked, so a bad
+// string is not a compile error here; in the caller's repo it is a valid string
+// literal. The pairing is asserted against the proto this same run emits.
 //
-// # Why both directions
-//
-// Checking only that emitted names resolve would pass vacuously if codegen
-// stopped emitting PresentOrNil at all and went back to the bare getter. The
-// second half asserts the split itself: nullable orderable fields go through
+// Both directions. Checking only that emitted names resolve passes vacuously if
+// codegen stops emitting PresentOrNil and goes back to the bare getter, so the
+// second half asserts the split: nullable orderable fields go through
 // PresentOrNil, NOT NULL ones do not.
 func TestEmittedCursorFieldsExistInTheProto(t *testing.T) {
 	ir := lower(t, `
@@ -120,9 +112,9 @@ func presentOrNilFields(src string) []string {
 }
 
 // protoFieldNames parses the field names out of one message in an emitted
-// .proto. This reads the emitted text rather than the dsl.Entity on purpose:
-// the entity is what BOTH emitters were built from, so comparing the server
-// against it would agree even if the proto emitter dropped or renamed a field.
+// .proto. It reads the emitted text rather than the dsl.Entity: the entity is
+// what both emitters were built from, so comparing the server against it would
+// agree even if the proto emitter dropped or renamed a field.
 func protoFieldNames(t *testing.T, files []ProtoFile, path, message string) map[string]bool {
 	t.Helper()
 	var content string

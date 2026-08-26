@@ -12,23 +12,19 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/dsl/sqlvalidate"
 )
 
-// cmdPlan diffs the .atl file set against the IR checkpoint and writes a
-// staged migration pair into <stage-dir>. The staged files are NOT placed
-// directly in migrations/ — that's `tidectl promote`'s job (the human
-// review gate).
+// cmdPlan diffs the .atl file set against the IR checkpoint and writes a staged
+// migration pair into <stage-dir>. `tidectl promote` is what moves them into
+// migrations/.
 //
-// Exit code:
+// Exit codes:
 //
-//	0 — plan emitted (or no changes).
-//	1 — plan emitted but contains backfill-required or breaking changes;
-//	    caller must add --destructive to the approve step.
-//	2 — bad args / IO error.
+//	0 — plan emitted, or no changes
+//	1 — plan emitted, carrying backfill-required or breaking changes
+//	2 — bad args or IO error
 //
-// A staged migration is named NNNN_tidectl_staged.up.sql / .down.sql, where
-// NNNN is the next sequence number derived from the existing migrations
-// directory. If you stage two consecutive plans without approving the
-// first, the second will overwrite the first staged pair — staging is a
-// scratch area by design.
+// A staged pair is NNNN_tidectl_staged.up.sql / .down.sql, NNNN being the next
+// sequence number after the migrations directory. Staging is a scratch area: a
+// second plan overwrites the first staged pair.
 func cmdPlan(args []string) int {
 	fs := flagSet("plan")
 	schemaDir := fs.String("schema-dir", "schema", "Directory containing .atl files")

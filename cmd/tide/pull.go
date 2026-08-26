@@ -27,9 +27,9 @@ import (
 //	        <entity>.atl    ← exactly what the server returned
 //	    version.json        ← {"version": "abc123..."} from the last pull
 //
-// `.tide-cache/` is gitignored (recommended in docs/DSL_AUTHORING.md). The
-// version file lets a subsequent `tide pull` ask the server "anything new
-// since N?" and no-op when nothing has changed.
+// `.tide-cache/` belongs in .gitignore; docs/reference/cli-tide.md says so. The
+// version file lets a later `tide pull` ask the server whether anything has
+// changed since N, and no-op when nothing has.
 
 const (
 	tideCacheDir  = ".tide-cache"

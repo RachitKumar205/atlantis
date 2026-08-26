@@ -5,7 +5,7 @@
 -- Until now the only way to get one was `cloud org create`, run by somebody who
 -- already had a shell on the machine, and neither question came up.
 
--- ── Who created it ──────────────────────────────────────────────────────────
+-- Who created it.
 --
 -- cloud.memberships records who may act in an organisation. It has never
 -- recorded who *made* one — `CreateOrgWithOwner`'s "owner" is nothing more than
@@ -37,7 +37,7 @@ ALTER TABLE cloud.orgs
 CREATE INDEX IF NOT EXISTS orgs_created_by ON cloud.orgs (created_by)
     WHERE created_by IS NOT NULL;
 
--- ── How many one account may create ─────────────────────────────────────────
+-- How many one account may create.
 --
 -- A per-account column rather than one global setting, so a single account can
 -- be raised without a migration or a deploy. There is no admin surface to

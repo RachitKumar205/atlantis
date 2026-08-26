@@ -12,11 +12,8 @@ import (
 // consumer ring buffer of slog records. It is the source of truth for
 // the console's Health page log tail.
 //
-// # Hot-path latency
-//
-// Every slog.Info / Warn / Error call on the server flows through the
-// tee handler that drives this ring. atlantis serves admin RPCs at
-// millisecond-level latencies, so the append path must be:
+// Every slog.Info, Warn and Error call on the server flows through the tee
+// handler driving this ring, so the append path must be:
 //
 //   - Non-blocking (no mutex contention can spike RPC P99 latencies).
 //   - Allocation-bounded (a fresh Record per emit, garbage-collected as
@@ -29,15 +26,10 @@ import (
 // JSON/Text handler that emits to stdout is the dominant cost
 // (~500 ns - 2 µs), unchanged from before. See logring_bench_test.go.
 //
-// # Drop semantics
-//
-// When the ring is full, new writes overwrite the oldest slot. A slow
-// reader can never back-pressure a fast writer — by design. The reader
-// detects skipped sequences by comparing the slot's recorded Seq to
-// the index it is reading; a mismatch means that slot was overwritten
-// and is silently skipped.
-//
-// # Read path
+// When the ring is full, a write overwrites the oldest slot, so a slow reader
+// cannot back-pressure a fast writer. The reader detects a skipped sequence by
+// comparing the slot's recorded Seq to the index it is reading; a mismatch
+// means the slot was overwritten, and it is skipped.
 //
 // Since() takes a cursor and returns every record with Seq > since,
 // bounded by the ring's capacity. The reader takes a snapshot of head
@@ -68,8 +60,8 @@ type Record struct {
 	Attrs []KV
 }
 
-// KV is a single attribute key/value pair, with the value pre-rendered
-// to string so the reader doesn't depend on slog.Value internals.
+// KV is one attribute pair, its value pre-rendered to a string so a reader
+// depends on no slog.Value internals.
 type KV struct {
 	Key, Val string
 }
@@ -161,14 +153,9 @@ func (r *LogRing) Since(since uint64) (recs []Record, head uint64) {
 	return out, head
 }
 
-// ---------------------------------------------------------------------------
-// slog.Handler tee
-// ---------------------------------------------------------------------------
-
-// RingHandler is a slog.Handler that forwards every Record to a
-// downstream handler (typically the existing JSON or Text handler
-// writing to stdout) AND publishes a copy into a LogRing for the
-// console's log tail.
+// RingHandler is a slog.Handler that forwards every Record to a downstream
+// handler — the JSON or Text handler writing to stdout — and publishes a copy
+// into a LogRing for the console's log tail.
 //
 // The downstream handler runs first and unchanged; the ring publish
 // step happens after. If the downstream handler panics or errors,

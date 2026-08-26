@@ -10,10 +10,10 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
-// TestDetectColumnTypeDrift_EndToEnd reproduces the vendor_cart_id shape: the
-// live column is varchar(10) while the .atl declares varchar(255). The
-// detector must report the width drift, report nothing when they match, and
-// not false-positive on serial/timestamptz/numeric canonicalization.
+// TestDetectColumnTypeDrift_EndToEnd drives the narrowing shape: the live column
+// is varchar(10) where the .atl declares varchar(255). The detector reports the
+// width drift, reports nothing when the two match, and does not fire on
+// serial, timestamptz or numeric canonicalization.
 //
 //	ATLANTIS_TEST_PG=postgres://atlantis:pw@localhost:55432/atlantis?sslmode=disable \
 //	  go test ./internal/introspect/ -run ColumnTypeDrift_EndToEnd -v

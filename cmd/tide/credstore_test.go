@@ -103,11 +103,9 @@ func TestTheKeyIsWrittenPrivately(t *testing.T) {
 	}
 }
 
-// TestLoginRefusesToReplaceAKey.
-//
-// The existing key belongs to a certificate very likely still live at atlantis.
-// Overwriting it would leave the machine holding material for an identity it
-// can no longer prove, with nothing to say what happened.
+// The existing key belongs to a certificate atlantis probably still accepts.
+// Overwriting it leaves the machine holding material for an identity it cannot
+// prove, and nothing records the swap.
 func TestLoginRefusesToReplaceAKey(t *testing.T) {
 	storeFixture(t)
 	first := fakeCredentials(t, "acme", "backend")

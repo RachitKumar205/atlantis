@@ -29,14 +29,12 @@ var allowedHandlerGuards = map[string]bool{
 // TestNoHandlerRollsItsOwnAuthorization fails when a method on Service calls
 // something that looks like a hand-written authorization check.
 //
-// The bug this package spent a phase removing was not any particular gate being
-// wrong. It was that authorization lived in method bodies, so whether an RPC
-// was protected depended on whether its author remembered to protect it — and
-// one forgotten call site was indistinguishable from a deliberate public
-// endpoint. Capabilities are declared in admin.proto and enforced by an
-// interceptor precisely so that omission is impossible. A new authorize* helper
-// in a handler would quietly reopen that door for whatever methods happened to
-// call it.
+// Authorization living in method bodies makes an RPC protected only if its
+// author remembered to protect it, and one forgotten call site is
+// indistinguishable from an intentionally public endpoint. Capabilities are
+// declared in admin.proto and enforced by an interceptor so that omission is
+// impossible; a new authorize* helper in a handler reopens the gap for whatever
+// methods call it.
 //
 // This matches on naming, so `gateOperator` or `ensureCaller` would slip past
 // it. That is a real limit and the reason it is one of two tests here rather

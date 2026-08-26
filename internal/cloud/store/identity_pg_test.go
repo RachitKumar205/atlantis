@@ -14,12 +14,9 @@ import (
 
 const somePasswordHash = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0$aGFzaGhhc2hoYXNoaGFzaA"
 
-// A provider account belongs to one Cloud account, and linking it elsewhere is
-// refused rather than ignored.
-//
-// The refusal is the whole point. The first version of LinkIdentity took the
-// conflict branch, updated provider_email, and returned nil — so the caller was
-// told the link was made while it still pointed at the other account.
+// Without `WHERE cloud.identities.user_id = EXCLUDED.user_id` the conflict
+// branch updates provider_email and returns nil, so the caller is told the link
+// was made while it still points at the other account.
 func TestLinkingAClaimedProviderAccountIsRefused(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -42,8 +39,8 @@ func TestLinkingAClaimedProviderAccountIsRefused(t *testing.T) {
 		t.Fatalf("linking a claimed account returned %v, want ErrIdentityClaimed", err)
 	}
 
-	// And it did not move. Asserted separately, because the error alone does
-	// not prove the write was refused rather than reported after the fact.
+	// And it did not move: the error alone does not prove the write was
+	// refused.
 	owner, err := db.UserByIdentity(ctx, "github", "4242")
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -82,7 +79,6 @@ func TestRelinkingYourOwnAccountSucceeds(t *testing.T) {
 	}
 }
 
-// An account with no password and one link cannot remove it.
 func TestUnlinkingTheOnlyWayInIsRefused(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -107,16 +103,11 @@ func TestUnlinkingTheOnlyWayInIsRefused(t *testing.T) {
 	}
 }
 
-// Two links from ONE provider are still only one way in.
-//
-// # Why this test exists
-//
-// It is the case the first version of the guard got wrong. UnlinkIdentity
-// deletes every row for the named provider, but the predicate counted all of
-// the user's identities and asked for more than one — which two GitHub links
-// satisfy. Both rows went, and the account was left with no password and no
-// identity: exactly the lockout the guard is for. One user can hold two links
-// from one provider because the key is (provider, provider_subject).
+// One user can hold two links from one provider, because the key is
+// (provider, provider_subject). UnlinkIdentity deletes every row for the named
+// provider, so a predicate counting all of the user's identities and asking for
+// more than one is satisfied by those two, deletes both, and leaves an account
+// with no password and no identity.
 func TestTwoLinksFromOneProviderAreStillOneWayIn(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -143,12 +134,9 @@ func TestTwoLinksFromOneProviderAreStillOneWayIn(t *testing.T) {
 	}
 }
 
-// A second provider makes the first removable, and removing it reports success
-// rather than "not found".
-//
-// The success half is not incidental: deleting more than one row used to fall
-// through to the "was it even linked?" branch and answer ErrNotFound after
-// having deleted everything.
+// A second provider makes the first removable, and removing two rows must
+// report success. A row count checked for exactly one falls through to the "was
+// it even linked?" branch and answers ErrNotFound after deleting everything.
 func TestUnlinkingIsAllowedWhenAnotherWayInRemains(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -209,13 +197,9 @@ func TestAPasswordMakesALinkRemovable(t *testing.T) {
 	}
 }
 
-// An empty password hash is not a password.
-//
-// User.HasPassword() treats "" as no password. If the SQL predicate disagreed —
-// `password_hash IS NOT NULL` alone does — an account Go considers
-// password-less could unlink its only identity and be locked out. Nothing
-// writes an empty hash today; the test is here so the two definitions cannot
-// drift apart later without something failing.
+// User.HasPassword treats "" as no password. `password_hash IS NOT NULL` alone
+// disagrees, and an account Go considers password-less could then unlink its
+// only identity and be locked out. Nothing writes an empty hash today.
 func TestAnEmptyPasswordHashIsNotAWayIn(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -238,7 +222,6 @@ func TestAnEmptyPasswordHashIsNotAWayIn(t *testing.T) {
 	}
 }
 
-// Unlinking something that was never linked is reported as such.
 func TestUnlinkingWhatIsNotLinkedIsNotFound(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -253,7 +236,6 @@ func TestUnlinkingWhatIsNotLinkedIsNotFound(t *testing.T) {
 	}
 }
 
-// One account cannot unlink another's provider.
 func TestUnlinkingIsScopedToTheAccount(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -314,12 +296,9 @@ func TestCreatingAnAccountFromAProviderIsOneStep(t *testing.T) {
 	}
 }
 
-// A claimed provider account leaves no half-made user behind.
-//
-// This is the rollback. The user row is inserted first, so a failure at the
-// identity insert has already written one — and if the transaction did not take
-// it back, the address would be occupied by an account nobody can reach, and
-// the retry would collide with it on the UNIQUE constraint.
+// The user row is inserted first, so a failure at the identity insert has
+// already written one. Without the rollback the address is occupied by an
+// account nobody can reach, and the retry collides on the UNIQUE constraint.
 func TestAFailedProviderSignUpLeavesNoAccount(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()

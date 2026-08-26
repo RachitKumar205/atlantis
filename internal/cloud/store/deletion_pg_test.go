@@ -11,9 +11,9 @@ import (
 
 // deletable makes one ready organisation with an admin and a viewer.
 //
-// Ready, not pending: SoftDeleteOrg is guarded on `ready`, so a fixture that
-// left the row pending would make every test here pass for the wrong reason —
-// the guard would refuse before any of the logic under test ran.
+// Ready, not pending: SoftDeleteOrg is guarded on 'ready', so a fixture that
+// left the row pending would have every test here pass on the guard rather
+// than on the logic under test.
 func deletable(t *testing.T, db *Store, org string) (adminID, viewerID string) {
 	t.Helper()
 	ctx := context.Background()
@@ -63,9 +63,6 @@ func TestSoftDeleteNeedsAnAdminAndLeavesTheOrgIntact(t *testing.T) {
 		t.Errorf("state is %q after a refused delete, want ready", got)
 	}
 
-	// A stranger gets ErrNotFound rather than ErrNotPermitted, which is the
-	// difference between "you may not" and "there is nothing here". Telling a
-	// stranger the second would report which organisations exist.
 	outsider, err := db.CreateUser(ctx, "outsider@example.test", "Out", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -83,11 +80,8 @@ func TestSoftDeleteNeedsAnAdminAndLeavesTheOrgIntact(t *testing.T) {
 	}
 }
 
-// A second delete must not move the window.
-//
-// Without the `state = 'ready'` guard a retry — of a request the caller thought
-// had failed, or a double-clicked button — would push purge_after further out
-// and silently extend a window somebody is counting on.
+// Without the state = 'ready' guard a retry would push purge_after further out
+// and extend a window somebody is counting on.
 func TestASecondDeleteDoesNotMoveTheWindow(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -138,9 +132,8 @@ func TestRestoreReturnsItToService(t *testing.T) {
 		t.Fatalf("state is %q after restore, want ready", got)
 	}
 
-	// The window is cleared, not merely ignored. A restored organisation with a
-	// purge_after still set is one the reaper would take the moment that date
-	// passed — an organisation destroyed weeks after somebody restored it.
+	// purge_after is cleared. Left set, the reaper takes the organisation the
+	// moment that date passes, weeks after somebody restored it.
 	var after *time.Time
 	if err := db.pool.QueryRow(ctx,
 		`SELECT purge_after FROM cloud.org_provisioning WHERE org = 'delrestore'`).
@@ -152,7 +145,6 @@ func TestRestoreReturnsItToService(t *testing.T) {
 	}
 }
 
-// The reaper waits, and this is the assertion the whole design rests on.
 func TestThePurgeClaimWaitsForTheWindow(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -181,9 +173,8 @@ func TestThePurgeClaimWaitsForTheWindow(t *testing.T) {
 		t.Fatalf("state is %q after a claim, want purging", got)
 	}
 
-	// Claimed once. A second reaper must not take the same organisation while
-	// the first holds the lease — two provisioners destroying one namespace is
-	// a race whose loser reports an error about an object that is already gone.
+	// A second reaper must not take the organisation while the first holds the
+	// lease: two provisioners would tear down one namespace.
 	if _, err := db.ClaimForPurge(ctx, "reaper-2", time.Minute); !errors.Is(err, ErrNothingToPurge) {
 		t.Errorf("a second reaper claimed an organisation already being purged: %v", err)
 	}
@@ -204,7 +195,7 @@ func TestAnExpiredPurgeLeaseIsReclaimed(t *testing.T) {
 	if _, err := db.ClaimForPurge(ctx, "died", time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	// The lease expires where the process did not.
+	// Expire the lease without stopping the claimant.
 	if _, err := db.pool.Exec(ctx,
 		`UPDATE cloud.org_provisioning SET claimed_until = NOW() - interval '1 minute'
 		  WHERE org = 'delstale'`); err != nil {
@@ -257,25 +248,19 @@ func TestPurgeRemovesEveryTrace(t *testing.T) {
 		}
 	}
 
-	// The name is free again, which is what makes `cloud org purge` an answer to
-	// "delete it and make a fresh one with the same name".
+	// The name is free again, which is what `cloud org purge` is for.
 	if err := db.CreateOrgWithOwner(ctx, "delgone", "Again", adminID, identity.RoleAdmin); err != nil {
 		t.Errorf("the name is still taken after a purge: %v", err)
 	}
 }
 
-// Deleting must hide the organisation from the two queries that would otherwise
-// undo it.
+// Neither ReadyOrgs nor Requeue mentions deletion; both filter on
+// state = 'ready', so a later change to either would remove the protection
+// without looking like it touched deletion.
 //
-// Neither ReadyOrgs nor Requeue mentions deletion — they filter on
-// `state = 'ready'`, and the guard is a consequence of the state machine rather
-// than a condition anybody wrote. That is exactly why it is asserted: a later
-// change to either query would remove the protection without looking like it
-// touched deletion at all.
-//
-// The reconcile loop calls ReadyOrgs and re-Ensures everything it returns. A
-// deleted organisation appearing there would have its namespace rebuilt while
-// it waited to be destroyed, which presents as the data coming back.
+// The reconcile loop re-Ensures everything ReadyOrgs returns, so a deleted
+// organisation appearing there has its namespace rebuilt while it waits to be
+// destroyed.
 func TestADeletedOrgIsInvisibleToReconcileAndRequeue(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()

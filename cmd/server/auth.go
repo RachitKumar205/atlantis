@@ -25,15 +25,11 @@ import (
 //   - Clients are REQUIRED to present a cert signed by TLSCAFile.
 //   - ClientAuth = RequireAndVerifyClientCert.
 //
-// # Why there is no insecure mode
-//
-// There used to be one, taken whenever TLS_CERT_FILE was empty, and it did far
-// more than skip encryption. The same emptiness turned off the caller
-// allowlist, the caller-to-cert binding, and admin capability enforcement,
-// because all three read `cfg.TLSCertFile != ""` as "is this deployment
-// authenticated". A developer running it was not running a less-encrypted
-// atlantis; they were running one with no authorization at all, against which
-// no authorization change could be tested.
+// There is no insecure mode. An empty TLS_CERT_FILE would not merely skip
+// encryption: the caller allowlist, the caller-to-cert binding and admin
+// capability enforcement all read `cfg.TLSCertFile != ""` as "is this
+// deployment authenticated", so it would disable authorization entirely and
+// leave no configuration in which an authorization change could be tested.
 //
 // loadConfig now requires all three paths, so this function cannot be reached
 // without them. `make dev-certs` writes a local CA and the leaf certs.
@@ -154,9 +150,9 @@ func resolveCaller(ctx context.Context) string {
 	return "anonymous"
 }
 
-// loggingInterceptor logs every RPC at completion with method, caller, code,
-// duration. We pair it with the resolve-caller interceptor so caller is
-// already populated by the time this runs.
+// loggingInterceptor logs every RPC at completion with method, caller, code and
+// duration. It runs after the resolve-caller interceptor, which populates the
+// caller.
 func loggingInterceptor(log *slog.Logger) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		resp, err := handler(ctx, req)

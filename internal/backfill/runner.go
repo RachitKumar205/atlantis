@@ -186,12 +186,12 @@ WHERE plan_hash=$1 AND entity_id=$2 AND field=$3`, w.cfg.Schema),
 	var rowsUpdated int64
 	err = tx.QueryRow(ctx, chunkSQL, pf.LastPK, w.cfg.ChunkSize).Scan(&newLastPK, &rowsUpdated)
 	if err != nil {
-		// The chunk errored — typically a malformed user expression or
-		// a column reference that doesn't exist. Postgres puts the tx
-		// into an aborted state, so any further statement on `tx` (the
-		// markFieldFailed UPDATE, the Commit) is silently ignored. Roll
-		// back explicitly and use a fresh pool exec so the field flips
-		// to 'failed' and the worker stops re-claiming it.
+		// The chunk errored, typically on a malformed expression or a column
+		// reference that does not exist. Postgres aborts the transaction, so
+		// every later statement on `tx` fails with SQLSTATE 25P02 and the
+		// commit becomes a rollback — a markFieldFailed issued there would not
+		// land. Rolling back explicitly and writing through the pool is what
+		// flips the field to 'failed' and stops the worker re-claiming it.
 		_ = tx.Rollback(ctx)
 		w.markFieldFailedPool(ctx, pf, err)
 		obs.BackfillChunksProcessed.WithLabelValues(truncateHash(pf.PlanHash), pf.EntityID, pf.Field, "failure").Inc()
@@ -199,7 +199,6 @@ WHERE plan_hash=$1 AND entity_id=$2 AND field=$3`, w.cfg.Schema),
 	}
 	obs.BackfillChunkDuration.WithLabelValues(pf.EntityID, pf.Field).Observe(time.Since(start).Seconds())
 
-	// Determine if this is the final chunk (no rows updated).
 	newStatus := "running"
 	if rowsUpdated == 0 {
 		newStatus = "complete"
@@ -226,8 +225,8 @@ WHERE plan_hash=$4 AND entity_id=$5 AND field=$6`, w.cfg.Schema),
 	obs.BackfillChunksProcessed.WithLabelValues(truncateHash(pf.PlanHash), pf.EntityID, pf.Field, "success").Inc()
 	obs.BackfillRowsProcessed.WithLabelValues(truncateHash(pf.PlanHash), pf.EntityID, pf.Field).Add(float64(rowsUpdated))
 
-	// Throttle between chunks of the same field. Empty chunks (final
-	// pass) don't throttle since we're done with this field.
+	// Throttle between chunks of the same field. An empty chunk is the final
+	// pass, with nothing left to pace against.
 	if rowsUpdated > 0 && w.cfg.Throttle > 0 {
 		select {
 		case <-ctx.Done():
@@ -292,12 +291,17 @@ WHERE plan_hash=$1 AND status='phase2_running'`, w.cfg.Schema), planHash)
 		return fmt.Errorf("cas phase3: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		// Another pod beat us — nothing to do.
+		// Another pod took the plan first.
 		return nil
 	}
 
-	// Validate ir_checkpoint hasn't drifted. If it has, fail the plan;
-	// the operator gets to triage manually rather than auto-corrupting.
+	// Drift in ir_checkpoint fails the plan, leaving it for manual triage
+	// rather than applying post_sql against a schema the plan was not computed
+	// from.
+	//
+	// A hash that cannot be read does not fail the plan: the check is skipped
+	// and Phase 3 proceeds. This is the one path where an unreadable checkpoint
+	// admits the DDL rather than refusing it.
 	currentHash, hashErr := currentIRCheckpointHash(ctx, tx, w.cfg.Schema)
 	if hashErr == nil && currentHash != expectedIRHash {
 		w.markPlanFailed(ctx, tx, planHash, fmt.Errorf("ir_checkpoint shifted under us (expected=%s got=%s)", expectedIRHash, currentHash))
@@ -322,8 +326,8 @@ WHERE plan_hash=$1`, w.cfg.Schema), planHash); err != nil {
 		return fmt.Errorf("commit phase3: %w", err)
 	}
 
-	// Outside the tx: DROP INDEX CONCURRENTLY can't run inside a
-	// transaction. Best-effort; index leak is recoverable manually.
+	// Outside the tx: DROP INDEX CONCURRENTLY cannot run inside one.
+	// Best-effort, and a leaked index is recoverable by hand.
 	for _, stmt := range splitStatements(postIndexesSQL) {
 		if _, err := w.pool.Exec(ctx, stmt); err != nil {
 			w.cfg.Logger.Warn("backfill post-index drop", "plan", planHash, "stmt", stmt, "err", err)
@@ -381,9 +385,9 @@ func IRCheckpointHash(ctx context.Context, tx pgx.Tx, schema string) (string, er
 	return currentIRCheckpointHash(ctx, tx, schema)
 }
 
-// sanitizeError trims a raw error down to a category string. Mirrors
-// the invalidate worker's sanitizeError — pg errors carry hostnames /
-// query fragments / PII that we don't want persisted in error_msg.
+// sanitizeError trims a raw error down to a category string, mirroring the
+// invalidate worker's sanitizeError. A pg error carries hostnames, query
+// fragments and row values, none of which belong in error_msg.
 func sanitizeError(err error) string {
 	if err == nil {
 		return ""
@@ -391,8 +395,8 @@ func sanitizeError(err error) string {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return "timeout"
 	}
-	// Surface the first line only, truncated. Operators get enough to
-	// triage; PII / connection strings stay out of the table.
+	// The first line only, truncated to 200 bytes: enough to triage, and short
+	// enough that a row value or connection string in a later line is dropped.
 	msg := err.Error()
 	if i := strings.IndexByte(msg, '\n'); i > 0 {
 		msg = msg[:i]
@@ -405,7 +409,7 @@ func sanitizeError(err error) string {
 
 // splitStatements breaks a multi-line SQL script into individual
 // statements (one per non-blank, non-comment line). Used for
-// CREATE/DROP INDEX CONCURRENTLY blocks that can't run inside a tx.
+// CREATE/DROP INDEX CONCURRENTLY blocks, which cannot run inside a tx.
 func splitStatements(script string) []string {
 	var out []string
 	for _, line := range strings.Split(script, "\n") {
@@ -418,8 +422,8 @@ func splitStatements(script string) []string {
 	return out
 }
 
-// truncateHash bounds plan_hash label cardinality. 8 hex chars = 4B
-// distinct values, more than enough for any practical operator pool.
+// truncateHash bounds plan_hash label cardinality: 8 hex characters is 2^32
+// distinct values.
 func truncateHash(s string) string {
 	if len(s) > 8 {
 		return s[:8]

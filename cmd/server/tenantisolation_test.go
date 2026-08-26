@@ -596,48 +596,33 @@ func mentionsIdent(expr ast.Expr, name string) bool {
 
 // The boot gate, tested by behaviour rather than by reading main.go's AST.
 //
-// # Why this replaces a source-level test
+// An AST test can show a call site exists. It cannot show the call works:
+// seven mutations leave the gate inert with the whole suite green — a second
+// condition that never holds, an inverted condition, a return of nil, and
+// deleting either call site.
 //
-// The AST test in this file proves a call site exists. It cannot prove the call
-// works, and a review demonstrated that at length: seven mutations made the
-// whole gate inert with the entire suite green — a second condition that can
-// never hold, an inverted condition, a return of nil, and deleting either call
-// site outright. Four rounds of hardening each closed the escape just used and
-// left the next one open.
+// The decision lives in one pure function, so every branch is reachable here.
+// The AST test's remaining share is narrow: whether that function is reached
+// from both the boot path and the reload hook.
 //
-// The decision now lives in one pure function, so every branch is reachable
-// here. What the AST test still owns is narrow and appropriate: is that
-// function reached from BOTH the boot path and the reload hook.
-// KNOWN LIMIT, stated rather than papered over.
-//
-// This proves the decision. The AST test below proves the call sites exist and
-// return. Neither checks the ARGUMENTS, and a review confirmed six mutations
-// that survive because of it — replacing cfg.RequireTenantIsolation with false,
+// Neither reads the arguments. Replacing cfg.RequireTenantIsolation with false,
 // policyProblems with nil, or perr with nil at either call site makes the gate
-// inert with the whole suite green.
+// inert and passes both. Arguments are not observable in source, and are
+// unavoidable in behaviour, so the pg tests carry them:
 //
-// A fifth AST rule would have closed some and left the rest; that loop had run
-// four times, each round hardening against the escape just used. What closed it
-// instead is TestServerRefusesToBootWhenAPartitionedTableHasNoPolicy in
-// boot_pg_test.go, which boots run() against a real database as a non-superuser
-// role and asserts whether the process starts. Arguments are not observable in
-// source and are unavoidable in behaviour.
+//   - TestServerRefusesToBootWhenAPartitionedTableHasNoPolicy boots run()
+//     against a real database as a non-superuser role and asserts whether the
+//     process starts.
+//   - TestReloadRefusesASchemaTheDatabaseIsNotEnforcing boots clean, changes the
+//     checkpoint underneath to declare `partition by` on a table with no policy,
+//     and asserts which outcome the running server logs.
+//   - TestServerRefusesToBootWhenThePolicyProbeCannotRun and
+//     TestReloadRefusesWhenThePolicyProbeCannotRun revoke SELECT on
+//     pg_catalog.pg_policy in a throwaway database, so the role keeps answering
+//     pg_class and errors on pg_policy.
 //
-// The reload hook's call site is now covered the same way, by
-// TestReloadRefusesASchemaTheDatabaseIsNotEnforcing in reload_pg_test.go: a
-// server boots clean, the checkpoint changes underneath it to declare
-// `partition by` on a table with no policy, and the test asserts on which of
-// the two outcomes the running server logs. It drives the accepted case too,
-// so a gate that refused every reload would not pass it.
-//
-// `perr`, the probe-failure path, was the last one open and is now closed at
-// both call sites — TestServerRefusesToBootWhenThePolicyProbeCannotRun and
-// TestReloadRefusesWhenThePolicyProbeCannotRun. Both revoke SELECT on
-// pg_catalog.pg_policy in their own throwaway database, so the role keeps
-// answering pg_class and errors on pg_policy: the shape a locked-down catalogue
-// actually has, rather than a dead connection that fails everything and would
-// prove nothing about this branch. Each drives the accepted case with the same
-// fixture, so a gate that refused unconditionally would not pass either.
+// Each drives its accepted case with the same fixture, so a gate that refused
+// unconditionally would fail them.
 //
 // All six of the argument mutations named above are now dead. Nothing about the
 // gate is covered by source-reading alone.

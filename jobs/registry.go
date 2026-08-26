@@ -5,17 +5,16 @@
 // Architecture:
 //
 //   - Registry holds the runtime map of "namespace.JobName" -> Handler.
-//     atlantis-server's startup wiring (cmd/server/main.go) populates
-//     it via RegisterJobHandlers, which the generated SDK calls.
-//     Worker.invoke() looks up the handler by job_name when it claims
-//     a row and dispatches with the deserialized typed args.
+//     Registry.Register populates it; the generated SDK calls that from the
+//     serving binary's startup wiring. Worker.handleOne resolves a claimed
+//     row's job_name through Registry.Lookup and dispatches with the
+//     deserialized typed args.
 //
-//   - Runner is the drain loop. One goroutine per queue. Wakes on
-//     LISTEN/NOTIFY for atl_jobs or a 1s ticker. Claims a batch via
-//     FOR UPDATE SKIP LOCKED, dispatches each job through the
-//     registry, marks rows complete/failed in their own transactions.
-//     A heartbeat goroutine per claimed job extends claimed_until so
-//     a peer doesn't poach the row mid-work.
+//   - Worker is the drain loop, one goroutine per queue. Worker.Run wakes on
+//     LISTEN/NOTIFY for atl_jobs or a 1s ticker, and Worker.drainOnce claims a
+//     batch with FOR UPDATE SKIP LOCKED, dispatches each job, and marks rows
+//     complete or failed in their own transactions. A heartbeat goroutine per
+//     claimed job extends claimed_until so a peer cannot poach it mid-work.
 //
 //   - Scheduler is a singleton goroutine (elected via
 //     pg_try_advisory_lock) that evaluates atlantis.job_schedules
@@ -26,11 +25,11 @@
 // isolation; internal/server/admin/jobs.go wraps these primitives in
 // the admin RPC surface.
 //
-// Caller-facing types (Handler, Registry, Worker, Config, Checkpoint)
-// live in the client SDK (github.com/rachitkumar205/atlantis/clients/go/jobs)
-// so callers import only the SDK. This package re-exports them for
-// server-internal use and adds server-only code (sweeper, workflows,
-// tracing, remote dispatch).
+// The caller-facing types — Handler, Registry, Worker, Config — live in the
+// client SDK, github.com/rachitkumar205/atlantis/clients/go/jobs, so a caller
+// imports only that. The aliases below re-export them for server-internal use,
+// and this package adds the server-only half: sweeper, reaper, scheduler,
+// workflows, tracing and remote dispatch.
 package jobs
 
 import (

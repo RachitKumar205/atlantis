@@ -23,10 +23,7 @@ import (
 // failure backs off rather than spinning. What it cannot prove is that the
 // resulting organisation serves anything, which is what
 // internal/cloud/provision's ATLANTIS_TEST_K8S tests are for. Neither replaces
-// the other, and this file is deliberately not where a "provisioning works"
-// claim is made.
-
-// ---------------------------------------------------------------- fake queue
+// the other.
 
 type failedMark struct {
 	org     string
@@ -97,10 +94,8 @@ func newFakeQueue(orgs ...store.Claimed) *fakeQueue {
 // do it too.
 //
 // Without this, every write below succeeds whether or not the caller detached
-// from the shutdown context — so the test asserting that a shutdown releases
-// the claim passed against a version that used the cancelled context directly
-// and would have written nothing at all in production. A fake that is more
-// forgiving than the thing it stands in for turns a test into a formality.
+// from the shutdown context, so the test asserting that a shutdown releases the
+// claim would pass against code that wrote nothing in production.
 func ctxErr(ctx context.Context) error { return ctx.Err() }
 
 func (f *fakeQueue) ClaimForProvisioning(ctx context.Context, claimedBy string, _ time.Duration) (*store.Claimed, error) {
@@ -228,8 +223,6 @@ func (f *fakeQueue) snapshot() ([]string, []failedMark, []string, []auditRow, in
 		f.extends
 }
 
-// -------------------------------------------------------------- fake cluster
-
 type fakeCluster struct {
 	mu sync.Mutex
 
@@ -328,8 +321,6 @@ func (f *fakeCluster) counts() (int, int) {
 	defer f.mu.Unlock()
 	return f.ensures, f.waits
 }
-
-// ------------------------------------------------------------------ fixtures
 
 func testConfig() Config {
 	return Config{
@@ -462,8 +453,6 @@ func (r *unregisterRecorder) seen() []string {
 	return append([]string(nil), r.orgs...)
 }
 
-// ------------------------------------------------------------------ the loop
-
 // The happy path, asserted on the sequence rather than the outcome.
 //
 // Two Ensure calls with one WaitReady between them. The second is not
@@ -566,10 +555,9 @@ func TestConsoleURLIsNotWrittenWhenRegistrationFails(t *testing.T) {
 // PublicEndpoint is not copied through when it equals Endpoint.
 //
 // Ensure sets them equal in a single-network deployment, which is every
-// deployment today. Storing the duplicate silently retires the COALESCE
-// fallback in orgCredentials, and the two then diverge the first time somebody
-// changes Endpoint alone — a failure that surfaces as a console handshake error
-// against an address nobody set.
+// deployment today. Storing the duplicate retires the COALESCE fallback in
+// orgCredentials, so the two diverge on the first change to Endpoint alone and
+// the console fails its handshake against an address nothing set.
 func TestAnIdenticalPublicEndpointIsLeftUnset(t *testing.T) {
 	q := newFakeQueue(store.Claimed{Org: "acme", Attempts: 1})
 	c := &fakeCluster{statuses: []provision.Status{unallocated(), readyStatus()}}
@@ -703,9 +691,8 @@ func TestShutdownMidProvisionReleasesTheClaim(t *testing.T) {
 
 // The lease is extended while a long wait is in progress.
 //
-// Sizing the lease above ReadyTimeout is enforced in validate, and this is the
-// second answer to the same question — the one that survives somebody raising
-// ReadyTimeout later without thinking about the queue.
+// validate enforces a lease longer than ReadyTimeout. This is the second answer
+// to the same question, and the one that survives a later ReadyTimeout increase.
 func TestTheLeaseIsExtendedDuringALongWait(t *testing.T) {
 	q := newFakeQueue(store.Claimed{Org: "acme", Attempts: 1})
 	c := &fakeCluster{
@@ -805,14 +792,11 @@ func TestAStaleQueueRowIsNotRecordedAsAFailure(t *testing.T) {
 	}
 }
 
-// ------------------------------------------------------------- reconciliation
-
 // An organisation the queue calls ready but the cluster has lost is requeued.
 //
-// The case that produced this: the local cluster was destroyed and rebuilt, and
-// three organisations stayed 'ready' with no namespace. Nothing looks at a ready
-// row — the claim predicate covers pending, failed and expired-provisioning and
-// deliberately not ready — so recovering them meant hand-written SQL.
+// Nothing else looks at a ready row: the claim predicate covers pending, failed
+// and expired-provisioning only. A cluster destroyed and rebuilt leaves its
+// organisations 'ready' with no namespace, recoverable only by hand.
 func TestAnAbsentOrganisationIsRequeued(t *testing.T) {
 	q := newFakeQueue()
 	q.ready = []string{"gone", "here"}
@@ -840,12 +824,11 @@ func TestAnAbsentOrganisationIsRequeued(t *testing.T) {
 	}
 }
 
-// A cluster that refuses our credentials must not requeue the whole fleet.
+// A cluster refusing this process's credentials must not requeue the fleet.
 //
-// The dangerous shape: Exists fails for every organisation, and a reconciler
-// that treated an error as absence would rebuild every customer at once —
-// destroying every certificate authority in the process, because this process
-// could not authenticate.
+// Exists then fails for every organisation, and a reconciler reading an error
+// as absence rebuilds every customer at once, destroying every certificate
+// authority with them.
 func TestACredentialFailureDoesNotRequeueEverything(t *testing.T) {
 	q := newFakeQueue()
 	q.ready = []string{"one", "two", "three"}
@@ -905,9 +888,7 @@ func TestReconcileDoesNothingWhileDegraded(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------- stale cluster credentials
-
-// staleCredsErr is the error the walkthrough actually produced, verbatim.
+// staleCredsErr is the error a rebuilt development cluster produces, verbatim.
 //
 // It arrived when the local cluster was destroyed and rebuilt underneath a
 // running provisioner: the new cluster has a new certificate authority, and the
@@ -937,9 +918,8 @@ func TestCredentialErrorsAreRecognised(t *testing.T) {
 
 // Stale credentials are rebuilt and the organisation provisions anyway.
 //
-// The failure this prevents: every organisation in the queue marked failed, one
-// per tick, with an x509 error that names none of them and no way to recover
-// short of somebody noticing and restarting the process.
+// Otherwise every organisation in the queue is marked failed, one per tick,
+// under an x509 error naming none of them, and only a restart recovers.
 func TestStaleCredentialsAreRebuiltAndTheOrganisationSucceeds(t *testing.T) {
 	q := newFakeQueue(store.Claimed{Org: "acme", Attempts: 1})
 	broken := &fakeCluster{ensureErr: staleCredsErr}
@@ -1224,8 +1204,6 @@ func (c *fakeCluster) Destroy(ctx context.Context, org string) error {
 	return nil
 }
 
-// ------------------------------------------------------------------- reaping
-
 func TestReapDestroysTheNamespaceThenTheRows(t *testing.T) {
 	q := newFakeQueue()
 	q.purgeQueue = []store.Claimed{{Org: "gone"}}
@@ -1277,10 +1255,9 @@ func TestReapDestroysBeforeItForgets(t *testing.T) {
 
 // A failed teardown must be retried, not buried.
 //
-// There is deliberately no backoff and no attempt cap on this path: an
-// organisation whose owner asked for deletion and quietly was not deleted is
-// the worst outcome the feature has. So a failure releases the claim and the
-// next pass takes it again.
+// No backoff and no attempt cap on this path: a teardown that stops being
+// retried leaves data whose owner asked for it to be deleted. A failure
+// releases the claim and the next pass takes it again.
 func TestAFailedTeardownReleasesTheClaimForAnotherTry(t *testing.T) {
 	q := newFakeQueue()
 	q.purgeQueue = []store.Claimed{{Org: "stubborn"}}
@@ -1340,17 +1317,12 @@ func TestReapStopsOnceTheContextIsCancelled(t *testing.T) {
 	}
 }
 
-// ------------------------------------------- console credential rotation
-
 // Rotation happens on the reconcile pass, for organisations that are due.
 //
-// # Why this is driven from reconcile at all
-//
-// It is the only loop that visits every ready organisation on a schedule. A
-// certificate running down is not drift — nothing changed it — but it needs the
-// same fleet-wide sweep, and a second loop doing the same walk would double the
-// per-tenant cost of the one loop whose cost already grows with the customer
-// count.
+// Driven from reconcile because it is the only loop that visits every ready
+// organisation on a schedule. A second loop doing the same walk would double
+// the per-tenant cost of the one loop whose cost already grows with the
+// customer count.
 func TestReconcileRotatesCredentialsThatAreDue(t *testing.T) {
 	q := newFakeQueue()
 	q.ready = []string{"due", "fine"}
@@ -1416,7 +1388,7 @@ func TestReconcileHonoursAnOperatorsRotationRequest(t *testing.T) {
 	q := newFakeQueue()
 	q.ready = []string{"asked"}
 	q.rotateRequests = map[string]time.Time{"asked": asked}
-	// Deliberately not due: the request is the only reason to rotate.
+	// Not due, so the request is the only reason to rotate.
 	c := &fakeCluster{}
 
 	var registered []string
@@ -1546,14 +1518,10 @@ func TestAnAbsentOrganisationIsNotRotated(t *testing.T) {
 	}
 }
 
-// The failure metric actually moves.
-//
-// It is the only warning that arrives before the outage rather than with it. A
-// rotation that keeps failing changes nothing anyone can see — the organisation
-// stays ready, its pods stay up, its callers keep working — right until the
-// credential expires and every browser loses that organisation at once. So a
-// counter that never increments would be worse than no counter, because the
-// alerting rule built on it would be permanently green.
+// A rotation that keeps failing changes nothing observable — the organisation
+// stays ready, its pods stay up, its callers keep working — until the
+// credential expires and every browser loses that organisation at once. This
+// counter is the only warning that arrives before that.
 func TestAFailedRotationIsCounted(t *testing.T) {
 	before := testutil.ToFloat64(consoleRotationFailures)
 
@@ -1647,9 +1615,9 @@ func TestTheFleetGaugeReportsTheSoonestExpiry(t *testing.T) {
 
 // Rotating recovers the countdown.
 //
-// The saw-tooth is the whole signal: it falls as certificates age and jumps
-// back when they are renewed. A gauge that stayed low after a successful
-// rotation would page somebody about a system that had just fixed itself.
+// The saw-tooth is the signal: the gauge falls as certificates age and jumps
+// back on renewal. One that stayed low after a successful rotation would alert
+// on a system that had just repaired itself.
 func TestRotatingRaisesTheFleetGauge(t *testing.T) {
 	nearlyOut := time.Now().Add(2 * time.Hour)
 
@@ -1690,10 +1658,9 @@ func TestRotatingRaisesTheFleetGauge(t *testing.T) {
 
 // A pass that learned nothing leaves the gauge alone.
 //
-// Writing zero would read as "a credential expires now" and page somebody about
-// a cluster that is merely unreachable — a different fault, with a different
-// fix, and one Prometheus already reports through the scrape target. Staleness
-// is the honest answer when nothing was inspected.
+// Writing zero reads as a credential expiring now and alerts on a cluster that
+// is only unreachable — a different fault with a different fix, and one the
+// scrape target already reports. A stale value is what nothing-inspected means.
 func TestAPassThatLearnedNothingLeavesTheGaugeAlone(t *testing.T) {
 	q := newFakeQueue()
 	q.ready = []string{"one"}
@@ -1725,9 +1692,8 @@ func TestAPassThatLearnedNothingLeavesTheGaugeAlone(t *testing.T) {
 // A rotation that could not be registered does not report the new expiry.
 //
 // The console is still presenting the previous certificate, so the new one's
-// expiry describes something nobody is using. Reporting it would show the fleet
-// as freshly renewed at the exact moment renewal stopped taking effect — the
-// gauge lying in the one direction that matters.
+// expiry describes a credential nothing serves. Reporting it shows the fleet as
+// freshly renewed at the moment renewal stopped taking effect.
 func TestAnUnregisteredRotationDoesNotRefreshTheGauge(t *testing.T) {
 	q := newFakeQueue()
 	q.ready = []string{"one"}
@@ -1816,14 +1782,12 @@ func TestAnUnregisteredRotationReportsThePreviousExpiry(t *testing.T) {
 	}
 }
 
-// ------------------------------------------- unregistering a purged org
-
 // A purge removes the console's copy as well as the namespace.
 //
 // Destroying the namespace takes the database and the certificate authority
-// with it and leaves console.orgs untouched — so the console went on holding a
-// sealed private key for an organisation that no longer existed, while `cloud
-// org purge` reported that everything had been destroyed.
+// with it and leaves console.orgs untouched, so the console keeps a sealed
+// private key for an organisation that no longer exists while `cloud org purge`
+// reports everything destroyed.
 func TestPurgingRemovesTheConsoleRegistration(t *testing.T) {
 	q := newFakeQueue()
 	q.purgeQueue = []store.Claimed{{Org: "gone"}}

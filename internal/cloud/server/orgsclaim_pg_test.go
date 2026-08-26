@@ -84,9 +84,8 @@ func TestTheAssertionNamesEveryMembershipInOrder(t *testing.T) {
 
 // TestTheOrgsClaimCarriesNamesOnly.
 //
-// Roles are the obvious thing to add here, and adding them would be a real
-// disclosure with nothing behind it: a console cannot act on what somebody may
-// do somewhere it cannot reach, and the claim exists to draw a menu.
+// Adding roles here discloses what a user may do in an organisation this
+// console cannot reach, and the claim exists to draw a menu.
 //
 // Read from the raw JSON rather than through identity.Private, because a struct
 // with no field for a value cannot see the value arriving.
@@ -129,10 +128,9 @@ func TestTheOrgsClaimCarriesNamesOnly(t *testing.T) {
 // TestMembershipIsTheGateNotTheClaim.
 //
 // The list is a snapshot and a Cloud session lasts hours, so an organisation
-// removed at Cloud keeps appearing in somebody's switcher until they sign in
-// again. That is the accepted cost, and this is what makes it a cost rather
-// than a hole: /authorize re-reads cloud.memberships, so the stale entry buys a
-// refusal page.
+// removed at Cloud keeps appearing in the switcher until the next sign-in.
+// /authorize re-reads cloud.memberships, so the stale entry buys a refusal page
+// rather than access.
 //
 // The assertion for the removed organisation is checked too. Without it this
 // test would pass on a build where the claim was simply empty.
@@ -180,9 +178,9 @@ func TestMembershipIsTheGateNotTheClaim(t *testing.T) {
 
 // TestAMembershipAddedLaterIsNotInAlreadyMintedAssertions.
 //
-// The other direction of the snapshot, and the one somebody will report as a
-// bug: joining an organisation does not make it appear in a console already
-// open. It appears at the next mint, which is a sign-in or a switch.
+// The other direction of the snapshot: joining an organisation does not make it
+// appear in a console already open. It appears at the next mint, a sign-in or a
+// switch.
 func TestAMembershipAddedLaterIsNotInAlreadyMintedAssertions(t *testing.T) {
 	f := newFixture(t)
 	const email = "joiner@example.com"

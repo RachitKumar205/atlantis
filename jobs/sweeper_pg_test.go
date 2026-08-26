@@ -129,10 +129,9 @@ ON CONFLICT (id) DO UPDATE SET ir = EXCLUDED.ir`, raw); err != nil {
 			"runtime marks it complete, no retry happens, nothing is dead-lettered, " +
 			"and a sweeper broken for months looks exactly like one with no work")
 	}
-	// And it must COUNT correctly. One entity exists and it failed, so the only
-	// truthful denominator is 1. The denominator used to be len(failures)+1,
-	// which is a count of nothing: this case reported "1 of 2 entities failed",
-	// telling an operator that something swept when nothing had.
+	// And the count. One entity exists and it failed, so the denominator is 1.
+	// len(failures)+1 renders this case as "1 of 2 entities failed", which
+	// reads as a partial success.
 	if !strings.Contains(err.Error(), "1 of 1 entities failed") {
 		t.Errorf("the failure says %q. One entity was swept and it failed, so the "+
 			"denominator must be 1 — anything larger claims a success that did "+
@@ -229,34 +228,23 @@ SELECT (SELECT count(*) FROM atlantis.swpn_alpha) + (SELECT count(*) FROM atlant
 	}
 }
 
-// A sweep that row-level security would silence must SAY SO, and must keep
-// sweeping everything else.
-//
-// # The bug
+// A sweep that row-level security silences reports it, and keeps sweeping
+// everything else.
 //
 // The sweeper owns the tables it sweeps and binds no tenant. Under FORCE ROW
 // LEVEL SECURITY the tenant policy applies to the owner too, so
 // atlantis.current_partition() is NULL, `tenant = NULL` is NULL, and the
-// subquery selects no ctids. The DELETE is legal. It succeeds. It matches
-// nothing. Expired rows then accumulate forever.
+// subquery selects no ctids. The DELETE is legal, succeeds, and matches
+// nothing, so expired rows accumulate. An entity already declaring a ttl_field
+// reaches this by adding one `partition by` line.
 //
-// Since the differ learned to read `partition by`, an entity that already
-// declares a ttl_field acquires this by adding one line to a .atl file.
+// Row counts cannot separate the two: blocked and skipped both leave every row
+// in place. sweeps_blocked_total is the only observable that tells "nothing to
+// expire" from "expiry stopped".
 //
-// # Why the row counts alone cannot catch it
-//
-// Broken and fixed leave IDENTICAL rows behind: the broken version deletes
-// nothing because RLS hides everything, the fixed version deletes nothing
-// because it skipped. So the load-bearing assertion here is the COUNTER —
-// sweeps_blocked_total is the only observable that distinguishes "nothing to
-// expire" from "expiry silently stopped", and it is the series an operator
-// alerts on.
-//
-// # Why a second role
-//
-// atlantis is a superuser on a development database, and row-level security
-// does not apply to superusers. Run as the default role this test passes with
-// the entire guard deleted, which is the failure mode it exists to prevent.
+// A second role, because atlantis is a superuser on a development database and
+// row-level security does not apply to superusers. As the default role this
+// passes with the whole guard deleted.
 func TestSweeperReportsWhenRowLevelSecurityHidesItsRows(t *testing.T) {
 	pool, ctx := schedTestPool(t)
 	dsn := os.Getenv("ATLANTIS_TEST_PG")
@@ -302,13 +290,12 @@ func TestSweeperReportsWhenRowLevelSecurityHidesItsRows(t *testing.T) {
 	            (2, now() - INTERVAL '1 day'),
 	            (3, now() + INTERVAL '1 hour')`)
 
-	// A third entity with NOTHING expired. It exists to pin the other half of
-	// the fix: rows_swept_total used to be incremented only when n > 0, so an
-	// entity that swept zero produced no series at all — and "nothing has
-	// expired yet" was indistinguishable from "this has not been swept in a
-	// month" from outside the process. The assertion is on series COUNT rather
-	// than value, because calling WithLabelValues to read a value would create
-	// the series and prove nothing.
+	// A third entity with nothing expired. Incrementing rows_swept_total only
+	// when n > 0 leaves an entity that swept zero with no series, so "nothing
+	// has expired yet" and "not swept in a month" look identical from outside.
+	//
+	// The assertion is on series count, not value: calling WithLabelValues to
+	// read a value creates the series.
 	mustExec(`CREATE TABLE atlantis.swprls_quiet (
 	            id bigint PRIMARY KEY, expires_at timestamptz NOT NULL)`)
 	mustExec(`INSERT INTO atlantis.swprls_quiet VALUES (1, now() + INTERVAL '1 day')`)

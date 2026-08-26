@@ -7,31 +7,25 @@ import (
 	"testing"
 )
 
-// Migration 0030 against a table carrying MORE THAN ONE permissive policy that
+// Migration 0030 against a table carrying more than one permissive policy that
 // calls current_partition().
 //
-// # Why this exists
-//
 // 0030's loop mutates pg_policy while iterating a cursor over pg_policy. Each
-// iteration renames the boundary to `<name>_legacy` — which is still permissive
-// and still calls current_partition(), so it still satisfies the loop's own
-// WHERE — then creates, grants, and drops. Whether that terminates, rather than
-// re-selecting the rows it just created, rests on PL/pgSQL cursor snapshot
-// behaviour that the migration does not state and I did not verify when I wrote
-// it. The single-policy fixture cannot distinguish the two: with one row there
-// is nothing for a re-scan to find that a snapshot would not also find.
+// iteration renames the boundary to `<name>_legacy` — still permissive, still
+// calling current_partition(), so still satisfying the loop's own WHERE — then
+// creates, grants, and drops. Whether that terminates rests on PL/pgSQL cursor
+// snapshot behaviour the migration does not state. A single-policy fixture
+// cannot tell the two apart: with one row there is nothing for a re-scan to
+// find that a snapshot would not also find.
 //
-// So this drives the case where they differ. If the cursor re-scans, the second
-// pass reaches a `_legacy` policy the first pass already dropped and the
-// migration fails loudly on ALTER POLICY — which is the good failure. The bad
-// outcome would be a boundary left permissive.
+// Two policies separate them. A cursor that re-scans reaches, on the second
+// pass, a `_legacy` policy the first pass already dropped, and the migration
+// fails on ALTER POLICY; the outcome that fails quietly is a boundary left
+// permissive.
 //
-// # And the case is reachable on its own merits
-//
-// An operator hardening isolation by hand writes exactly this: the emitted
-// boundary, plus one of their own that also scopes by tenant. Under the old
-// permissive model those two ORed, so the pair was expressible and someone will
-// have written it.
+// The pair is expressible: the emitted boundary plus a second hand-written
+// policy that also scopes by tenant, which under the permissive model ORed
+// with it.
 func TestMigration0030HandlesATableWithTwoTenantScopedPermissivePolicies(t *testing.T) {
 	dsn := os.Getenv("ATLANTIS_TEST_PG")
 	if dsn == "" {

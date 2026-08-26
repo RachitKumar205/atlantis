@@ -99,9 +99,8 @@ func TestEmitGoServer_EmitsAllSixCoreMethods(t *testing.T) {
 }
 
 func TestEmitGoServer_NativeProtoSignatures(t *testing.T) {
-	// Every method takes a proto request and returns a proto response.
-	// This is the load-bearing assertion: the handler IS the
-	// buf-generated service interface; no adapter shim.
+	// Every method takes a proto request and returns a proto response: the
+	// handler is the buf-generated service interface, with no adapter shim.
 	ir := lower(t, `entity Account in consumer { id bigint primary  email text not null }`)
 	files, _ := EmitGoServer(ir, GenConfig{})
 	c := entityServerFile(t, files)
@@ -762,9 +761,6 @@ func TestGoFieldType_ScalarTypes(t *testing.T) {
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Go server emission for QueryX
-
 func TestEmitGoServer_QueryHandlerEmitted(t *testing.T) {
 	ir := lower(t, `
 entity Account in consumer {
@@ -829,25 +825,18 @@ entity Account in consumer {
 	assertContains(t, c, `extras = append(extras, "\"deleted_at\" IS NULL")`)
 }
 
-// This test asserts on a STRING produced by a generator whose output is not
-// compiled, and it is worth being blunt about that because it is why the
-// tenant-isolation bug survived.
+// This asserts on a string produced by a generator whose output is not
+// compiled. It proves that EmitGoServer writes those characters into
+// gen/go/server/<ns>/<entity>_server.go, a tree not on disk and not built. The
+// shipped server dispatches from the IR at runtime and never reads
+// PartitionField.
 //
-// It was named TestEmitGoServer_PartitionInjected and read as "the partition
-// predicate is injected". What it actually proved is that EmitGoServer writes
-// those characters into gen/go/server/<ns>/<entity>_server.go — a tree not on
-// disk and not built. The shipped server dispatches from the IR at runtime and
-// never reads PartitionField; CallerPartition and WithCallerPartition have no
-// callers anywhere. Reads returned every tenant's rows the whole time this was
-// green.
-//
-// The IR is built directly rather than lowered, so this exercises the emitter
-// without depending on how the clause parses. The test is kept because the
-// emitter is still present in a tree nothing compiles, and would come back the
-// moment anything built gen/go/server again — but it is NOT evidence of
-// isolation and must not be cited as such. That evidence lives in
+// So it is not evidence of tenant isolation. That evidence is in
 // partition_rls_pg_test.go, which reads rows as one tenant against a real
 // database and fails to see another tenant's.
+//
+// The IR is built directly rather than lowered, so this exercises the emitter
+// without depending on how the clause parses.
 func TestEmitGoServer_PartitionEmitterStillRendersThePredicate(t *testing.T) {
 	ir := &dsl.IR{Entities: []dsl.Entity{{
 		Name: "Order", Namespace: "consumer",

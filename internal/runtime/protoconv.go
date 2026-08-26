@@ -24,9 +24,9 @@ func TimePtrToProto(t *time.Time) *timestamppb.Timestamp {
 	return timestamppb.New(*t)
 }
 
-// ProtoToTime is the inverse for non-null timestamptz columns. A nil
-// proto becomes the zero time — callers SHOULD validate required fields
-// at the gRPC boundary before this is reached, but we don't panic.
+// ProtoToTime is the inverse for non-null timestamptz columns. A nil proto
+// becomes the zero time rather than a panic; required fields are validated at
+// the gRPC boundary before this is reached.
 func ProtoToTime(p *timestamppb.Timestamp) time.Time {
 	if p == nil {
 		return time.Time{}
@@ -43,23 +43,22 @@ func ProtoToTimePtr(p *timestamppb.Timestamp) *time.Time {
 	return &t
 }
 
-// There is deliberately NO IntervalToProto / ProtoToInterval helper here.
+// There is no IntervalToProto / ProtoToInterval helper here, and there cannot
+// be one.
 //
-// Both existed briefly and could not work. A helper has to name a concrete Go
-// type for atlantis.common.v1.Interval, and there is no single one: each
-// generated tree carries its own copy of the message, so this package's
-// commonpb.Interval and an emitted server's are different Go types that will
-// not assign to each other. The compile fixture in internal/codegen/compilecheck
-// reported exactly that, on the first build.
+// A helper has to name a concrete Go type for atlantis.common.v1.Interval, and
+// there is no single one: each generated tree carries its own copy of the
+// message, so this package's commonpb.Interval and an emitted server's are
+// different Go types that will not assign to each other. The compile fixture in
+// internal/codegen/compilecheck reports exactly that.
 //
 // The helpers above are safe because timestamppb and sql.NullX come from shared
 // modules — there is one timestamppb.Timestamp. atlantis's own messages have no
 // such guarantee, so codegen constructs them inline in the pb package the
-// emitted file already imports. See coltype.ScanFragments / coltype.BindExpr.
+// emitted file already imports. See coltype.ScanFragments and coltype.BindExpr.
 //
-// The dispatcher has its own pair (setIntervalField / intervalFromProto in
-// internal/server/entity) because it works in dynamicpb and names no generated
-// type at all.
+// The dispatcher has its own pair, setIntervalField and intervalFromProto in
+// internal/server/entity, which work in dynamicpb and name no generated type.
 
 // The generated INSERT / UPDATE handlers receive proto messages where
 // nullable scalars are `*T` (proto3 `optional` semantics). pgx wants
@@ -187,10 +186,10 @@ func Float32PtrFromNull(s sql.NullFloat64) *float32 {
 	return &v
 }
 
-// pgvector ships `pgvector.Vector` as the scan target for `vector(N)`
-// columns. On the wire we use `repeated float`. The bridge is trivial
-// today (both are `[]float32`-shaped) but lives here so the day the
-// pgvector wire type changes, the codegen and runtime move in lockstep.
+// pgvector ships `pgvector.Vector` as the scan target for `vector(N)` columns,
+// and the wire form is `repeated float`. Both are `[]float32`-shaped, so the
+// bridge below is identity; it exists so a pgvector wire-type change moves
+// codegen and runtime together.
 
 // VectorToFloat32 is identity today — `repeated float` in proto3 is
 // `[]float32` in generated Go, and pgvector.Vector unwraps to the same.

@@ -13,36 +13,23 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/schema"
 )
 
-// Turning on `partition by` over rows nobody will ever be able to bind to.
+// A row whose discriminator is the empty string is unreachable once
+// `partition by` applies to its table. Migration 0024 refuses to bind an empty
+// discriminator — atlantis.set_partition errors on it and current_partition()
+// NULLIFs it — so an unbound read compares against NULL and matches nothing,
+// which is what makes an unbound request fail closed. The empty string is still
+// a legal column value, and is what a legacy column gets when it is added and
+// backfilled with a default before the tenants are decided. Applying the clause
+// over that data makes those rows readable by no tenant, with no error.
 //
-// # What makes a row unreachable
+// Only checked when the clause is being added. An already-partitioned table
+// cannot acquire such a row, because the boundary's WITH CHECK compares the
+// column to current_partition(), which is NULL; a new entity has no rows.
 //
-// The discriminator is a run-time parameter, and migration 0024 refuses to bind
-// an empty one: `atlantis.set_partition` errors on it, and current_partition()
-// NULLIFs it, so an unbound read compares against NULL and matches nothing. That
-// is deliberate — it is what makes an unbound request fail closed.
-//
-// The empty string is nonetheless a legal value for the column: `not null` does not exclude
-// it, and it is exactly what a legacy column gets when it is added and
-// backfilled with a default before anyone decides what the tenants are. So the
-// moment `partition by` is applied over that data, those rows stop being
-// readable by anyone — no tenant can name them, and there is no error, because
-// the policy is working exactly as written.
-//
-// # Why only when the clause is being ADDED
-//
-// An already-partitioned table cannot acquire such a row: the boundary's
-// WITH CHECK compares the column to current_partition(), which is NULL there,
-// so the insert is refused. A brand-new entity has no rows yet. The exposure is
-// exactly the transition, over data that predates it.
-//
-// # Why a cap rather than an exact count
-//
-// The index on the discriminator is created by this same migration and does not
-// exist while this runs, so an exact count is a sequential scan of a legacy
-// table inside the apply's locked transaction. The operator needs to know that
-// there ARE such rows and roughly how many, not the precise figure, so the scan
-// stops at unreachableTenantCap.
+// The scan stops at unreachableTenantCap rather than counting exactly. The
+// index on the discriminator is created by the same migration and does not
+// exist yet, so an exact count is a sequential scan of a legacy table inside
+// the apply's locked transaction.
 const unreachableTenantCap = 1000
 
 // unreachableTenant is one table about to isolate rows nobody can reach.

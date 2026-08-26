@@ -1,25 +1,17 @@
-// Dispatched-worker SDK. The caller-facing constructor for the
-// Temporal-style worker-poll mode: connect outbound to atlantis-server
-// over gRPC + mTLS, receive jobs as Dispatch envelopes, run them
-// through the same Handler interface as the direct-PG Worker.
+// Dispatched-worker SDK: the constructor for worker-poll mode, which connects
+// outbound to atlantis-server over gRPC and mTLS, receives jobs as Dispatch
+// envelopes, and runs them through the same Handler interface as the direct-PG
+// Worker.
 //
-// Use this when:
+// It suits a worker with no direct PG access — across a network, behind a
+// firewall, on a laptop — one that scales independently of atlantis pods, or a
+// set of workers sharing one outbound pipe rather than a PG connection each.
 //
-//   - You don't have direct PG access to atlantis (cross-network,
-//     firewalled, customer network, laptop dev against prod).
-//   - You want to scale workers independently of atlantis pods.
-//   - Multiple workers can share one outbound gRPC pipe instead of
-//     each holding their own PG connection.
+// NewWorker, the direct-PG drain loop, suits a worker co-located with atlantis,
+// and drains one hop sooner.
 //
-// Keep using NewWorker (direct-PG) when:
-//
-//   - Worker and atlantis are co-located (same VPC).
-//   - PG access is cheap.
-//   - You want the lowest possible drain latency (one fewer hop).
-//
-// Handler interface is unchanged: jobs.Handler.Handle(ctx, argsJSON).
-// Existing handler code compiles against NewDispatchedWorker with
-// zero changes.
+// The Handler interface is the same for both, so a handler compiles against
+// either constructor unchanged.
 
 package jobs
 
@@ -668,10 +660,9 @@ func recvOnStream(stream grpc.ClientStream) (*DispatchEnvelope, error) {
 	return &env, nil
 }
 
-// dispatchedJSONMsg + dispatchedJSONCodec mirror the server-side
-// envelope/codec. We declare our own copy here so the SDK doesn't
-// depend on internal/server packages (which would break the open
-// SDK boundary).
+// dispatchedJSONMsg and dispatchedJSONCodec mirror the server-side envelope and
+// codec. Declared here rather than imported: the SDK is a separate module and
+// cannot reach internal/server.
 type dispatchedJSONMsg struct {
 	Raw []byte
 }
@@ -695,11 +686,10 @@ func (dispatchedJSONCodec) Unmarshal(data mem.BufferSlice, v any) error {
 	return nil
 }
 
-// Name MUST match the server-side dispatchCodecName in
-// internal/server/jobsdispatcher/grpc.go. gRPC selects the server's
-// codec by this name via the content-type header; collision with the
-// admin service's "json" codec previously caused the dispatcher to
-// fail unmarshal at SessionAccepted.
+// Name must match dispatchCodecName in internal/server/jobsdispatcher/grpc.go.
+// gRPC selects the server's codec by this name through the content-type header,
+// and a collision with the admin service's "json" codec fails the dispatcher's
+// unmarshal at SessionAccepted.
 func (dispatchedJSONCodec) Name() string { return "atl-json-dispatch" }
 
 // MaxJobNamesPerOpen mirrors the server-side cap so the SDK doesn't

@@ -12,24 +12,19 @@ import (
 
 // What the signer refuses to start with.
 //
-// # Why these are startup errors rather than request-time ones
+// These fail at startup rather than at request time. The process holds a
+// certificate authority's private key and mints caller identities with it, and
+// each setting below decides whether "who may ask" is enforced at all. None
+// announces itself later: an absent client CA admits every peer, and an empty
+// allowlist admits every common name.
 //
-// This process holds a certificate authority's private key and mints caller
-// identities with it. Every setting below is the difference between "who may
-// ask" being enforced and not being enforced at all — and none of them
-// announces itself at request time in a way anybody would notice: an absent
-// client CA would simply mean every peer is admitted, and an empty allowlist
-// would mean every common name is.
+// An optional `PG_URL` is the same shape. A DSN that is set and broken is fatal
+// on connect; one that is absent reduces the signer to a reserved-name denylist,
+// which checks nothing that was registered, so the deployment with the least
+// configuration gets the fewest checks.
 //
-// The precedent is `PG_URL`. It used to be optional, and the comment above it
-// claimed that failing to connect was fatal "in production posture" — true only
-// of a DSN that was set and broken. A DSN that was *absent* silently reduced the
-// signer to a reserved-name denylist, which is not a check on anything an
-// operator registered. So the deployment with the least configuration had the
-// fewest checks, which is exactly backwards.
-//
-// run() exists so these can be asserted from inside the package. main() calls it
-// and exits; everything below calls it and reads the error.
+// run() exists so these are assertable from inside the package. main() calls it
+// and exits; the tests below call it and read the error.
 
 // signerEnv is a complete, working configuration.
 //
@@ -37,10 +32,9 @@ import (
 // than found one failing test at a time.
 func signerEnv(t *testing.T) map[string]string {
 	t.Helper()
-	// The authority the signer ISSUES from.
+	// The authority the signer issues from.
 	issuing := testpki.New(t, t.TempDir())
-	// A second, separate authority: who may CALL it. Separate on purpose — see
-	// loadClientCAs for what sharing one would open.
+	// A separate authority for who may call it; see loadClientCAs.
 	clients := testpki.New(t, t.TempDir())
 
 	return map[string]string{

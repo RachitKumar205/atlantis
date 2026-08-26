@@ -31,8 +31,6 @@ var Scenarios = []Scenario{
 	recursiveCTE(),
 }
 
-// ─────────────────────────── shared IRs ───────────────────────────
-
 // usersIR is the canonical "simple entity" — used by most scenarios.
 // Identity is false so tests can supply explicit IDs and assert on
 // them (PG IDENTITY rejects non-DEFAULT inserts without OVERRIDING).
@@ -108,8 +106,6 @@ func customQueryIR() *dsl.IR {
 	}}
 	return ir
 }
-
-// ─────────────────────────── individual scenarios ───────────────────────────
 
 func insertReturning() Scenario {
 	return Scenario{
@@ -533,8 +529,6 @@ func recursiveCTE() Scenario {
 		},
 	}
 }
-
-// ─────────────────────────── helpers ───────────────────────────
 
 // seedUser inserts one user row through the standard codegen-emitted
 // INSERT shape. Wrapped so scenarios don't have to repeat the SQL.

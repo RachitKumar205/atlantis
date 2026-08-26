@@ -6,46 +6,33 @@
 -- and its certificate authority persisted for ever. These two columns are what
 -- lets that be closed without making the close irreversible.
 
--- ── When it was deleted, and when it may be destroyed ───────────────────────
+-- purge_after is stored rather than computed as deleted_at plus the running
+-- binary's window, so that shortening the default later cannot move the
+-- destruction date of an organisation already inside its window.
 --
--- Two columns rather than one, and the second is not derivable from the first.
+-- deleted_at is kept even though purge_after alone drives the reaper: it is
+-- what an audit reads.
 --
--- purge_after could be computed as deleted_at + whatever window the running
--- binary is configured with. It is stored instead, because a window is a
--- promise made to somebody at the moment they pressed delete. Computing it
--- would mean shortening the default later silently moved the destruction date
--- of every organisation already in the window — including ones deleted under
--- the old promise, whose owners were told they had thirty days.
+-- Both nullable, being meaningless outside state 'deleted'. No CHECK ties them
+-- to the state, because a row legitimately carries purge_after in 'purging' as
+-- well, and a constraint spanning three columns would need relaxing the first
+-- time a state is added.
 --
--- deleted_at is kept even though purge_after alone would drive the reaper. It
--- is what answers "when did this happen" in an audit, and it is the column a
--- support conversation starts from.
+-- A deleted organisation keeps its row, with two consequences:
 --
--- Both nullable, because they are meaningless in every state but `deleted`.
--- There is deliberately no CHECK tying them to the state: a row can legitimately
--- carry a purge_after in `purging` as well as in `deleted`, and a constraint
--- spanning three columns would have to be relaxed the first time a state is
--- added — which is how a constraint stops being trusted.
---
--- # Why the row survives deletion
---
--- A deleted organisation keeps its row, and that has two consequences worth
--- naming rather than discovering:
---
---   * its name stays taken, so the same name cannot be reused until the row
---     goes. That is correct while the namespace still exists — two
---     organisations resolving to org-acme would collide in the cluster.
+--   * its name stays taken until the row goes, which is correct while the
+--     namespace exists, since two organisations resolving to org-acme would
+--     collide in the cluster.
 --   * it still counts against cloud.users.org_limit. The namespace, database
---     and volume are still reserved, so a limit that ignored deleted
---     organisations would let one account hold unbounded capacity by deleting
---     and recreating.
+--     and volume remain reserved, so ignoring deleted organisations would let
+--     one account hold unbounded capacity by deleting and recreating.
 --
--- `cloud org purge` is the escape hatch for both.
+-- `cloud org purge` releases both.
 ALTER TABLE cloud.org_provisioning
     ADD COLUMN IF NOT EXISTS deleted_at  TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS purge_after TIMESTAMPTZ;
 
--- ── The two new states ──────────────────────────────────────────────────────
+-- The two new states.
 --
 -- 0005 wrote CHECK (state IN ('pending','provisioning','ready','failed')), so
 -- the states are enumerated in the schema and not only in Go. That is the right

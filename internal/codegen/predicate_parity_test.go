@@ -16,22 +16,15 @@ import (
 // A type is filterable only if several independent tables agree, and they are
 // spread across three packages.
 //
-// # What went wrong
+// A type added to every type table — DDL, Go type, proto type, scan and bind —
+// and to none of the predicate tables can be ordered by and not filtered on.
+// Nothing fails; the field is absent from the generated filter message.
 //
-// `real` and `double` were added to every TYPE table by an earlier change —
-// DDL, Go type, proto type, scan and bind — and to none of the PREDICATE
-// tables, so a float column could be ordered by and not filtered on. Nothing
-// failed; the field was simply absent from the generated filter message.
-//
-// Fixing that surfaced the same shape one level down. `internal/codegen` held
-// its own byte-for-byte copy of schema.PredicateKindForField, so teaching the
-// two predicateMessageForField tables about floats produced a .proto with a
-// FloatPredicate field and a FilterSpec with no entry for the column — the
-// filter advertised, then rejected as an unknown field at request time. Only
-// the golden diff caught it, and only because the fixture happens to carry a
-// float column.
-//
-// # The rule this pins
+// The same shape sits one level down. internal/codegen holds its own copy of
+// schema.PredicateKindForField, so teaching the two predicateMessageForField
+// tables about a type without it produces a .proto carrying the predicate field
+// and a FilterSpec with no entry for the column: the filter is advertised, then
+// rejected as an unknown field at request time.
 //
 // The kind name and the message name are the same fact spelled two ways:
 // `PredicateFloat` ↔ `FloatPredicate`. Asserting the correspondence turns "do

@@ -78,26 +78,6 @@ func (s *Server) Register(grpcSrv *grpc.Server, ir *dsl.IR) error {
 	return nil
 }
 
-// OnReload, when set, is called with the new IR before the snapshot is swapped
-// in. A non-nil error abandons the reload and leaves the old snapshot serving.
-//
-// It exists for the partition-policy check. That check asks the database
-// whether every entity declaring `partition by` has an enforced policy on its
-// table — a question no differ can answer, because a differ compares two
-// declarations and this compares a declaration against the live catalogue. A
-// policy can be missing from a correct declaration in several ways that are not
-// diffs: an unapplied migration, an adopted database, a policy dropped out of
-// band.
-//
-// Boot is not enough. A checkpoint arrives at a RUNNING server through
-// LISTEN/NOTIFY and the reload turns on `partitioned` for whatever the table
-// carries at that moment. A review delivered exactly that and read another
-// tenant's rows, while the one signal an operator can see — omit the tenant,
-// get refused — reported healthy throughout.
-//
-// A func field rather than a direct call because this package must not import
-// internal/storage/pg: pg already depends on runtime, and the check belongs
-// next to the other catalog probes.
 // Reload builds a new snapshot from the IR and swaps it atomically.
 // In-flight requests on the old snapshot complete unaffected.
 //
@@ -118,8 +98,26 @@ func (s *Server) Reload(ir *dsl.IR, contentHash string) error {
 	return nil
 }
 
-// SetOnReload installs the hook. Not a constructor argument because most
-// callers (sandbox, tests) have nothing to verify.
+// SetOnReload installs a hook called with the new IR before the snapshot is
+// swapped in. A non-nil error abandons the reload and leaves the old snapshot
+// serving. Not a constructor argument, because most callers (sandbox, tests)
+// have nothing to verify.
+//
+// It carries the partition-policy check, which asks the database whether every
+// entity declaring `partition by` has an enforced policy on its table. No
+// differ can answer that: a differ compares two declarations, and this compares
+// a declaration against the live catalogue. A policy goes missing from a
+// correct declaration in ways that are not diffs — an unapplied migration, an
+// adopted database, a policy dropped out of band.
+//
+// Checking at boot is not enough. A checkpoint reaches a running server through
+// LISTEN/NOTIFY, and the reload turns on `partitioned` for whatever the table
+// carries at that moment, while the one observable signal — omit the tenant,
+// get refused — reports healthy throughout.
+//
+// A func rather than a direct call, because this package must not import
+// internal/storage/pg: pg already depends on runtime, and the check belongs
+// next to the other catalog probes.
 func (s *Server) SetOnReload(fn func(*dsl.IR) error) { s.onReload = fn }
 
 // ContentHash returns the content hash of the currently loaded snapshot.

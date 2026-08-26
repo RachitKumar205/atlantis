@@ -1,48 +1,25 @@
 // Package adminjson is the one JSON encoding of admin API messages.
 //
 // `tide --format=json` and `tidectl --format=json` render admin API messages
-// through this package. Two more surfaces will: the console BFF's HTTP
-// responses, which still emit the older hand-marshalled shape, and the OpenAPI
-// document, which does not exist yet. Both are tracked separately.
+// through this package. The console BFF still emits its own hand-marshalled
+// shape, so those two surfaces can disagree until it moves here.
 //
-// The point of a shared encoder is that those surfaces cannot disagree once
-// they are on it. A disagreement between them would be invisible until
-// something downstream broke on a shape it had been told to expect.
+// protojson, not encoding/json. protoc-gen-go emits snake_case tags, so
+// encoding/json over a generated struct looks almost right, and is wrong twice:
+// an enum field serializes as its integer, making `plan_class` a `2` that every
+// consumer must map itself, and `omitempty` makes a field's presence depend on
+// its value. protojson implements the proto3 JSON mapping — a specification,
+// and the one an OpenAPI document generated from this proto describes.
 //
-// # Why protojson rather than encoding/json
+// That mapping renders 64-bit integers as strings: `"version": "7"`, not
+// `"version": 7`. JSON numbers are IEEE-754 doubles and lose precision above
+// 2^53, and every 64-bit field here — schema versions, timestamps, row counts —
+// is one a script may compare for equality.
 //
-// encoding/json over a generated struct is tempting: protoc-gen-go emits
-// snake_case tags, so the output looks almost identical to the hand-rolled
-// structs this replaced. It is wrong in two ways that matter. Enum fields
-// serialize as integers, so `plan_class` becomes `2` and every consumer has to
-// carry its own copy of the enum's numbering. And `omitempty` on generated
-// fields means a field's presence in the output depends on its value, which is
-// not a property any documented API should have.
-//
-// protojson implements the proto3 JSON mapping, which is a specification rather
-// than a consequence of struct tags. Enums are their names, and the same
-// specification is what an OpenAPI document generated from this proto will
-// describe.
-//
-// # The int64 change
-//
-// The proto3 JSON mapping renders 64-bit integers as strings — `"version":
-// "7"`, not `"version": 7`. This is not a protojson quirk: JSON numbers are
-// IEEE-754 doubles, which silently lose precision above 2^53, and every 64-bit
-// field here (schema versions, timestamps, row counts) is one an agent or a
-// script may compare for equality. Quoting them is the standard's answer, and
-// it is the correct one.
-//
-// It is also a break from what these commands used to print. Taken
-// deliberately, once, while the installed base is small enough to absorb it.
-//
-// # Whitespace is not stable
-//
-// protojson randomizes its whitespace — an extra space after a comma in compact
-// mode, after a key in indented mode — seeded from a hash of the running binary
-// (see protobuf-go's internal/detrand). Two builds of the same tide release can
-// differ. Byte-comparing this output, in a golden test or a diff, will fail
-// eventually and for no reason; compare parsed values.
+// Whitespace is not stable. protojson randomizes it — an extra space after a
+// comma in compact mode, after a key in indented mode — seeded from a hash of
+// the running binary (protobuf-go's internal/detrand), so two builds of one
+// tide release differ. Compare parsed values, not bytes.
 package adminjson
 
 import (
@@ -60,13 +37,13 @@ import (
 // the SQL columns, and the docs already use; a second casing convention
 // appearing only in JSON output would be a thing every reader has to translate.
 //
-// EmitDefaultValues restores the empty-collection shapes that protobuf itself
-// cannot distinguish from absent ones. Without it an empty list is an absent
-// key, and a consumer that iterates it has to handle null where it expects an
-// array — the failure lands in the consumer, at runtime, on the one deployment
-// where the list happened to be empty. It deliberately does not emit null for
-// presence-sensing fields, so a proto3 `optional` left unset stays absent and
-// keeps meaning "not set" rather than "set to nothing".
+// EmitDefaultValues restores the empty-collection shapes protobuf cannot
+// distinguish from absent ones. Without it an empty list is an absent key, and
+// a consumer iterating it meets null where it expects an array — at runtime, on
+// the one deployment where that list is empty.
+//
+// It emits no null for presence-sensing fields, so a proto3 `optional` left
+// unset stays absent and keeps meaning "not set" rather than "set to nothing".
 var marshaler = protojson.MarshalOptions{
 	UseProtoNames:     true,
 	EmitDefaultValues: true,
@@ -94,8 +71,8 @@ func MarshalIndent(m proto.Message) ([]byte, error) { return indented.Marshal(m)
 // JSON document in a `bytes` field — the IR, a schema diff, a job's arguments —
 // and they are `bytes` rather than google.protobuf.Struct for a specific
 // reason: Struct reorders keys, and these documents are content-hash inputs, so
-// reordering would change a hash for a schema nobody edited. Byte-exactness on
-// the wire is the requirement; base64 in a terminal is the accident.
+// reordering changes a hash for an unedited schema. Byte-exactness on the wire
+// is the requirement, and base64 in a terminal is what it costs.
 //
 // Without this, `tide diff --format=json | jq '.diff.additive'` returns null,
 // and that pipeline is the entire reason the command has a JSON mode.

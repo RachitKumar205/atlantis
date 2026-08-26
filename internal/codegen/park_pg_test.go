@@ -114,7 +114,7 @@ SELECT count(*) FROM information_schema.columns
 		t.Error("the column is still present under its original name; nothing was parked")
 	}
 
-	// And the data is still there. This is the whole point.
+	// And the data is still there.
 	var parked string
 	if err := conn.QueryRow(ctx,
 		`SELECT notes__parked FROM atlantis.prk_memo WHERE id = 1`).Scan(&parked); err != nil {
@@ -391,9 +391,9 @@ func TestParkingAnAdoptedTableKeepsAndRestoresIt(t *testing.T) {
 		t.Fatalf("park: %v\n%s", err, mig.Up)
 	}
 
-	// The rows must exist, in the tombstone, under the registered name. Reading
-	// them through the register is the point: if the register cannot find the
-	// data, neither can the reaper or an operator.
+	// The rows must exist, in the tombstone, under the registered name. Read
+	// through the register: if the register cannot find the data, neither can
+	// the reaper or an operator.
 	var schemaName, object, origSchema, origName string
 	if err := conn.QueryRow(ctx, `
 SELECT schema_name, object_name, original_schema, original_name
@@ -452,10 +452,10 @@ SELECT schema_name, object_name, original_schema, original_name
 	}
 }
 
-// Restoring a table the reaper has already dropped must fail loudly and say
-// why. Both statements in the unpark are renames, and a rename of an absent
-// table under IF EXISTS is a silent no-op — so this path used to report
-// success having restored nothing at all.
+// Restoring a table the reaper has already dropped fails loudly and says why.
+// Both statements in the unpark are renames, and a rename of an absent table
+// under IF EXISTS is a silent no-op, which reports success having restored
+// nothing.
 func TestUnparkingAReapedTableFailsLoudly(t *testing.T) {
 	url := os.Getenv("ATLANTIS_TEST_PG")
 	if url == "" {

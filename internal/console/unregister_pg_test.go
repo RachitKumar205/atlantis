@@ -15,12 +15,9 @@ import (
 
 // Removing everything the console holds for a destroyed organisation.
 //
-// # Why this needs a real database
-//
-// The whole function is four DELETEs and a decision about which tables they run
-// against. There is nothing to fake: the interesting question is whether the
-// statements match the schema, and whether the one table that must survive
-// actually survives. A stub would answer neither.
+// The function is four DELETEs and a decision about which tables they run
+// against, so there is nothing to fake: the question is whether the statements
+// match the schema, and whether the one table that must survive does.
 //
 // The console schema declares no foreign keys at all, so nothing cascades and
 // every table has to be named. That is exactly the shape where a fix removes the

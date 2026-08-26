@@ -4,25 +4,22 @@ package introspect
 // declares (column-level `check "..."` and table-level `check "..." as
 // name`) and the CHECK constraints actually enforced on the live table.
 //
-// Like the unique-index detector, the plan/diff path is structurally blind
-// to CHECK drift: the differ never manages CHECK constraints, so a check
-// that was narrower at adoption (a pre-atlantis migration) — or that the
-// .atl later widened — silently stays whatever the DB had, and the mismatch
-// only surfaces as a runtime 23514 check violation (the carts
-// `awaiting_checkout` outage was exactly this).
+// The plan/diff path is blind to CHECK drift the same way it is to unique-index
+// drift: the differ never manages CHECK constraints, so a check narrower at
+// adoption — or one the .atl later widened — stays whatever the database had,
+// and the mismatch surfaces as SQLSTATE 23514 on a write the schema permits.
 //
-// Matching is by NORMALIZED EXPRESSION, not by constraint name: a declared
+// Matching is by normalized expression, not by constraint name. A declared
 // check is rendered onto a throwaway TEMP table carrying the entity's column
-// types, and Postgres's own pg_get_constraintdef deparse is compared to the
-// live pg_get_constraintdef. Equivalence is decided by the same engine that
-// enforces the constraint — no Go-side expression canonicalization, the same
-// soundness argument as normalizePredicate. Read-only; reports, never alters.
+// types, and Postgres's own pg_get_constraintdef deparse is compared against
+// the live one, so the engine that enforces the constraint is the one deciding
+// equivalence. No Go-side canonicalization; the same argument as
+// normalizePredicate. Read-only.
 //
-// A known, accepted limitation: two checks that are *semantically* equal but
-// *textually* different — most commonly `col IS NULL OR col IN (...)` vs the
-// bare `col IN (...)` (a CHECK passes on NULL either way) — are reported as a
-// divergence. That's why this surfaces as an advisory, not a hard refusal:
-// the operator reads the declared-vs-live defs and decides.
+// Two checks that are semantically equal and textually different are reported
+// as divergent — most often `col IS NULL OR col IN (...)` against a bare
+// `col IN (...)`, which pass identically since a CHECK admits NULL. That is why
+// this is an advisory rather than a refusal.
 
 import (
 	"context"

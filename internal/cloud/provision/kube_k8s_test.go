@@ -29,12 +29,11 @@ import (
 
 // Provisioning against a real cluster.
 //
-// Everything in kube_test.go runs against a fake client, which answers what the
-// API server would answer about the shape of an object and nothing at all about
-// whether the resulting pods start. Every defect this package has had so far —
-// a CA key the signer could not parse, a memcached address that makes readiness
-// fail forever, a default database the extensions were not created in — is
-// invisible to a fake and obvious here.
+// kube_test.go runs against a fake client, which answers what the API server
+// would answer about the shape of an object and nothing about whether the
+// resulting pods start. A CA key the signer cannot parse, a memcached address
+// that makes readiness fail for ever, a default database the extensions were
+// never created in: all invisible to a fake.
 //
 // Run with:
 //
@@ -61,8 +60,7 @@ func TestK8sProvisionsAWorkingOrganisation(t *testing.T) {
 	pcfg := testConfig()
 	pcfg.ReadyTimeout = 6 * time.Minute
 	// The shared cache lives beside the operators rather than in a tenant
-	// namespace. Nothing has created it at this point in the effort, which is
-	// exactly what this test is here to reveal.
+	// namespace, and nothing else creates it.
 	pcfg.MemcachedAddr = "memcached.atlantis-system.svc.cluster.local:11211"
 
 	k, err := NewKube(pcfg, c, nil)
@@ -111,23 +109,20 @@ func TestK8sProvisionsAWorkingOrganisation(t *testing.T) {
 	// the database PG_URL points at, and that memcached is reachable — /readyz
 	// probes it and 503s otherwise.
 	//
-	// https, and the certificate deliberately unverified. The health listener
-	// terminates TLS so that /status and /metrics can demand a client
-	// certificate; /readyz needs none, but it shares the listener, so the scheme
-	// moved with it. This test holds no copy of the organisation's authority and
-	// should not need one — it is asking "is this process serving", not "is this
-	// the right process".
+	// https, and the certificate unverified. The health listener terminates TLS
+	// so that /status and /metrics can demand a client certificate; /readyz
+	// needs none but shares the listener. This test holds no copy of the
+	// organisation's authority: it asks whether the process is serving, not
+	// whether it is the right process.
 	// Rotation, against the organisation this test has already built.
 	//
-	// Everything the unit tests prove about ReissueConsoleLeaves is about the
-	// certificates. What only a real API server can answer is whether the
-	// read-modify-write actually lands: whether the stored bundle round-trips
+	// The unit tests cover the certificates. Only a real API server answers
+	// whether the read-modify-write lands: whether the stored bundle round-trips
 	// through bundleFromSecret's checks after being rewritten, and whether both
 	// Secrets are updated rather than one.
 	//
-	// It runs before the pod assertions below on purpose. If a rotation were to
-	// disturb something a running workload depends on, the checks that follow
-	// are what would notice.
+	// It runs before the pod assertions below, so that if a rotation disturbs
+	// something a running workload depends on, the checks that follow notice.
 	t.Run("rotating the console credentials", func(t *testing.T) {
 		ns := k.cfg.Namespace(org)
 		read := func() *certs.Bundle {
@@ -165,17 +160,16 @@ func TestK8sProvisionsAWorkingOrganisation(t *testing.T) {
 		if !forced.Rotated {
 			t.Fatal("a forced rotation reported that it did nothing")
 		}
-		// The reported expiry has to be the new certificate's, not the old one's
-		// — it is what the gauge is built from, and reporting the superseded one
-		// would show the fleet counting down while it was in fact being renewed.
+		// The reported expiry is the new certificate's. The gauge is built from
+		// it, so reporting the superseded one shows the fleet counting down
+		// while it is being renewed.
 		if forced.ExpiresAt.Before(time.Now()) {
 			t.Errorf("the rotation reports an expiry of %s, which is in the past",
 				forced.ExpiresAt)
 		}
 
 		// Re-read through bundleFromSecret, which re-checks every pair and every
-		// chain. That is the assertion: what was written back is still a bundle
-		// this system would accept.
+		// chain: what was written back is still a bundle this system accepts.
 		after := read()
 
 		if bytes.Equal(before.Console.CertPEM, after.Console.CertPEM) {
@@ -193,9 +187,8 @@ func TestK8sProvisionsAWorkingOrganisation(t *testing.T) {
 		}
 
 		// The second Secret, the one registration reads. Updating the PKI Secret
-		// and not this one leaves the console being handed the previous
-		// certificate for as long as nothing re-provisions — a rotation that
-		// reports success and changes nothing the console ever sees.
+		// and not this one hands the console the previous certificate for as
+		// long as nothing re-provisions, while the rotation reports success.
 		var creds corev1.Secret
 		if err := c.Get(ctx, ctrlclient.ObjectKey{Namespace: ns, Name: secretConsoleCreds}, &creds); err != nil {
 			t.Fatalf("read %s/%s: %v", ns, secretConsoleCreds, err)
@@ -226,21 +219,17 @@ func TestK8sProvisionsAWorkingOrganisation(t *testing.T) {
 		}
 	})
 
-	// Every assertion here reads the *running pod*, not the Deployment and not
-	// the structs in workloads.go.
+	// Every assertion here reads the running pod, not the Deployment and not the
+	// structs in workloads.go.
 	//
-	// The distinction is the whole reason this subtest exists. A security
-	// context is easy to write and easy to have no effect: `runAsNonRoot: true`
-	// against an image with a named USER is refused by the kubelet at container
-	// creation, so the field is present, correct, and the workload never starts —
-	// and the Deployment still reads exactly right. Reading it back from the API
-	// server after the pod is Running is the only form of this check that can
-	// fail for the reasons it is meant to catch.
+	// A security context can be present, correct, and have no effect:
+	// `runAsNonRoot: true` against an image with a named USER is refused by the
+	// kubelet at container creation, so the workload never starts while the
+	// Deployment still reads right.
 	//
-	// The service-account token is the sharpest of them: nothing we write says
-	// "no token volume". Admission adds a `kube-api-access-*` projected volume to
-	// every pod that does not refuse it, so its *absence* is evidence about what
-	// the cluster did, and it cannot be established anywhere but here.
+	// Nothing written here says "no token volume". Admission adds a
+	// `kube-api-access-*` projected volume to every pod that does not refuse
+	// one, so its absence is evidence about what the cluster did.
 	t.Run("the workload pods are hardened in the cluster", func(t *testing.T) {
 		ns := k.cfg.Namespace(org)
 
@@ -288,11 +277,9 @@ func TestK8sProvisionsAWorkingOrganisation(t *testing.T) {
 				if csc.ReadOnlyRootFilesystem == nil || !*csc.ReadOnlyRootFilesystem {
 					t.Errorf("%s/%s: the root filesystem is writable", p.Name, ctr.Name)
 				}
-				// The mount is half of that setting, not a detail of it: a
-				// read-only root with no writable /tmp is a container that boots
-				// and then fails the first time anything reaches for os.TempDir.
-				// The failure is late, load-dependent, and looks nothing like this
-				// setting, so it is asserted here rather than left to be met.
+				// A read-only root with no writable /tmp boots and then fails
+				// the first time anything reaches for os.TempDir, late and
+				// under load.
 				var tmp bool
 				for _, m := range ctr.VolumeMounts {
 					if m.MountPath == "/tmp" {
@@ -319,17 +306,13 @@ func TestK8sProvisionsAWorkingOrganisation(t *testing.T) {
 
 			// A memory limit equal to the request, and no CPU limit.
 			//
-			// Both halves are asserted because both are decisions. The memory
-			// limit is what stops one organisation's runaway taking the node and
-			// killing a different tenant's database. The *absence* of a CPU limit
-			// is equally deliberate: a CPU limit throttles even on an idle node,
-			// buying isolation that requests already provide, and it is the kind
-			// of field somebody adds later for symmetry.
+			// The memory limit stops one organisation's runaway taking the node
+			// and killing a different tenant's database. The absence of a CPU
+			// limit is asserted too: a CPU limit throttles even on an idle node.
 			//
-			// Equality is the part that matters. A limit above the request
-			// overcommits the node — every tenant inside its request, the limits
-			// summing past what exists, and the first simultaneous spike killing
-			// a pod that did nothing wrong.
+			// A limit above the request overcommits the node — every tenant
+			// inside its request, the limits summing past what exists, and the
+			// first simultaneous spike killing a pod that did nothing wrong.
 			for _, ctr := range p.Spec.Containers {
 				req, lim := ctr.Resources.Requests, ctr.Resources.Limits
 				memReq, memLim := req[corev1.ResourceMemory], lim[corev1.ResourceMemory]
@@ -348,11 +331,9 @@ func TestK8sProvisionsAWorkingOrganisation(t *testing.T) {
 			}
 
 			// atlantis migrates before it binds the health port, so its boot
-			// budget has to be larger than its steady-state one. The comparison
-			// is between the two budgets rather than against fixed numbers,
-			// because the thing that must stay true is the ordering: whatever the
-			// liveness settings become, a first boot must have longer than a
-			// single stall does.
+			// budget has to be larger than its steady-state one. Compared
+			// against each other rather than against fixed numbers: what must
+			// stay true is the ordering.
 			if name == nameAtlantis {
 				for _, ctr := range p.Spec.Containers {
 					sp, lp := ctr.StartupProbe, ctr.LivenessProbe
@@ -434,16 +415,14 @@ func TestK8sProvisionsAWorkingOrganisation(t *testing.T) {
 	})
 }
 
-// Tenant isolation, proven rather than declared.
-//
 // The policy objects are applied whether or not the cluster enforces them: an
 // API server accepts a NetworkPolicy under any CNI, and kindnet implements
-// none. So this asserts the mechanism, not the manifest.
+// none. So this probes the traffic rather than reading the manifest.
 //
-// It runs both directions on purpose. A test that only checks the blocked case
-// passes just as happily when the probe itself is broken — a typo in the
-// address, a pod that never started, an image that is not there. The
-// same-namespace probe is the control that says the probe can succeed at all.
+// Both directions. Checking only the blocked case passes just as happily when
+// the probe itself is broken — a typo in the address, a pod that never started,
+// an image that is not there — so the same-namespace probe is the control that
+// says a probe can succeed at all.
 func TestK8sTenantsCannotReachEachOthersDatabase(t *testing.T) {
 	if os.Getenv("ATLANTIS_TEST_K8S") == "" {
 		t.Skip("set ATLANTIS_TEST_K8S to exercise network policy against a real cluster")
@@ -508,23 +487,16 @@ func TestK8sTenantsCannotReachEachOthersDatabase(t *testing.T) {
 	}
 }
 
-// Every exposed port refuses a foreign pod with no network policy in the way.
+// TestK8sTenantsCannotReachEachOthersDatabase proves the policy works; this
+// deletes the policy and proves the credentials do.
 //
-// This is the test the isolation story rests on, and it is deliberately the
-// opposite shape of TestK8sTenantsCannotReachEachOthersDatabase. That one proves
-// the policy works. This one deletes the policy and proves the credentials do —
-// so that a cloud where the policy means something else is not a security
-// question.
+// NetworkPolicy is not portable. `ipBlock` covers pod traffic under Calico,
+// never covers it under GKE Dataplane V2, and on EKS pods take VPC addresses so
+// the pod-CIDR exclusion matches nothing and the rule fails open. Nothing in
+// the object says which is in force.
 //
-// It has to be that way because NetworkPolicy is not portable. `ipBlock` covers
-// pod traffic under Calico, never covers it under GKE Dataplane V2, and on EKS
-// pods take VPC addresses so the pod-CIDR exclusion matches nothing and the rule
-// fails open. The same manifest, three meanings. Nothing in the object says
-// which one is in force.
-//
-// So the property worth owning is not "the policy blocks tenants". It is "every
-// port is safe with no policy at all". Then the policy is a second layer, and a
-// cloud where it is inert costs defence in depth rather than the boundary.
+// So the property asserted is that every port is safe with no policy at all,
+// and the policy is a second layer.
 func TestK8sEveryExposedPortRefusesAForeignPodWithNoNetworkPolicy(t *testing.T) {
 	if os.Getenv("ATLANTIS_TEST_K8S") == "" {
 		t.Skip("set ATLANTIS_TEST_K8S to exercise the exposed ports against a real cluster")
@@ -612,16 +584,14 @@ func TestK8sEveryExposedPortRefusesAForeignPodWithNoNetworkPolicy(t *testing.T) 
 	atlantisHost := fmt.Sprintf("%s.%s.svc.cluster.local", nameAtlantis, ns)
 	signerHost := fmt.Sprintf("%s.%s.svc.cluster.local", nameSigner, ns)
 
-	// The control, and it runs first for two reasons.
+	// The control, and it runs first. It proves a pod in another namespace now
+	// reaches this organisation, so a refusal below is the certificate and not
+	// the network.
 	//
-	// The obvious one: it proves a pod in another namespace now reaches this
-	// organisation, so a refusal below is the certificate and not the network.
-	//
-	// The one that is easy to miss: it is the only probe here that expects a
-	// *successful* HTTPS response. If the probe image could not speak HTTPS at
-	// all, every request would come back probeNoReply — which reads as the
-	// expected refusal on 9090 and 7070, and both would pass having tested
-	// nothing. This failing first is what stops that.
+	// It is also the only probe here that expects a successful HTTPS response.
+	// If the probe image could not speak HTTPS at all, every request would come
+	// back probeNoReply, which reads as the expected refusal on 9090 and 7070,
+	// and both would pass having tested nothing.
 	readyz := fmt.Sprintf("https://%s:%d/readyz", atlantisHost, portHealth)
 	if code := probeHTTPS(ctx, t, c, probeNS, "control-readyz", readyz); code != probeGot200 {
 		t.Fatalf("inconclusive: the control probe got %d from %s, want %d (200). "+
@@ -638,7 +608,6 @@ func TestK8sEveryExposedPortRefusesAForeignPodWithNoNetworkPolicy(t *testing.T) 
 		name := "gated" + strings.ReplaceAll(path, "/", "-")
 		switch code := probeHTTPS(ctx, t, c, probeNS, name, url); code {
 		case probeGot401:
-			// The property.
 		case probeGot200:
 			t.Errorf("a pod in %s read %s with no client certificate; "+
 				"this port is protected by the network policy alone", probeNS, url)
@@ -653,14 +622,13 @@ func TestK8sEveryExposedPortRefusesAForeignPodWithNoNetworkPolicy(t *testing.T) 
 	// twice, from two places, because neither check is sufficient alone.
 	//
 	// From a pod: that the port is reachable now that no policy stands in the
-	// way. This is the half that says a refusal is not the network.
+	// way, so a refusal is not the network.
 	//
-	// A pod cannot say more than that. busybox reports a refused handshake as
-	// `error getting response: Connection reset by peer` — and a server that had
-	// *stopped* asking for a certificate would produce the same words, because a
-	// gRPC server rejects an HTTP/1.1 request just as abruptly. Asserting "not
-	// 200" from a pod would therefore hold whether or not mTLS was still on: a
-	// check that cannot fail for the reason it names.
+	// A pod cannot say more. busybox reports a refused handshake as `error
+	// getting response: Connection reset by peer`, and a server that had stopped
+	// asking for a certificate produces the same words, because a gRPC server
+	// rejects an HTTP/1.1 request just as abruptly. "Not 200" from a pod holds
+	// whether or not mTLS is still on.
 	for _, tc := range []struct {
 		what string
 		host string
@@ -680,10 +648,8 @@ func TestK8sEveryExposedPortRefusesAForeignPodWithNoNetworkPolicy(t *testing.T) 
 	// what actually happened rather than guess from wget's wording.
 	//
 	// The host is outside the pod network, so the policy never applied to it and
-	// deleting the policy changes nothing here. That is the point: this asks a
-	// different question — *what* refuses — while the probes above establish
-	// that the network is no longer the thing doing it. Together they say the
-	// certificate is carrying the port. Separately neither does.
+	// deleting the policy changes nothing here. This asks what refuses; the
+	// probes above establish that the network is not the thing doing it.
 	for _, tc := range []struct {
 		what string
 		addr string
@@ -698,31 +664,22 @@ func TestK8sEveryExposedPortRefusesAForeignPodWithNoNetworkPolicy(t *testing.T) 
 // assertRefusesWithoutAClientCertificate requires that TLS itself — not the
 // protocol layered on top of it — turns away a client holding no certificate.
 //
-// # Why "the connection failed" is not the assertion
-//
-// The obvious version of this check is "open a connection, try to use it, and
-// require an error". It passes on a server that has stopped requiring client
-// certificates altogether, and it was measured doing exactly that. With mTLS
-// removed from the admin plane, a plain TLS client is admitted, sends an
-// HTTP/1.1 request, and gRPC hangs up on it for speaking the wrong protocol:
+// "The connection failed" would pass on a server that has stopped requiring
+// client certificates: a plain TLS client is admitted, sends an HTTP/1.1
+// request, and gRPC hangs up on it for speaking the wrong protocol.
 //
 //	mTLS on   →  remote error: tls: certificate required
 //	mTLS off  →  EOF
 //
-// Both are errors. Only the first is this port's boundary doing anything. A
-// check that accepted either would have reported a protected port on a build
-// where the protection had been deleted — which is the failure this whole test
-// exists to rule out, reproduced inside the test itself.
+// Both are errors and only the first is this port's boundary. So the error has
+// to name a certificate; EOF, connection reset and timeout all fail, with a
+// message saying why the result is not evidence.
 //
-// So the error has to name a certificate. EOF, connection reset and timeout all
-// fail, and they fail with a message that says why the result is not evidence.
-//
-// # Why the handshake is not enough on its own
-//
-// Under TLS 1.3 the client finishes its side before the server has judged it,
-// so `tls.Dial` returns a usable connection and the alert arrives on the first
-// read. The exchange below is what surfaces it. A TLS 1.2 server refuses during
-// the handshake instead, so both paths lead to the same check.
+// The handshake alone is not enough either. Under TLS 1.3 the client finishes
+// its side before the server has judged it, so tls.Dial returns a usable
+// connection and the alert arrives on the first read; the exchange below is
+// what surfaces it. A TLS 1.2 server refuses during the handshake, so both
+// paths reach the same check.
 func assertRefusesWithoutAClientCertificate(t *testing.T, what, addr string) {
 	t.Helper()
 
@@ -768,26 +725,20 @@ const provisionerSubject = "system:serviceaccount:atlantis-system:atlantis-provi
 // The provisioner's role is enough to do its job and not enough to do anything
 // else.
 //
-// Both halves are needed and neither is interesting alone. A role of `*` on `*`
-// passes the first half perfectly, which is what makes a test that only
-// provisions an organisation worthless as a statement about privilege. A role
-// of nothing at all passes the second.
+// Both halves are needed. A role of `*` on `*` passes the sufficiency half; a
+// role of nothing at all passes the confinement half.
 //
-// # Why impersonation rather than a token
+// Impersonation rather than a token: the API server evaluates RBAC for the
+// impersonated subject exactly as it would for the process itself, so this needs
+// no TokenRequest call, no service-account Secret and nothing mounted. It does
+// not prove the token reaches the process — that GetConfig prefers in-cluster
+// credentials and the pod has them mounted — which the test in
+// internal/provisioner covers.
 //
-// The API server evaluates RBAC for the impersonated subject exactly as it
-// would for the process itself, so this needs no TokenRequest call, no
-// service-account Secret, and nothing mounted. What it does not prove is that
-// the token reaches the process — that GetConfig prefers in-cluster credentials
-// and that the pod has them mounted. Only the running Deployment shows that,
-// which is what the test in internal/provisioner covers.
-//
-// # Why this can fail without the code changing
-//
-// It reads deploy/provisioner-rbac.yaml's effect, not the Go source. Adding an
-// API call to kube.go without adding its verb here leaves the production code
-// compiling, the unit tests green, and the provisioner refused at run time. This
-// is the test that turns that into a failure now.
+// This can fail without the Go source changing. It reads the effect of
+// deploy/provisioner-rbac.yaml, so adding an API call to kube.go without adding
+// its verb there leaves the production code compiling, the unit tests green, and
+// the provisioner refused at run time.
 func TestK8sTheProvisionerRoleIsSufficientAndConfined(t *testing.T) {
 	if os.Getenv("ATLANTIS_TEST_K8S") == "" {
 		t.Skip("set ATLANTIS_TEST_K8S to exercise the provisioner's role against a real cluster")
@@ -916,10 +867,10 @@ const (
 
 // probeHTTPS makes one unauthenticated HTTPS request from a pod in ns.
 //
-// The certificate is deliberately not verified. This asks what the *server*
-// does with a client that holds no certificate, and verifying the server's own
-// certificate would need the organisation's authority distributed to a probe
-// that is standing in for an attacker — who would not have it either.
+// The certificate is not verified. This asks what the server does with a client
+// holding no certificate, and verifying the server's own certificate would need
+// the organisation's authority distributed to a probe standing in for an
+// attacker, who would not have it either.
 //
 // probeNoReply is the answer that needs care. It means the request produced
 // neither 200 nor 401: the port was unreachable, or TLS refused the connection,
@@ -951,16 +902,11 @@ exit %d`, url, probeGot200, probeGot401, probeNoReply)
 func runProbe(ctx context.Context, t *testing.T, c ctrlclient.Client, ns, name, script string) int32 {
 	t.Helper()
 
-	// The security context is not incidental. Tenant namespaces enforce Pod
-	// Security "restricted", so a bare pod is refused at admission — and the
-	// refusal surfaces here as `create probe pod: ... violates PodSecurity`,
-	// which is a test that cannot run rather than a policy that failed. The uid
-	// is named explicitly because busybox declares no USER and therefore defaults
-	// to root, which runAsNonRoot rejects.
-	//
-	// This probe has to satisfy the same policy the workloads do. If that ever
-	// becomes hard, that is worth knowing: it means the policy is stricter than
-	// the thing it is protecting can tolerate.
+	// Tenant namespaces enforce Pod Security "restricted", so a bare pod is
+	// refused at admission and the refusal surfaces here as `create probe pod:
+	// ... violates PodSecurity`, which is a test that could not run rather than
+	// a policy that failed. The uid is named explicitly because busybox declares
+	// no USER and therefore defaults to root, which runAsNonRoot rejects.
 	nobody := int64(65534)
 	no, yes := false, true
 	pod := &corev1.Pod{

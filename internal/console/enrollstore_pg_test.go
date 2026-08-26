@@ -78,10 +78,10 @@ func TestAnEnrolTokenIsSpentExactlyOnce(t *testing.T) {
 // covering for its absence, which stops covering the moment somebody redeems a
 // stale token before anyone else touches it.
 //
-// Note what is NOT involved: the sweeper. Expiry is enforced by the statement,
-// not by housekeeping on a 24-hour tick. A test that inserted a stale row, ran
-// the sweep and asserted the row was gone would prove the sweep and pass on a
-// build where an hour-old fifteen-minute token still mints certificates.
+// The sweeper is not involved: expiry is enforced by the statement, not by
+// housekeeping on a 24-hour tick. A test that inserted a stale row, ran the
+// sweep and asserted the row was gone would prove the sweep and pass on a build
+// where an hour-old fifteen-minute token still mints certificates.
 func TestAnExpiredEnrolTokenIsRefusedWithoutBeingConsumed(t *testing.T) {
 	f := newConsoleFixture(t)
 	ctx := context.Background()

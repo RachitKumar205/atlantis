@@ -102,17 +102,15 @@ func cmdPlan(args []string) int {
 	return code
 }
 
-// classExitCode is the contract CI branches on.
+// classExitCode is the contract CI branches on. docs/reference/cli-tide.md
+// documents it, so a renumbering here changes which pull requests merge.
 //
-// docs/guides/set-up-caller-ci.md tells readers to gate merges on these, so a
-// renumbering here changes whether other people's pull requests can merge. It
-// is a map rather than a switch so that completeness over the proto enum is
-// something a test can iterate; a switch's default arm answers for a class
-// nobody decided about, and answers plausibly, which is how destructive spent a
-// release reported as an operational failure.
+// A map rather than a switch, so a test can iterate it for completeness over
+// the proto enum. A switch's default arm answers for an undecided class, and
+// answers plausibly.
 //
-// Codes 0-2 are plan outcomes. 3 is reserved for "this tide cannot act on it"
-// and is deliberately NOT in this map — see exitCodeForClass.
+// Codes 0-2 are plan outcomes. 3 means this tide cannot act on the class and is
+// not in this map — see exitCodeForClass.
 var classExitCode = map[adminpb.PlanClass]int{
 	adminpb.PlanClass_PLAN_CLASS_ADDITIVE:              0,
 	adminpb.PlanClass_PLAN_CLASS_BACKFILL_REQUIRED:     1,

@@ -66,8 +66,7 @@ func TestAnOrganisationIsNotCreatedWithoutItsOwner(t *testing.T) {
 		t.Fatal("an organisation was created for an owner that does not exist")
 	}
 
-	// The rollback is the point: not merely that it errored, but that it left
-	// nothing behind.
+	// The error alone does not prove the rollback; these two do.
 	if _, err := db.ConsoleURL(ctx, "ownerless"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("the organisation row survived a failed create: %v", err)
 	}
@@ -103,12 +102,10 @@ func TestCreatingAnOrganisationTwiceDoesNotRequeueAReadyOne(t *testing.T) {
 	}
 }
 
-// The property a whole class of queue bugs hides behind.
-//
-// Claiming sets the state to `provisioning`. A predicate that only looks at
-// pending and failed therefore stops seeing a row the moment it is claimed, so
-// a provisioner that dies mid-work wedges its organisation for ever — and the
-// lease column that was supposed to prevent that is never even evaluated.
+// Claiming sets the state to 'provisioning'. A predicate that only looks at
+// pending and failed stops seeing a row the moment it is claimed, so a
+// provisioner that dies mid-work wedges its organisation for ever and the lease
+// column is never evaluated.
 func TestAnExpiredLeaseIsClaimableAgain(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -142,8 +139,8 @@ func TestAnExpiredLeaseIsClaimableAgain(t *testing.T) {
 	}
 }
 
-// A live lease is not claimable. The mirror of the test above, and without it
-// that one passes against a predicate that claims everything.
+// The mirror of the test above: without it, that one passes against a predicate
+// that claims everything.
 func TestALiveLeaseIsNotClaimable(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -162,8 +159,8 @@ func TestALiveLeaseIsNotClaimable(t *testing.T) {
 	}
 }
 
-// Two claimants, one organisation. This is what the single-statement claim
-// buys: a select followed by an update has a window between them.
+// The claim is one statement. A select followed by an update has a window
+// between them in which a second provisioner takes the same row.
 func TestTwoProvisionersNeverClaimTheSameOrganisation(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -193,9 +190,8 @@ func TestTwoProvisionersNeverClaimTheSameOrganisation(t *testing.T) {
 	}
 }
 
-// Without a backoff a failed organisation is claimable on the very next tick,
-// so a permanent fault becomes a loop that provisions nothing. atlantis.jobs
-// has exactly that shape; this must not.
+// Without a backoff a failed organisation is claimable on the next tick, so a
+// permanent fault becomes a loop that provisions nothing.
 func TestAFailedOrganisationWaitsForItsBackoff(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -236,8 +232,7 @@ func TestAFailedOrganisationWaitsForItsBackoff(t *testing.T) {
 	}
 }
 
-// A retry delay of zero would reintroduce the busy loop, so it is refused
-// rather than quietly treated as "now".
+// A retry delay of zero means claimable immediately, so it is refused.
 func TestFailingWithoutABackoffIsRefused(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -249,8 +244,7 @@ func TestFailingWithoutABackoffIsRefused(t *testing.T) {
 	if err := db.MarkProvisioningFailed(ctx, "nobackoff", "boom", 0); err == nil {
 		t.Error("a failure with no retry delay was accepted")
 	}
-	// Sub-millisecond rounds to zero in the query, so it is the same failure
-	// wearing a positive number.
+	// Sub-millisecond rounds to zero in the query.
 	if err := db.MarkProvisioningFailed(ctx, "nobackoff", "boom", time.Microsecond); err == nil {
 		t.Error("a sub-millisecond retry delay was accepted, which means claimable immediately")
 	}
@@ -266,8 +260,8 @@ func TestAnEmptyQueueIsItsOwnAnswer(t *testing.T) {
 	}
 }
 
-// Extending a lease somebody else now holds is exactly when a stalled
-// provisioner would most want to, and exactly when it must not.
+// A provisioner whose lease expired must not extend the claim somebody else
+// now holds.
 func TestExtendingSomebodyElsesLeaseIsRefused(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -339,12 +333,9 @@ func TestTheQueueRefusesAnUnusableRequest(t *testing.T) {
 	}
 }
 
-// Reconciliation reads ready organisations and puts absent ones back.
-//
-// The gap this closes: nothing else looks at a ready row. The claim predicate
-// covers pending, failed and expired-provisioning, and deliberately not ready —
-// so before ReadyOrgs existed, an organisation whose cluster was rebuilt stayed
-// ready for ever while serving nothing.
+// Nothing else looks at a ready row: the claim predicate covers pending, failed
+// and expired-provisioning. Without ReadyOrgs an organisation whose cluster was
+// rebuilt stays ready for ever while serving nothing.
 func TestReadyOrganisationsCanBeListedAndRequeued(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -396,13 +387,12 @@ func TestReadyOrganisationsCanBeListedAndRequeued(t *testing.T) {
 		t.Errorf("a requeued organisation carries a backoff (%v); it should be "+
 			"claimable now, since nothing about it failed", p.NextAttemptAfter)
 	}
-	// attempts is deliberately kept: a row rebuilt four times is telling you
-	// something, and clearing it hides that.
+	// attempts is kept, so a row rebuilt repeatedly still shows its count.
 	if p.Attempts == 0 {
 		t.Error("requeue reset the attempt count, hiding how often this organisation has been rebuilt")
 	}
 
-	// And it is claimable again, which is the whole point.
+	// And it is claimable again.
 	c, err := db.ClaimForProvisioning(ctx, "t2", time.Minute)
 	if err != nil {
 		t.Fatalf("a requeued organisation could not be claimed: %v", err)
@@ -412,8 +402,6 @@ func TestReadyOrganisationsCanBeListedAndRequeued(t *testing.T) {
 	}
 }
 
-// Requeue only moves a row that is still ready.
-//
 // Reconciliation reads a list, checks the cluster, then writes. In between, an
 // operator may have reset the row by hand and a provisioner may have claimed
 // it. Without the guard this would stamp pending over an active claim and two

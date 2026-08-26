@@ -28,10 +28,10 @@ const undefinedTable = "42P01"
 
 // OrgRegistration is one organisation's atlantis, as an operator supplies it.
 //
-// PEM text rather than file paths, deliberately. The console stopped loading
-// certificates from disk when they became a property of an organisation, and
-// the reading is done by whoever is calling — `cloud org register` — so that
-// this package keeps exactly one idea of where credentials come from.
+// PEM text rather than file paths. Certificates are a property of an
+// organisation, not of the console's filesystem, and the caller — `cloud org
+// register` — does the reading, so this package has one idea of where
+// credentials come from.
 type OrgRegistration struct {
 	Org        string
 	Endpoint   string
@@ -50,15 +50,12 @@ type OrgRegistration struct {
 
 	// This organisation's own certificate signer.
 	//
-	// Optional, and optional AS A GROUP: all four or none. Empty means the
-	// console uses its process-wide ATL_SIGNER_* settings, which is what every
-	// organisation registered before migration 0009 does and what
-	// `make dev-signer` serves.
+	// Optional as a group: all four or none. Empty means the process-wide
+	// ATL_SIGNER_* settings, which is what `make dev-signer` serves.
 	//
-	// A mixture is refused rather than stored. Three of four is not "mostly
-	// configured": it produces a console dialling one signer while presenting
-	// credentials for another, which fails at that signer's handshake with an
-	// error about a certificate rather than about this row.
+	// A mixture is refused rather than stored. Three of four produces a console
+	// dialling one signer while presenting credentials for another, failing at
+	// that signer's handshake with an error about a certificate.
 	SignerAddr          string
 	SignerCAPEM         string
 	SignerClientCertPEM string
@@ -67,15 +64,12 @@ type OrgRegistration struct {
 
 // RegisterOrg records an organisation's atlantis and seals its private key.
 //
-// This is the only exported way into console.orgs, and it exists because
-// registration is Cloud's job rather than the console's: an HTTP route that
-// provisions an organisation is a route that has to prove who is asking, and
-// nothing in front of the console can prove it yet. `cloud org register`
-// therefore writes the row directly, which is why the entry point is a function
-// on a connection string rather than a handler.
+// The only exported way into console.orgs. Registration is Cloud's job, so
+// `cloud org register` writes the row directly and the entry point takes a
+// connection string rather than being a handler.
 //
-// Upserts. Re-registering an organisation rotates its certificate in place, and
-// a running console picks that up within orgClientRefresh without a restart.
+// Upserts. Re-registering rotates a certificate in place, and a running console
+// picks that up within orgClientRefresh without a restart.
 func RegisterOrg(ctx context.Context, pgURL, keyset string, r OrgRegistration) error {
 	keys, err := secrets.FromEnvKeyset(keyset)
 	if err != nil {
@@ -105,16 +99,11 @@ func RegisterOrg(ctx context.Context, pgURL, keyset string, r OrgRegistration) e
 		SignerClientCertPEM: r.SignerClientCertPEM,
 		SignerClientKeyPEM:  r.SignerClientKeyPEM,
 	})
-	// The console owns this schema and applies it at startup, so an operator who
-	// registers before the console has ever run gets a bare "relation does not
-	// exist". Naming the order is cheaper than making this command a second
-	// owner of the migration tree.
+	// The console owns this schema and applies it at startup, so registering
+	// before the console has ever run gets a bare "relation does not exist".
 	//
-	// Matched on SQLSTATE rather than on the message. The first version of this
-	// looked for `"orgs" does not exist`, which never matched anything —
-	// PostgreSQL quotes the qualified name, so the text is `relation
-	// "console.orgs" does not exist`. A guard keyed to prose nobody checked
-	// against a live server is a guard that silently never fires.
+	// Matched on SQLSTATE, not on the message: PostgreSQL quotes the qualified
+	// name, so the text is `relation "console.orgs" does not exist`.
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == undefinedTable {
 		return fmt.Errorf("%w\n\nThe console creates its own schema when it "+
@@ -124,29 +113,11 @@ func RegisterOrg(ctx context.Context, pgURL, keyset string, r OrgRegistration) e
 }
 
 // validateOrgCredentials refuses a registration that cannot produce a working
-// channel.
+// channel. Called from store.registerOrg, so it covers every write to
+// console.orgs including the test harness.
 //
-// Called from store.registerOrg rather than from RegisterOrg, so that it covers
-// every write to console.orgs — including the test harness, which would
-// otherwise be the one path allowed to store credentials nothing checks.
-//
-// # Why check at all, when the dial checks
-//
-// buildOrgTLS parses the same material and fails on the same faults, so none of
-// this makes a bad registration safe that would otherwise be unsafe. What it
-// changes is when the operator finds out. A mis-registered organisation is
-// discovered at somebody's next page load, as a 503 naming TLS, hours after the
-// command that caused it printed nothing and exited 0 — and the person reading
-// that error is usually not the person who ran the command.
-//
-// # What it deliberately does not check
-//
-// That the client certificate chains to CAPEM. CAPEM is the root this console
-// verifies the organisation's *server* against; the client leaf is issued by
-// whatever root that server trusts for clients. Those are the same CA in every
-// deployment that exists today and are not required to be, so a chain check
-// here would refuse a correct configuration. The handshake is the authority on
-// that pairing, and it is the layer this step is built on.
+// It does not check that the client certificate chains to CAPEM, which is the
+// root the console verifies the organisation's SERVER against.
 func validateOrgCredentials(c orgCredentials) error {
 	if c.Org == "" {
 		// Also what the private key is sealed against, so an empty one would
@@ -264,44 +235,20 @@ func leafOf(certPEM string) (*x509.Certificate, error) {
 }
 
 // UnregisterOrg removes everything the console holds for an organisation that
-// no longer exists.
+// no longer exists: the registration and its sealed private key, its sessions,
+// its redeemable enrolment tokens, and the fingerprint rows renewal looks up.
+// Idempotent.
 //
-// # Why this exists
-//
-// Purging an organisation destroyed its namespace, its database and its
-// certificate authority, and left this row untouched. So the console went on
-// holding a sealed private key for an organisation that had been deleted, for
-// ever, and `cloud org purge` told the operator it had destroyed everything.
-// Nothing else ever deleted from console.orgs — the only DELETE in the tree was
-// in a test.
-//
-// # What it removes, and the one thing it keeps
-//
-// The registration and the operational state that referenced it: sessions bound
-// to the organisation, enrolment tokens that could still be redeemed, and the
-// fingerprint-to-organisation rows renewal looks up. None of those mean anything
-// once the certificate authority behind them is gone, and an enrolment token
-// outliving its organisation is a live credential for something that no longer
-// exists.
-//
-// The audit log is deliberately NOT removed. It references the organisation by
-// name and is supposed to outlive it: "what happened to acme" has to still have
-// an answer after acme stops existing, which is the same reason purgeOne writes
-// an audit row on its way out.
-//
-// # Idempotent
-//
-// Deleting nothing is success. The purge path retries after a partial failure,
-// and a second pass finding the rows already gone is the ordinary case rather
-// than a problem.
+// The audit log is not removed; it references the organisation by name and
+// outlives it.
 func UnregisterOrg(ctx context.Context, pgURL, org string) error {
 	if org == "" {
 		return errors.New("an organisation is required")
 	}
 	// The same connection setup the console itself uses, rather than a bare
-	// pgxpool.New. console.orgs carries no row-level security today, so this is
-	// not load-bearing yet — it is here so that adding a policy later does not
-	// silently turn these deletes into no-ops.
+	// pgxpool.New. console.orgs carries no row-level security today, so this
+	// changes nothing yet; adding a policy later would otherwise turn these
+	// deletes into silent no-ops.
 	cfg, err := newPoolConfig(pgURL)
 	if err != nil {
 		return fmt.Errorf("console database URL: %w", err)

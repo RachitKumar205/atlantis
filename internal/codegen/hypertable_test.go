@@ -13,12 +13,11 @@ import (
 // sql.go already emits create_hypertable, and three schemas in the corpus
 // declare hypertables.
 //
-// Licensing is load-bearing here and was checked, not assumed. create_hypertable
-// and set_chunk_time_interval are both defined in timescaledb's sql/ddl_api.sql,
-// which carries the Apache 2.0 header. That matters because the Timescale
-// License forbids offering TSL software as a database service and its "Value
-// Added" exception requires that users be prohibited from modifying schema via
-// DDL — exactly what this product exists to permit. See task #33.
+// create_hypertable and set_chunk_time_interval are both defined in
+// timescaledb's sql/ddl_api.sql, which carries the Apache 2.0 header. The
+// Timescale License forbids offering TSL software as a database service, and
+// its "Value Added" exception requires that users be prohibited from modifying
+// schema via DDL, which is what this product exists to permit. See task #33.
 
 func hypertable(intervalMS int) *dsl.IR {
 	return &dsl.IR{Entities: []dsl.Entity{{

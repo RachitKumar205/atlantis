@@ -52,8 +52,8 @@ const (
 //
 // The policy has two halves, and they answer different failures:
 //
-//   - Refresh on a timer, and additionally whenever a token names a key we do
-//     not hold. The second half is what makes rotation work promptly. Waiting
+//   - Refresh on a timer, and additionally whenever a token names a key the
+//     cache does not hold. The second half is what makes rotation prompt. Waiting
 //     for the timer would mean that in the window between Cloud promoting a
 //     new signing key and this console's next scheduled refresh, every sign-in
 //     fails — for up to refreshAfter, with nothing wrong on either side.

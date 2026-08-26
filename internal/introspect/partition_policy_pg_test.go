@@ -13,20 +13,18 @@ import (
 // Introspection must report the isolation the DATABASE enforces, not the
 // isolation the schema file claims.
 //
-// # The defect this closes
+// PartitionField copied off the declared entity makes the live IR agree with
+// the schema by construction: ComputeDiff compares a value to itself,
+// diffPartition returns on its first line, and `tide adopt` cannot report a
+// table whose policy the database is not enforcing.
 //
-// PartitionField was copied verbatim off the declared entity, so the live IR
-// agreed with the schema by construction. ComputeDiff then compared a value to
-// itself, diffPartition returned on its first line, and `tide adopt` could
-// never report a table whose policy the database is not actually enforcing.
+// Strip the policy, FORCE and RLS from a live table whose declaration says
+// `partition by tenant`, and that shape reports the column as partitioned with
+// no warning and an empty diff.
 //
-// A review proved it by stripping the policy, FORCE and RLS from a live table
-// whose declaration said `partition by tenant`: introspection reported the
-// column as partitioned, emitted no warning, and the diff came back empty.
-//
-// That is the single drift this feature most needs to surface, because no
-// differ emitted the policy until very recently — so the modal deployment is
-// one where the schema claims a partition the database has never had.
+// It is the drift most likely to be present, since a deployment predating the
+// differ's policy emission has a schema claiming a partition the database never
+// had.
 func TestIntrospectReadsIsolationFromTheDatabase(t *testing.T) {
 	dsn := os.Getenv("ATLANTIS_TEST_PG")
 	if dsn == "" {

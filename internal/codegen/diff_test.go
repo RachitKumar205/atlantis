@@ -612,21 +612,16 @@ func TestDiff_TableNameAppeared_IsBreaking(t *testing.T) {
 	}
 }
 
-// ---- Caller-context-aware removal tests ----
-
-// TestDiff_FieldRemoved_OwnedNoCrossRef_IsAdditive: when the submitting
-// caller owns the entity and no other caller references the removed field,
-// the removal is downgraded to additive.
-// Removing a column you own is DESTRUCTIVE, not additive.
+// Removing a column the submitting caller owns is destructive, not additive.
 //
-// This test previously asserted the opposite, and the opposite is what let a
-// deleted line in a .atl file reach production unattended: additive is the
-// class `tide apply` applies without a gate, so `ALTER TABLE ... DROP COLUMN`
-// ran and the only recovery was a point-in-time restore of the whole database.
+// Additive is the class `tide apply` applies with no gate, so classifying this
+// removal as additive sends `ALTER TABLE ... DROP COLUMN` to production
+// unattended, with a point-in-time restore of the whole database as the only
+// recovery.
 //
-// Owning the thing says nothing about whether deleting it loses data.
-// Reference analysis still escalates to cross-caller-breaking when somebody
-// else reads it; what it must not do is de-escalate below destructive.
+// Owning the column says nothing about whether deleting it loses data.
+// Reference analysis still escalates to cross-caller-breaking when another
+// caller reads it; it must not de-escalate below destructive.
 func TestDiff_FieldRemoved_OwnedNoCrossRef_IsDestructive(t *testing.T) {
 	oldIR := lower(t, `entity A in x { id bigint primary  brand text }`)
 	newIR := lower(t, `entity A in x { id bigint primary }`)
@@ -686,9 +681,8 @@ func TestDiff_FieldRemoved_NotOwner_IsBreaking(t *testing.T) {
 	}
 }
 
-// TestDiff_EntityRemoved_OwnedNoCrossRef_IsAdditive: dropping an entity
-// the submitting caller owns, with no cross-caller references, is additive.
-// Same for a whole entity: owning it does not make dropping it safe.
+// Same for a whole entity: owning it, with no cross-caller references, does not
+// make dropping it additive.
 func TestDiff_EntityRemoved_OwnedNoCrossRef_IsDestructive(t *testing.T) {
 	oldIR := lower(t, `entity A in x { id bigint primary } entity B in x { id bigint primary }`)
 	newIR := lower(t, `entity A in x { id bigint primary }`)

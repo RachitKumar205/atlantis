@@ -101,7 +101,7 @@ func TestApproveSucceedsWithRoleSudoAndOrigin(t *testing.T) {
 	}
 }
 
-// Reject deliberately does not take sudo.
+// Reject does not take sudo.
 //
 // The worst a wrongly-rejected plan costs is a re-plan; putting a password
 // prompt in front of "no" is how reviewers stop saying it. Asserted because
@@ -134,23 +134,18 @@ func TestRejectDoesNotRequireSudoButDoesRequireTheRole(t *testing.T) {
 
 // A request that skipped requirePolicyRole must be refused by the server.
 //
-// This is the property that makes the middleware chain fail safe, and it is
-// not the one it looks like. Forwarding the user's role rather than the
-// policy's is equivalent — past requirePolicyRole's check the two are the same
-// string, and a mutation swapping them changes nothing. What matters is the
-// case where the middleware did not run at all: no role reaches the handler,
-// the empty string is asserted, and the server refuses because no class's
-// approver_role is "".
+// Forwarding the user's role rather than the policy's is equivalent: past
+// requirePolicyRole's check the two are the same string, and a mutation
+// swapping them changes nothing. What this covers is the middleware not running
+// at all — no role reaches the handler, the empty string is asserted, and the
+// server refuses because no class's approver_role is "".
 //
 // Driven through a mux registered with the same pattern but a shorter chain,
-// which is the shape a reordering mistake produces: the handler reachable
-// without requirePolicyRole in front of it.
+// which is the shape a reordering mistake produces.
 //
-// The mux matters, and the first version of this test did without it. Calling
-// the handler directly leaves r.PathValue("id") empty — ServeMux is what fills
-// it — so the request was refused with "plan_id is required" and the test
-// passed without ever reaching the role check it exists to exercise. It
-// asserted a refusal and got one, for a reason unrelated to its own claim.
+// The mux is required. Calling the handler directly leaves r.PathValue("id")
+// empty, ServeMux being what fills it, so the request is refused with "plan_id
+// is required" and the test passes without reaching the role check.
 func TestAHandlerReachedWithoutTheRoleMiddlewareIsRefused(t *testing.T) {
 	f := newConsoleFixture(t)
 	planID := f.pendingPlan(t)

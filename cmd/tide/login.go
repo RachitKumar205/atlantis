@@ -6,12 +6,10 @@
 // writes what comes back to ~/.atlantis/<org>/<caller>/. The private key is
 // created on the machine that will use it and never leaves.
 //
-// # There is no --caller
-//
-// The token determines which caller it enrols, on the console, from the row it
-// spends. The signer then names the certificate from that value and takes only
-// the public key from the request — so a name supplied here would decide
-// nothing, and offering the flag would invite somebody to think it did.
+// There is no --caller flag. The console determines the caller from the row the
+// token spends, and the signer names the certificate from that value and takes
+// only the public key from the request, so a name supplied here would decide
+// nothing.
 
 package main
 
@@ -228,15 +226,11 @@ func enrol(baseURL, org, token, caFile string) (*storedCredentials, error) {
 
 // enrolClient dials the enrolment listener.
 //
-// # Why --ca exists
-//
-// At this moment tide holds nothing: no certificate, no CA, no store entry. It
-// still has to verify the listener it is about to hand a live token to. With no
-// --ca it trusts the system roots, which is right for a console behind a
-// publicly-trusted certificate and wrong for a private authority — including
-// every local development stack, whose root is in no system store.
-//
-// Without the flag the acceptance test for this feature could not be run.
+// tide holds nothing at this point — no certificate, no CA, no store entry —
+// and still has to verify the listener it is about to hand a live token to.
+// With no --ca it trusts the system roots, which is right for a publicly-trusted
+// console and wrong for a private authority, including every local development
+// stack.
 func enrolClient(caFile string) (*http.Client, error) {
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if caFile != "" {

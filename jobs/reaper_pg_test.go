@@ -142,11 +142,10 @@ func TestReapRefusesIncompleteRegistrations(t *testing.T) {
 	}
 }
 
-// Dropping a parked COLUMN is ALTER TABLE on a live table, so it needs ACCESS
-// EXCLUSIVE. If the reaper waits for that lock it does not merely fail to
-// reap — a pending ACCESS EXCLUSIVE request blocks every reader that queues
-// behind it, so a background job with no deadline takes the table down to
-// delete a column nobody can see.
+// Dropping a parked column is ALTER TABLE on a live table, so it needs ACCESS
+// EXCLUSIVE. A reaper waiting for that lock does more than fail to reap: a
+// pending ACCESS EXCLUSIVE request blocks every reader queueing behind it, so a
+// background job with no deadline takes the table down to drop a hidden column.
 //
 // This drives the real conflict: another session holds the table, the reaper
 // runs, and the assertions are that it gives up quickly, changes nothing, and
@@ -251,12 +250,11 @@ func TestReapGivesUpRatherThanBlockingTheTable(t *testing.T) {
 		t.Errorf("the reaper waited %s for a lock it should have abandoned after 300ms", waited)
 	}
 
-	// A failed reap must not cost a connection. The drop used to be a
-	// multi-statement simple-protocol string: on failure Postgres skips the
-	// COMMIT, so the connection went back to the pool inside a failed
-	// transaction and pgxpool destroyed it. Nothing observably broke — pgx just
-	// rebuilt the backend — which is why this asserts the churn directly rather
-	// than asserting that later queries still work. They always did.
+	// A failed reap must not cost a connection. As a multi-statement
+	// simple-protocol string, a failure makes Postgres skip the COMMIT, the
+	// connection returns to the pool inside a failed transaction and pgxpool
+	// destroys it. Nothing else observably breaks — pgx rebuilds the backend —
+	// so this asserts the churn rather than that later queries still work.
 	if _, err := reapPool.Exec(ctx, `SELECT 1`); err != nil {
 		t.Fatalf("post-reap query: %v", err)
 	}
@@ -298,10 +296,9 @@ SELECT (SELECT count(*) FROM information_schema.columns
 	}
 
 	// A lock conflict counts as a failed attempt and backs off, so the row is
-	// deliberately NOT retried immediately — that is what stops a contended
-	// table being hammered every run. Clearing the backoff stands in for the
-	// wait, and then the same registration must reap normally: a lock timeout
-	// may not leave the reaper permanently unable to reap.
+	// not retried immediately and a contended table is not hammered every run.
+	// Clearing the backoff stands in for the wait; the same registration then
+	// reaps normally, since a lock timeout may not wedge the reaper for good.
 	if _, err := pool.Exec(ctx, `UPDATE atlantis.parked_objects
 	     SET next_attempt_after = NULL WHERE parent_table = 'reap_locked'`); err != nil {
 		t.Fatalf("clear backoff: %v", err)

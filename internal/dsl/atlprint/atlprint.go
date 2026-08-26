@@ -1,42 +1,22 @@
 // Package atlprint performs surgical, formatting-preserving edits to .atl
 // source text.
 //
-// The atlantis pipeline is one-way: .atl source → AST → validated IR →
-// SQL/codegen. There is no IR→.atl printer, and re-emitting a whole file
-// from the AST would discard comments, alignment, and blank lines that
-// callers care about. This package does the opposite: take an existing .atl
-// verbatim, change exactly one declaration, and leave every other byte
-// untouched so the resulting git diff is minimal and reviewable.
+// The pipeline is one-way — .atl source → AST → validated IR → SQL/codegen —
+// and there is no IR→.atl printer. Re-emitting a file from the AST discards its
+// comments, alignment and blank lines, so an edit here computes the target
+// declaration's [start, end) byte span and replaces that slice alone.
+// Everything outside the span is copied through.
 //
-// # Why this is kept with no caller
+// The spans are Position.Byte and EndByte, recorded per entity and per field in
+// internal/dsl/ast.go, which sets them for this package and nothing else.
 //
-// Its one non-test consumer was the console's schema editor, removed on
-// 2026-08-13 along with the GitHub pull-request flow it fed. Nothing in the
-// binary calls this today.
+// Nothing in the binary calls this. Deleting the package takes those spans with
+// it, and with them the only way to edit .atl without reformatting it;
+// internal/dsl/check_placement_test.go covers the splice, including the
+// multi-line-field case that depends on the spans being right.
 //
-// It stays because deleting it would not stop at this package. The spans it
-// splices on — Position.Byte and EndByte, recorded per entity and per field —
-// exist in internal/dsl/ast.go for this and nothing else, so the next person
-// tidying dead code removes those too, and with them the only mechanism by
-// which anything can edit .atl without reformatting it. That machinery is
-// subtle, it is tested (see internal/dsl/check_placement_test.go, whose
-// multi-line-field case depends on the spans being right), and it is needed
-// again by anything that edits schema text rather than regenerating it — a
-// `tide fmt`, a codemod, an agent proposing a field.
-//
-// Rebuilding a byte-splicing editor is expensive; keeping a tested one that
-// nothing calls is close to free. If that trade stops holding, delete the
-// package and the spans together, deliberately, rather than one then the
-// other.
-//
-// The approach is a byte-level splice. The parser records a start byte
-// (Position.Byte) and an end byte (EndByte) for entities and fields; an edit
-// computes the target's [start, end) span and replaces only that slice. All
-// surrounding text — comments, whitespace, other declarations — is copied
-// through unchanged because it never enters the edited span.
-//
-// Every operation re-parses its result and fails if the splice produced
-// syntactically invalid .atl, so a successful return is always parseable.
+// Every operation re-parses its result and fails if the splice produced invalid
+// .atl, so a successful return is parseable.
 package atlprint
 
 import (
@@ -127,8 +107,6 @@ func RemoveField(src []byte, namespace, entity, field string) ([]byte, error) {
 	out := splice(src, start, end, "")
 	return validate(out, namespace, entity)
 }
-
-// ---- internal helpers ----
 
 func parse(src []byte) (*dsl.File, error) {
 	f, err := dsl.Parse("edit.atl", src)

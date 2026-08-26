@@ -18,41 +18,25 @@ type querier interface {
 // scopedRead runs fn against the database, inside a tenant-bound transaction
 // when the entity declares `partition by`.
 //
-// # Why reads need a transaction at all
+// A read needs a transaction because the tenant is a transaction-local run-time
+// parameter, which is what makes it safe on a pooled connection: it reverts
+// when the transaction ends, so a later request reusing the backend cannot
+// inherit it. A statement on the bare pool has no transaction to bind and runs
+// with no tenant set, seeing nothing on a role RLS applies to and everything on
+// a role that bypasses it.
 //
-// The tenant is a transaction-local run-time parameter, which is what makes it
-// safe on a pooled connection: it reverts when the transaction ends, so a later
-// request reusing the same backend cannot inherit it. A statement on the bare
-// pool has no transaction to bind, so it would run with no tenant set — seeing
-// nothing on a role row-level security applies to, and everything on a role
-// that bypasses it.
+// An entity without `partition by` runs straight on the pool. The branch is on
+// a field resolved once at snapshot time, not per request. Binding is cheap:
+// since migration 0024 the discriminator is a run-time parameter, so a bind
+// writes nothing and assigns no transaction id.
 //
-// # Why only partitioned entities pay for it
+// Fails closed. A partitioned entity with no tenant in context returns an error
+// and reads nothing rather than falling through to an unbound read, which is
+// correct only on a deployment whose database role obeys row-level security.
 //
-// An entity without `partition by` runs exactly as before, straight on the
-// pool. That is the overwhelming majority of entities, and a transaction per
-// read is not a cost worth imposing on them to serve a clause they do not use.
-// The branch is on a field resolved once at snapshot time, not per request.
-//
-// Binding itself is cheap: migration 0024 made the discriminator a run-time
-// parameter, so a bind writes nothing and assigns no transaction ID. Under the
-// table-backed design this function would have cost one transaction ID per
-// read, which is why it was not written then.
-//
-// # Fails closed
-//
-// For a partitioned entity with no tenant in context this returns an error and
-// reads nothing. It must not fall through to an unbound read: that is correct
-// only on a deployment whose database role obeys row-level security, and the
-// whole point of enforcing in the database is not to depend on the caller
-// having got something else right.
-//
-// # Errors are the caller's, not this function's
-//
-// fn's error is returned as-is. An earlier draft swallowed it and returned
-// whatever Commit said, which on an aborted transaction is
-// "commit unexpectedly resulted in rollback" — so permission denied, statement
-// timeout and undefined column all arrived as the same sentence.
+// fn's error is returned as-is. Returning Commit's error instead reports
+// "commit unexpectedly resulted in rollback" for permission denied, statement
+// timeout and undefined column alike.
 func (s *Server) scopedRead(ctx context.Context, meta *entityMeta, fn func(q querier) error) error {
 	return s.scopedReadIf(ctx, meta.partitioned, fn)
 }

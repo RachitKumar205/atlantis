@@ -92,9 +92,8 @@ func TestARotatedSignerIsPickedUpOnTheRefreshWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Inside the window the cached client is still served, and that is
-	// deliberate: re-reading the row on every enrolment would cost a database
-	// round trip per certificate.
+	// Inside the window the cached client is still served: re-reading the row
+	// on every enrolment costs a database round trip per certificate.
 	_, addr, err := f.srv.signerFor(ctx, defaultOrg)
 	if err != nil {
 		t.Fatal(err)

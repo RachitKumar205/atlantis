@@ -31,12 +31,10 @@ import (
 // arrangement in which "the console reached the right one" is a claim that can
 // come out false.
 //
-// # Why the schemas differ
-//
-// Each stack gets an entity the other does not have. A test where both servers
-// answer identically cannot distinguish a correct lookup from a shared client:
-// both return the same bytes, and the assertion passes either way. Asserting
-// that B's entity is *absent* from A's answer is the half that does the work.
+// The schemas differ: each stack gets an entity the other does not have. Where
+// both servers answer identically, a correct lookup and a shared client return
+// the same bytes and the assertion passes either way. Asserting that B's entity
+// is absent from A's answer is the half that does the work.
 
 // otherOrg is the second organisation. `acme` (defaultOrg) is the first.
 const otherOrg = "globex"

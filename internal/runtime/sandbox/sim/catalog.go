@@ -144,9 +144,9 @@ func NewCatalog() *Catalog {
 	return &Catalog{tables: map[string]*TableDesc{}}
 }
 
-// RegisterTable installs a table descriptor. Returns an error if a table
-// by the same qualified name is already registered — we treat schema as
-// build-time immutable, so re-registration is a programmer error.
+// RegisterTable installs a table descriptor, and errors when one is already
+// registered under the same qualified name. The schema is fixed once built, so
+// a re-registration is a caller bug.
 func (c *Catalog) RegisterTable(d *TableDesc) error {
 	if d.Schema == "" || d.Name == "" {
 		return fmt.Errorf("sandbox catalog: table needs Schema and Name")

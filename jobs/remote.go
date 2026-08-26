@@ -18,10 +18,9 @@ import (
 //	Request:  {"JobName": "vendor.BulkImport", "Args": {...}}
 //	Response: {"Error": ""}  (empty = success)
 //
-// Any language that can serve a gRPC endpoint with a JSON codec can
-// act as a handler: Python, TypeScript, Rust, Java. The contract is
-// deliberately minimal so the barrier to implementing a handler in
-// a new language is one function, not a code generator.
+// Any language that can serve a gRPC endpoint with a JSON codec can act as a
+// handler. The contract is one function, so a new language needs no code
+// generator.
 type RemoteHandler struct {
 	addr string
 

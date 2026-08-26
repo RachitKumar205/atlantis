@@ -18,25 +18,18 @@ import (
 // 0025 matched `polname LIKE '%\_tenant\_isolation'`. codegen derives that name
 // through truncateIdent, which replaces everything past 54 bytes with a hash
 // suffix — so a table name of 47 bytes or more yields a policy called
-// `..._snapshot_te_6d29d49d`, and the LIKE does not match it. 0025 walked past
-// the table and reported success, leaving the boundary PERMISSIVE on precisely
+// `..._snapshot_te_6d29d49d`, and the LIKE does not match it. 0025 walks past
+// the table and reports success, leaving the boundary permissive on precisely
 // the tables where emitForeignPolicyGuard is no longer there to refuse a second
 // permissive policy.
 //
-// # The fixture is not hand-named
+// The fixture is not hand-named. The entity is declared and run through
+// codegen.EmitInitial, so the policy name is whatever partitionPolicyName
+// produces. The premise check below asserts that name really is outside 0025's
+// pattern, so the test cannot quietly stop covering the case it exists for.
 //
-// The entity is declared and run through codegen.EmitInitial, so the policy
-// name is whatever partitionPolicyName actually produces. Hard-coding a
-// truncated string would prove the migration handles a name I invented; this
-// proves it handles the name atlantis emits. The premise check below asserts
-// the name really is outside 0025's pattern, so the test cannot quietly stop
-// covering the case it exists for.
-//
-// # Why the real .sql runs
-//
-// Same reason the 0025 test gives: the migration is a DO block of catalogue
-// lookups and format() calls, and the file is what ships. A Go re-implementation
-// would be a second thing to get wrong.
+// The real .sql runs, for the reason the 0025 test gives: the migration is a DO
+// block of catalogue lookups and format() calls, and the file is what ships.
 
 const rollupTable = "analytics_customer_engagement_daily_rollup_snapshot"
 
@@ -101,10 +94,10 @@ SELECT p.polname FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid
 // It cannot get there by running 0025's DOWN migration: that selects by the
 // same LIKE pattern and would miss this table for the same reason the up half
 // does. So the boundary is read out of the catalogue by dependency, dropped,
-// and re-created permissive under its own name — with an operator's own
-// `deleted_at IS NULL` hardening added, because carrying the predicate verbatim
-// is the second thing this migration has to get right and a regenerated
-// predicate would silently drop it.
+// and re-created permissive under its own name, with a hand-written
+// `deleted_at IS NULL` clause added: carrying the predicate verbatim is the
+// second thing this migration has to get right, and a regenerated predicate
+// drops that clause while reporting success.
 //
 // It also returns the grant name CODEGEN chose, so the migration's own
 // derivation can be checked against it. Both replicate truncateIdent — Go's on
@@ -221,13 +214,12 @@ func TestMigration0030ConvertsABoundaryWhoseNameWasTruncated(t *testing.T) {
 			"The operator's `deleted_at IS NULL` clause is gone, so soft-deleted "+
 			"rows are visible to every caller and the migration reported success", qual)
 	}
-	// The grant the migration created must carry the name codegen would give it.
-	// Both derive it through truncateIdent — Go's over bytes, the migration's in
+	// The grant the migration creates carries the name codegen gives it. Both
+	// derive it through truncateIdent — Go's over bytes, the migration's in
 	// plpgsql over characters — and this fixture is chosen so the derivation
-	// actually fires. If the two ever disagree, every doc page telling an
-	// operator to drop `<table>_default_access` names a policy that is not on
-	// their table, and the two agreeing is not something reading either one
-	// tells you.
+	// fires. Where the two disagree, every doc page naming
+	// `<table>_default_access` names a policy the table does not have, and
+	// neither implementation read on its own shows the disagreement.
 	if got := permissiveNames(t, admin); len(got) != 1 || got[0] != codegenGrant {
 		t.Fatalf("the permissive policies are %v, want exactly [%s].\n"+
 			"  empty        → the table denies every row to every caller, because "+
@@ -237,9 +229,9 @@ func TestMigration0030ConvertsABoundaryWhoseNameWasTruncated(t *testing.T) {
 			got, codegenGrant)
 	}
 
-	// Running it again must be a no-op, because a repair migration is the kind
-	// an operator re-runs. A second pass that re-selected the now-restrictive
-	// boundary would rename and rebuild it forever.
+	// Running it again is a no-op: a repair migration gets re-run by hand, and a
+	// second pass that re-selects the now-restrictive boundary renames and
+	// rebuilds it forever.
 	t.Run("idempotent", func(t *testing.T) {
 		before := permissiveNames(t, admin)
 		runMigration(t, admin, "0030_convert_remaining_permissive_boundaries.up.sql")

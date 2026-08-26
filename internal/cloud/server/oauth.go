@@ -16,62 +16,41 @@ import (
 )
 
 // oauthCookie carries one sign-in attempt's state across the provider.
-//
-// A third cookie beside the session and the pending login, for the same reason
-// those two are separate from each other: it holds a different thing at a
-// different stage, and one that can be mistaken for another is one that will be.
 const oauthCookie = "atl_cloud_oauth"
 
-// oauthTTL bounds how long a started sign-in can be finished.
-//
-// Long enough to read a consent screen and think about it, short enough that a
-// cookie left on a shared machine is not a way back in. Shorter than the
-// pending login it produces, because this half involves no decision by Cloud.
+// oauthTTL bounds how long a started sign-in can be finished. Shorter than the
+// pending login it produces.
 const oauthTTL = 10 * time.Minute
 
-// Intents. Whether the callback is signing somebody in or attaching a provider
-// to an account that is already signed in.
+// Intents. Whether the callback is a sign-in or an attachment to an account
+// that already holds a session.
 const (
 	intentSignIn = "signin"
 	intentLink   = "link"
 )
 
-// oauthState is what the cookie holds.
+// oauthState is the value carried in the OAuth state cookie. It binds a
+// callback to a request that started here, naming the provider and the
+// operation.
 //
-// # Why a cookie and not a table
-//
-// The value is per-browser by nature, and the browser is the thing holding it.
-// A table would cost a row per abandoned sign-in, a sweeper, and an exemption
-// in the boot-time policy guard arguing that nobody is identified when a
-// callback lands. None of that buys a property this does not have.
-//
-// # What it does and does not say
-//
-// It says: this callback belongs to a request that started here, for this
-// provider, doing this. It does NOT say who — for a link, the acting account
-// comes from the session cookie at callback time. Putting a user id in here
-// would make a forged or replayed blob a way to attach a provider account to
-// somebody else's Cloud account.
+// It carries no user id. For a link, the acting account comes from the session
+// cookie at callback time, so a forged or replayed state cannot attach a
+// provider account to a different Cloud account.
 type oauthState struct {
 	Provider string
 	Intent   string
 	State    string
 	Verifier string
 
-	// Expires is checked here rather than left to the cookie's MaxAge.
-	//
-	// MaxAge is a request the browser honours; it is not a rule. Anything that
-	// keeps a copy of the value can present it afterwards, so the deadline has
-	// to be inside the thing being presented.
+	// Expires is checked here, not left to the cookie's MaxAge. A copy of the
+	// cookie value can be presented after MaxAge has passed, so the deadline
+	// has to travel inside the value.
 	Expires time.Time
 }
 
-// encode packs the state into a cookie value.
-//
-// Five fields joined by a character that appears in none of them: the two
-// tokens are base64url, the provider and intent are constants from this file,
-// and the deadline is decimal. Not JSON, which would need escaping rules for
-// values that cannot contain the separator anyway.
+// encode packs the state into a cookie value. The separator is safe because no
+// field can contain it: both tokens are base64url, the provider and intent are
+// constants from this file, and the deadline is decimal.
 func (s oauthState) encode() string {
 	return strings.Join([]string{
 		s.Provider, s.Intent, s.State, s.Verifier,
@@ -102,24 +81,17 @@ func decodeOAuthState(v string, now time.Time) (oauthState, bool) {
 	return s, true
 }
 
-// redirectURI is where the provider sends the browser back.
-//
-// Built from CLOUD_PUBLIC_URL and never from anything in the request. A
-// redirect_uri taken from a parameter is the open-redirect version of this
-// flow: the provider would faithfully deliver the authorization code to
-// whatever host was asked for.
+// redirectURI is where the provider sends the browser back. Built from
+// CLOUD_PUBLIC_URL and never from the request: a redirect_uri taken from a
+// parameter has the provider deliver the authorization code to whatever host
+// was asked for.
 func (s *Server) redirectURI(provider string) string {
 	return fmt.Sprintf("%s/auth/%s/callback", s.cfg.PublicURL, provider)
 }
 
-// handleOAuthStart sends the browser to a provider.
-//
-// A factory closed over the provider's name rather than a handler that reads it
-// from the path. The route decides which provider this is, so nothing in the
-// request can influence which endpoint the authorization code is later
-// exchanged at — and an unconfigured provider has no route at all, which is
-// what makes its URL a 404 rather than an error page for a feature nobody
-// turned on.
+// handleOAuthStart sends the browser to a provider. Closed over the provider's
+// name rather than reading it from the path, so nothing in the request can
+// influence which endpoint the authorization code is exchanged at.
 func (s *Server) handleOAuthStart(name string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		s.oauthStart(w, r, name)
@@ -136,10 +108,9 @@ func (s *Server) oauthStart(w http.ResponseWriter, r *http.Request, name string)
 		return
 	}
 
-	// A session means this is somebody attaching a second way to sign in, not
-	// somebody signing in. Read here rather than at the callback so the intent
-	// is fixed before the round trip — a session that expires mid-consent
-	// should not silently turn a link into a new account.
+	// A session means this is an attachment, not a sign-in. Read here rather
+	// than at the callback so the intent is fixed before the round trip: a
+	// session expiring mid-consent must not turn a link into a new account.
 	intent := intentSignIn
 	if _, signedIn := s.sessionUser(r); signedIn {
 		intent = intentLink
@@ -163,12 +134,9 @@ func (s *Server) oauthStart(w http.ResponseWriter, r *http.Request, name string)
 
 // handleOAuthCallback finishes a sign-in or a link.
 //
-// # The one thing this must not do
-//
-// Issue a session. Every path through here ends in a pending login, which the
-// second factor turns into a session through the routes C3 already has. A
-// provider vouching for somebody is one factor; treating it as two is the
-// bypass this whole design exists to prevent.
+// This must not issue a session. Every path through here ends in a pending
+// login, which the second factor turns into a session. A provider vouching for
+// an identity is one factor.
 func (s *Server) handleOAuthCallback(name string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		s.oauthCallback(w, r, name)
@@ -191,9 +159,8 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request, name stri
 			"This sign-in did not start here, or it took too long. Please try again.")
 		return
 	}
-	// Cleared before anything else can fail. One authorization code, one
-	// attempt: a cookie surviving a failed callback is a cookie that can be
-	// replayed against a second one.
+	// Cleared before anything else can fail: a cookie surviving a failed
+	// callback can be replayed against a second authorization code.
 	s.clearCookie(w, oauthCookie)
 
 	st, ok := decodeOAuthState(c.Value, time.Now())
@@ -208,16 +175,15 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request, name stri
 		page(w, http.StatusBadRequest, "This sign-in could not be completed. Please try again.")
 		return
 	}
-	// Constant time. The comparison is against a value an attacker supplies and
-	// can vary, which is the shape a timing oracle needs.
+	// Constant time: the right-hand side comes from the request and can be
+	// varied across attempts.
 	if subtle.ConstantTimeCompare([]byte(st.State), []byte(r.URL.Query().Get("state"))) != 1 {
 		page(w, http.StatusBadRequest, "This sign-in could not be completed. Please try again.")
 		return
 	}
 
-	// The provider refused, or the user declined consent. Not an error on this
-	// side, and the provider's own description is not echoed back: it is text
-	// from a third party rendered into a page.
+	// The provider refused, or consent was declined. Its description is not
+	// echoed back: that is third-party text rendered into a page.
 	if e := r.URL.Query().Get("error"); e != "" {
 		page(w, http.StatusOK, "Sign-in was cancelled. You can close this page.")
 		return
@@ -257,14 +223,12 @@ func (s *Server) finishOAuthSignIn(w http.ResponseWriter, r *http.Request, provi
 	user, err := s.db.UserByIdentity(ctx, provider, id.Subject)
 	switch {
 	case err == nil:
-		// Known link. The common path, every sign-in after the first.
+		// Known link.
 	case errors.Is(err, store.ErrNotFound):
 		var ok bool
 		user, ok = s.adoptOrCreate(w, r, provider, id)
 		if !ok {
-			// Answered already: created nothing, refused, or failed. Which one
-			// is not this function's business — every branch in there writes
-			// its own response, and a second one here would be a second body.
+			// adoptOrCreate has already written the response.
 			return
 		}
 	default:
@@ -276,20 +240,17 @@ func (s *Server) finishOAuthSignIn(w http.ResponseWriter, r *http.Request, provi
 	s.startSecondLeg(w, r, user, provider)
 }
 
-// adoptOrCreate handles a provider account nobody has linked yet.
+// adoptOrCreate handles a provider account with no existing link.
 //
-// Reports false when it has already answered the request, which covers every
-// outcome except a user the caller should carry on with — created, refused, or
-// failed. It returns no error for the same reason: each of those branches has
-// its own body to write, and handing one back would mean the caller wrote a
-// second.
+// False means the response is already written, whether the account was refused
+// or the lookup failed. The caller must return without writing.
 func (s *Server) adoptOrCreate(w http.ResponseWriter, r *http.Request, provider string, id *oauth.Identity) (*store.User, bool) {
 	ctx := r.Context()
 
 	existing, err := s.db.UserByEmail(ctx, id.Email)
 	if errors.Is(err, store.ErrNotFound) {
-		// Nobody here yet. One transaction, so there is no state where the
-		// account exists without the link that reaches it.
+		// One transaction, so no state exists where the account is present
+		// without the link that reaches it.
 		created, err := s.db.CreateUserWithIdentity(ctx,
 			id.Email, id.Name, provider, id.Subject, id.Email)
 		if errors.Is(err, store.ErrIdentityClaimed) {
@@ -309,35 +270,15 @@ func (s *Server) adoptOrCreate(w http.ResponseWriter, r *http.Request, provider 
 		return nil, false
 	}
 
-	// # The auto-link rule, and why it has a condition
+	// Auto-linking to an existing account requires that account to hold a
+	// confirmed second factor. This trusts the provider's assertion about an
+	// address, so with no factor behind it, registering that address at the
+	// provider reaches the account.
 	//
-	// The provider says this person controls an address that already has a
-	// Cloud account. Attaching the two is what makes "Sign in with GitHub"
-	// work for somebody who signed up with a password.
+	// The unverified case is answered first: the factorless refusal directs
+	// people to their password, and handleLogin rejects an unverified address.
 	//
-	// It is safe only while a second factor stands behind it. Cloud is trusting
-	// a third party's word about an address, and if that word is enough to
-	// reach an account with nothing else on it, then registering the right
-	// address at a provider is account takeover: the attacker would arrive at
-	// enrolment and set their own factor.
-	//
-	// So the account must already have one. Then the provider's word gets the
-	// attacker as far as a challenge they cannot answer, which is exactly where
-	// a stolen password gets them.
-	//
-	// A factorless account is refused and NOTHING is written — no identity row,
-	// no pending login. The person is told to use the password they already
-	// have, which puts them through the same enrolment they were going to need.
-	// Unverified accounts get their own answer, and it has to come first.
-	//
-	// The refusal below tells people to sign in with their password — which
-	// handleLogin refuses for an unverified address, so an account in that
-	// state would be told to do the one thing that cannot work. Point at the
-	// verification link instead.
-	//
-	// No mail is sent from here. A callback that mailed an address chosen by
-	// whoever holds a provider account is a way to send mail to somebody at
-	// will, so the resend route stays the only thing that sends.
+	// Nothing here sends mail; the address comes from the provider account.
 	if existing.EmailVerifiedAt == nil {
 		page(w, http.StatusConflict,
 			"That address already has an Atlantis account whose email is not "+
@@ -353,13 +294,9 @@ func (s *Server) adoptOrCreate(w http.ResponseWriter, r *http.Request, provider 
 		page(w, http.StatusInternalServerError, "Could not sign in. Please try again.")
 		return nil, false
 	}
-	// Refused HERE, before anything is written and before any pending login can
-	// be minted. That ordering is the safety property, not a nicety: the branch
-	// below hands out a pending login with mayEnrol computed from `enrolled`,
-	// and if a factorless account ever reached it, the person holding the
-	// provider account would be handed an ENROLLING pending login for somebody
-	// else's account. That is takeover in two clicks. The refusal is what makes
-	// the auto-link above acceptable, so it cannot be relaxed on its own.
+	// Refused before anything is written. The branch below computes mayEnrol
+	// from `enrolled`, so a factorless account reaching it returns an ENROLLING
+	// pending login for an account the provider holder does not own.
 	if !enrolled {
 		page(w, http.StatusConflict,
 			"That address already has an Atlantis account with no two-factor "+
@@ -383,14 +320,14 @@ func (s *Server) adoptOrCreate(w http.ResponseWriter, r *http.Request, provider 
 
 // startSecondLeg issues the pending login and tells the browser what is next.
 //
-// Deliberately the same two calls handleLogin makes after a correct password,
-// in the same order, so there is one definition of what a first factor earns.
+// The same two calls handleLogin makes after a correct password, in the same
+// order, so one definition covers what a first factor earns.
 func (s *Server) startSecondLeg(w http.ResponseWriter, r *http.Request, user *store.User, provider string) {
 	// Any session already in this browser belongs to whoever used it last, and
 	// it is not the account being signed in to now. Left in place it outranks
-	// the pending login at requireEnrolable, which prefers a session — so
+	// the pending login at requireEnrolable, which prefers a session, so
 	// enrolment would set a factor on the wrong account and hand back a session
-	// for it. Signing in as somebody ends the previous somebody.
+	// for it. A new sign-in ends the previous session.
 	s.clearCookie(w, sessionCookie)
 
 	enrolled, err := s.db.ForUser(user.ID).HasConfirmedFactor(r.Context())
@@ -413,29 +350,14 @@ func (s *Server) startSecondLeg(w http.ResponseWriter, r *http.Request, user *st
 		next = "enrol"
 	}
 	// The raw name, not providerLabel's display form. Every redirect out of
-	// this file carries `provider=<id>`, and the page renders the label — one
-	// spelling in the contract, and the app already has to know the ids to draw
-	// its buttons.
+	// this file carries `provider=<id>` and the page renders the label.
 	s.handOff(w, r, next, provider)
 }
 
 // handOff returns the browser to the sign-in application.
 //
-// # Relative, and no longer configurable
-//
-// This used to redirect to CLOUD_SIGNIN_APP_URL, and to answer with a
-// text/plain page naming an HTTP route when that was unset. Both are gone:
-// Cloud serves the application itself now, so the setting could only ever
-// duplicate CLOUD_PUBLIC_URL — two values an operator keeps in step by hand,
-// with a stale one stranding sign-ins on another origin after the pending
-// cookie was already set on this one. That is the failure the console_url
-// migration removed by fusing an audience and a redirect into one column, and
-// it is not worth reintroducing.
-//
-// A relative Location resolves against this origin, which is exactly where the
-// application is. `next` is a fixed literal here and in every caller, so there
-// is nothing to escape and nothing to open-redirect through.
-// provider is carried so the page can say which one signed you in.
+// The Location is relative, so it resolves against this origin, which is where
+// the application is served from. `next` is a fixed literal in every caller.
 func (s *Server) handOff(w http.ResponseWriter, r *http.Request, next, provider string) {
 	http.Redirect(w, r, "/signin?next="+next+"&provider="+url.QueryEscape(provider),
 		http.StatusSeeOther)
@@ -443,29 +365,24 @@ func (s *Server) handOff(w http.ResponseWriter, r *http.Request, next, provider 
 
 // refuseClaimed sends a sign-in back to the application with the reason.
 //
-// It used to answer with a text/plain 409 — accurate, and a dead end: no link
-// back, and nothing the application could read to explain what happened. The
-// link path has its own version of this (backToAccount with "claimed"), because
-// somebody connecting a provider from account settings should land back there
-// rather than on the sign-in screen.
+// The link path has its own version, backToAccount with "claimed", so a
+// provider connected from account settings returns there rather than to the
+// sign-in screen.
 func (s *Server) refuseClaimed(w http.ResponseWriter, r *http.Request, provider string) {
 	http.Redirect(w, r,
 		"/signin?error=claimed&provider="+url.QueryEscape(provider),
 		http.StatusSeeOther)
 }
 
-// ── Linking, for somebody already signed in ─────────────────────────────────
-
 // finishLink attaches a provider account to the signed-in account.
 //
-// The user comes from the session, not from the state cookie. That is the whole
-// reason the state carries no identity: this is the branch where a forged blob
-// would otherwise choose whose account gets a new way in.
+// The user comes from the session, not from the state cookie. This is the
+// branch a forged state would otherwise use to choose whose account gains a new
+// way in, which is why oauthState carries no identity.
 func (s *Server) finishLink(w http.ResponseWriter, r *http.Request, provider string, id *oauth.Identity) {
 	user, ok := s.sessionUser(r)
 	if !ok {
-		// The session went away during the round trip. Not an error worth a
-		// stack trace — say what happened and let them start again.
+		// The session went away during the round trip.
 		page(w, http.StatusUnauthorized,
 			"You were signed out while connecting "+providerLabel(provider)+
 				". Sign in and try again.")
@@ -474,9 +391,7 @@ func (s *Server) finishLink(w http.ResponseWriter, r *http.Request, provider str
 
 	if err := s.db.LinkIdentity(r.Context(), user.ID, provider, id.Subject, id.Email); err != nil {
 		if errors.Is(err, store.ErrIdentityClaimed) {
-			// The account screen, not the sign-in one: this person is signed in
-			// and was connecting a provider, so the refusal belongs where they
-			// started.
+			// The account screen, where the link was started, not sign-in.
 			s.backToAccount(w, r, provider, "claimed")
 			return
 		}
@@ -489,10 +404,8 @@ func (s *Server) finishLink(w http.ResponseWriter, r *http.Request, provider str
 
 // backToAccount returns the browser to the account screen after a link attempt.
 //
-// Every one of these used to be a text/plain page — "GitHub is now connected to
-// your account." and nothing else: no link, no way back, and no way for the
-// application to know what happened. Connecting a provider from account
-// settings was a one-way trip out of the app.
+// The outcome travels as a query parameter the application reads, so the
+// browser stays inside it.
 //
 // outcome is a fixed literal at every call site, so the query string carries no
 // caller-supplied text.
@@ -518,8 +431,8 @@ func (s *Server) handleListIdentities(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]map[string]any, 0, len(linked))
 	for _, i := range linked {
-		// The provider subject is not published. It is an opaque id nobody can
-		// act on, and it is the value the link is keyed by.
+		// The provider subject is not published: it is the value the link is
+		// keyed by.
 		out = append(out, map[string]any{
 			"provider":       i.Provider,
 			"email":          i.Email,
@@ -564,8 +477,6 @@ func (s *Server) handleUnlinkIdentity(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// ── Shared helpers ──────────────────────────────────────────────────────────
-
 // sessionUser resolves the session cookie, reporting whether there was one.
 //
 // Quiet: it writes nothing. requireSession is the version that answers the
@@ -604,20 +515,8 @@ func (s *Server) providerNames() []string {
 	return out
 }
 
-// configuredProviders builds the providers this deployment has credentials for.
-//
-// # Why absent rather than disabled
-//
-// A provider in this map has routes; one that is not has none, and the URL
-// answers 404. The alternative — always registering the routes and failing at
-// the redirect — produces an error page for a feature nobody turned on, which
-// reads as a broken deployment rather than an unconfigured one.
-//
-// ConfigFromEnv has already refused a half-configured pair, so reaching here
-// with an id and no secret is not possible through the normal path.
-//
-// The log line names what is on. An operator who set the variables and sees
-// nothing here has learned something at boot rather than from a user.
+// configuredProviders returns the providers this deployment has credentials
+// for. ConfigFromEnv has already refused a half-configured pair.
 func configuredProviders(cfg Config, log *slog.Logger) map[string]oauth.Provider {
 	out := map[string]oauth.Provider{}
 	if cfg.GitHubClientID != "" && cfg.GitHubClientSecret != "" {

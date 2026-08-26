@@ -15,9 +15,9 @@ import (
 // pg_get_expr into a string. The scan failed on the first index and threw away
 // everything already read.
 //
-// The fixture below therefore contains the three shapes the old query got
-// wrong. Each is load-bearing: a fixture with only a plain partition passes
-// against code that is still broken.
+// The fixture below therefore contains three shapes a naive query gets wrong.
+// Each is needed: a fixture with only a plain partition passes against code
+// that is still broken.
 
 // auditPartitions lists the audit_log partitions that currently exist.
 func auditPartitions(t *testing.T, f *consoleFixture) map[string]bool {
@@ -59,9 +59,9 @@ func month(y int, m time.Month) string {
 
 // A partition with an index on it is dropped.
 //
-// The index is the whole point. It has relispartition true and relpartbound
-// NULL, which is what made the old query's scan fail — so a fixture without one
-// would pass against the code this replaces.
+// The index carries the case: it has relispartition true and relpartbound NULL,
+// which is what a partition scan trips on, so a fixture without one passes
+// against a broken query.
 func TestAnOldPartitionIsDroppedDespiteItsIndexes(t *testing.T) {
 	f := newConsoleFixture(t)
 	ctx := context.Background()

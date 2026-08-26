@@ -1,21 +1,14 @@
 -- The organisations a session's owner belongs to.
 --
 -- Copied off the assertion at sign-in, like every other column on this row. The
--- console holds no user record and cannot ask Cloud — that separation is
--- deliberate (step 3), so that Cloud being down does not take a console with
--- it. Which means the list has to arrive with the assertion and be kept here,
--- or it is not available at all.
+-- console holds no user record and does not call Cloud at request time, so that
+-- Cloud being down does not take a console with it.
 --
--- ── What it is for, and what it must not become ──────────────────────────────
---
--- Drawing an organisation switcher. Nothing else.
---
--- It is a snapshot: a membership revoked at Cloud after sign-in keeps appearing
--- here until the session ends. That is safe for exactly one reason — Cloud's
--- /authorize re-reads cloud.memberships before minting, so a stale entry costs
--- a refusal page and grants nothing. The moment any code authorizes anything
--- from this column, the staleness stops being free and this comment stops being
--- true.
+-- It draws the organisation switcher and nothing else. Do not authorize from
+-- this column: it is a snapshot, and a membership revoked at Cloud after
+-- sign-in keeps appearing here until the session ends. That is currently free
+-- because Cloud's /authorize re-reads cloud.memberships before minting, so a
+-- stale entry costs a refusal page and grants nothing.
 --
 -- TEXT[] rather than a join table. A join table would be the right shape for
 -- something queried across sessions; this is read only as part of the row it

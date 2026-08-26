@@ -9,11 +9,10 @@ import (
 
 // Pool adapts a pgxpool to the narrow Querier this package needs.
 //
-// The adapter exists because pgx returns a concrete pgx.Rows while Querier
-// returns the local Rows interface, and Go requires exact return types for
-// method-set matching. Keeping Querier local rather than depending on pgx
-// directly is what lets the grant tests run without Postgres — that seam has
-// already paid for itself, so it is worth the six lines here.
+// pgx returns a concrete pgx.Rows while Querier returns the local Rows
+// interface, and Go requires exact return types for method-set matching.
+// Keeping Querier local rather than depending on pgx directly is what lets the
+// grant tests run without Postgres.
 func Pool(p *pgxpool.Pool) Querier { return pgxQuerier{p} }
 
 type pgxQuerier struct{ p *pgxpool.Pool }

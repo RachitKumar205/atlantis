@@ -13,14 +13,12 @@ import (
 // find.
 //
 // tide's dispatch is a switch and its usage is a hand-written list, so the two
-// can disagree silently — and did: `inspect` was dispatched and working while
-// `tide` with no arguments never mentioned it. A user's only route to a
-// subcommand they have not been told about is that list.
+// disagree silently. That list is the only route to a subcommand nothing else
+// has named.
 //
-// tidectl does not have this problem because its commands are a slice a test
-// can read. tide's switch is load-bearing in a way that resists the same
-// treatment (each arm calls a differently-shaped function), so the property is
-// asserted here instead of restructured.
+// tidectl's commands are a slice a test can read directly. tide's switch arms
+// each call a differently-shaped function, so the property is asserted over the
+// AST instead.
 func TestEverySubcommandAppearsInUsage(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "main.go", nil, 0)

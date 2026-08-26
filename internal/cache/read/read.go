@@ -17,10 +17,9 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/runtime"
 )
 
-// PointerCache is the cache interface this package needs. It is a strict
-// subset of runtime.Cache — we keep the local interface for testability and
-// so the package doesn't need to import every Cache implementation under
-// the sun.
+// PointerCache is the cache interface this package needs, a strict subset of
+// runtime.Cache. Declared locally so a test can supply one and so this package
+// imports no Cache implementation.
 type PointerCache interface {
 	// Get returns the bytes stored under key, or runtime.ErrCacheMiss.
 	Get(ctx context.Context, key string) ([]byte, error)
@@ -82,9 +81,8 @@ type Reader struct {
 	sf    singleflight.Group
 }
 
-// tier0Entry is what we store in the in-process LRU. We track when the value
-// was loaded so XFetch can compute the early-refresh probability against the
-// caller's TTL.
+// tier0Entry is one value in the in-process LRU. loadedAt is kept so XFetch can
+// compute the early-refresh probability against the caller's TTL.
 type tier0Entry struct {
 	body     []byte
 	loadedAt time.Time
@@ -164,26 +162,23 @@ func (r *Reader) Get(ctx context.Context, entity, id string, loader Loader) ([]b
 		if lerr != nil {
 			return nil, lerr
 		}
-		// Best-effort refill. If the cache is down, we still return the
-		// freshly-loaded body to the caller — staleness is acceptable; data
-		// loss is not.
-		// A row with no version pointer is NOT written to tier 1.
+		// Best-effort refill: a cache that is down still returns the
+		// freshly-loaded body to the caller.
 		//
-		// The previous code invented version 1 for it. That body was never
-		// legitimately readable: tier1Lookup treats version 0 as a miss, so
-		// nothing could find it until the pointer reached exactly 1 — which is
+		// A row with no version pointer is not written to tier 1. Inventing
+		// version 1 for it stores a body nothing can read — tier1Lookup treats
+		// version 0 as a miss — until the pointer reaches exactly 1, which is
 		// what the first write produces, since the write path enqueues
-		// CurrentVersion()+1 and CurrentVersion is 0. So the single moment the
-		// body became reachable was the moment it went stale, and the first
-		// write after a first read served the pre-write row.
+		// CurrentVersion()+1 from 0. The moment that body becomes reachable is
+		// the moment it goes stale, and the first read after a write serves the
+		// pre-write row.
 		//
-		// Skipping the write costs nothing, because that key had no reachable
-		// state to lose. Tier 0 still caches the row in-process, and once
-		// anything writes the row the pointer exists and tier 1 works normally.
+		// Skipping the write loses no reachable state. Tier 0 still holds the
+		// row in-process, and the first write establishes the pointer.
 		//
-		// Establishing the pointer from the read path would be the richer fix,
-		// but PointerCache cannot set it and doing so races with concurrent
-		// writers computing CurrentVersion()+1.
+		// The read path cannot establish the pointer itself: PointerCache reads
+		// versions and writes only bodies, and adding SetVersion here would race
+		// concurrent writers computing CurrentVersion()+1.
 		newVer, _ := r.cache.CurrentVersion(loadCtx, entity, id)
 		if newVer > 0 {
 			_ = r.cache.Set(loadCtx, runtime.CacheKey(entity, id, newVer), fresh, r.cfg.DefaultTTL)

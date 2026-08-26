@@ -63,9 +63,9 @@ func New(cfg Config) (*Client, error) {
 	return &Client{inner: c}, nil
 }
 
-// Close releases any pooled connections. The Grafana fork's Close returns
-// no error; we keep an error in our signature so future drivers can surface
-// shutdown failures without a breaking API change.
+// Close releases any pooled connections. The Grafana fork's Close returns no
+// error; this signature keeps one so another driver can report a shutdown
+// failure without changing the API.
 func (c *Client) Close() error {
 	c.inner.Close()
 	return nil
@@ -73,11 +73,10 @@ func (c *Client) Close() error {
 
 // Get returns the bytes stored under key, or runtime.ErrCacheMiss.
 //
-// Note: gomemcache itself does not take a context; we honor ctx by checking
-// for cancellation before making the call. The per-op Timeout in Config is
-// the hard upper bound. If the caller wants a *sooner* deadline they can
-// rely on ctx — the routine returns ErrCacheMiss-as-error after a deadline
-// expires, the same way the reader would treat any failed lookup.
+// gomemcache takes no context, so ctx is honoured by checking for cancellation
+// before the call. Config's per-op Timeout is the hard upper bound; a ctx
+// deadline sooner than that returns an error the reader treats as any other
+// failed lookup.
 func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -168,13 +167,12 @@ func (c *Client) CurrentVersion(ctx context.Context, entity, id string) (int64, 
 // SetVersion stores the new version under the pointer key with the given
 // TTL. Used by the invalidation outbox worker.
 //
-// Monotonic guard: refuses to write a version that's less than or equal to
-// the current pointer value. Without this guard, two concurrent workers
-// processing rows for the same entity can race and leave the pointer at a
-// *lower* version after both finish. The guard is implemented as
-// read-then-write rather than memcached CAS for one reason — the pointer
-// key may not exist yet on first write, and CAS requires an existing
-// value.
+// Monotonic: refuses a version at or below the current pointer. Without the
+// guard, two workers processing rows for one entity can race and leave the
+// pointer at the lower version.
+//
+// Read-then-write rather than memcached CAS, because the pointer key may not
+// exist on first write and CAS needs an existing value.
 //
 // Three return shapes:
 //
@@ -182,13 +180,11 @@ func (c *Client) CurrentVersion(ctx context.Context, entity, id string) (int64, 
 //   - ErrStaleVersion — the cached pointer is already at-or-ahead of
 //     `version`. The worker treats this as success-equivalent (the desired
 //     state is in cache already) and DELETEs the outbox row.
-//   - any other error — the guard couldn't be validated (CurrentVersion
-//     failed) or the write itself failed. The worker treats this as
-//     retryable and leaves the outbox row for the next tick. Returning the
-//     read error here is the load-bearing decision: with an unvalidated
-//     guard, proceeding to SET would let a delayed worker overwrite a
-//     fresher pointer published by another worker since this worker's
-//     last successful read.
+//   - any other error — CurrentVersion failed, so the guard is unvalidated, or
+//     the write itself failed. The worker retries, leaving the outbox row for
+//     the next tick. The read error is returned rather than swallowed: SET on
+//     an unvalidated guard lets a delayed worker overwrite a fresher pointer
+//     another worker published since this one last read.
 func (c *Client) SetVersion(ctx context.Context, entity, id string, version int64, ttl time.Duration) error {
 	if version <= 0 {
 		return fmt.Errorf("memcached: refusing to write non-positive version %d for %s/%s", version, entity, id)
@@ -216,16 +212,14 @@ var ErrStaleVersion = errors.New("memcached: stale version pointer write rejecte
 // doesn't import this package; instead, this method does the check.
 func (c *Client) IsStale(err error) bool { return errors.Is(err, ErrStaleVersion) }
 
-// Increment atomically increments an unsigned counter at key by delta.
-// First call against a missing key seeds it to delta (memcached's
-// `incr` semantics return an error on missing keys, so we add a fallback
-// SET path).
+// Increment atomically increments an unsigned counter at key by delta. Against
+// a missing key it seeds to delta through a fallback SET, since memcached's
+// `incr` errors on one.
 //
-// Used by the tier-2 query-result cache to maintain per-entity generation
-// counters. Each Create/Update/Delete enqueues a generation_bump in the
-// outbox; the worker calls Increment when it drains the row. Combined
-// with the worker's debouncing rule, a single tight write-burst doesn't
-// hammer memcached.
+// The tier-2 query-result cache keeps its per-entity generation counters this
+// way: each Create, Update and Delete enqueues a generation_bump, and the
+// worker calls Increment when it drains the row. The worker's debouncing keeps
+// a write burst from becoming one Increment per write.
 func (c *Client) Increment(ctx context.Context, key string, delta uint64) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -303,13 +297,12 @@ func ttlToExpiration(ttl time.Duration) int32 {
 	return int32(ttl / time.Second)
 }
 
-// parseInt64 / formatInt64 pin the on-wire encoding of version pointers so
-// the worker and the reader agree about how they look on the wire.
+// parseInt64 and formatInt64 pin the on-wire encoding of version pointers, so
+// the worker and the reader read the same bytes the same way.
 //
-// Uses strconv.ParseInt so overflow (a string of >19 digits, or a number
-// > max int64) is rejected via ErrRange. A naive hand-rolled loop would
-// silently wrap on overflow, which a memcached-network attacker could
-// exploit to point the reader at an attacker-chosen body version.
+// strconv.ParseInt rejects overflow with ErrRange — a string past 19 digits, or
+// a number above max int64. A hand-rolled loop wraps silently, which anything
+// on the memcached network can use to point the reader at a version it chose.
 func parseInt64(b []byte) (int64, error) {
 	if len(b) == 0 {
 		return 0, fmt.Errorf("empty")

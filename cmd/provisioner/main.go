@@ -6,17 +6,13 @@
 // this binary existed, provisioning was a package with no importer outside its
 // own tests, and creating an organisation left it queued for nobody.
 //
-// # Why this is not part of cloud serve
+// Separate from `cloud serve` because it needs Kubernetes credentials and
+// `cloud serve` holds every password, every TOTP secret and the assertion
+// signing key. See internal/provisioner.
 //
-// It needs Kubernetes credentials, and cloud serve holds every password, every
-// TOTP secret and the assertion signing key. Keeping the two apart means script
-// on Cloud's origin cannot schedule pods. See internal/provisioner.
-//
-// # Running more than one
-//
-// Safe, and tested. The claim is one statement with FOR UPDATE SKIP LOCKED, and
-// a provisioner that dies mid-work frees its organisation when the lease
-// expires — there is no sweeper to run and none to forget.
+// Running more than one is safe. The claim is one statement with FOR UPDATE
+// SKIP LOCKED, and a provisioner that dies mid-work frees its organisation when
+// the lease expires, so there is no sweeper to run.
 package main
 
 import (

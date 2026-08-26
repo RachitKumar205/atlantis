@@ -58,8 +58,6 @@ func testIR(entities ...*dsl.Entity) *dsl.IR {
 	return ir
 }
 
-// --- SQL builder tests ---
-
 func TestBuildGetSQL(t *testing.T) {
 	e := testAccount()
 	sql := buildGetSQL(e)
@@ -183,8 +181,6 @@ func TestBuildQueryPrefix(t *testing.T) {
 	}
 }
 
-// --- Meta builder tests ---
-
 func TestBuildEntityMeta(t *testing.T) {
 	e := testAccount()
 	ir := testIR(e)
@@ -247,8 +243,6 @@ func TestBuildEntityMeta_CompositePK(t *testing.T) {
 		t.Errorf("pkCols[1] = %q, want variant_id", meta.pkCols[1].sqlName)
 	}
 }
-
-// --- Proto descriptor tests ---
 
 func TestBuildProtoDescriptors(t *testing.T) {
 	e := testAccount()
@@ -347,8 +341,6 @@ func TestBuildProtoDescriptors_CompositePK(t *testing.T) {
 		t.Errorf("entity message fields = %d, want 3", msgDesc.Fields().Len())
 	}
 }
-
-// --- Nullable handling tests ---
 
 func TestColumnMeta_Nullable(t *testing.T) {
 	e := testAccount()

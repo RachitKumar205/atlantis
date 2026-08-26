@@ -13,8 +13,6 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/runtime/sandbox/sim"
 )
 
-// ─────────────────────────── pgvector ───────────────────────────
-
 func makeEmbeddingTable(t *testing.T) *sim.Pool {
 	t.Helper()
 	cat := sim.NewCatalog()
@@ -190,8 +188,6 @@ func TestVectorIP(t *testing.T) {
 	}
 }
 
-// ─────────────────────────── JSONB ───────────────────────────
-
 func makeEventsJSONTable(t *testing.T) *sim.Pool {
 	t.Helper()
 	cat := sim.NewCatalog()
@@ -266,8 +262,6 @@ func TestJsonExtractNested(t *testing.T) {
 		t.Fatalf("id: %d want 2", id)
 	}
 }
-
-// ─────────────────────────── hypertable warn ───────────────────────────
 
 func TestHypertableWarnOnce(t *testing.T) {
 	cat := sim.NewCatalog()

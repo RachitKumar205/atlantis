@@ -72,11 +72,10 @@ func caSerial(t *testing.T, pemBytes []byte) string {
 	return c.SerialNumber.String()
 }
 
-// The property the whole package is built around. Provisioning is interrupted
-// routinely — a restart, a timeout, a full disk — so the second run has to
-// converge rather than duplicate, and above all it must not mint a second
-// authority. A fresh CA would invalidate every caller certificate already
-// issued for the organisation, and nothing would report that it had happened.
+// Provisioning is interrupted routinely — a restart, a timeout, a full disk —
+// so the second run has to converge rather than duplicate. A fresh CA would
+// invalidate every caller certificate already issued for the organisation, and
+// nothing would report it.
 func TestEnsureIsIdempotentAndKeepsTheAuthority(t *testing.T) {
 	k := newTestKube(t)
 	ctx := context.Background()
@@ -97,9 +96,9 @@ func TestEnsureIsIdempotentAndKeepsTheAuthority(t *testing.T) {
 	}
 }
 
-// The failure mode a presence check cannot see. Something that exists and is
-// unusable must be an error, because treating it as "already done" means every
-// retry is a no-op while the organisation stays broken forever.
+// A presence check cannot see this. Something that exists and is unusable,
+// treated as "already done", makes every retry a no-op while the organisation
+// stays broken.
 func TestUnusableStoredCertificatesAreRefusedRatherThanReused(t *testing.T) {
 	k := newTestKube(t)
 	ctx := context.Background()
@@ -119,9 +118,8 @@ func TestUnusableStoredCertificatesAreRefusedRatherThanReused(t *testing.T) {
 	if err == nil {
 		t.Fatal("Ensure reused certificates it could not parse")
 	}
-	// The message has to say what to do about it: this state is not
-	// self-healing on purpose, and an operator needs to know that the fix
-	// costs every caller a re-enrolment.
+	// The message has to say what to do about it. This state does not
+	// self-heal, and the fix costs every caller a re-enrolment.
 	if !strings.Contains(err.Error(), secretPKI) {
 		t.Errorf("the error does not name the secret to delete: %v", err)
 	}
@@ -149,10 +147,9 @@ func TestAPartiallyWrittenSecretIsRefused(t *testing.T) {
 	}
 }
 
-// The single most important line in the object builders. atlantis verifies
-// callers against the authority and never signs anything, so it has no reason
-// to hold the key that could mint one — and if it did, a compromised atlantis
-// could issue itself any caller identity in the organisation.
+// atlantis verifies callers against the authority and never signs, so an
+// atlantis holding the CA key could issue itself any caller identity in the
+// organisation.
 func TestTheAtlantisPodNeverHoldsTheAuthorityKey(t *testing.T) {
 	k := newTestKube(t)
 	ctx := context.Background()
@@ -262,8 +259,8 @@ func TestTheAtlantisDeploymentSetsWhatTheDefaultsGetWrong(t *testing.T) {
 }
 
 // The policy that isolates the database must not block the controller that
-// creates it. This is the failure with the worst diagnosis: the Cluster simply
-// never becomes ready, with nothing in its status pointing at the network.
+// creates it: the Cluster never becomes ready, with nothing in its status
+// pointing at the network.
 func TestTheNetworkPolicyAdmitsTheOperator(t *testing.T) {
 	k := newTestKube(t)
 	ctx := context.Background()
@@ -295,9 +292,9 @@ func TestTheNetworkPolicyAdmitsTheOperator(t *testing.T) {
 	}
 }
 
-// Outside the cluster is allowed, inside it is not. That distinction is the
-// whole control: it lets the console and a caller in while keeping every other
-// tenant's pods out, and a pod cannot forge a source outside the pod CIDR.
+// Outside the cluster is allowed, inside it is not: that lets the console and a
+// caller in while keeping every other tenant's pods out, and a pod cannot forge
+// a source address outside the pod CIDR.
 func TestTheExternalPolicyExcludesThePodNetwork(t *testing.T) {
 	k := newTestKube(t)
 	ctx := context.Background()
@@ -334,13 +331,13 @@ func TestTheExternalPolicyExcludesThePodNetwork(t *testing.T) {
 	}
 }
 
-// A restrictive mode on a Secret volume is unreadable without an fsGroup,
-// because the files are owned by root and every image here runs as a non-root
-// user. Tightening the mode alone is the trap: it looks like hardening and
-// produces `permission denied` reading a file that is plainly there.
+// A restrictive mode on a Secret volume is unreadable without an fsGroup: the
+// files are owned by root and every image here runs as a non-root user, so
+// tightening the mode alone produces `permission denied` on a file that is
+// plainly there.
 //
-// Written over every workload rather than over the signer, because the next
-// pod to mount a secret will meet the same thing.
+// Checked over every workload, since the next pod to mount a secret meets the
+// same thing.
 func TestARestrictiveSecretModeAlwaysComesWithAnFsGroup(t *testing.T) {
 	k := newTestKube(t)
 	ctx := context.Background()
@@ -386,8 +383,8 @@ func TestConfigRefusesAnIncompleteDeployment(t *testing.T) {
 		t.Error("NewKube accepted an empty config")
 	}
 
-	// MemcachedAddr specifically, because cmd/server has a default for it and
-	// that default is the one value guaranteed to be wrong in a pod.
+	// MemcachedAddr specifically: cmd/server has a default for it, and that
+	// default is wrong in a pod.
 	cfg := testConfig()
 	cfg.MemcachedAddr = ""
 	if _, err := NewKube(cfg, c, nil); err == nil {

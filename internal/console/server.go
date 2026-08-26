@@ -94,10 +94,9 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// No dial here any more. Channels are per organisation and built on first
-	// use from a registry row, so there is nothing to connect to at boot — and
-	// nothing to unwind on the failure paths below, which used to repeat
-	// `_ = atl.Close()` six times.
+	// No dial here. Channels are per organisation and built on first use from a
+	// registry row, so there is nothing to connect to at boot and nothing for
+	// the failure paths below to unwind.
 	db, err := newStore(ctx, cfg.PGURL, log, keys)
 	if err != nil {
 		return nil, fmt.Errorf("open console db: %w", err)
@@ -161,10 +160,10 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 	}
 	// The fallback signer and the enrolment listener, built independently.
 	//
-	// They used to be one branch, which meant a console could not have a
-	// listener without a process-wide signer address. A hosted console has no
-	// such address: every signer belongs to an organisation and signerFor picks
-	// the right one per request. See Config.EnrollmentEnabled.
+	// Independently, because a hosted console has no process-wide signer
+	// address: every signer belongs to an organisation and signerFor picks the
+	// right one per request. One branch covering both would make a listener
+	// impossible without that address. See Config.EnrollmentEnabled.
 	//
 	// Both at startup, both fatal. validateEnrollment has already refused a
 	// half-configured group, so reaching here with a broken certificate path
@@ -213,9 +212,8 @@ func (s *Server) Close() {
 // AuditRetentionDays to 0 disables the drop step but the partition
 // creation still runs (otherwise inserts would fail at month rollover).
 func (s *Server) auditRetentionLoop() {
-	// First tick fires after a short delay so we don't compete with
-	// startup work; subsequent ticks are 24h apart. A jittered first
-	// tick isn't worth the complexity here — single-instance assumption.
+	// First tick fires after a short delay, clear of startup work; subsequent
+	// ticks are 24h apart. No jitter, this being a single instance.
 	timer := time.NewTimer(2 * time.Minute)
 	defer timer.Stop()
 
@@ -235,7 +233,7 @@ func (s *Server) runAuditRetention() {
 	defer cancel()
 
 	// Roll forward: ensure this month and next month exist.
-	// (See store.migrate for why we anchor on first-of-month, not today.)
+	// See store.migrate for why the anchor is first-of-month, not today.
 	now := time.Now().UTC()
 	firstOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	if err := s.db.ensureAuditPartition(ctx, firstOfMonth); err != nil {
@@ -328,18 +326,13 @@ func (s *Server) buildMux() {
 	mux.HandleFunc("GET /api/parked", s.auth(s.handleListParkedObjects))
 	mux.HandleFunc("GET /api/health", s.auth(s.handleHealth))
 
-	// The console does not edit schema.
+	// The console does not edit schema. `.atl` files are edited in the
+	// customer's own git repository and applied by `tide apply`; this console
+	// observes, approves and audits.
 	//
-	// /api/schema/edit/preview and /api/schema/edit/pr used to live here. They
-	// composed a field edit against the caller's .atl source and opened a
-	// GitHub pull request with the result — a mechanism a hosted customer does
-	// not have, and one that put a second authoring path beside the customer's
-	// own git repo. `.atl` files are edited in that repo and applied by
-	// `tide apply`; this console observes, approves and audits.
-	//
-	// The caller→repo mapping endpoints went with them, along with
-	// console.caller_repos, which baked owner/repo/default_branch into the
-	// product's data model.
+	// A route that composed a field edit and opened a pull request would be a
+	// second authoring path beside that repository, and would need a
+	// caller-to-repository mapping in the product's data model.
 
 	// Caller management.
 	mux.HandleFunc("GET /api/callers", s.auth(s.handleGetCallers))
@@ -347,10 +340,9 @@ func (s *Server) buildMux() {
 	mux.HandleFunc("DELETE /api/callers/{caller}", s.auth(s.requireRole("admin", s.csrf(s.handleRevokeCaller))))
 	// Enrolment replaces cert issuance.
 	//
-	// POST /api/callers/{caller}/cert/issue used to generate a private key here
-	// and return it for download. This mints a single-use token instead; the
-	// machine that will hold the key generates it and sends only a CSR. See
-	// enroll.go.
+	// This mints a single-use token rather than generating a private key and
+	// returning it for download: the machine that will hold the key generates
+	// it and sends only a CSR. See enroll.go.
 	//
 	// Sudo as well as admin, which the issuance route did not require. It
 	// produces a credential that becomes a caller's identity — the same class
@@ -428,10 +420,8 @@ func (s *Server) buildMux() {
 	// gets back any records with a higher sequence number, plus the new
 	// last_seq for the next poll.
 	//
-	// This comment used to say the stream was synthetic — generated by the BFF
-	// so the Health page had something to render while the RPC was still to be
-	// built. The RPC exists and handleGetLogs proxies it. Left uncorrected, the
-	// note taught every reader to distrust real operational data.
+	// The records are real: handleGetLogs proxies the RPC rather than
+	// synthesising a stream for the Health page.
 	mux.HandleFunc("GET /api/logs", s.auth(s.handleGetLogs))
 
 	// No user-management routes. Membership and roles belong to the
@@ -459,8 +449,6 @@ func (s *Server) buildMux() {
 
 	s.mux = mux
 }
-
-// ── middleware ────────────────────────────────────────────────────────────────
 
 type contextKey int
 
@@ -505,7 +493,7 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 			} else {
 				// Rewrite the cookie so the browser's MaxAge matches the
 				// new server-side expiry. Cookies without MaxAge are
-				// session-cookies; we want a persistent one matching TTL.
+				// session cookies; this one persists and matches the TTL.
 				setSessionCookie(w, cookie.Value, s.cfg.CookieSecure)
 			}
 		}
@@ -534,8 +522,6 @@ func (s *Server) requireSudo(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r)
 	}
 }
-
-// ── auth handlers ──────────────────────────────────────────────────────────
 
 // acceptAssertion reads an assertion out of the request, verifies it against
 // Cloud, and spends it so it cannot be presented twice.
@@ -664,26 +650,19 @@ func (s *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 // (sudoTTL ~ 5 minutes). Required by destructive endpoints — sign-out-all,
 // revoke-all — so a stolen session cookie alone cannot trigger them.
 //
-// Step-up used to mean re-typing a password. With no local credentials it
-// means presenting an assertion that says a second factor was just presented,
-// which sends the user back to Cloud to prove themselves there. That preserves
-// the property the control exists for: holding the cookie is not enough.
+// With no local credentials, step-up means presenting an assertion that says a
+// second factor was just presented, which sends the user back to Cloud to prove
+// it there. The property is the same either way: holding the cookie is not
+// enough.
 //
-// # Why single-use stopped being sufficient
+// It requires the StepUp claim, not merely an unspent assertion. Single-use
+// prevents replay, not re-minting: a live Cloud session mints a fresh assertion
+// on request and lasts twelve hours without a second factor being presented.
 //
-// This used to accept any unspent assertion, and that was strong while the only
-// way to get one was an operator running `cloud mint` with the signing key.
-// Cloud's /authorize changed the economics: a live Cloud session mints a fresh
-// assertion on request, and that session lasts twelve hours without anybody
-// touching a second factor. Single-use stops an assertion being *replayed*; it
-// does nothing about one being *re-minted*.
-//
-// So the check moved from "is this fresh" to "does this say a factor was
-// presented". Cloud sets that claim on exactly one route — /authorize with
-// prompt=reauth — and only after checking the code. Without this line the claim
-// is decoration and sudo is a button that always succeeds, which is the
-// degradation the previous version of this comment warned about and which
-// looks, from every screen and every audit row, exactly like a working gate.
+// Cloud sets StepUp on one route, /authorize with prompt=reauth, and only after
+// checking the code. Without the check below the claim is inert and sudo always
+// succeeds, which looks identical to a working gate on every screen and in
+// every audit row.
 func (s *Server) handleSudo(w http.ResponseWriter, r *http.Request) {
 	claims := s.acceptAssertion(w, r)
 	if claims == nil {
@@ -786,8 +765,8 @@ func (s *Server) switchTargets(u *User) []map[string]string {
 	return out
 }
 
-// ── admin RPC proxies ─────────────────────────────────────────────────────────
-// These forward the request to atlantis and pipe the raw JSON response back
+// The admin RPC proxies below forward the request to atlantis and pipe the raw
+// JSON response back
 // to the browser unchanged. This avoids maintaining duplicate type definitions
 // for every admin response struct — the browser receives exactly what the
 // admin service returns.
@@ -885,12 +864,10 @@ func (s *Server) handleGetEntityOwners(w http.ResponseWriter, r *http.Request) {
 // migration parked instead of dropping.
 //
 // Read-only, like the RPC behind it. Extending a retention window or reaping
-// early are deliberate acts with data consequences and stay documented SQL
-// rather than a button — the value of a 30-day window comes from it being hard
-// to shorten by accident.
+// early has data consequences, and stays documented SQL rather than a button,
+// so the 30-day window is hard to shorten by accident.
 func (s *Server) handleListParkedObjects(w http.ResponseWriter, r *http.Request) {
-	// Accepts "1" or "true": a query param that silently means false for one
-	// of the two obvious spellings is a bug waiting to be filed.
+	// Accepts "1" or "true", so neither obvious spelling silently means false.
 	all := r.URL.Query().Get("all")
 	atl := s.orgATL(w, r)
 	if atl == nil {
@@ -916,9 +893,8 @@ func (s *Server) handleListParkedObjects(w http.ResponseWriter, r *http.Request)
 //
 //   - /readyz, /healthz codes come from the upstream HTTP status.
 //   - uptime is computed by the SPA from started_at.
-//   - version is the schema version reported by /status (the design
-//     screenshot shows v0048 which is the schema version, not the
-//     server build version).
+//   - version is the schema version reported by /status, not the
+//     server build version.
 //   - metrics_series is the count of non-comment lines in /metrics.
 //
 // All atlantis HTTP calls share a tight ProbeTimeout so a wedged
@@ -993,8 +969,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// /metrics series count — every non-comment, non-blank line in
-	// the Prometheus text format is one series. We don't need an exact
-	// count, just a stable "N series" surface that moves with reality.
+	// the Prometheus text format is one series. Not an exact count, just a
+	// stable "N series" surface that moves with the metrics.
 	metricsSeries := 0
 	if resp, err := hc.Get("https://" + healthAddr + "/metrics"); err == nil { //nolint:noctx
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
@@ -1041,8 +1017,6 @@ func (s *Server) requireRole(role string, next http.HandlerFunc) http.HandlerFun
 	}
 }
 
-// ── CSRF middleware ────────────────────────────────────────────────────────────
-
 // csrf rejects requests whose Origin header doesn't match the server host.
 // Combined with SameSite=Strict session cookies this prevents cross-site
 // request forgery on the console's state-changing endpoints.
@@ -1061,17 +1035,12 @@ func (s *Server) csrf(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// ── Login rate limiter ────────────────────────────────────────────────────────
-
 // loginLimiter is a per-IP sliding-window leaky bucket sized for a
 // human-paced sign-in.
 //
-// It used to be the secondary throttle, behind bcrypt's intrinsic ~250ms cost
-// per attempt. There is no bcrypt any more — the console holds no passwords,
-// and verifying an assertion is a signature check measured in microseconds. So
-// this is now the ONLY thing bounding how fast one host can push candidate
-// assertions at this console, and it should be tightened rather than relaxed
-// if it is revisited.
+// The console holds no passwords, and verifying an assertion is a signature
+// check measured in microseconds, so nothing else bounds how fast one host can
+// push candidate assertions at this console.
 //
 // Memory bound: at most loginLimiterMaxIPs entries, each holding up to
 // loginLimiterMax timestamps. ~10KB ceiling under sustained attack.
@@ -1111,8 +1080,8 @@ func (l *loginLimiter) allow(ip string) (bool, int) {
 		l.lastSwp = now
 	}
 
-	// Hard cap on tracked IPs: if we're full and this IP is new, refuse.
-	// Better to fail-closed than to silently amnesty entries under load.
+	// Hard cap on tracked IPs: a new IP arriving at the cap is refused, rather
+	// than entries being amnestied under load.
 	if len(l.hits) >= loginLimiterMaxIPs {
 		if _, known := l.hits[ip]; !known {
 			return false, int(loginLimiterWindow.Seconds())
@@ -1165,8 +1134,6 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// ── Security headers ─────────────────────────────────────────────────────────
-
 // withSecurityHeaders wraps a handler so every response carries a
 // hardened header set: CSP, Referrer-Policy, X-Frame-Options, etc.
 // HSTS only ships when CookieSecure (i.e. HTTPS), since HSTS on plain
@@ -1179,8 +1146,8 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 		"default-src 'self'",
 		"script-src 'self'",
 		// 'unsafe-inline' for styles is required because Vite's prod build
-		// inlines a small style block + we use React style={{...}} props.
-		// 'unsafe-inline' for scripts is *not* set — that's the dangerous one.
+		// inlines a small style block and React style={{...}} props are used.
+		// It is not set for scripts, which is the dangerous one.
 		"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
 		"font-src 'self' https://fonts.gstatic.com",
 		"img-src 'self' data:",
@@ -1206,8 +1173,6 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-
-// ── Settings-page operations ─────────────────────────────────────────────────
 
 // handleInstance returns small, non-secret runtime facts the Settings
 // page renders: the gRPC endpoint callers connect to. Auth-required so
@@ -1321,8 +1286,6 @@ func (s *Server) handleRevokeAllCallers(w http.ResponseWriter, r *http.Request) 
 		"failures": failures,
 	})
 }
-
-// ── Caller management ─────────────────────────────────────────────────
 
 func (s *Server) handleGetCallers(w http.ResponseWriter, r *http.Request) {
 	atl := s.orgATL(w, r)
@@ -1449,8 +1412,6 @@ func (s *Server) handleRevokeCaller(w http.ResponseWriter, r *http.Request) {
 	s.proxyProto(w, "admin", resp, nil)
 }
 
-// ── Schema rollback ───────────────────────────────────────────────────
-
 func (s *Server) handleRollbackSchema(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ToVersion int64 `json:"to_version"`
@@ -1528,8 +1489,6 @@ func (s *Server) handlePreviewRollback(w http.ResponseWriter, r *http.Request) {
 	s.proxyProto(w, "admin", resp, nil)
 }
 
-// ── Job queue management ─────────────────────────────────────────────
-
 func (s *Server) handleListDeadJobs(w http.ResponseWriter, r *http.Request) {
 	limit := intQuery(r, "limit", 50)
 	jobName := r.URL.Query().Get("job_name")
@@ -1577,8 +1536,6 @@ func (s *Server) handleRetryDeadJob(w http.ResponseWriter, r *http.Request) {
 
 	s.proxyProto(w, "admin", resp, nil)
 }
-
-// ── Worker dispatcher ────────────────────────────────────────────────
 
 func (s *Server) handleListConnectedWorkers(w http.ResponseWriter, r *http.Request) {
 	atl := s.orgATL(w, r)
@@ -1645,8 +1602,6 @@ func (s *Server) handleEvictWorker(w http.ResponseWriter, r *http.Request) {
 	s.proxyProto(w, "admin", resp, nil)
 }
 
-// ── audit log ─────────────────────────────────────────────────────────────────
-
 func (s *Server) handleGetAuditLog(w http.ResponseWriter, r *http.Request) {
 	u := r.Context().Value(ctxUser).(*User)
 	limit := intQuery(r, "limit", 100)
@@ -1679,7 +1634,6 @@ func (s *Server) handleGetAuditLog(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{"entries": out})
 }
 
-// ── Live log tail ────────────────────────────────────────────────────────────
 // handleGetLogs proxies the SPA's poll into atlantis's GetLogs admin RPC,
 // which reads from the lock-free in-process slog ring buffer (see
 // internal/obs/logring.go). Cursor-based: the client passes ?since=N and
@@ -1700,8 +1654,6 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	s.proxyProto(w, "GetLogs", resp, err)
 }
 
-// ── SPA handler ───────────────────────────────────────────────────────────────
-
 // handleSPA serves the built console.
 //
 // The logic moved to internal/spafs when Cloud grew a SPA of its own and needed
@@ -1713,14 +1665,10 @@ func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 		ServeHTTP(w, r)
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────────
-
 // proxyProto writes an admin RPC response to w as canonical proto JSON.
 //
-// It replaces a generic proxyRPC that took a method name and forwarded the
-// server's JSON bytes untouched. Method names are no longer strings — each RPC
-// is a typed call on the generated client — so the shared part is what happens
-// to the result, not what is invoked.
+// Each RPC is a typed call on the generated client rather than a method name
+// string, so what is shared between them is the handling of the result.
 //
 // The dialect is clients/go/adminjson, the same one tide and tidectl emit.
 // Empty lists arrive as [] rather than null (protobuf cannot distinguish empty
@@ -1792,7 +1740,7 @@ func intQuery(r *http.Request, key string, fallback int) int {
 // int64Query parses a positive int64 query parameter. The second return
 // value is true only when the param was present and parsed successfully —
 // used for optional filters where "missing" must be distinguished from
-// "zero" so we don't accidentally pass before=0 to the server.
+// "zero", so before=0 never reaches the server by accident.
 func int64Query(r *http.Request, key string) (int64, bool) {
 	v := r.URL.Query().Get(key)
 	if v == "" {
@@ -1917,10 +1865,8 @@ type ctxPlanRoleKey struct{}
 // requireRole cannot do this. It takes a static role string, decided when the
 // route is registered — and the role that may approve is per-class, stored in
 // atlantis.change_policy, and only knowable after the plan has been loaded and
-// its class read. Wiring requireRole("admin") here would hard-code today's
-// default and silently ignore an operator who set a different role for
-// destructive changes, which is the one setting they were most likely to
-// change.
+// its class read. Wiring requireRole("admin") here hard-codes the default and
+// ignores a change_policy row naming a different role for destructive changes.
 //
 // The plan is fetched once here and the resolved role is stashed in the request
 // context, the way auth already stashes ctxUser. The handler then asserts that
@@ -1951,24 +1897,19 @@ func (s *Server) requirePolicyRole(next http.HandlerFunc) http.HandlerFunc {
 				http.StatusForbidden)
 			return
 		}
-		// The USER's role travels onward.
+		// The user's role travels onward.
 		//
-		// Forwarding `want` instead would be equivalent, and it is worth being
-		// exact about that rather than claiming a safety property this does not
-		// have: the check above refuses unless u.Role == want, so past this
-		// line the two are the same string. An earlier version of this comment
-		// said stashing `want` "disarmed the server's own check". It does not,
-		// and a mutation test confirms the swap changes no observable
-		// behaviour. u.Role is preferred only because it says what it means —
-		// this is the role the person holds — instead of relying on an
-		// invariant three lines up.
+		// Forwarding `want` instead is equivalent: the check above refuses
+		// unless u.Role == want, so past this line the two are the same string,
+		// and swapping them changes no observable behaviour. u.Role says what
+		// it means rather than resting on an invariant three lines up.
 		//
-		// What DOES protect the server is that a request which never passed
-		// through here carries no role at all. The handler reads the empty
-		// string, asserts it, and the server refuses: the class's approver_role
-		// is never "". So removing or reordering this middleware fails the
-		// legitimate path too, loudly, rather than opening the illegitimate one
-		// quietly. TestApproveSucceedsWithRoleSudoAndOrigin is what fails.
+		// What protects the server is that a request which never passed through
+		// here carries no role at all. The handler reads the empty string,
+		// asserts it, and the server refuses, a class's approver_role never
+		// being "". So removing or reordering this middleware fails the
+		// legitimate path loudly rather than opening the illegitimate one
+		// quietly, and TestApproveSucceedsWithRoleSudoAndOrigin is what fails.
 		next(w, r.WithContext(context.WithValue(r.Context(), ctxPlanRoleKey{}, u.Role)))
 	}
 }

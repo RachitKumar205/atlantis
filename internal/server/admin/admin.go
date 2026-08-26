@@ -50,11 +50,10 @@ import (
 //     APPLY would mean "may write to anyone's schema" rather than "may write to
 //     mine".
 //
-// The per-CN allowlists that used to sit between (1) and (2) are gone. They
-// expressed authorization as process configuration, which meant a grant could
-// not be audited, could not be changed without a restart, and — because the
-// operator list fell back to a global wildcard when unset, the shipped default
-// — silently made every mutation-capable caller an operator.
+// No per-CN allowlist sits between (1) and (2). Authorization as process
+// configuration cannot be audited or changed without a restart, and an operator
+// list falling back to a global wildcard when unset — the shipped default —
+// makes every mutation-capable caller an operator.
 type Service struct {
 	pool               *pgxpool.Pool
 	mirrorDir          string
@@ -201,20 +200,18 @@ func (s *Service) guardOperatorTransport(ctx context.Context) error {
 
 // requireMutablePlane enforces the deployment-wide switch.
 //
-// This is not authorization and does not overlap with the capability check: it
-// is one operator decision about whether this atlantis accepts schema change
-// over the wire at all. ATL_ALLOW_APPLY_MUTATION=false is the regulated posture
-// documented in docs/architecture/schema-flow.md — tidectl materialises the SQL
-// into files that are reviewed in the operator's own version control before it
-// applies them, and no grant, however broad, may route around that. Note this
-// is the operator's review process, in their repository; atlantis neither opens
-// nor observes it. It is also the switch to reach for during an incident,
-// which a per-caller grant cannot express because it would have to be revoked
-// caller by caller and restored the same way.
+// Not authorization, and no overlap with the capability check: one operator
+// decision about whether this atlantis accepts schema change over the wire at
+// all. ATL_ALLOW_APPLY_MUTATION=false is the regulated posture documented in
+// docs/architecture/schema-flow.md, where tidectl materialises the SQL into
+// files reviewed in the operator's own version control — a process atlantis
+// neither opens nor observes — and no grant routes around it. It is also the
+// switch for an incident, which a per-caller grant cannot express without being
+// revoked caller by caller and restored the same way.
 //
-// It lives in the handler rather than the interceptor because it is not a
-// property of the caller or the method — it is one bit of server state, and
-// three RPCs in jobs.go and workflows.go already read it directly.
+// In the handler rather than the interceptor because it is a property of
+// neither the caller nor the method: one bit of server state, which three RPCs
+// in jobs.go and workflows.go already read directly.
 func (s *Service) requireMutablePlane(what string) error {
 	if s.allowApplyMutation {
 		return nil
@@ -227,11 +224,10 @@ func (s *Service) requireMutablePlane(what string) error {
 // req.Caller must name the authenticated cert CN, so a caller permitted to
 // mutate can only mutate its own namespace.
 //
-// This deliberately did NOT move to the interceptor along with the capability
-// check. An interceptor sees the method name and the connection; it does not
-// see request bodies. Deleting this in the name of "no handler does its own
-// authz" would leave SCHEMA_APPLY meaning "may write to any caller's schema"
-// rather than "may write to mine" — a privilege escalation dressed as cleanup.
+// It did not move to the interceptor along with the capability check: an
+// interceptor sees the method name and the connection, not request bodies.
+// Without it, SCHEMA_APPLY means "may write to any caller's schema" rather than
+// "may write to mine".
 //
 // In insecure dev mode there is no cert identity to bind to, so the check is
 // skipped. Nothing else covers it there either — cmd/server does not install
@@ -453,16 +449,16 @@ type GetCanonicalIRResponse struct {
 //  5. Diff new IR against the checkpoint.
 //  6. Classify; emit SQL; produce impact report.
 //
-// We do NOT write to caller_registrations here — that happens only when
-// ApplyMigration succeeds. PlanSchema is read-only.
+// caller_registrations is not written here; only a successful ApplyMigration
+// writes it. PlanSchema is read-only.
 func (s *Service) PlanSchema(ctx context.Context, req *adminpb.PlanSchemaRequest) (*adminpb.PlanSchemaResponse, error) {
 	reqFiles := submittedFilesFromPB(req.GetFiles())
 	if req.GetCaller() == "" {
 		return nil, errors.New("admin: caller identity is required")
 	}
 
-	// Pass 1: parse the caller's submitted files into one big File set so
-	// we can detect DSL errors before merging with anything.
+	// Pass 1: parse the caller's submitted files into one File set, so DSL
+	// errors surface before anything is merged.
 	callerFiles, parseErrs := parseSubmitted(req.GetCaller(), reqFiles)
 	if len(parseErrs) > 0 {
 		// Surface parse errors up front. The plan is "unclean" — no apply
@@ -540,9 +536,8 @@ func (s *Service) PlanSchema(ctx context.Context, req *adminpb.PlanSchemaRequest
 
 	// Surface live unique-index drift so `tide plan` warns before apply.
 	// Best-effort and read-only (no lock); the apply path re-checks inside
-	// the locked tx and refuses. Unlike extensions we DON'T swallow the
-	// error silently — a check that couldn't run must not read as "clean,"
-	// so we record it and the operator sees the apply-time surprise coming.
+	// the locked tx and refuses. The error is recorded rather than swallowed as
+	// extensions are, so a check that could not run does not read as clean.
 	indexDrift, driftNotes, driftErr := introspect.DetectUniqueIndexDrift(ctx, s.pool, newIR)
 	var driftErrMsg string
 	if driftErr != nil {
@@ -655,10 +650,10 @@ func translateBackfillFields(in []codegen.BackfillField) []BackfillFieldRef {
 // caller's custom queries and procedures, using the full IR's entity
 // set so cross-caller table references still resolve.
 //
-// Scope is intentional: stored content from other callers was already
-// validated when its owning caller submitted it. If we re-validated it
-// here under whatever rules are in force at this moment, drift in some
-// unrelated caller's stored content would block this caller's apply —
+// Scoped: stored content from other callers was validated when its owning
+// caller submitted it. Re-validating it here under whatever rules are in force
+// now would let drift in an unrelated caller's stored content block this
+// caller's apply —
 // for example, a caller that hasn't re-applied since a `table "..."`
 // override was added on one of its entities would have stale references
 // in its stored procedures, and every other caller would be unable to
@@ -683,11 +678,10 @@ func validateCustomSQL(ir *dsl.IR, caller string, owns map[string]string) []stri
 	// it, and re-judging it here would let unrelated drift block this apply.
 	//
 	// A nil or empty map means ownership could not be established, and the gate
-	// then checks EVERYTHING rather than nothing. Scoping is an availability
-	// concession — it keeps one caller's drift from blocking another's apply —
-	// and an unknown owner is not a reason to skip a security check. Written
-	// the other way round, passing nil would disable the gate silently, which
-	// is how a control ends up present in the source and absent at runtime.
+	// then checks everything rather than nothing. Scoping is an availability
+	// concession, keeping one caller's drift from blocking another's apply, and
+	// an unknown owner is not a reason to skip the check. The other way round,
+	// passing nil disables the gate silently.
 	for i := range ir.Entities {
 		if len(owns) > 0 && owns[ir.Entities[i].ID()] != caller {
 			continue
@@ -801,22 +795,19 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 	}
 	// The compare-and-swap.
 	//
-	// Be clear about what it adds over the check above, because it is less
-	// than it looks: the plan id is hashed over this same token, so any drift
-	// that would fail here has already failed there. What is left is a client
-	// that sends the plan id from one plan and the token from another — a
-	// mixed-up retry wrapper, not schema drift. It stays for that, and because
-	// the token has to travel on the wire regardless: an approval, when there
-	// is one, is recorded against the ground the approver saw, and this field
-	// is that ground.
+	// It adds less than it looks over the check above: the plan id is hashed
+	// over this same token, so any drift that would fail here has already
+	// failed there. What is left is a client sending the plan id from one plan
+	// and the token from another — a mixed-up retry wrapper, not schema drift.
+	// The token travels on the wire regardless, because an approval is recorded
+	// against the ground the approver saw and this field is that ground.
 	//
-	// It is checked here rather than where it used to live, at the end of the
-	// transaction beside the checkpoint write. That put it after the DDL, so a
-	// caller working from moved ground executed its whole migration before
-	// anything looked at the token. The transaction rolled back either way, so
-	// correctness never depended on the placement — but the DDL had taken its
-	// locks by then, and on a large table that is minutes of ACCESS EXCLUSIVE
-	// spent on an apply that was always going to be refused.
+	// Checked here rather than at the end of the transaction beside the
+	// checkpoint write. That is after the DDL, so a caller working from moved
+	// ground executes its whole migration before anything looks at the token.
+	// The transaction rolls back either way, but the DDL has taken its locks by
+	// then — on a large table, minutes of ACCESS EXCLUSIVE spent on an apply
+	// that was always going to be refused.
 	//
 	// An empty token skips the check. That is the first apply into an empty
 	// database, where there is no checkpoint to have moved.
@@ -1169,9 +1160,9 @@ func computeMergedSchemaVersion(entries []mergedEntry) string {
 }
 
 // upsertCallerFiles replaces this caller's full submission set inside the tx.
-// We DELETE then INSERT (vs ON CONFLICT) so files that the caller dropped
-// from their submission are removed from storage too — otherwise a caller
-// could leave orphan registrations behind.
+// DELETE then INSERT rather than ON CONFLICT, so a file dropped from the
+// submission is removed from storage too; otherwise it stays as an orphan
+// registration.
 func (s *Service) upsertCallerFiles(ctx context.Context, tx pgx.Tx, caller string, files []SubmittedFile) error {
 	if _, err := tx.Exec(ctx,
 		`DELETE FROM atlantis.caller_registrations WHERE caller = $1`, caller); err != nil {
@@ -1222,9 +1213,9 @@ ORDER BY caller, file_path`, exclude)
 		}
 		f, err := dsl.Parse(caller+":"+path, []byte(content))
 		if err != nil {
-			// Another caller's submission is broken. We surface this as an
-			// error rather than silently dropping the file — a broken
-			// caller shouldn't permit this caller to plan around them.
+			// Another caller's submission is broken. Reported as an error
+			// rather than dropping the file, so a broken caller does not let
+			// this caller plan around them.
 			return nil, fmt.Errorf("caller %s: stored file %s no longer parses: %w", caller, path, err)
 		}
 		out = append(out, f)
@@ -1405,28 +1396,17 @@ func filesHash(files []SubmittedFile) string {
 // computePlanID hashes (caller, files, dependency hash) so applies can detect
 // drift since planning. Stable across reruns of the same plan.
 //
-// # It hashes contents, and that is load-bearing
-//
-// It used to hash file PATHS. `cmd/tide/apply.go` and `backfill.go` both
-// documented the consequence — "a staleness check, not an integrity one" —
-// and both were right that nothing then rested on it: the security property
-// was that the request carries no channel for raw SQL, whatever files arrive.
-//
-// An approval changes that. Once a human's decision is recorded against a plan
-// id, a path-only id means a caller can be approved for "drop users.legacy_flag"
-// and then submit entirely different content at the same paths, against the
+// It hashes file CONTENTS, not paths. An approval is recorded against a plan
+// id, so a path-only id would let a caller approved for "drop
+// users.legacy_flag" submit different content at the same paths, against the
 // same checkpoint, match the same id, and inherit the approval. The gate would
 // have been passed by a change nobody looked at.
 //
-// # And it hashes the dependency hash, not the checkpoint
-//
-// depHash is callerDependencyHash's output. This used to hash the entire prior
-// checkpoint, which made the plan id move whenever any caller applied
-// anything — so the id-mismatch refusal fired before the CAS ever ran, and
-// narrowing only the CAS would have changed nothing observable. The two
-// staleness guards are deliberately fed the same token: they answer the same
-// question, and letting them disagree about what "the world" means is how one
-// of them ends up enforcing a stale rule.
+// depHash is callerDependencyHash's output, not the whole prior checkpoint.
+// Hashing the checkpoint moves the plan id whenever any caller applies
+// anything, so the id-mismatch refusal fires before the CAS runs. Both
+// staleness guards are fed the same token so they cannot disagree about what
+// counts as a change.
 func computePlanID(caller string, files []SubmittedFile, depHash string) string {
 	h := sha256.New()
 	h.Write([]byte(caller))
@@ -1497,8 +1477,8 @@ func buildImpactReport(planCaller string, others []*dsl.File, d *codegen.Diff, _
 		otherByCaller[c] = append(otherByCaller[c], f.Path)
 	}
 
-	// Build a set of entity IDs declared in each other caller's files so
-	// we can determine whether a caller is actually affected by the diff.
+	// The entity IDs declared in each other caller's files, which is what
+	// decides whether a caller is affected by the diff.
 	callerEntities := map[string]map[string]bool{} // caller → set of entityIDs
 	for _, f := range others {
 		c := f.Path

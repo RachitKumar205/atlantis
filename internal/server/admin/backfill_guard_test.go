@@ -9,22 +9,13 @@ import (
 
 // BeginBackfillPlan must call the guard and return on its error.
 //
-// # Why this exists again
+// Without it, the guard can be deleted outright with the whole suite green.
 //
-// It existed, and I deleted it. Replacing refuseBackfillOnPartitioned with
-// refuseBackfillOnBlockedTables removed the test file that held this assertion
-// and nothing replaced it, so for a while the guard could be deleted outright
-// with the whole suite green. A review caught that in the same round the
-// replacement landed.
-//
-// # Known limits, stated rather than implied
-//
-// This reads source. It cannot see the arguments, so feeding the guard nil
-// still passes — a review confirmed that survives. What actually closes it is
-// booting the server against a real database and asserting the refusal; that is
-// tracked separately. Until then this covers the cheap half: the call is
-// present, its condition is a real nil test on the value the call returned, the
-// body returns that value, and the whole thing is not sitting in dead code.
+// This reads source, so it cannot see the arguments: feeding the guard nil
+// still passes. Closing that needs the server booted against a real database
+// with the refusal asserted, tracked separately. What this covers is that the
+// call is present, its condition is a real nil test on the value the call
+// returned, the body returns that value, and none of it sits in dead code.
 func TestBeginBackfillPlanReachesTheGuard(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "backfill.go", nil, 0)

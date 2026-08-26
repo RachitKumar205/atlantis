@@ -13,8 +13,7 @@ import (
 )
 
 // Cookie names. The session and the half-finished login are separate cookies
-// for the same reason they are separate tables: nothing should be able to treat
-// one as the other by forgetting a field.
+// backed by separate tables.
 const (
 	sessionCookie = "atl_cloud_session"
 	pendingCookie = "atl_cloud_pending"
@@ -27,8 +26,7 @@ type loginRequest struct {
 
 // handleLogin verifies a password and hands back a half-finished login.
 //
-// It never returns a session. The only thing that creates one is a second
-// factor, which is the property the two-table split makes structural — see
+// It never returns a session. Only a second factor creates one; see
 // migrations/cloud/0003 and store.CreatePendingLogin.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
@@ -45,9 +43,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	user, err := s.db.UserByEmail(r.Context(), email)
 	if errors.Is(err, store.ErrNotFound) {
-		// Hash anyway. Skipping it here is the enumeration oracle: argon2id
-		// takes tens of milliseconds, the response body is identical either
-		// way, and the clock is not.
+		// Hash anyway: argon2id takes tens of milliseconds, so skipping it
+		// separates a known address from an unknown one by the clock.
 		authn.VerifyDecoy(req.Password)
 		s.refuseSignIn(w)
 		return
@@ -59,8 +56,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !user.HasPassword() {
-		// An OAuth-only account. Same work, same answer: whether an address has
-		// a password is not something this route should disclose.
+		// An OAuth-only account. Same work, same answer, so this route does not
+		// disclose whether an address has a password.
 		authn.VerifyDecoy(req.Password)
 		s.refuseSignIn(w)
 		return
@@ -90,8 +87,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// An unverified address cannot hold a session, so there is no
-	// half-authenticated account to reason about anywhere downstream.
+	// An unverified address cannot hold a session, so no downstream code sees a
+	// half-authenticated account.
 	if user.EmailVerifiedAt == nil {
 		jsonError(w, "verify your email address first — check your inbox, "+
 			"or request another link", http.StatusForbidden)
@@ -113,8 +110,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setCookie(w, pendingCookie, token, store.PendingTTL)
 
-	// The account is told which of the two things to do next. That is not a
-	// disclosure — it is already past the password.
+	// Past the password already, so naming the next step discloses nothing.
 	next := "verify"
 	if !enrolled {
 		next = "enrol"
@@ -128,13 +124,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // refuseSignIn is the one answer a failed password gets.
 //
 // Identical for an unknown address, an account with no password, a wrong
-// password and an unreadable hash. Any difference between them is a way to
-// learn which addresses have accounts.
+// password and an unreadable hash.
 func (s *Server) refuseSignIn(w http.ResponseWriter) {
 	jsonError(w, "that email address and password do not match", http.StatusUnauthorized)
 }
-
-// ── The second factor ───────────────────────────────────────────────────────
 
 type verifyRequest struct {
 	Code string `json:"code"`
@@ -142,10 +135,9 @@ type verifyRequest struct {
 
 // handleVerifySecondFactor completes a sign-in.
 //
-// Accepts either a TOTP code or a backup code. The two are told apart by shape
-// rather than by a field the client sets: a six-digit string is a TOTP code and
-// anything else is tried as a backup code. A client that had to declare which
-// would be a client that could declare the wrong one.
+// Accepts either a TOTP code or a backup code, told apart by shape rather than
+// by a field the client sets: a six-digit string is TOTP, anything else is
+// tried as a backup code.
 func (s *Server) handleVerifySecondFactor(w http.ResponseWriter, r *http.Request) {
 	if !s.rateLimited(w, r) {
 		return
@@ -166,9 +158,8 @@ func (s *Server) handleVerifySecondFactor(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if !accepted {
-		// The pending login SURVIVES a wrong code. Spending it would mean a
-		// mistyped digit costs the user their password entry too, and the rate
-		// limiter is what bounds guessing.
+		// The pending login survives a wrong code; the rate limiter bounds
+		// guessing.
 		jsonError(w, "that code is not right", http.StatusUnauthorized)
 		return
 	}
@@ -250,8 +241,7 @@ func isTOTPShaped(s string) bool {
 // spendPendingLogin claims the half-finished login and proves it belongs to
 // userID. It answers the request and returns false on every failure.
 //
-// Extracted because both callers must do exactly this, and one of them used to
-// do it too late — see handleEnrolFinish.
+// Both callers must do this before issuing a session; see handleEnrolFinish.
 func (s *Server) spendPendingLogin(w http.ResponseWriter, r *http.Request, userID string) bool {
 	pendingToken, _ := r.Cookie(pendingCookie)
 	if pendingToken == nil {
@@ -271,14 +261,11 @@ func (s *Server) spendPendingLogin(w http.ResponseWriter, r *http.Request, userI
 		jsonError(w, "could not sign in", http.StatusInternalServerError)
 		return false
 	}
-	// Belt and braces: the pending login just spent must be the one the factor
-	// was checked against. Only reachable if two requests interleaved, and a
-	// mismatch here would mean issuing a session for the wrong account.
-	//
-	// It matters more on the enrolment path, where userID comes from
-	// requireEnrolable and prefers a live SESSION over the pending login: a
-	// browser holding one account's session and another's pending cookie would
-	// otherwise enrol a factor on the first while spending the second.
+	// The pending login just spent must be the one the factor was checked
+	// against. On the enrolment path userID comes from requireEnrolable, which
+	// prefers a live session, so a browser holding one account's session and
+	// another's pending cookie enrols a factor on the first while spending the
+	// second.
 	if subtle.ConstantTimeCompare([]byte(spentUser), []byte(userID)) != 1 {
 		s.log.Error("pending login changed account mid-request",
 			"checked", userID, "spent", spentUser)
@@ -306,13 +293,10 @@ func (s *Server) completeSignIn(w http.ResponseWriter, r *http.Request, userID s
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Signed in."})
 }
 
-// ── Enrolment ───────────────────────────────────────────────────────────────
-
 // handleEnrolBegin mints a secret and returns what an authenticator needs.
 //
-// Reachable from a pending login with may_enrol set, and from an authenticated
-// session — the first is how an account with no factor gets one, the second is
-// how somebody replaces theirs.
+// Reachable from a pending login with may_enrol set, which is a first factor,
+// and from an authenticated session, which is a replacement.
 func (s *Server) handleEnrolBegin(w http.ResponseWriter, r *http.Request) {
 	userID, ok := s.requireEnrolable(w, r)
 	if !ok {
@@ -341,9 +325,8 @@ func (s *Server) handleEnrolBegin(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "could not start enrolment", http.StatusInternalServerError)
 		return
 	}
-	// Stored unconfirmed. Enrolment is not finished until a code proves the
-	// authenticator actually captured it — otherwise somebody who closed the
-	// page mid-way is locked out by a factor they never had.
+	// Stored unconfirmed. A page closed mid-enrolment would otherwise leave the
+	// account gated behind a factor no authenticator holds.
 	if err := s.db.ForUser(userID).PutTOTPSecret(r.Context(), ciphertext); err != nil {
 		s.log.Error("store TOTP secret", "err", err)
 		jsonError(w, "could not start enrolment", http.StatusInternalServerError)
@@ -395,29 +378,15 @@ func (s *Server) handleEnrolFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── Order matters here, and it used to be wrong ─────────────────────────
+	// Claimed before ConfirmTOTP and ReplaceBackupCodes write. Claiming after
+	// them loses the plaintext backup codes: the claim fails, the response says
+	// the sign-in expired, and the account keeps a confirmed factor and ten
+	// hashes whose plaintext was never returned.
 	//
-	// Enrolling during a sign-in completes it; enrolling from a session that
-	// already exists does not need to. Either way the pending login is claimed
-	// FIRST, before anything is committed.
-	//
-	// It used to be claimed last, after ConfirmTOTP and ReplaceBackupCodes had
-	// both written — so when the claim failed, this handler answered "your
-	// sign-in has expired" and dropped the `codes` slice holding the only copy
-	// of the plaintext. The account kept a confirmed factor and ten
-	// backup-code hashes nobody had ever seen.
-	//
-	// The reachable shape is NOT a pending login that merely timed out. That
-	// case never gets here: requireEnrolable resolves it through
-	// requirePending, which refuses an expired one before any of this runs.
-	//
-	// It is a live SESSION plus a stale pending cookie. requireEnrolable
-	// prefers the session and never looks at the pending login, so the handler
-	// runs to completion and only the spend at the end fails. A browser gets
-	// into that state by starting a second sign-in and abandoning it, which is
-	// also why the account-settings enrolment path is the one that suffers:
-	// re-enrolling replaces the existing backup codes, so the failure does not
-	// just withhold new codes, it destroys working ones.
+	// The reachable case is a live session with a stale pending cookie.
+	// requireEnrolable prefers the session and never reads the pending login,
+	// so only the spend fails, and re-enrolment has already replaced the
+	// existing backup codes.
 	completing := false
 	if _, err := r.Cookie(pendingCookie); err == nil {
 		if !s.spendPendingLogin(w, r, userID) {
@@ -445,12 +414,9 @@ func (s *Server) handleEnrolFinish(w http.ResponseWriter, r *http.Request) {
 		s.setCookie(w, sessionCookie, token, store.SessionTTL)
 	}
 
-	// Last, so the gap between storing the hashes and handing back the
-	// plaintext is as small as it can be made. It cannot be closed: any
-	// shown-once secret has a window where the server has written it and the
-	// client has not received it — a dropped response is enough. What makes
-	// that survivable is being able to mint a fresh set, which is why
-	// regenerating backup codes is a route and not a support ticket.
+	// Last, so the window between storing the hashes and returning the
+	// plaintext is as small as possible. A dropped response still loses the
+	// codes; regenerating them is a route for that reason.
 	codes, hashes, err := authn.NewBackupCodes()
 	if err != nil {
 		s.log.Error("generate backup codes", "err", err)
@@ -470,23 +436,17 @@ func (s *Server) handleEnrolFinish(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"backup_codes": codes,
 		"message":      message,
-		// Stated as a field rather than left to be read out of the message.
-		// This route has two exits — enrolling during a sign-in completes it,
-		// enrolling from a session does not — and the client has to know which
-		// one it took. The session cookie that would otherwise say so is
-		// HttpOnly, so the alternative was matching on English prose.
+		// A field, not something to read out of the message. The route has two
+		// exits and the session cookie that distinguishes them is HttpOnly.
 		"signed_in": completing,
 	})
 }
 
-// ── Session plumbing ────────────────────────────────────────────────────────
-
 // requirePending resolves a half-finished login.
 //
-// wantEnrol asks for one that is allowed to enrol. A pending login for an
-// account that already has a factor cannot reach enrolment — otherwise somebody
-// holding a password could replace the second factor with one of their own,
-// which is the whole gate walked around.
+// wantEnrol asks for one allowed to enrol. A pending login for an account that
+// already holds a factor cannot reach enrolment, which would let a password
+// alone replace that factor.
 func (s *Server) requirePending(w http.ResponseWriter, r *http.Request, wantEnrol bool) (*store.PendingLogin, bool) {
 	c, err := r.Cookie(pendingCookie)
 	if err != nil {
@@ -522,18 +482,12 @@ func (s *Server) requireEnrolable(w http.ResponseWriter, r *http.Request) (strin
 
 // handleAuthConfig reports what the sign-in screen has to know up front.
 //
-// Unauthenticated, and deliberately thin: the names of the configured OAuth
-// providers and nothing else. Anything account-shaped added here would be a
-// disclosure to an anonymous caller.
+// Unauthenticated, so it carries the names of the configured OAuth providers
+// and nothing account-shaped.
 func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
-	// providerNames() builds with make(), so this is `[]` and never `null` on
-	// a deployment with no providers configured. That distinction is load
-	// bearing — the page branches on length, and `null` is not a length — so
-	// TestAuthConfigReportsNoProvidersAsAnEmptyList asserts the wire format
-	// rather than trusting the constructor to stay that way.
-	//
-	// A `if providers == nil` normalisation stood here first and was removed:
-	// mutation testing showed nothing could make it fire.
+	// providerNames() builds with make(), so this serialises as `[]` and never
+	// `null` when no provider is configured. The page branches on length.
+	// TestAuthConfigReportsNoProvidersAsAnEmptyList pins the wire format.
 	providers := s.providerNames()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"providers": providers,
@@ -542,16 +496,12 @@ func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
 
 // handlePendingState reports whether a half-finished sign-in is in progress.
 //
-// # Why this is not a disclosure
+// It answers only for the pending cookie the caller already holds, and returns
+// the same `next` value handleLogin computed when it set that cookie. Holding
+// the cookie means the password has already been accepted.
 //
-// It answers only for the pending cookie the caller already holds, and says no
-// more than handleLogin already said when it set that cookie: `next` is the
-// same value, computed the same way. Somebody holding the cookie is past the
-// password.
-//
-// It deliberately does NOT return the email address or the user id. The page
-// does not need them to render, and a half-finished login is exactly the state
-// where the least should be said.
+// It returns neither the email address nor the user id; the page renders
+// without them.
 func (s *Server) handlePendingState(w http.ResponseWriter, r *http.Request) {
 	c, err := r.Cookie(pendingCookie)
 	if err != nil {
@@ -570,7 +520,7 @@ func (s *Server) handlePendingState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The same value handleLogin returned when it set this cookie, computed the
-	// same way. That is what makes a reload continuous rather than a restart.
+	// same way.
 	next := "verify"
 	if p.MayEnrol {
 		next = "enrol"
@@ -588,8 +538,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			s.log.Error("delete session", "err", err)
 		}
 	}
-	// Cleared regardless, and answered the same way whether or not there was a
-	// session. Signing out twice is a thing browsers do.
+	// Cleared and answered the same way whether or not a session existed.
 	s.clearCookie(w, sessionCookie)
 	s.clearCookie(w, pendingCookie)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Signed out."})

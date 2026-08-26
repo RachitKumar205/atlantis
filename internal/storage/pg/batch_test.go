@@ -19,6 +19,5 @@ func TestBatch_QueueGrowsLen(t *testing.T) {
 	}
 }
 
-// SendBatch / RunInTx require a real Postgres; their happy paths are
-// covered by tests/integration (task #25). The unit tests above pin the
-// shape of the wrapper API so generated code can rely on it.
+// SendBatch and RunInTx need a real Postgres; tests/integration covers them.
+// The tests above pin the shape of the wrapper API.

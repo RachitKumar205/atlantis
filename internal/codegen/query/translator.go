@@ -219,9 +219,6 @@ func oneofArm(m protoreflect.Message) (protoreflect.FieldDescriptor, protoreflec
 	return fd, m.Get(fd), true
 }
 
-// ----------------------------------------------------------------------------
-// String predicate
-
 func (w *walker) translateStringPredicate(m protoreflect.Message, fs FieldSpec) (string, error) {
 	fd, val, ok := oneofArm(m)
 	if !ok {
@@ -286,9 +283,8 @@ func (w *walker) translateStringPredicate(m protoreflect.Message, fs FieldSpec) 
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Int32 / Int64 predicate (one helper, parameterized by width)
-
+// translateIntPredicate renders int32 and int64 comparisons. wide selects
+// int64; the arms are identical otherwise.
 func (w *walker) translateIntPredicate(m protoreflect.Message, fs FieldSpec, wide bool) (string, error) {
 	fd, val, ok := oneofArm(m)
 	if !ok {
@@ -337,9 +333,6 @@ func (w *walker) translateIntPredicate(m protoreflect.Message, fs FieldSpec, wid
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Bool predicate
-
 func (w *walker) translateBoolPredicate(m protoreflect.Message, fs FieldSpec) (string, error) {
 	fd, val, ok := oneofArm(m)
 	if !ok {
@@ -357,9 +350,6 @@ func (w *walker) translateBoolPredicate(m protoreflect.Message, fs FieldSpec) (s
 		return "", fmt.Errorf("unknown bool predicate arm %q", arm)
 	}
 }
-
-// ----------------------------------------------------------------------------
-// Timestamp predicate
 
 func (w *walker) translateTimestampPredicate(m protoreflect.Message, fs FieldSpec) (string, error) {
 	fd, val, ok := oneofArm(m)
@@ -400,9 +390,6 @@ func (w *walker) translateTimestampPredicate(m protoreflect.Message, fs FieldSpe
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Bytes predicate
-
 func (w *walker) translateBytesPredicate(m protoreflect.Message, fs FieldSpec) (string, error) {
 	fd, val, ok := oneofArm(m)
 	if !ok {
@@ -429,9 +416,8 @@ func (w *walker) translateBytesPredicate(m protoreflect.Message, fs FieldSpec) (
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Numeric predicate (decimal-string-carried; cast to ::numeric for compares)
-
+// translateNumericPredicate renders `numeric` comparisons. The value arrives as
+// a decimal string and the placeholder is cast to ::numeric.
 func (w *walker) translateNumericPredicate(m protoreflect.Message, fs FieldSpec) (string, error) {
 	fd, val, ok := oneofArm(m)
 	if !ok {
@@ -469,50 +455,30 @@ func (w *walker) translateNumericPredicate(m protoreflect.Message, fs FieldSpec)
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Float predicate (native float comparison; placeholder cast to column width)
-
 // translateFloatPredicate renders `real` and `double` comparisons. cast is
 // "::real" for float4 columns and "" for float8.
 //
-// # The column stays bare and the placeholder carries the cast
+// The cast goes on the placeholder, not the column. `"score"::real > $1`
+// compares the same values but defeats a btree index on the column, because the
+// indexed expression is the column and the query's is a function of it.
 //
-// The reverse — `"score"::real > $1` — would compare the same values and defeat
-// any btree index on the column, because the indexed expression is the column
-// and the query's is a function of it. Casting the parameter instead leaves the
-// index usable, and the parameter is one value per query rather than one per
-// row.
+// Without a cast, a float4 column holding 0.1 returns zero rows for
+// `WHERE score = 0.1::float8`: PG resolves float4-vs-float8 by promoting the
+// COLUMN, and the promotion of a stored 0.1 is 0.10000000149011612. A bare
+// decimal literal is `numeric` and resolves the same way. See
+// TestFloat4ComparisonNeedsTheWidth.
 //
-// # Why the cast is there at all
+// Two other things independently prevent this today, so removing the cast alone
+// breaks no test: the arm binds a float32 rather than a float64, and pgx
+// negotiates the placeholder's type with PG, which answers float4 for
+// `score = $1` against a float4 column. pgx's negotiation depends on the
+// placeholder sitting where PG can resolve it, and translateFilter composes
+// this output into larger expressions, so a future arm comparing against an
+// expression would lose it. The cast is the only one of the three visible in
+// the SQL.
 //
-// The hazard is real and verified: on a float4 column holding 0.1,
-// `WHERE score = 0.1::float8` returns ZERO rows. PG resolves float4-vs-float8
-// by promoting the COLUMN, and the promotion of a stored 0.1 is
-// 0.10000000149011612, which is not the 0.1 on the other side. A bare decimal
-// literal is worse still — it is `numeric`, resolves the same way, and also
-// returns nothing. See TestFloat4ComparisonNeedsTheWidth.
-//
-// # Three things prevent that here, and only one is this cast
-//
-// The arm also binds a float32 rather than a float64, and pgx separately
-// negotiates the placeholder's type with PG — for `score = $1` against a float4
-// column PG answers float4, so pgx encodes float4 whatever Go value it was
-// handed. Any ONE of the three is currently enough, which is worth saying
-// plainly: removing this cast alone does not break a test, because the other
-// two still hold.
-//
-// They are kept together because which one survives is not knowable in advance.
-// pgx's negotiation depends on the placeholder appearing in a position PG can
-// resolve, and this function's output is composed into larger expressions by
-// translateFilter; a future arm comparing against an expression rather than a
-// bare column would lose it. The cast is the only one of the three that is
-// visible in the SQL, so it is the one a reader can check.
-//
-// # `eq` is still float equality
-//
-// The cast fixes the width mismatch, not the nature of floats. A value that was
-// computed rather than round-tripped from the same literal can still miss on
-// either width. The arm exists because callers who know their data expect it.
+// `eq` remains float equality. The cast fixes the width mismatch, not the
+// nature of floats: a computed value can still miss at either width.
 func (w *walker) translateFloatPredicate(m protoreflect.Message, fs FieldSpec, cast string) (string, error) {
 	fd, val, ok := oneofArm(m)
 	if !ok {
@@ -562,9 +528,6 @@ func (w *walker) translateFloatPredicate(m protoreflect.Message, fs FieldSpec, c
 	}
 }
 
-// ----------------------------------------------------------------------------
-// Shared helpers
-
 // comparisonOp maps a predicate arm name to a SQL operator.
 func comparisonOp(arm string) string {
 	switch arm {
@@ -584,10 +547,11 @@ func comparisonOp(arm string) string {
 	return ""
 }
 
-// inFragment emits `col IN ($1, $2, ...)` or `col NOT IN (...)`. Empty list
-// is a contradiction (IN empty) or tautology (NOT IN empty); we treat both
-// as "no predicate contribution" since the canonicalizer drops empty lists.
-// Direct empty arrivals (caller bug, no canonicalizer between) → drop.
+// inFragment emits `col IN ($1, $2, ...)` or `col NOT IN (...)`.
+//
+// An empty list is a contradiction for IN and a tautology for NOT IN. Both
+// contribute no predicate here, since the canonicalizer drops empty lists and
+// one arriving directly is a caller bug.
 func (w *walker) inFragment(col string, vals []any, negate bool) (string, error) {
 	if len(vals) == 0 {
 		return "", nil

@@ -26,11 +26,10 @@ func emitUp(t *testing.T, old, nw *dsl.IR) string {
 
 // Removing a named entity-level check must DROP that name.
 //
-// checkConstraintName used to scan the entity it was handed — always the *new*
-// one, which by definition no longer holds the removed constraint — then fall
-// back to a hash of the predicate. The emitted DROP CONSTRAINT IF EXISTS
-// targeted a name that had never existed, so IF EXISTS turned it into a no-op:
-// the plan reported the constraint gone while the database kept enforcing it.
+// checkConstraintName is handed the new entity, which no longer holds the
+// removed constraint. Scanning that and falling back to a hash of the predicate
+// names a constraint that never existed, and IF EXISTS turns the DROP into a
+// no-op: the plan reports the constraint gone while the database enforces it.
 func TestRemovingANamedCheckDropsThatName(t *testing.T) {
 	with := dsl.Entity{Name: "Order", Namespace: "shop",
 		Fields: []dsl.Field{{Name: "id", Type: dsl.FieldType{Name: "bigint"}, Primary: true}, {Name: "total", Type: dsl.FieldType{Name: "int"}}},
@@ -45,10 +44,9 @@ func TestRemovingANamedCheckDropsThatName(t *testing.T) {
 
 // Two named checks may share a predicate. Removing one must drop that one.
 //
-// Identity used to be the predicate, so the emitter's predicate-scan resolved
-// the survivor's name and emitted DROP CONSTRAINT "a" when the author had
-// removed "b" — destroying a constraint nobody touched while the one they
-// removed stayed live, with the plan reporting neither.
+// Keyed by predicate, the emitter's scan resolves the survivor's name and
+// emits DROP CONSTRAINT "a" for a removal of "b": the kept constraint is
+// destroyed, the removed one stays live, and the plan reports neither.
 func TestRemovingOneOfTwoChecksSharingAPredicateDropsTheRightOne(t *testing.T) {
 	two := dsl.Entity{Name: "Order", Namespace: "shop",
 		Fields: []dsl.Field{{Name: "id", Type: dsl.FieldType{Name: "bigint"}, Primary: true}, {Name: "total", Type: dsl.FieldType{Name: "int"}}},

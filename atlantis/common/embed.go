@@ -10,10 +10,9 @@ import "embed"
 // a caller's output dir as compile-time inputs so a caller's namespace
 // protos can `import "atlantis/common/v1/...";`.
 //
-// A glob rather than a file list. The list was hand-maintained, so a new
-// common proto reached callers only if whoever added it also remembered this
-// line — and the failure is quiet in the worst place: the caller's `buf
-// generate` fails on an import it cannot resolve, in their repository.
+// A glob rather than a file list, which has to be edited alongside every new
+// common proto. Omitted from the list, a proto reaches no caller and their
+// `buf generate` fails on an import it cannot resolve.
 //
 //go:embed v1/*.proto
 var Protos embed.FS

@@ -1,25 +1,19 @@
 // Package migrations carries the SQL trees atlantis owns, embedded in the
 // binaries that apply them.
 //
-// # Why embedded rather than read from disk
+// Embedded rather than read from a path, so a binary and the schema it was
+// built against cannot be updated separately. A server started against an older
+// checkout would migrate a database backwards from what its own code expects,
+// and report success: applying no migrations and applying the right ones look
+// identical from outside.
 //
-// A binary and the schema it was built against are one artifact. Reading the
-// tree from a path meant they could be updated separately: a server started
-// with MIGRATIONS_DIR pointing at an older checkout would migrate a database
-// backwards from what its own code expects, and nothing would say so — the run
-// reports success either way, because applying no migrations and applying the
-// right ones look identical from outside.
+// With no path there is no mismatch, and no `COPY migrations` line in the
+// server image (Dockerfile:150). The console image is a single binary.
 //
-// Embedding removes the path, so it removes the mismatch. It also removes the
-// `COPY migrations /app/migrations` line the server image needed, and lets the
-// console image stay a single binary.
-//
-// # What is NOT here
-//
-// tidectl-emitted migrations. Those are written by `tidectl plan` / `approve`
-// into the DEPLOYMENT's repository, after this binary is built, so no binary
-// can carry them — see internal/migrate.RunDir. The split is by who owns the
-// schema: atlantis owns infra/ and console/, the deployment owns its own.
+// tidectl-emitted migrations are not here. `tidectl plan` writes those into the
+// deployment's repository after this binary is built, so no binary can carry
+// them; see internal/migrate.RunDir. atlantis owns infra/ and console/, and the
+// deployment owns its own.
 package migrations
 
 import "embed"

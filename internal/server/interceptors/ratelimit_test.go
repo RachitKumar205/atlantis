@@ -92,9 +92,9 @@ func TestIsLowPriority(t *testing.T) {
 	}
 }
 
-// Exercising NewRateLimit end-to-end requires a UnaryServerInterceptor
-// invocation. The interceptor's pool dependency is nil-tolerant by design;
-// we pass nil here so the test stays leaf (no pgx + Docker requirement).
+// Exercising NewRateLimit end to end requires a UnaryServerInterceptor
+// invocation. The interceptor tolerates a nil pool, so passing nil keeps these
+// tests leaf: no pgx, no Docker.
 
 func TestNewRateLimit_BucketLimitRejects(t *testing.T) {
 	cfg := RateLimitConfig{
@@ -129,10 +129,9 @@ func TestNewRateLimit_PerCallerOverrideUsed(t *testing.T) {
 		DefaultQPS: 1,
 		Burst:      1,
 		PerCaller:  map[string]int{caller: 1000},
-		// Burst is still 1 so the override doesn't make this useful unless
-		// we also configure burst per caller. v0.1's shape is global burst,
-		// per-caller refill rate — pinning the override-read path is what
-		// matters here.
+		// Burst stays 1, so the override changes nothing without a per-caller
+		// burst too: the shape is a global burst with a per-caller refill
+		// rate. What this pins is the override-read path.
 		CallerFromContext: func(context.Context) string { calls++; return caller },
 	}
 	interceptor := NewRateLimit(nil, cfg)

@@ -1,13 +1,12 @@
 // pgparse_test covers the translator from end to end. The structure is
 // three layers of tables:
 //
-//   1. parseOK — input → AST shape we expect (verified via reflect.DeepEqual)
-//   2. parseErr — input → must wrap ErrUnsupported (or carry a specific message)
-//   3. integration — full Parse → Stmt happy-path smoke tests for each kind
+//   1. parseOK — input to expected AST shape, compared by reflect.DeepEqual
+//   2. parseErr — input that must wrap ErrUnsupported, or carry a given message
+//   3. integration — full Parse to Stmt, one happy path per statement kind
 //
-// Every edge case that surfaced during the migration plan's adversarial
-// review is pinned here so a future regression in pg_query_go (or in
-// the translator) trips a focused test rather than a UI-visible failure.
+// A regression in pg_query_go or in the translator trips one of these rather
+// than surfacing at a caller.
 
 package sql
 
@@ -17,8 +16,6 @@ import (
 	"strings"
 	"testing"
 )
-
-// ─────────────────────────── helpers ───────────────────────────
 
 // parseStmt is a thin wrapper that fails the test on any error.
 // Use this when the test asserts on AST shape; the err path has its
@@ -32,9 +29,9 @@ func parseStmt(t *testing.T, src string) Stmt {
 	return got
 }
 
-// assertUnsupported confirms err wraps ErrUnsupported AND that its
-// message contains the expected substring. The substring check is
-// load-bearing — operators read these messages directly.
+// assertUnsupported confirms err wraps ErrUnsupported and that its message
+// carries the expected substring. These messages are read directly, so the
+// substring is part of the contract.
 func assertUnsupported(t *testing.T, err error, wantSubstr string) {
 	t.Helper()
 	if err == nil {
@@ -47,8 +44,6 @@ func assertUnsupported(t *testing.T, err error, wantSubstr string) {
 		t.Fatalf("err = %q; want substring %q", err.Error(), wantSubstr)
 	}
 }
-
-// ─────────────────────────── entry-point edge cases ───────────────────────────
 
 func TestParse_EmptyInput(t *testing.T) {
 	cases := []string{
@@ -108,8 +103,6 @@ func TestParse_SyntaxErrorWrapped(t *testing.T) {
 		t.Fatalf("syntax error should wrap ErrUnsupported, got %v", err)
 	}
 }
-
-// ─────────────────────────── SELECT ───────────────────────────
 
 func TestSelect_NoFrom(t *testing.T) {
 	stmt := parseStmt(t, "SELECT 1")
@@ -407,8 +400,6 @@ func TestSelect_AnyWithNonEqualRejected(t *testing.T) {
 	assertUnsupported(t, err, "ANY")
 }
 
-// ─────────────────────────── JSON extract ───────────────────────────
-
 func TestSelect_JsonExtractPred_SingleArrow(t *testing.T) {
 	sel := parseStmt(t, `SELECT "id" FROM "s"."t" WHERE "data"->>'type' = $1`).(*Select)
 	jep, ok := sel.Where[0].(JsonExtractPred)
@@ -468,8 +459,6 @@ func TestSelect_JsonExtractInProjection(t *testing.T) {
 	}
 }
 
-// ─────────────────────────── vector distance ───────────────────────────
-
 func TestSelect_VectorDistanceProjectionAndOrderBy(t *testing.T) {
 	cases := []struct {
 		op  string
@@ -512,8 +501,6 @@ func TestSelect_VectorDistance_PG17HammingRejected(t *testing.T) {
 	_, err := Parse(`SELECT "embedding" <+> $1::vector AS d FROM "s"."t"`)
 	assertUnsupported(t, err, "")
 }
-
-// ─────────────────────────── INSERT ───────────────────────────
 
 func TestInsert_Basic(t *testing.T) {
 	stmt := parseStmt(t, `INSERT INTO "s"."t" ("a", "b") VALUES ($1, $2)`)
@@ -626,8 +613,6 @@ func TestInsert_CoalesceMoreThanTwoArgsRejected(t *testing.T) {
 	assertUnsupported(t, err, "COALESCE")
 }
 
-// ─────────────────────────── UPDATE / DELETE ───────────────────────────
-
 func TestUpdate_Basic(t *testing.T) {
 	upd := parseStmt(t, `UPDATE "s"."t" SET "a" = $1, "b" = now() WHERE "id" = $2`).(*Update)
 	if upd.Table.Name != "t" {
@@ -671,8 +656,6 @@ func TestDelete_UsingRejected(t *testing.T) {
 	_, err := Parse(`DELETE FROM "s"."t" USING "s"."u" WHERE "s"."t"."id" = "u"."id"`)
 	assertUnsupported(t, err, "USING")
 }
-
-// ─────────────────────────── unsupported PG features ───────────────────────────
 
 func TestSelect_JoinRejected(t *testing.T) {
 	_, err := Parse(`SELECT "a"."id" FROM "s"."a" JOIN "s"."b" ON "a"."id" = "b"."a_id"`)
@@ -737,8 +720,6 @@ func TestSelect_TableAliasRejected(t *testing.T) {
 	assertUnsupported(t, err, "alias")
 }
 
-// ─────────────────────────── literals + expressions ───────────────────────────
-
 func TestExpr_NullLiteralRejected(t *testing.T) {
 	_, err := Parse(`INSERT INTO "s"."t" ("a") VALUES (NULL)`)
 	assertUnsupported(t, err, "NULL")
@@ -790,8 +771,6 @@ func TestExpr_IntLiteralPreserved(t *testing.T) {
 	}
 }
 
-// ─────────────────────────── error wrapping ───────────────────────────
-
 func TestParse_ErrUnsupportedSentinelWrappedConsistently(t *testing.T) {
 	// Every rejection path must wrap ErrUnsupported so callers can
 	// branch on errors.Is. The conformance suite + pool tests rely
@@ -814,8 +793,6 @@ func TestParse_ErrUnsupportedSentinelWrappedConsistently(t *testing.T) {
 		})
 	}
 }
-
-// ─────────────────────────── round-trip basics ───────────────────────────
 
 func TestInsert_RoundTripExecutorShape(t *testing.T) {
 	// Smoke test the full codegen-emitted shape one full statement at a

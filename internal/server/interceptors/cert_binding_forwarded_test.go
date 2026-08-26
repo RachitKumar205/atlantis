@@ -11,14 +11,12 @@ import (
 // requirement, so a caller behind a TLS-terminating proxy is not refused for
 // having no live peer.
 //
-// This used to assert that the check FINGERPRINTED the forwarded certificate
-// rather than the live peer, which was the whole point while callers were
-// pinned to one leaf. Migration 0032 removed pinning, so there is no
-// fingerprint to compare and the surviving property is the one below: the
-// forwarded certificate is what leafCertFromContext finds.
+// Migration 0032 removed per-caller pinning, so there is no fingerprint to
+// compare and the property is narrower than it was: the forwarded certificate
+// is what leafCertFromContext finds.
 //
-// Still worth a test. Without it the interceptor would refuse every proxied
-// caller with "no peer certificate", which reads as a TLS problem and is not.
+// Without it the interceptor refuses every proxied caller with "no peer
+// certificate", which reads as a TLS problem and is not.
 func TestCertBinding_ForwardedCertSatisfiesThePeerRequirement(t *testing.T) {
 	der := []byte("re-validated-forwarded-cert-der")
 	callerFn := func(context.Context) string { return "vendor" }

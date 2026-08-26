@@ -22,12 +22,10 @@ func setConsoleEnv(t *testing.T) {
 
 // The console will not start without an issuer to trust.
 //
-// This is stricter than it may look, and the strictness is the point. The
-// verifier compares iss and aud for exact equality, and an empty expected
-// value means the check is skipped — so a console missing either one would not
-// refuse to start, it would start and accept assertions from any issuer, for
-// any console. Nothing downstream could notice: every request would carry a
-// valid session, established from a token that verified.
+// The verifier compares iss and aud for exact equality, and an empty expected
+// value skips the check, so a console missing either one starts and accepts
+// assertions from any issuer for any console. Nothing downstream notices: every
+// request carries a valid session, established from a token that verified.
 func TestConfigFromEnvRequiresTheCloudIssuer(t *testing.T) {
 	for _, missing := range []string{"CLOUD_ISSUER", "CLOUD_AUDIENCE", "CLOUD_JWKS_URL"} {
 		t.Run("without "+missing, func(t *testing.T) {

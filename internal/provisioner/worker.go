@@ -40,9 +40,8 @@ type Queue interface {
 	ReadyOrgs(ctx context.Context) ([]string, error)
 	Requeue(ctx context.Context, org, reason string) error
 
-	// The teardown half. Separate from ClaimForProvisioning for the reason
-	// store.ClaimForPurge records: one predicate covering both would be the one
-	// query nobody can afford to misread.
+	// The teardown half. Separate from ClaimForProvisioning; see
+	// store.ClaimForPurge for the differing lease and retry policies.
 	ClaimForPurge(ctx context.Context, claimedBy string, lease time.Duration) (*store.Claimed, error)
 	MarkPurged(ctx context.Context, org string) error
 	MarkPurgeFailed(ctx context.Context, org, reason string) error
@@ -55,20 +54,15 @@ type Queue interface {
 
 // Cluster is where organisations are built.
 //
-// Deliberately not provision.Target, which is Ensure plus Destroy and does not
-// carry WaitReady. Programming to that interface would mean a type assertion in
-// the one place that must not be clever, so this names what is actually needed
-// instead. *provision.Kube satisfies it.
+// Not provision.Target, which is Ensure plus Destroy and does not carry
+// WaitReady; using it would need a type assertion for the wait.
+// *provision.Kube satisfies this.
 type Cluster interface {
 	Ensure(ctx context.Context, spec provision.Spec) (provision.Status, error)
 	WaitReady(ctx context.Context, org string) error
 	Exists(ctx context.Context, org string) (bool, error)
 
 	// Destroy removes an organisation's namespace and everything in it.
-	//
-	// Added when deletion was wired up. Until then this method existed on
-	// *provision.Kube and nothing outside a test had ever called it — the
-	// destructive half of provisioning, written and unreachable.
 	Destroy(ctx context.Context, org string) error
 
 	// RotateConsoleCredentials reissues the two certificates the console
@@ -185,10 +179,10 @@ func (w *Worker) Healthy() bool { return !w.degraded.Load() }
 
 // reconnect rebuilds the cluster connection and reports whether it worked.
 //
-// Credentials are read afresh, which is the whole point: controller-runtime's
-// GetConfig reads the kubeconfig or the service account at the moment it is
-// called, so a rotated authority is picked up without a restart. If the rebuild
-// fails, this process is degraded rather than merely unlucky.
+// Credentials are read afresh: controller-runtime's GetConfig reads the
+// kubeconfig or the service account at the moment it is called, so a rotated
+// authority is picked up without a restart. A failed rebuild marks this process
+// degraded.
 func (w *Worker) reconnect() bool {
 	c, err := w.newCluster()
 	if err != nil || c == nil {
@@ -205,13 +199,13 @@ func (w *Worker) reconnect() bool {
 	return true
 }
 
-// credentialError reports whether err means the cluster refused who we are.
+// credentialError reports whether err means the cluster refused this process's
+// credentials.
 //
 // Matched on text because the errors arrive from three layers that do not share
 // a type: crypto/x509 for a chain that does not verify, and the API server for
 // 401 and 403. A false positive costs one wasted reconnect; a false negative
-// costs an organisation marked failed for a fault that is not its own, which is
-// the more expensive way to be wrong.
+// marks an organisation failed for a fault that is not its own.
 func credentialError(err error) bool {
 	if err == nil {
 		return false
@@ -275,40 +269,14 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-// reconcile puts back in the queue any organisation the cluster has lost.
+// reconcile puts back in the queue any organisation the cluster has lost, and
+// checks the console certificate's remaining life, this being the only loop
+// that visits every ready organisation.
 //
-// # Why this is needed at all
+// Nothing else reads a ready row: the claim predicate covers 'pending',
+// 'failed' and expired 'provisioning' only. It compares existence, not shape.
 //
-// Nothing else looks at a ready row. The claim predicate covers pending,
-// failed and expired-provisioning, and deliberately not ready — so an
-// organisation whose namespace is deleted, or whose cluster is rebuilt
-// underneath it, stays ready for ever while serving nothing. That was found by
-// running the local walkthrough: three organisations survived a cluster rebuild
-// as ready rows with no namespace, and recovering them meant hand-written SQL.
-//
-// # What it deliberately does not do
-//
-// It compares existence, not shape, with one exception. A Deployment scaled to
-// zero by hand, a Secret edited, a NetworkPolicy removed — none of that is
-// noticed. Detecting drift inside a namespace means diffing every object this
-// package applies against what is there, and a partial version of that is worse
-// than none: it would report an organisation as reconciled while leaving whole
-// classes of drift unchecked. Absence is the case that matters and the case that
-// can be answered honestly.
-//
-// The exception is the console's certificate, which is checked for how much life
-// it has left. That is not drift — nothing changed it — it is a clock running
-// down, and there is no other loop that visits every ready organisation on a
-// schedule. Keeping it here means the fleet's credentials are renewed by the
-// same pass that already proves each organisation is still there.
-//
-// # Why requeue rather than repair in place
-//
-// Rebuilding mints a new certificate authority, because the old one lived in a
-// Secret that went with the namespace. Every caller certificate issued under it
-// stops working. That is not a choice this makes — the authority is already
-// gone — but it is why a requeued organisation is a real event worth an audit
-// row rather than silent self-healing.
+// Requeue rather than repair: the authority went with the namespace.
 func (w *Worker) reconcile(ctx context.Context) {
 	if !w.Healthy() || ctx.Err() != nil {
 		return
@@ -321,15 +289,12 @@ func (w *Worker) reconcile(ctx context.Context) {
 		return
 	}
 
-	// Read once for the whole pass rather than per organisation. Almost every
-	// row has no request, and the alternative is a query per tenant per
-	// interval for a column that is nearly always NULL.
+	// Read once for the pass rather than per organisation, for a column that is
+	// nearly always NULL.
 	//
-	// A failure here is not fatal to the pass: the expiry-driven half of
-	// rotation and the existence check below both still work, and an operator's
-	// request is honoured on the next interval instead. Skipping the whole
-	// reconcile because one query failed would stop the fleet being checked at
-	// all.
+	// A failure is not fatal to the pass. Expiry-driven rotation and the
+	// existence check below still run, and the request is honoured on the next
+	// interval.
 	requests, err := w.q.ConsoleRotationRequests(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -393,12 +358,10 @@ func (w *Worker) reconcile(ctx context.Context) {
 
 	// Published only when this pass actually learned an expiry.
 	//
-	// Leaving the previous value standing is deliberate. A pass that inspected
-	// nothing — an empty fleet, or a cluster that refused every call — knows
-	// nothing new, and writing zero there would read as "a credential expires
-	// now" and page somebody about a fault that is somewhere else entirely.
-	// Staleness is the honest failure here, and Prometheus already reports a
-	// scrape target that has stopped answering.
+	// The previous value stands when a pass inspected nothing — an empty fleet,
+	// or a cluster that refused every call. Writing zero would read as a
+	// credential expiring now and fire every threshold rule. Prometheus already
+	// reports a scrape target that has stopped answering.
 	if !soonest.IsZero() {
 		consoleCertSecondsLeft.Set(time.Until(soonest).Seconds())
 	}
@@ -434,9 +397,9 @@ func (w *Worker) drain(ctx context.Context) {
 		case errors.Is(err, store.ErrNothingToProvision):
 			return
 		case err != nil:
-			// Reaching the queue at all failed. Counted separately from a
-			// failed organisation because this provisions nobody, and stops
-			// the drain rather than spinning against a database that is down.
+			// Reaching the queue failed. Counted separately from a failed
+			// organisation: this provisions none of them, and stops the drain
+			// rather than spinning against a database that is down.
 			claimFailuresTotal.Inc()
 			if ctx.Err() == nil {
 				w.log.Error("could not claim from the provisioning queue", "err", err)
@@ -478,20 +441,15 @@ func (w *Worker) provisionOne(ctx context.Context, c store.Claimed) {
 		return
 	}
 
-	// Set here rather than after the mark below, and the difference is not
-	// cosmetic: the organisation is serving and registered at this point, so a
-	// mark that does not land is stale bookkeeping and not a failed attempt.
-	//
-	// With the assignment after the mark, that path fell through to the
-	// deferred metric still holding "failed" — so the counter contradicted both
-	// the comment below and the queue, and a dashboard would have shown a
-	// failure for an organisation that was working.
+	// Set here rather than after the mark below. The organisation is serving and
+	// registered at this point, so a mark that does not land is stale
+	// bookkeeping and not a failed attempt; assigning after the mark leaves the
+	// deferred metric holding "failed" for an organisation that is working.
 	outcome = "provisioned"
 
 	if err := w.q.MarkProvisioned(ctx, c.Org); err != nil {
-		// Deliberately not a failure mark — a retry finds everything in place
-		// and converges, whereas recording a failure here would describe a
-		// working organisation as broken.
+		// Not a failure mark: a retry finds everything in place and converges,
+		// and a failure here would describe a working organisation as broken.
 		log.Error("the organisation is serving but the queue row was not updated", "err", err)
 		return
 	}
@@ -550,10 +508,8 @@ func (w *Worker) build(ctx context.Context, org string) (provision.Status, error
 // heartbeat extends the lease while a long wait is in progress, and returns a
 // function that stops it and waits for the goroutine to finish.
 //
-// Sizing the lease above ReadyTimeout is already enforced in validate, so this
-// is the second of two answers to the same question rather than the only one.
-// It is the one that survives somebody raising ReadyTimeout later without
-// thinking about the queue.
+// validate already enforces a lease above ReadyTimeout; this survives a later
+// change to ReadyTimeout alone.
 func (w *Worker) heartbeat(ctx context.Context, org string) func() {
 	hbCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
@@ -561,9 +517,8 @@ func (w *Worker) heartbeat(ctx context.Context, org string) func() {
 	go func() {
 		defer close(done)
 		defer func() {
-			// The five-line shape every worker goroutine in cmd/server uses: a
-			// panic here would otherwise take the process down mid-provision
-			// and leave the organisation claimed until its lease expired.
+			// A panic here would take the process down mid-provision and leave
+			// the organisation claimed until its lease expired.
 			if r := recover(); r != nil {
 				w.log.Error("lease heartbeat panicked", "org", org, "panic", r)
 			}
@@ -580,9 +535,9 @@ func (w *Worker) heartbeat(ctx context.Context, org string) func() {
 						return
 					}
 					// ExtendLease is guarded on claimed_by, so a failure here
-					// can mean the claim is already gone — which is the one
+					// can mean the claim is already gone, which is the one
 					// condition under which two provisioners build the same
-					// organisation. Loud, and counted.
+					// organisation.
 					leaseExtensionFailuresTotal.Inc()
 					w.log.Warn("could not extend the provisioning lease",
 						"org", org, "err", err)
@@ -597,19 +552,12 @@ func (w *Worker) heartbeat(ctx context.Context, org string) func() {
 	}
 }
 
-// record writes the organisation to both databases, in the order that makes a
-// crash between them safe.
+// record writes the console row first, then cloud.orgs.console_url, which is
+// the commit point: non-empty implies the console row exists.
 //
-// The console row first, then cloud.orgs.console_url. /authorize reads
-// ConsoleURL only after membership, and an empty one is what raises
-// ErrNoConsole — so console_url is the commit point: non-empty implies the
-// console row already exists.
-//
-// `cloud org register` writes them the other way round and is also correct,
-// because its hazard is the mirror image: it can be run for an organisation
-// Cloud has never heard of. Here the foreign key on cloud.org_provisioning
-// means the Cloud row exists before anything is ever claimed. If these two
-// paths are ever unified, one of them regresses.
+// `cloud org register` writes them in the opposite order and is also correct,
+// because it can run for an organisation Cloud has never heard of. Unifying the
+// two paths regresses one of them.
 func (w *Worker) record(ctx context.Context, org string, st provision.Status) error {
 	reg := console.OrgRegistration{
 		Org:        org,
@@ -618,10 +566,8 @@ func (w *Worker) record(ctx context.Context, org string, st provision.Status) er
 		CAPEM:      string(st.CAPEM),
 		CertPEM:    string(st.ConsoleCertPEM),
 
-		// []byte on both sides. The private keys are the two fields that are
-		// NOT a []byte-to-string conversion, and wrapping them would not
-		// compile — which is the one thing in this mapping that cannot go
-		// wrong silently.
+		// []byte on both sides. The two private-key fields are not
+		// []byte-to-string conversions, so mixing them up does not compile.
 		KeyPEM: st.ConsoleKeyPEM,
 
 		PublicEndpoint: publicEndpoint(st),
@@ -644,13 +590,10 @@ func (w *Worker) record(ctx context.Context, org string, st provision.Status) er
 // publicEndpoint reports what callers dial, when that differs from what the
 // console dials.
 //
-// Ensure sets PublicEndpoint equal to Endpoint in a single-network deployment,
-// which is every deployment today. Copying that through would write an
-// atl_public_endpoint duplicating atl_endpoint — exactly what that column's own
-// comment says not to do, because the read path is a COALESCE fallback that is
-// deliberately not backfilled. Storing the duplicate retires the fallback
-// silently, and the two then diverge the first time somebody changes Endpoint
-// alone.
+// Returns "" when they are equal, which is every single-network deployment.
+// atl_public_endpoint is read through a COALESCE fallback on atl_endpoint, so
+// storing a duplicate retires that fallback, and the two diverge the first time
+// Endpoint alone changes.
 func publicEndpoint(st provision.Status) string {
 	if st.PublicEndpoint == st.Endpoint {
 		return ""
@@ -660,9 +603,6 @@ func publicEndpoint(st provision.Status) string {
 
 // fail records an attempt that did not finish, and schedules the next one.
 func (w *Worker) fail(ctx context.Context, c store.Claimed, cause error) {
-	// A cancelled context is a shutdown, not the organisation's fault, so it
-	// does not escalate the backoff. The attempt is still recorded as failed
-	// because it is: nothing is serving, and the row must be claimable again.
 	retryIn := w.cfg.backoff(c.Attempts)
 	switch {
 	case ctx.Err() != nil:
@@ -672,9 +612,8 @@ func (w *Worker) fail(ctx context.Context, c store.Claimed, cause error) {
 		retryIn = w.cfg.RetryBase
 		cause = fmt.Errorf("the provisioner shut down mid-attempt: %w", cause)
 	case credentialError(cause):
-		// Nor is this. Escalating here would punish an organisation for a
-		// platform fault and, with several queued, would push all of them into
-		// long backoffs while the actual problem — credentials — went unnamed.
+		// Nor is this. Escalating would push every queued organisation into a
+		// long backoff for a platform fault, with credentials unnamed.
 		retryIn = w.cfg.RetryBase
 		cause = fmt.Errorf("the cluster refused this provisioner's credentials, "+
 			"which is a fault in the provisioner and not in this organisation: %w", cause)
@@ -683,10 +622,9 @@ func (w *Worker) fail(ctx context.Context, c store.Claimed, cause error) {
 	w.log.Error("provisioning did not finish",
 		"org", c.Org, "attempt", c.Attempts, "retry_in", retryIn, "err", cause)
 
-	// Detached from ctx on purpose. The cause is often that ctx was cancelled,
-	// and a mark issued on a cancelled context does not land — which would
-	// leave the row claimed until the lease expired, turning a clean restart
-	// into a wait.
+	// Detached from ctx, whose cancellation is often the cause. A mark issued
+	// on a cancelled context does not land, leaving the row claimed until the
+	// lease expires and turning a clean restart into a wait.
 	mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), markTimeout)
 	defer cancel()
 
@@ -703,52 +641,23 @@ func (w *Worker) fail(ctx context.Context, c store.Claimed, cause error) {
 
 // audit writes one row to cloud.audit_log.
 //
-// The actor is a named constant rather than an empty string: a blank actor
-// reads as a bug in the logging rather than as a machine acting. There is no
-// actor email because there is no human — this is the same convention
-// enrolmentActor follows in the console.
+// The actor is a named constant, so a row this process wrote is distinguishable
+// from one that lost its actor. No actor email, as with enrolmentActor in the
+// console.
 //
-// LogAction returns nothing and logs its own failures, which is deliberate: an
-// audit write that fails must not fail the provisioning, and must not be
-// silently discarded either.
+// LogAction returns nothing and logs its own failures: a failed audit write
+// must not fail the provisioning.
 func (w *Worker) audit(ctx context.Context, org, action string, detail map[string]any) {
 	w.q.LogAction(ctx, org, store.ProvisionerActor, "", action, detail)
 }
 
-// reap destroys the organisations whose retention window has run out.
+// rotateConsole reissues org's console credentials if they expire within
+// ConsoleCertRenewWithin, or if requested is set. It returns the expiry, or the
+// zero time if this pass could not read one.
 //
-// # Why this runs on the reconcile tick and not the poll tick
-//
-// Deletion is not urgent. An organisation deleted thirty days ago can wait
-// another five minutes, and running this every ten seconds would mean a query
-// against the whole queue table at that rate for work that appears a handful of
-// times a month.
-//
-// rotateConsole replaces one organisation's console credentials when they are
-// near expiry, or when an operator has asked.
-//
-// # Why a failure here is logged and not escalated
-//
-// Nothing about the organisation is wrong. Its pods are running, its callers are
-// authenticating, and the only thing that has not happened is a credential
-// replacement that will be retried on the next pass. Requeueing would rebuild a
-// healthy organisation — and rebuilding mints a new authority, which is exactly
-// the outage this whole mechanism exists to avoid. Marking it failed would take
-// a serving organisation out of `ready` for a reason its customers cannot see.
-//
-// What does need to be loud is the credential running out while these failures
-// repeat, and that is what the metric below is for: a rotation that has been
-// failing for days is invisible in logs nobody reads and obvious in a gauge.
-//
-// # Why the request is cleared only after the registration succeeds
-//
-// The operator asked for the console to be using a different certificate. That
-// is only true once the console has been told about it — a rotation written to
-// the cluster and never registered leaves the console presenting the old
-// credential, which still works, so nothing would look wrong.
-// It returns when this organisation's console credential expires, or the zero
-// time when the pass could not find out. The caller aggregates those into the
-// fleet-wide gauge; see reconcile.
+// Failures are logged, not requeued: a rebuild mints a new authority and
+// invalidates every caller certificate. requestedAt is cleared only after
+// registration succeeds.
 func (w *Worker) rotateConsole(
 	ctx context.Context, c Cluster, org string, requestedAt time.Time, requested bool,
 ) time.Time {
@@ -758,11 +667,9 @@ func (w *Worker) rotateConsole(
 		if ctx.Err() != nil {
 			return time.Time{}
 		}
-		// The expiry is carried out of every failure that got far enough to read
-		// a certificate, and it is reported here rather than dropped. A rotation
-		// that keeps failing is the one case this whole mechanism exists to make
-		// visible, and discarding what it learned would leave the fleet gauge
-		// frozen at the last healthy reading while the credential ran out.
+		// The expiry is carried out of every failure that got far enough to
+		// read a certificate. Discarding it would freeze the fleet gauge at the
+		// last healthy reading while the credential ran out.
 		w.warnIfExpiringSoon(org, r.ExpiresAt)
 		if credentialError(err) {
 			w.log.Warn("cannot rotate console credentials: the cluster refused "+
@@ -776,9 +683,8 @@ func (w *Worker) rotateConsole(
 		return r.ExpiresAt
 	}
 	if !r.Rotated {
-		// Nothing was due, so this credential is comfortably in date by
-		// definition. No warning: reaching the window is what makes one due, so
-		// a healthy pass cannot produce one worth warning about.
+		// Nothing was due, so no warning: reaching the window is what makes a
+		// credential due.
 		return r.ExpiresAt
 	}
 
@@ -789,10 +695,9 @@ func (w *Worker) rotateConsole(
 		w.log.Error("rotated an organisation's console credentials but could not "+
 			"register them; the console keeps using the previous certificate "+
 			"until this succeeds", "org", org, "err", err)
-		// The previous certificate is the one still in use, so that is the expiry
-		// that describes this organisation — not the new one, which nothing is
-		// presenting yet. Reporting the new one here would show the credential as
-		// renewed at the exact moment renewal stopped taking effect.
+		// The previous certificate is the one still in use, so its expiry is
+		// what describes this organisation; nothing is presenting the new one
+		// until registration succeeds.
 		w.warnIfExpiringSoon(org, r.PreviousExpiresAt)
 		return r.PreviousExpiresAt
 	}
@@ -817,20 +722,11 @@ func (w *Worker) rotateConsole(
 // warnIfExpiringSoon says so in the log when a credential that is still in use
 // is inside the renewal window.
 //
-// The metric is the thing to alert on, but a log line is what the person who
-// gets paged reads next, and "which organisation" is the question they will
-// have. The gauge is a fleet minimum and cannot answer it.
+// consoleCertSecondsLeft is the fleet minimum and cannot name the organisation.
 //
-// # Where this is called from, and where it deliberately is not
-//
-// Only the failure paths: a rotation that errored, and one written to the
-// cluster that the console was never told about. Those are the two ways a
-// credential inside the window survives a pass.
-//
-// It was first called on the not-rotated path instead, where it could never
-// fire — reaching the window is what makes a credential due, so a pass that
-// rotated nothing had nothing to warn about by construction. A warning that
-// cannot fire is worse than none, because the silence reads as evidence.
+// Called only from the failure paths — a rotation that errored, and one written
+// to the cluster but never registered. On the not-rotated path it could not
+// fire, since reaching the window is what makes a credential due.
 func (w *Worker) warnIfExpiringSoon(org string, expires time.Time) {
 	if expires.IsZero() {
 		return
@@ -840,21 +736,20 @@ func (w *Worker) warnIfExpiringSoon(org string, expires time.Time) {
 		return
 	}
 	w.log.Warn("an organisation's console credential is inside the renewal window "+
-		"and was not rotated; when it expires, nobody can open this organisation "+
+		"and was not rotated; when it expires this organisation cannot be opened "+
 		"in a browser",
 		"org", org,
 		"expires", expires.Format(time.RFC3339),
 		"remaining", left.Round(time.Hour).String())
 }
 
-// # The most dangerous loop in the system
+// reap purges organisations whose retention window has elapsed. It runs on the
+// reconcile tick rather than the poll tick, so the queue table is not scanned
+// every ten seconds for work that occurs a few times a month.
 //
-// It destroys customer data on a timer with no human in it. Everything that
-// makes that safe is in store.ClaimForPurge's predicate rather than here: a row
-// is only claimable when its state is `deleted` and its purge_after has passed,
-// or when it is already `purging` under a lease that expired. This function
-// trusts that entirely and does not second-guess it — a second opinion here
-// would be a second place for the rule to be wrong.
+// Eligibility is decided entirely by store.ClaimForPurge: state 'deleted' with
+// purge_after in the past, or state 'purging' under an expired lease. This
+// function does not re-check it.
 func (w *Worker) reap(ctx context.Context) {
 	// The same degraded check drain does. A provisioner that cannot reach the
 	// cluster must not claim a purge: it would fail, release, and be reclaimed
@@ -886,14 +781,11 @@ func (w *Worker) reap(ctx context.Context) {
 
 // purgeOne tears down one organisation and removes its rows.
 //
-// The order is the whole design: the cluster first, the database second. A
-// crash between them leaves the namespace gone and the row still reading
-// `purging`, which the next pass reclaims and retries — and Destroy on an
-// absent namespace succeeds, so the retry converges.
+// Cluster first, database second. A crash between them leaves the namespace
+// gone and the row reading 'purging', which the next pass reclaims; Destroy on
+// an absent namespace succeeds, so the retry converges.
 //
-// The other order would delete the row that says which namespace to destroy,
-// stranding a live namespace with a customer's data in it and nothing left
-// pointing at it.
+// The other order deletes the row naming the namespace to destroy.
 func (w *Worker) purgeOne(ctx context.Context, org string) {
 	start := time.Now()
 	outcome := "failed"
@@ -911,9 +803,8 @@ func (w *Worker) purgeOne(ctx context.Context, org string) {
 	defer stop()
 
 	if err := w.currentCluster().Destroy(ctx, org); err != nil {
-		// Released rather than marked terminally failed. A customer who asked
-		// to be deleted and quietly was not is the worst outcome here, so this
-		// keeps being retried rather than backing off into silence.
+		// Released rather than marked terminally failed, so a customer who
+		// asked to be deleted does not stay undeleted in silence.
 		log.Error("could not destroy the organisation", "err", err)
 		if mErr := w.q.MarkPurgeFailed(ctx, org, err.Error()); mErr != nil {
 			log.Error("could not release the purge claim", "err", mErr)
@@ -921,22 +812,16 @@ func (w *Worker) purgeOne(ctx context.Context, org string) {
 		return
 	}
 
-	// The console's copy, which the destroyed namespace does not take with it.
+	// The console's copy, which the destroyed namespace does not take with it:
+	// a sealed private key, sessions, enrolment tokens and certificate
+	// fingerprints, none of which means anything once the authority is gone.
 	//
-	// It holds a sealed private key for this organisation, plus the sessions,
-	// enrolment tokens and certificate fingerprints that referenced it — none of
-	// which means anything now that the authority behind them is gone. Left
-	// behind, they accumulate one dead organisation at a time while `cloud org
-	// purge` reports that everything was destroyed.
-	//
-	// Between Destroy and MarkPurged on purpose. Before Destroy it would strip a
-	// live organisation's credentials and then possibly fail to destroy it,
-	// leaving something running that the console can no longer reach. After
-	// MarkPurged the row would be gone and nothing would retry this.
+	// Between Destroy and MarkPurged. Before Destroy it would strip a live
+	// organisation's credentials and might then fail to destroy it; after
+	// MarkPurged the row would be gone and nothing would retry.
 	if err := w.unregister(ctx, w.cfg.ConsolePGURL, org); err != nil {
-		// Retried rather than logged past. The claim is released so the next
-		// pass picks it up; Destroy is idempotent against an absent namespace,
-		// so the retry converges instead of repeating work.
+		// The claim is released so the next pass picks it up; Destroy is
+		// idempotent against an absent namespace, so the retry converges.
 		log.Error("the organisation was destroyed but the console still holds "+
 			"its credentials", "err", err)
 		if mErr := w.q.MarkPurgeFailed(ctx, org, err.Error()); mErr != nil {
@@ -947,8 +832,8 @@ func (w *Worker) purgeOne(ctx context.Context, org string) {
 
 	if err := w.q.MarkPurged(ctx, org); err != nil {
 		// The namespace is gone and the rows are not. The next pass reclaims
-		// the row, Destroy succeeds against an absent namespace, and it
-		// converges — which is why this is a log and not a failure mark.
+		// the row and Destroy succeeds against an absent namespace, so this is
+		// a log rather than a failure mark.
 		log.Error("the organisation was destroyed but its rows remain", "err", err)
 		return
 	}
@@ -956,10 +841,8 @@ func (w *Worker) purgeOne(ctx context.Context, org string) {
 	outcome = "purged"
 	log.Info("purged", "took", time.Since(start).Round(time.Second))
 
-	// Audited before the rows go, or rather: audited knowing they have. The
-	// audit log references the organisation by name and outlives it, which is
-	// the point — "what happened to acme" must still have an answer after acme
-	// stops existing.
+	// The audit log references the organisation by name and outlives it, so
+	// "what happened to acme" still has an answer after acme stops existing.
 	w.audit(ctx, org, "org.purged", map[string]any{
 		"took_ms": time.Since(start).Milliseconds(),
 	})

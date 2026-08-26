@@ -66,15 +66,9 @@ func (g *Google) AuthCodeURL(state, challenge, redirectURI string) string {
 
 // Identify exchanges the code and reads the userinfo endpoint.
 //
-// # Why userinfo and not the id_token
-//
-// The exchange also returns a signed id_token carrying the same claims, and
-// verifying it locally would save this round trip. It would also mean a JWKS
-// cache, a key-rotation path and a second way for this to be wrong, for one
-// HTTP call on an operation a person performs a few times a year. The token
-// arrived over TLS from Google's own token endpoint, so reading the claims from
-// Google directly is not a weaker statement than checking a signature on
-// claims Google just handed over.
+// Reads userinfo rather than verifying the id_token the exchange also returns.
+// The claims come over TLS from Google's own endpoint either way, and
+// verifying locally needs a JWKS cache and a key-rotation path.
 func (g *Google) Identify(ctx context.Context, code, verifier, redirectURI string) (*Identity, error) {
 	token, err := exchange(ctx, g.http(), g.tokenURL,
 		g.ClientID, g.ClientSecret, code, verifier, redirectURI)

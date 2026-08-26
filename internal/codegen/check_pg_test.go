@@ -298,14 +298,14 @@ func TestChangedPredicateEnforcesTheNewOne(t *testing.T) {
 // Rolling back a migration that dropped a column plus the entity-level CHECK
 // referencing it.
 //
-// The up script drops the constraint (ADDITIVE) then the column (BREAKING). The
-// down script used to emit its groups in the same order, so it re-added the
-// constraint before the column existed:
+// The up script drops the constraint (additive) then the column (breaking), so
+// a down script emitting its groups in the same order re-adds the constraint
+// before the column exists:
 //
 //	ERROR:  column "total" does not exist
 //
-// Every table-driven case above runs migration.Down, but none of them needed
-// down to restore a column, so none could see it.
+// Every table-driven case above runs migration.Down, and none of them needs
+// down to restore a column, so none reaches this.
 func TestRollbackRestoresColumnBeforeItsCheck(t *testing.T) {
 	url := os.Getenv("ATLANTIS_TEST_PG")
 	if url == "" {

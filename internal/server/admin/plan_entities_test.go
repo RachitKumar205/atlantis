@@ -18,9 +18,9 @@ import (
 //
 // It builds a change in every bucket by reflection over Diff's fields, so a
 // fifth bucket added later fails here rather than going unnoticed until an
-// operator trusts an empty strip. It round-trips through JSON deliberately —
-// planEntityIDs reads a STORED diff, so a bucket that All() returns but that
-// does not survive marshalling is just as invisible.
+// operator trusts an empty strip. It round-trips through JSON because
+// planEntityIDs reads a stored diff, so a bucket All() returns but that does
+// not survive marshalling is equally invisible.
 func TestPlanEntityIDsReadsEveryBucket(t *testing.T) {
 	typ := reflect.TypeOf(codegen.Diff{})
 	d := &codegen.Diff{}
@@ -105,14 +105,12 @@ func TestPlanEntityIDsSkipsChangesWithNoEntity(t *testing.T) {
 	}
 }
 
-// TestPlanEntityIDsToleratesAnUndecodableDiff pins the choice to list the plan
-// without its entities rather than to fail the whole queue.
+// Pins the choice to list the plan without its entities rather than fail the
+// whole queue: a row whose diff will not decode was edited outside this server,
+// and refusing to serve the approval queue leaves nothing approvable.
 //
-// The trade is deliberate and narrow: a row whose diff will not decode was
-// edited outside this server, and refusing to serve the approval queue at all
-// would mean nobody can approve anything. Note what this does NOT protect
-// against — a renamed bucket decodes to empty and returns no error, so this arm
-// is not the guard for that. TestPlanEntityIDsReadsEveryBucket is.
+// A renamed bucket decodes to empty and returns no error, so this arm is not
+// the guard for that. TestPlanEntityIDsReadsEveryBucket is.
 func TestPlanEntityIDsToleratesAnUndecodableDiff(t *testing.T) {
 	for _, tc := range []struct {
 		name string

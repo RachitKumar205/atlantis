@@ -46,7 +46,7 @@ func TestAddingACheckIsDetected(t *testing.T) {
 }
 
 // Dropping cannot fail on data and takes only a brief lock: rows the constraint
-// used to reject simply become legal.
+// rejected become legal.
 func TestRemovingACheckIsAdditive(t *testing.T) {
 	oldE := entityWithChecks([]dsl.TableCheck{{Name: "total_positive", Expr: "total > 0"}}, "")
 	newE := entityWithChecks(nil, "")
@@ -102,14 +102,13 @@ func TestFieldLevelCheckIsDetected(t *testing.T) {
 
 // Unnamed checks must be identified by predicate, not by position.
 //
-// The first version of this test compared two identical entities and asserted
-// an empty diff, which is true for any deterministic keying — including the
-// positional keying that was broken. It passed while this bug was live.
+// Comparing two identical entities and asserting an empty diff separates
+// nothing: that holds for any deterministic keying, positional included.
 //
-// The real hazard: with positional names, deleting the first of two unnamed
-// checks renumbers the second, so a pure removal reports as a removal PLUS a
-// predicate change on a constraint nobody touched. That escalates the plan to
-// backfill-required, which exits 1 in caller CI.
+// Under positional names, deleting the first of two unnamed checks renumbers
+// the second, so a pure removal reports as a removal plus a predicate change on
+// an untouched constraint. That escalates the plan to backfill-required, which
+// exits 1 in caller CI.
 func TestDeletingOneUnnamedCheckIsOneRemoval(t *testing.T) {
 	oldE := entityWithChecks([]dsl.TableCheck{{Expr: "total > 0"}, {Expr: "id > 0"}}, "")
 	newE := entityWithChecks([]dsl.TableCheck{{Expr: "id > 0"}}, "")
@@ -152,11 +151,10 @@ func TestNamedCheckCannotClobberAnUnnamedOne(t *testing.T) {
 
 // Two named checks may share a predicate; they are still two constraints.
 //
-// Identity used to be the predicate, so they collapsed to one entry: removing
-// one produced no change at all, and the emitter's predicate-scan resolved the
-// *survivor's* name — emitting DROP CONSTRAINT "a" when the author had removed
-// "b". A constraint nobody touched was destroyed and the one they removed
-// stayed live, with the plan reporting neither.
+// Keyed by predicate they collapse to one entry, so removing one produces no
+// change, and the emitter's scan resolves the survivor's name — DROP CONSTRAINT
+// "a" for a removal of "b". The kept constraint is destroyed, the removed one
+// stays live, and the plan reports neither.
 func TestTwoNamedChecksSharingAPredicateAreDistinct(t *testing.T) {
 	oldE := entityWithChecks([]dsl.TableCheck{
 		{Name: "a", Expr: "total > 0"},
@@ -325,12 +323,10 @@ func TestComputeDiffSurfacesCheckChanges(t *testing.T) {
 
 // Round-trip: what up creates, down must remove — under the same name.
 //
-// Two tests used to live here asserting only that the string "ADD CONSTRAINT"
-// appeared somewhere in the up-migration. They stayed green through five
-// separate defects that each produced SQL which either aborted or silently did
-// nothing, because every one of those defects was in the constraint *name* and
-// neither test looked at a name. "Contains ADD CONSTRAINT" is satisfied by SQL
-// that fails.
+// Asserting only that "ADD CONSTRAINT" appears in the up-migration stays green
+// through five separate defects that each emit SQL which aborts or silently
+// does nothing: every one of them is in the constraint name, and that assertion
+// reads no name. It is satisfied by SQL that fails.
 //
 // check_emit_test.go asserts on names; check_pg_test.go executes the DDL. This
 // keeps the pairing property the other two do not cover: the identifier down

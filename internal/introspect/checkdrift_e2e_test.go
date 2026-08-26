@@ -10,12 +10,11 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
-// TestDetectCheckConstraintDrift_EndToEnd reproduces the carts outage shape
-// against a live Postgres: the live table enforces a NARROWER status check
-// than the .atl declares (live allows 3 values, declared 4). The detector
-// must (a) report no drift when declared == live, and (b) surface both
-// directions when the .atl widened the value set the live constraint still
-// rejects.
+// TestDetectCheckConstraintDrift_EndToEnd drives the narrowing shape against a
+// live Postgres: the live table enforces a status check over three values where
+// the .atl declares four. The detector reports no drift when the two match, and
+// reports both directions when the .atl widened a value set the live constraint
+// still rejects.
 //
 //	ATLANTIS_TEST_PG=postgres://atlantis:pw@localhost:55432/atlantis?sslmode=disable \
 //	  go test ./internal/introspect/ -run CheckConstraintDrift_EndToEnd -v

@@ -7,26 +7,13 @@ import (
 
 // The store-level contracts of the two spend operations.
 //
-// # Why these are here and not only at the HTTP layer
-//
-// internal/cloud/server tests both of these end to end, and one of them was
-// covered twice over while the other was not covered at all. Mutation testing
-// found the difference: deleting `AND used_at IS NULL` from SpendBackupCode
-// changed nothing any test could see.
-//
-// The reason is that the server asks UnusedBackupCodeHashes first, and that
-// query filters spent codes out of the candidate set — so a second presentation
-// of the same code never reaches SpendBackupCode at all. The predicate the
-// function's own comment describes as what stops two requests both succeeding
-// was, in practice, unreachable from above.
-//
-// It is still load-bearing, for exactly the case the comment names: two
-// requests presenting one code at the same moment both read it as unused, both
-// match it, and both call this. Only the predicate decides which one wins. That
-// is not reachable from an HTTP test without a race, so the contract is
-// asserted here, where it lives.
+// The server asks UnusedBackupCodeHashes first, and that query filters spent
+// codes out of the candidate set, so a second presentation of one code never
+// reaches SpendBackupCode over HTTP: deleting `AND used_at IS NULL` changes
+// nothing an end-to-end test can see. The predicate decides which of two
+// simultaneous requests presenting one code wins, and that is not reachable
+// from an HTTP test without a race.
 
-// A backup code cannot be spent twice.
 func TestSpendingABackupCodeTwiceFails(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -37,8 +24,8 @@ func TestSpendingABackupCodeTwiceFails(t *testing.T) {
 	}
 	us := db.ForUser(u.ID)
 
-	// Not real argon2id hashes. Nothing here verifies them — this exercises the
-	// spend, and hashing ten codes for that would add half a second per run.
+	// Not real argon2id hashes: nothing here verifies them, and hashing ten
+	// codes would add half a second per run.
 	if err := us.ReplaceBackupCodes(ctx, []string{"hash-a", "hash-b"}); err != nil {
 		t.Fatalf("store codes: %v", err)
 	}
@@ -89,8 +76,6 @@ func TestSpendingABackupCodeTwiceFails(t *testing.T) {
 	}
 }
 
-// A backup code belonging to somebody else cannot be spent.
-//
 // The row-level-security policy is the boundary, but SpendBackupCode also names
 // the user in its WHERE clause. Both are asserted because they fail
 // differently: a missing bind returns nothing, and a missing user_id predicate
@@ -138,12 +123,9 @@ func TestABackupCodeCannotBeSpentByAnotherAccount(t *testing.T) {
 	}
 }
 
-// A TOTP step cannot be spent twice, and an earlier step cannot be replayed
-// after a later one.
-//
-// The server proves the first half end to end. The second half — that the
-// comparison is `<` and not `!=` — is only visible from here, because reaching
-// it over HTTP means presenting a code from a window that has already passed.
+// An earlier step must be refused after a later one has been spent. Reaching
+// that over HTTP means presenting a code from a window that has already passed,
+// so the `<` comparison is only visible from here.
 func TestSpendingATOTPStepTwiceFails(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -174,8 +156,7 @@ func TestSpendingATOTPStepTwiceFails(t *testing.T) {
 			"usable for the rest of its window")
 	}
 
-	// An earlier step, presented after a later one. Refused, which is what the
-	// `<` comparison buys over an equality check.
+	// An earlier step, presented after a later one.
 	spent, err = us.SpendTOTPStep(ctx, 999)
 	if err != nil {
 		t.Fatalf("earlier step: %v", err)
@@ -194,11 +175,9 @@ func TestSpendingATOTPStepTwiceFails(t *testing.T) {
 	}
 }
 
-// Re-enrolling clears the spent-step marker.
-//
-// Otherwise an account that re-enrols keeps the previous secret's high-water
-// mark, and every code from the new authenticator below it is refused — which
-// presents as "my new authenticator does not work" with nothing in the logs.
+// An account that re-enrols otherwise keeps the previous secret's high-water
+// mark, and every code from the new authenticator below it is refused with
+// nothing in the logs.
 func TestReEnrollingResetsTheStepMarker(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
@@ -247,12 +226,8 @@ func TestReEnrollingResetsTheStepMarker(t *testing.T) {
 	}
 }
 
-// An unbound handle reads nothing and writes nothing, and says so.
-//
-// This is the failure the whole bound-handle design exists to make impossible:
-// under the RESTRICTIVE policy an unbound query matches no rows, so it looks
-// like an account with no second factor rather than like a bug. The check is an
-// error rather than an empty result for that reason.
+// Under the RESTRICTIVE policy an unbound query matches no rows, which reads as
+// an account with no second factor. ErrNoUser is returned instead.
 func TestAnUnboundHandleRefusesRatherThanReadingNothing(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()

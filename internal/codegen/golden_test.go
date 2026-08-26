@@ -16,34 +16,20 @@ var updateGolden = flag.Bool("update", false,
 
 // Every emitter's output, pinned against a committed fixture.
 //
-// # Why this exists
+// `make codegen-check` cannot catch emitter drift: it runs `tidectl codegen`
+// into a temp dir and diffs against the checked-in `gen/`, and this repo ships
+// no `.atl` files, since callers keep their schemas in their own repos. On a CI
+// checkout the command emits nothing, `gen/` is absent and gitignored, `mkdir
+// -p` creates both sides empty, and the diff succeeds for any emitter change at
+// all. The same gate fails on a developer machine holding generated output from
+// a schema that has since moved away.
 //
-// `make codegen-check` was supposed to be the gate that caught emitter drift.
-// It could not: it runs `tidectl codegen` into a temp dir and diffs the result
-// against the checked-in `gen/`, and this repo ships no `.atl` files — callers
-// keep their schemas in their own repos. So on a CI checkout the command emits
-// nothing, `gen/` is absent and gitignored, `mkdir -p` creates both sides empty,
-// and the diff succeeds. It printed "codegen-check ok" on every run since it was
-// written, for any emitter change whatsoever, including one that emitted nothing
-// at all.
+// testdata/schema.atl is committed, so the emitters always have real input, and
+// the expected output is committed beside it.
 //
-// The same gate then FAILS on a developer machine that has generated output
-// left over from a run against a schema that has since moved away — a false
-// alarm locally and no true alarm in CI, which is the wrong way round on both
-// counts.
-//
-// The fix has to supply what was missing: a schema this repo owns. The fixture
-// in testdata/schema.atl is committed, so the emitters always have real input,
-// and the expected output is committed beside it, so a change to any emitter
-// shows up as a reviewable diff rather than a hash mismatch or a silent pass.
-//
-// # Why golden files and not assertions on substrings
-//
-// The rest of this package's tests assert that a particular line appears in the
-// emitted source, which is the right shape for "this specific guard is emitted".
-// It cannot answer "did anything ELSE move?" — and an emitter is exactly the
-// kind of code where an unnoticed change reaches every caller's repo on their
-// next codegen run.
+// Golden files rather than substring assertions: the rest of this package
+// asserts that a particular line appears, which answers "is this guard
+// emitted?" and not "did anything else move?".
 func TestEmittersMatchGolden(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join("testdata", "schema.atl"))
 	if err != nil {

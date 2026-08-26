@@ -1,9 +1,7 @@
 -- Move the tenant discriminator from a table back to a run-time parameter.
 --
--- Migration 0021 rejected a GUC and chose a table. That reasoning was sound
--- about the threat and wrong about the price, and the price is only visible
--- when you measure it. Measured on PostgreSQL 17.8, 200k rows over 4 tenants,
--- identical indexes, as a NOSUPERUSER NOBYPASSRLS role:
+-- Measured on PostgreSQL 17.8, 200k rows over 4 tenants, identical indexes, as
+-- a NOSUPERUSER NOBYPASSRLS role:
 --
 --                                       GUC          table
 --   transaction ids per 100 reads         0            100
@@ -13,13 +11,10 @@
 --   bound point read, 8 conns     21,399 tps     17,336 tps
 --   dead rows after 20 s                  0        122,449
 --
--- The transaction-id row is not a percentage. set_partition INSERTed, and every
--- write assigns a transaction id. Migration 0023 removed this burn from the
--- read path; binding put it back on the write path, where it is mandatory
--- rather than incidental.
+-- The transaction-id row is a count, not a percentage: set_partition INSERTed,
+-- and every write assigns a transaction id.
 --
--- The arithmetic, stated carefully because the round numbers invite a
--- factor-of-two error. At the measured 17,336 bound reads per second:
+-- At the measured 17,336 bound reads per second:
 --
 --   * autovacuum_freeze_max_age (200,000,000) is reached in 3.2 hours. That is
 --     the trigger for the anti-wraparound vacuum, not a failure.
@@ -27,78 +22,56 @@
 --     and only if that vacuum cannot complete. A long-running transaction, a
 --     stale replication slot or an orphaned prepared transaction arranges that.
 --
--- So the failure is neither certain nor three days away. It is a database that
--- refuses writes, reachable in under two days by read volume alone, on a
--- feature whose entire purpose is to be safe to read from.
---
--- What 0021 got right, and this does not fix
--- ------------------------------------------
--- A custom GUC is PGC_USERSET. Caller-authored SQL can reassign it, and no
+-- A custom GUC is PGC_USERSET, so caller-authored SQL can reassign it and no
 -- database-side lock exists: `REVOKE SET ON PARAMETER "atlantis.tenant" FROM
--- PUBLIC` does not even create a pg_parameter_acl row for a placeholder GUC,
--- re-verified on 17.8. So this migration alone would reopen exactly the hole
--- 0021 closed.
---
--- It does not ship alone. Two changes land with it and are what make it safe:
+-- PUBLIC` does not create a pg_parameter_acl row for a placeholder GUC,
+-- verified on 17.8. Two changes ship with this migration and are what make it
+-- safe:
 --
 --   1. internal/dsl/sqlvalidate rejects set_config() and set_partition() in
---      five caller-authored SQL surfaces: query bodies, procedure steps, CHECK
---      expressions (table-level and per-field), partial-index predicates, and
---      `default raw`. The statement gate is already a permit-list, so `SET` was
---      refused before this; the function-call form was not. The first version
---      covered two of the five, and a review broke it in minutes: a CHECK
---      expression is emitted verbatim into DDL, PostgreSQL does not require it
---      to be IMMUTABLE, and a set_config planted there fires on every INSERT
---      and rebinds a transaction that was correctly bound.
---
---      Seven, in fact: `backfill` expressions, spliced verbatim into a live
---      UPDATE by internal/backfill/splicer.go, and `index by expr`, emitted
---      verbatim into CREATE INDEX. Both are gated now. The second was the worst
---      of the seven — its escape appended whole statements, one of which
---      dropped the very policy every other check here protects.
---
---      Do not read this list as exhaustive. It has been called exhaustive three
---      times and been wrong three times.
+--      seven caller-authored SQL surfaces: query bodies, procedure steps,
+--      table-level and per-field CHECK expressions, partial-index predicates,
+--      `default raw`, `backfill` expressions spliced into a live UPDATE by
+--      internal/backfill/splicer.go, and `index by expr` emitted into CREATE
+--      INDEX. The statement gate is a permit-list, so `SET` was already
+--      refused; the function-call form was not. A CHECK expression is emitted
+--      verbatim into DDL and PostgreSQL does not require it to be IMMUTABLE,
+--      so a set_config planted there fires on every INSERT and rebinds a
+--      correctly bound transaction. This list has been believed exhaustive and
+--      been wrong three times.
 --   2. internal/storage/pg clears the parameter as each connection is opened,
 --      so a value cannot arrive from a server default, a role default, or a
---      pooler handing back a backend somebody else used. (Transaction-locality
---      is what stops a value outliving its own request; this covers the values
---      that were never ours to begin with.)
+--      pooler returning a backend another session used. Transaction-locality
+--      stops a value outliving its own request; this covers values that were
+--      never set by this process.
 --
--- Neither is optional. Applying this migration without them is a cross-tenant
--- read, not a performance change. Apply it AFTER the binary carrying them is
--- running, not before: a server predating the gate serves a checkpoint the gate
--- would refuse, and this migration is what makes that checkpoint exploitable.
--- Nothing can stop such a binary running, so the new one re-audits the stored
--- schema at boot (cmd/server, sqlvalidate.AuditForbiddenCalls) and declines to
--- serve what an older one let in. That audit is also what covers SQL stored
--- before the gate existed at all, which no amount of deploy ordering reaches.
+-- Applying this migration without both is a cross-tenant read. Apply it AFTER
+-- the binary carrying them is running: a server predating the gate serves a
+-- checkpoint the gate would refuse, and this migration makes that checkpoint
+-- exploitable. The new binary re-audits the stored schema at boot (cmd/server,
+-- sqlvalidate.AuditForbiddenCalls), which also covers SQL stored before the
+-- gate existed.
 --
--- The residual exposure, stated plainly: a person who can write a query body
--- and get it through `tide apply` may find a vector the validator does not
--- know about. That person can also drop the policy, redeclare the entity
--- without `partition by`, or write a body that reads whatever they like. The
--- boundary this protects is the accidental leak — a forgotten predicate, a new
--- handler — which is the leak that actually happens.
+-- Residual exposure: anyone who can get a query body through `tide apply` may
+-- find a vector the validator does not know about. That person can equally
+-- drop the policy or redeclare the entity without `partition by`. The boundary
+-- this protects is the accidental leak — a forgotten predicate, a new handler.
 
 -- current_partition is what every RLS policy calls, so its cost is paid on
 -- every read of every partitioned table.
 --
--- LANGUAGE sql and STABLE with no SECURITY DEFINER and no SET search_path, all
--- three deliberately: those two attributes block planner inlining, and the
--- difference is 0.606 us per call against 0.114 us. Neither is needed any
--- more. SECURITY DEFINER existed to read a table the caller had no privilege
--- on; reading a GUC needs no privilege. search_path pinning guarded object
--- resolution inside the body; the only object left is schema-qualified to
--- pg_catalog below, which a caller cannot shadow.
+-- LANGUAGE sql and STABLE, with no SECURITY DEFINER and no SET search_path.
+-- Both of those attributes block planner inlining, at 0.606 us per call against
+-- 0.114 us, and neither is needed: reading a GUC requires no privilege, and the
+-- only object in the body is schema-qualified to pg_catalog below, which a
+-- caller cannot shadow.
 --
--- nullif is not cosmetic. A transaction-local set does NOT revert to NULL when
--- the transaction ends — it reverts to the empty string, verified on 17.8. So
--- on the second and every later request on a pooled connection, an unbound
--- transaction would see '' rather than NULL, and `tenant_col = ''` matches a
--- row whose discriminator is the empty string instead of matching nothing.
--- The column is NOT NULL, which does not exclude ''. Mapping '' back to NULL
--- restores fail-closed for that case at no measurable cost.
+-- nullif is required. A transaction-local set reverts to the empty string, not
+-- to NULL, when the transaction ends — verified on 17.8. On the second and
+-- every later request on a pooled connection an unbound transaction would see
+-- '', and `tenant_col = ''` matches a row whose discriminator is the empty
+-- string rather than matching nothing. The column is NOT NULL, which does not
+-- exclude ''. Mapping '' back to NULL keeps that case fail-closed.
 CREATE OR REPLACE FUNCTION atlantis.current_partition()
 RETURNS text
 LANGUAGE sql
