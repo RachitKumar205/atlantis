@@ -9,8 +9,9 @@
 # This exists because the cluster needs three things the node image does not
 # give you, and every one of them was originally applied by hand and then lost:
 #
-#   1. A working resolver. The node's only nameserver answers `.test` and
-#      refuses everything else, so nothing in-cluster can resolve a registry.
+#   1. A working resolver, in two places. The node's only nameserver answers
+#      `.test` and refuses everything else. CoreDNS then forwards to that same
+#      file with the refusing server first, so no pod resolves a public name.
 #   2. A StorageClass. Unlike kind, the node image ships the local-path
 #      provisioner's *images* but deploys nothing, so there is no default
 #      StorageClass and every PVC stays Pending.
@@ -189,6 +190,71 @@ kubectl --context "$CLUSTER" get --raw /readyz >/dev/null 2>&1 || {
     echo "  container k8s delete --name ${CLUSTER} && $0" >&2
     exit 1
 }
+
+# ---------- 2b. in-cluster DNS ----------
+#
+# CoreDNS ships with `forward . /etc/resolv.conf`, and section 2 leaves
+# 192.168.64.1 first in that file. It answers `.test` and returns SERVFAIL for
+# everything else. The forward plugin fails over on timeouts and connection
+# errors, not on a SERVFAIL — that is a valid response, so it reaches the
+# client and the public resolvers appended below it are never tried.
+#
+# The effect is one-sided and easy to misread: `.test` resolves, so the
+# database is reachable and the cluster looks healthy, while every pod lookup
+# of a public name fails. Cloud sending mail through api.resend.com is the
+# case that surfaces it.
+#
+# One zone per resolver, so each name goes to a server that can answer it.
+# The kubernetes plugin still claims cluster.local ahead of both.
+say "in-cluster DNS"
+dns_applied=$(kubectl --context "$CLUSTER" apply -f - <<'YAML'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns
+  namespace: kube-system
+data:
+  Corefile: |
+    test:53 {
+        errors
+        cache 30
+        forward . 192.168.64.1
+    }
+    .:53 {
+        errors
+        health {
+           lameduck 5s
+        }
+        ready
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+           pods insecure
+           fallthrough in-addr.arpa ip6.arpa
+           ttl 30
+        }
+        prometheus :9153
+        forward . 1.1.1.1 8.8.8.8 {
+           max_concurrent 1000
+        }
+        cache 30 {
+           disable success cluster.local
+           disable denial cluster.local
+        }
+        loop
+        reload
+        loadbalance
+    }
+YAML
+)
+case "$dns_applied" in
+    *configured*)
+        kubectl --context "$CLUSTER" -n kube-system rollout restart deployment/coredns >/dev/null
+        kubectl --context "$CLUSTER" -n kube-system rollout status deployment/coredns --timeout=90s >/dev/null
+        echo "public names resolve in-cluster"
+        ;;
+    *)
+        echo "already split"
+        ;;
+esac
 
 # ---------- 3. images ----------
 say "images"
