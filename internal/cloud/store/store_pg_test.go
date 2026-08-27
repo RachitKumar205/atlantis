@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -561,7 +562,12 @@ func TestTheRoleCheckHasArmed(t *testing.T) {
 		t.Errorf("refused, but not because of the role: %v", err)
 	}
 	// Named, so an operator can see how many tables are affected.
-	if !strings.Contains(err.Error(), "2 table(s)") {
+	//
+	// The count is matched, not its value. Pinning a number makes this fail
+	// every time a policed table is added, which says nothing about the role
+	// check — and a table that lost its policy is what
+	// TestPolicyGuardPassesOnAFreshSchema is for.
+	if !regexp.MustCompile(`\d+ table\(s\)`).MatchString(err.Error()) {
 		t.Errorf("the error does not say how many tables are affected: %v", err)
 	}
 }

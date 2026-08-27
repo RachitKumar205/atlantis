@@ -200,6 +200,11 @@ func (s *Server) routes() {
 	// form posts — see its comment.
 	s.mux.HandleFunc("POST /api/orgs", s.handleCreateOrg)
 
+	// Reads a database the requester names and returns .atl describing it. The
+	// only route that makes Cloud dial an address it was given; see
+	// internal/cloud/dsnguard for what it may reach.
+	s.mux.HandleFunc("POST /api/onboarding/introspect", s.handleIntrospectDatabase)
+
 	// Deletion and restore are not symmetrical. Delete requires the
 	// organisation's own name in the body; restore requires nothing beyond
 	// membership, so undoing a mistake is never harder than making it.
