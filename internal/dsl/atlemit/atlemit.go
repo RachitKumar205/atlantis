@@ -5,14 +5,17 @@
 // solves the opposite problem, splicing a change into .atl text that already
 // exists.
 //
-// A generated file understates the database. Introspection does not read
-// indexes, uniques or CHECK predicates back from the catalogue; FromPostgres
-// carries those over from the declaration it was given, which here is a stub
-// with none. Columns, types, keys, defaults and foreign keys are real, and a
-// missing `index by` line means "not discovered", not "not present".
+// Columns, types, keys, defaults, foreign keys, UNIQUE and CHECK constraints
+// are read from the catalogue: FromPostgres supplies the first group, and
+// introspect.Enrich the rest, which FromPostgres carries from a declaration
+// that on this path is a stub holding none.
 //
-// Entity therefore emits a header comment saying so: a file committed as
-// complete produces a later CREATE INDEX for an index the database already has.
+// Secondary indexes are read where .atl can spell them, which leaves
+// expression, partial, bare-unique and non-btree indexes undeclared. Enrich
+// returns a note naming each, and Entity emits a header comment saying the
+// absence of an `index by` line means "not discovered", not "not present" —
+// a file committed as complete produces a later CREATE INDEX for an index the
+// database already has.
 package atlemit
 
 import (
@@ -94,6 +97,24 @@ func Entity(e *dsl.Entity, physicalTable string) string {
 			continue
 		}
 		fmt.Fprintf(&b, "  check %q\n", c.Expr)
+	}
+
+	// Only the btree indexes introspection can spell. A column carries `desc`
+	// where the catalogue records a descending sort: an index on
+	// (created_at DESC) is a different index from one on (created_at), so
+	// dropping the modifier declares something the database does not have.
+	for _, ix := range e.Indexes {
+		if ix.Kind != dsl.IndexBtree || len(ix.Fields) == 0 {
+			continue
+		}
+		cols := make([]string, len(ix.Fields))
+		for i, f := range ix.Fields {
+			cols[i] = f.Name
+			if f.Desc {
+				cols[i] += " desc"
+			}
+		}
+		fmt.Fprintf(&b, "  index by %s\n", strings.Join(cols, ", "))
 	}
 
 	// Columns whose type has no .atl spelling are omitted and named. Silently

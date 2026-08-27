@@ -108,6 +108,51 @@ func TestGeneratedAtlParses(t *testing.T) {
 	mustLower(t, src)
 }
 
+// A secondary index has no constraint behind it, so nothing else in the
+// pipeline reads one. Committed without them, the first `tide plan` proposes
+// creating an index the database already has.
+//
+// The kinds .atl cannot spell are named instead of dropped, for the same
+// reason: an index that appears nowhere is one nobody knows to keep.
+func TestGeneratedAtlCarriesSecondaryIndexes(t *testing.T) {
+	res := generateFrom(t, []string{
+		`DROP SCHEMA IF EXISTS adoptidx CASCADE`,
+		`CREATE SCHEMA adoptidx`,
+		`CREATE TABLE adoptidx.event (
+			id         bigint PRIMARY KEY,
+			actor      text NOT NULL,
+			kind       text NOT NULL,
+			created_at timestamptz NOT NULL,
+			deleted_at timestamptz
+		)`,
+		`CREATE INDEX event_actor ON adoptidx.event (actor)`,
+		`CREATE INDEX event_recent ON adoptidx.event (kind, created_at DESC)`,
+		`CREATE INDEX event_lower_actor ON adoptidx.event (lower(actor))`,
+		`CREATE INDEX event_live ON adoptidx.event (kind) WHERE deleted_at IS NULL`,
+	}, "adoptidx")
+
+	src := atlOf(t, res, "adoptidx.event")
+
+	if !strings.Contains(src, "index by actor") {
+		t.Errorf("the plain index is missing:\n%s", src)
+	}
+	// DESC is part of the index's identity. Emitting `index by kind,
+	// created_at` for an index on (kind, created_at DESC) declares a different
+	// index, which reads as drift forever.
+	if !strings.Contains(src, "index by kind, created_at desc") {
+		t.Errorf("the descending index lost its sort order:\n%s", src)
+	}
+
+	joined := strings.Join(res.Warnings, "\n")
+	for _, want := range []string{"event_lower_actor", "event_live"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("index %s is neither declared nor mentioned in the warnings:\n%s", want, joined)
+		}
+	}
+
+	mustLower(t, src)
+}
+
 // A CHECK and a composite UNIQUE exist only in the catalogue: FromPostgres
 // carries both from the declaration, and a generating pass supplies a stub that
 // has neither. Enrich is what reads them.

@@ -157,9 +157,12 @@ func Generate(ctx context.Context, q introspect.Querier, ns string, schemas []st
 	// FromPostgres carries CHECKs and composite UNIQUEs from the declaration it
 	// was given, which here is a stub holding neither. Reading them is what
 	// makes the emitted .atl describe the database instead of the stub.
-	if err := introspect.Enrich(ctx, q, filled); err != nil {
+	notes, err := introspect.Enrich(ctx, q, filled)
+	if err != nil {
 		return Result{}, err
 	}
+	warnings = append(warnings, notes...)
+	sort.Strings(warnings)
 
 	out := make([]Entity, 0, len(filled.Entities))
 	for i := range filled.Entities {
