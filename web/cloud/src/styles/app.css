@@ -394,3 +394,91 @@ body {
 .orglist__enter {
   white-space: nowrap;
 }
+
+/*
+  Schema import: the declarations read from a customer's database, and what
+  would tighten them.
+
+  Long, monospaced content in a screen otherwise made of short form fields. Each
+  block scrolls on its own rather than widening the card, so a table with a
+  hundred-character CHECK does not push the page sideways.
+*/
+.import__section {
+  margin: 0 0 1.5rem;
+}
+
+.import__section h3 {
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 0 0 0.6rem;
+}
+
+.import__table {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  color: var(--ink-2);
+}
+
+.import__suggestions,
+.import__notes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.import__suggestions li {
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--canvas-1);
+}
+
+.import__suggestions p {
+  margin: 0.35rem 0 0;
+  font-size: 0.9rem;
+  color: var(--ink-2);
+}
+
+.import__notes li {
+  font-size: 0.85rem;
+  color: var(--ink-3);
+}
+
+/*
+  The line to paste, and the declaration to commit. Both are copied by hand, so
+  they wrap rather than truncate: an .atl body clipped at the card's edge is one
+  somebody copies incompletely without noticing.
+*/
+.import__line,
+.import__atl {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  margin: 0.5rem 0 0;
+  padding: 0.6rem 0.7rem;
+  border-radius: var(--radius-sm);
+  background: var(--canvas-2);
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.import__entity {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0.55rem 0.75rem;
+  margin: 0 0 0.5rem;
+  background: var(--canvas-1);
+}
+
+.import__entity summary {
+  cursor: pointer;
+  font-size: 0.9rem;
+  color: var(--ink-2);
+}

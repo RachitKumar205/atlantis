@@ -49,6 +49,7 @@ export function Organisations({
   onDelete,
   onRestore,
   onSignOut,
+  onImport,
 }: {
   me: Me
   error: string | null
@@ -57,6 +58,7 @@ export function Organisations({
   onDelete: (name: string, confirm: string) => void
   onRestore: (name: string) => void
   onSignOut: () => void
+  onImport: () => void
 }) {
   const [name, setName] = useState('')
   const [displayName, setDisplayName] = useState('')
@@ -121,6 +123,15 @@ export function Organisations({
       ) : (
         <Notice kind="info">{limitMessage(me)}</Notice>
       )}
+
+      {/*
+        Offered whether or not an organisation exists. An account with none is
+        the one most likely to want it, and an entry that appears only once
+        there is something to attach it to is one they never see.
+      */}
+      <p className="foot">
+        <LinkButton onClick={onImport}>Import an existing database</LinkButton>
+      </p>
 
       <p className="foot">
         <LinkButton onClick={onSignOut}>Sign out</LinkButton>

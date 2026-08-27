@@ -15,6 +15,8 @@ import {
   signOut,
   signUp,
   verifySecondFactor,
+  importSchema,
+  type SchemaImport,
 } from '@/lib/api'
 import {
   arrivalScreen,
@@ -26,6 +28,7 @@ import {
 import { anySettling, type Me } from '@/lib/orgs'
 import { BackupCodes } from '@/screens/BackupCodes'
 import { Enrol } from '@/screens/Enrol'
+import { ImportSchema } from '@/screens/ImportSchema'
 import { Message } from '@/screens/Message'
 import { Organisations } from '@/screens/Organisations'
 import { ResetRequest } from '@/screens/ResetRequest'
@@ -184,6 +187,24 @@ export function App() {
     [run],
   )
 
+  // The result of the last import, held so the screen can render it. Cleared on
+  // the way in, so a second import does not open showing the first one's
+  // tables.
+  const [imported, setImported] = useState<SchemaImport | null>(null)
+
+  const runImport = useCallback(
+    (dsn: string, namespace: string, schemas: string[]) =>
+      run(async () => {
+        setImported(await importSchema(dsn, namespace, schemas))
+      }),
+    [run],
+  )
+
+  const openImport = useCallback(() => {
+    setImported(null)
+    setScreen('import-schema')
+  }, [])
+
   // Poll while an organisation is being built, and stop when none is.
   //
   // A fixed interval rather than a backoff: provisioning takes about a minute,
@@ -229,6 +250,18 @@ export function App() {
           onDelete={deleteOrganisation}
           onRestore={restoreOrganisation}
           onSignOut={endSession}
+          onImport={openImport}
+        />
+      )
+
+    case 'import-schema':
+      return (
+        <ImportSchema
+          error={error}
+          busy={busy}
+          result={imported}
+          onSubmit={runImport}
+          onBack={() => setScreen('organisations')}
         />
       )
     case 'signin':
