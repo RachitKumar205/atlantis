@@ -119,8 +119,13 @@ func TestGenerateSchemaProducesUsableDeclarations(t *testing.T) {
 		// Risk #1 from the adopt rework: a generated file understates the
 		// schema, and a customer who believes it complete will later add an
 		// index the database already has.
+		//
+		// UNIQUE and CHECK left this list when introspect.Enrich began reading
+		// them. Secondary indexes are what remains unread, and the header has
+		// to keep naming them: the value of this warning is that it is
+		// specific, and one that hedges about everything warns about nothing.
 		atl := byTable["legacy.customer"].GetAtl()
-		for _, want := range []string{"Indexes", "not present", "Review before committing"} {
+		for _, want := range []string{"Secondary indexes", "not present", "Review before committing"} {
 			if !strings.Contains(atl, want) {
 				t.Errorf("generated header does not mention %q:\n%s", want, atl)
 			}

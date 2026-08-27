@@ -38,10 +38,11 @@ func Entity(e *dsl.Entity, physicalTable string) string {
 
 	b.WriteString("// Generated from the live database.\n")
 	b.WriteString("//\n")
-	b.WriteString("// Columns, types, keys, defaults and foreign keys were read from the\n")
-	b.WriteString("// catalogue. Indexes, unique constraints and CHECK predicates were NOT:\n")
-	b.WriteString("// atlantis cannot yet read those back, so their absence here means \"not\n")
-	b.WriteString("// discovered\", not \"not present\". Review before committing.\n")
+	b.WriteString("// Columns, types, keys, defaults, foreign keys, UNIQUE and CHECK\n")
+	b.WriteString("// constraints were read from the catalogue. Secondary indexes were NOT:\n")
+	b.WriteString("// their absence here means \"not discovered\", not \"not present\", and the\n")
+	b.WriteString("// first plan will propose creating any that already exist.\n")
+	b.WriteString("// Review before committing.\n")
 
 	fmt.Fprintf(&b, "entity %s in %s {\n", e.Name, e.Namespace)
 	if physicalTable != "" {
@@ -76,6 +77,23 @@ func Entity(e *dsl.Entity, physicalTable string) string {
 			b.WriteString(m)
 		}
 		b.WriteString("\n")
+	}
+
+	// Constraints spanning more than one column, which have no field to hang
+	// off. Single-column uniqueness is already a field modifier, and emitting
+	// it again here would declare the same constraint twice.
+	for _, u := range e.Uniques {
+		if len(u.Fields) < 2 {
+			continue
+		}
+		fmt.Fprintf(&b, "  unique by %s\n", strings.Join(u.Fields, ", "))
+	}
+	for _, c := range e.Checks {
+		if c.Name != "" {
+			fmt.Fprintf(&b, "  check %q as %s\n", c.Expr, c.Name)
+			continue
+		}
+		fmt.Fprintf(&b, "  check %q\n", c.Expr)
 	}
 
 	// Columns whose type has no .atl spelling are omitted and named. Silently
