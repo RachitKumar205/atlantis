@@ -807,6 +807,30 @@ func TestSignOut(t *testing.T) {
 	}
 }
 
+// The sign-out a console redirects a browser to.
+//
+// Two properties. The session ends, and the browser lands on Cloud's own
+// sign-in whatever the URL asked for — the endpoint reads no redirect
+// parameter, so there is none to recognise or refuse.
+func TestEndSessionRedirectsToSignIn(t *testing.T) {
+	f := newFixture(t)
+	f.verifiedAccount(t, "endsession@example.com")
+	session, _, _ := f.enrol(t, "endsession@example.com")
+
+	rec := f.getWithCookie(t, "/logout?post_logout_redirect_uri=https://evil.example",
+		sessionCookie, session)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusSeeOther)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/signin" {
+		t.Errorf("Location = %q, want /signin — a redirect parameter reached the response", loc)
+	}
+	if _, err := f.db.SessionUser(context.Background(), session); err == nil {
+		t.Error("the session still resolves after the end-session redirect")
+	}
+}
+
 // Enrolment cannot be reached without a password.
 func TestEnrolmentRequiresAPassword(t *testing.T) {
 	f := newFixture(t)

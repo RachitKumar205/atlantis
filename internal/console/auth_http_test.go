@@ -25,6 +25,30 @@ func exchangeBody(assertion string) string {
 	return fmt.Sprintf(`{"assertion":%q}`, assertion)
 }
 
+// TestConfigAnswersWithoutASession is the property the sign-in redirect rests
+// on: a browser holding no session cookie can still read where Cloud is.
+//
+// Behind s.auth the route answers 401, and /login renders with no link out.
+func TestConfigAnswersWithoutASession(t *testing.T) {
+	f := newConsoleFixture(t)
+
+	w := httptest.NewRecorder()
+	f.srv.handler.ServeHTTP(w, f.request(t, http.MethodGet, "/api/config", "", ""))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", w.Code, w.Body.String())
+	}
+
+	var got struct {
+		CloudSignInURL string `json:"cloud_signin_url"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&got); err != nil {
+		t.Fatalf("decode /api/config: %v", err)
+	}
+	if want := "https://cloud.test/signin"; got.CloudSignInURL != want {
+		t.Errorf("cloud_signin_url = %q, want %q", got.CloudSignInURL, want)
+	}
+}
+
 // TestExchangeOpensASession is the whole sign-in path, end to end: Cloud mints,
 // the console verifies against the published JWKS, and a session cookie comes
 // back that later requests are accepted with.

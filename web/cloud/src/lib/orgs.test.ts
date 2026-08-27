@@ -8,6 +8,7 @@ import {
   canDelete,
   canRestore,
   deletedMessage,
+  enterURL,
   limitMessage,
   normaliseMe,
   normaliseOrg,
@@ -237,5 +238,26 @@ describe('deletion', () => {
   it('labels the two new states', () => {
     expect(stateLabel('deleted')).toBe('Deleted')
     expect(stateLabel('purging')).toBe('Being destroyed')
+  })
+})
+
+// enterURL decides whether a console that sent somebody here gets them back to
+// the page they asked for. A dropped parameter is invisible: the sign-in works
+// and lands on the console's default page.
+describe('enterURL', () => {
+  it('adds the return path to the link the server built', () => {
+    expect(enterURL('https://cloud.test/authorize?org=acme', '/approvals'))
+      .toBe('https://cloud.test/authorize?org=acme&return_to=%2Fapprovals')
+  })
+
+  it('opens the query when the link has none', () => {
+    expect(enterURL('https://console.test/', '/schema'))
+      .toBe('https://console.test/?return_to=%2Fschema')
+  })
+
+  it('leaves the link alone when there is nothing to carry', () => {
+    expect(enterURL('https://cloud.test/authorize?org=acme', ''))
+      .toBe('https://cloud.test/authorize?org=acme')
+    expect(enterURL('', '/approvals')).toBe('')
   })
 })

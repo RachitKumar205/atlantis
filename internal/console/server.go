@@ -310,6 +310,9 @@ func (s *Server) buildMux() {
 	// it.
 	mux.HandleFunc("POST /api/auth/exchange", s.handleExchange)
 
+	// Unauthenticated: a browser holding no session cookie is what reads it.
+	mux.HandleFunc("GET /api/config", s.handleConfig)
+
 	// Auth-required endpoints.
 	mux.HandleFunc("POST /api/auth/logout", s.auth(s.handleLogout))
 	mux.HandleFunc("GET /api/auth/me", s.auth(s.handleMe))
@@ -712,6 +715,20 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]bool{"ok": true})
 }
 
+// handleConfig returns the addresses the SPA needs before it holds a session.
+//
+// The URL names no organisation: this console serves several, a request with
+// no session identifies none of them, and Cloud's /authorize answers 400
+// without one.
+//
+// The address comes from CloudIssuer, the same configuration handleMe builds
+// step_up_url from.
+func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
+	jsonOK(w, map[string]any{
+		"cloud_signin_url": s.cfg.CloudIssuer + "/signin",
+	})
+}
+
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	u := r.Context().Value(ctxUser).(*User)
 	jsonOK(w, map[string]any{
@@ -731,6 +748,15 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		// to match exactly, so there is no second value that could drift.
 		"step_up_url": s.cfg.CloudIssuer + "/authorize?org=" +
 			url.QueryEscape(u.Org) + "&prompt=reauth",
+
+		// Cloud itself, for the way back. Both sessions survive following it,
+		// so returning here costs one click.
+		"cloud_url": s.cfg.CloudIssuer,
+
+		// Where signing out goes once this console has dropped its own session.
+		// Clearing the cookie here ends nothing at Cloud: separate origins, and
+		// a console can clear no cookie but its own.
+		"cloud_signout_url": s.cfg.CloudIssuer + "/logout",
 
 		// Every organisation this person belongs to, each with the URL that
 		// switches to it. Built here for the same two reasons as step_up_url,

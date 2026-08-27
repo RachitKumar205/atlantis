@@ -296,7 +296,13 @@ function SecurityPanel({
               </div>
             </div>
             <div className="setrow__control">
-              <span className="set-readout">Managed by Atlantis Cloud</span>
+              {/* step_up_url is Cloud's address with this session's org on it,
+                  which is the account the password belongs to. */}
+              {me?.step_up_url ? (
+                <a className="set-readout" href={me.step_up_url}>Manage at Atlantis Cloud</a>
+              ) : (
+                <span className="set-readout">Managed by Atlantis Cloud</span>
+              )}
             </div>
           </div>
 

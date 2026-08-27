@@ -533,15 +533,44 @@ func (s *Server) handlePendingState(w http.ResponseWriter, r *http.Request) {
 
 // handleLogout ends a session.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	s.endSession(w, r)
+	writeJSON(w, http.StatusOK, map[string]string{"message": "Signed out."})
+}
+
+// handleEndSession ends a session and sends the browser to sign-in.
+//
+// A console signs somebody out by clearing its own cookie and then sending the
+// browser here, which is the only way its Cloud session ends: the two are
+// separate origins, and a console can clear no cookie but its own. This is
+// OIDC's end_session_endpoint, and GET because a browser is redirected to it.
+//
+// It takes no post-logout redirect parameter. The specification requires a
+// provider to redirect only to values it recognises, and accepting none removes
+// what that check exists for; /signin is where a browser with no session
+// belongs.
+//
+// A GET that ends a session can be triggered by any page able to make a browser
+// fetch a URL. What that produces is an unwanted sign-out, with no parameters to
+// influence and nothing disclosed.
+//
+// Another console already signed in keeps its own cookie until it expires. Only
+// minting a new assertion needs the Cloud session, so this stops the next
+// sign-in everywhere and ends no session but its own and the caller's.
+func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
+	s.endSession(w, r)
+	http.Redirect(w, r, "/signin", http.StatusSeeOther)
+}
+
+// endSession deletes the session behind the request's cookie and clears both
+// cookies. Does the same work whether or not a session existed.
+func (s *Server) endSession(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		if err := s.db.DeleteSession(r.Context(), c.Value); err != nil {
 			s.log.Error("delete session", "err", err)
 		}
 	}
-	// Cleared and answered the same way whether or not a session existed.
 	s.clearCookie(w, sessionCookie)
 	s.clearCookie(w, pendingCookie)
-	writeJSON(w, http.StatusOK, map[string]string{"message": "Signed out."})
 }
 
 // handleResendVerification sends another verification link.

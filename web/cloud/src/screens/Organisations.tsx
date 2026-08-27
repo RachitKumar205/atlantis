@@ -7,6 +7,7 @@ import {
   canEnter,
   canRestore,
   deletedMessage,
+  enterURL,
   limitMessage,
   stateLabel,
   type Me,
@@ -28,6 +29,18 @@ import {
  * attribute here would work all the way through development and fail only in a
  * binary built with -tags embedspa.
  */
+// RETURN_TO is the path the console was trying to reach when it sent the
+// browser here, carried back on the /authorize link.
+//
+// Read at module scope, which runs before the first screen: the sign-in
+// screens replace the URL as they go, and a later read returns whatever the
+// last one left.
+//
+// A sign-in through GitHub or Google leaves this origin and returns to
+// /signin, so the value is empty on that path and the console lands on its
+// default page.
+const RETURN_TO = new URLSearchParams(window.location.search).get('return_to') ?? ''
+
 export function Organisations({
   me,
   error,
@@ -150,7 +163,7 @@ function OrgRow({
       <span className="orglist__name">{org.displayName || org.name}</span>
 
       {canEnter(org) ? (
-        <a className="orglist__enter" href={org.url}>Open</a>
+        <a className="orglist__enter" href={enterURL(org.url, RETURN_TO)}>Open</a>
       ) : (
         <span className="orglist__state">{label}</span>
       )}

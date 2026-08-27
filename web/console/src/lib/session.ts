@@ -17,6 +17,32 @@ import type { MeResult } from '@/api/client'
 export const ASSERTION_PARAM = 'assertion'
 export const MODE_PARAM = 'mode'
 
+// RETURN_TO_PARAM carries the path the browser was trying to reach before it
+// was sent to Cloud.
+//
+// Not `next`: Cloud reads that one already, and it names a screen there
+// (`enrol`, `verify`) rather than a path. One name for two meanings ends with
+// a sign-in landing on the enrolment screen.
+export const RETURN_TO_PARAM = 'return_to'
+
+// DEFAULT_PATH is where a sign-in carrying no path lands.
+export const DEFAULT_PATH = '/schema'
+
+// safeNext reduces an arriving return_to to a path on this console, or to
+// DEFAULT_PATH.
+//
+// The value travels to Cloud and back in a fragment, so it arrives from
+// outside. A scheme or an authority in it navigates the browser to another
+// origin.
+//
+// `//host` and `/\host` both parse as an authority, so the character after the
+// leading slash decides whether the path stays on this origin.
+export function safeNext(raw: string | null | undefined): string {
+  if (!raw || raw[0] !== '/') return DEFAULT_PATH
+  if (raw[1] === '/' || raw[1] === '\\') return DEFAULT_PATH
+  return raw
+}
+
 // carriesAssertion reports whether a URL fragment holds an assertion.
 //
 // The router's guard and the login page must agree about this, and before it

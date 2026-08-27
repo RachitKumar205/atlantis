@@ -106,6 +106,21 @@ export function canEnter(org: Org): boolean {
 }
 
 /**
+ * enterURL adds a console's return path to the /authorize link.
+ *
+ * The path arrives from the console that sent the browser here and travels
+ * back untouched: Cloud never navigates to it, and the console reduces it to a
+ * path on its own origin before use.
+ *
+ * An empty returnTo leaves the link as the server built it.
+ */
+export function enterURL(url: string, returnTo: string): string {
+  if (url === '' || returnTo === '') return url
+  const sep = url.includes('?') ? '&' : '?'
+  return `${url}${sep}return_to=${encodeURIComponent(returnTo)}`
+}
+
+/**
  * canDelete reports whether to offer the delete control.
  *
  * Admin only, matching the server — store.SoftDeleteOrg refuses a viewer — and

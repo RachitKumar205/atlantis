@@ -134,6 +134,19 @@ func (s *Server) redirectWithAssertion(w http.ResponseWriter, r *http.Request, g
 	}
 
 	frag := url.Values{"assertion": {token}}
+
+	// The path the console was trying to reach when it sent the browser here.
+	//
+	// Opaque to Cloud, which never navigates to it. The console reduces it to a
+	// path on its own origin before using it, so a value naming another host
+	// moves nothing.
+	//
+	// Omitted for step-up: that assertion goes to a popup which closes, and the
+	// page underneath has not moved.
+	if next := r.URL.Query().Get("return_to"); next != "" && !stepUp {
+		frag.Set("return_to", next)
+	}
+
 	if stepUp {
 		// Tells the console's sign-in page that it is running in a popup opened
 		// for step-up, so it hands the assertion to its opener rather than

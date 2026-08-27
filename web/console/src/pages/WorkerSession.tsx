@@ -82,11 +82,11 @@ export function WorkerSession() {
     return () => clearInterval(id)
   }, [])
 
-  const drain = async (password: string) => {
+  const drain = async (assertion: string) => {
     setActionPending(true)
     setActionError(null)
     try {
-      await api.auth.sudo(password)
+      await api.auth.sudo(assertion)
       await api.workers.drain(id)
       setShowDrain(false)
       setTick(t => t + 1)
@@ -97,11 +97,11 @@ export function WorkerSession() {
     }
   }
 
-  const evict = async (password: string) => {
+  const evict = async (assertion: string) => {
     setActionPending(true)
     setActionError(null)
     try {
-      await api.auth.sudo(password)
+      await api.auth.sudo(assertion)
       await api.workers.evict(id)
       navigate({ to: '/workers' })
     } catch (e) {

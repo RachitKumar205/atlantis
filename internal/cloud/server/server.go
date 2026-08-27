@@ -222,6 +222,10 @@ func (s *Server) routes() {
 	// sign-in app replaces them.
 	s.mux.HandleFunc("GET /verify", s.handleVerify)
 	s.mux.HandleFunc("GET /reset", s.handleResetForm)
+
+	// Where a console sends the browser to end its Cloud session. GET because a
+	// redirect is what carries it here.
+	s.mux.HandleFunc("GET /logout", s.handleEndSession)
 	s.mux.HandleFunc("POST /reset", s.handleResetSubmit)
 
 	// Liveness, answering without touching anything. A liveness probe that

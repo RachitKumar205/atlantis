@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import { carriesAssertion, enrolControlState, shouldRenderLogin, switcherMode } from './session'
+import {
+  carriesAssertion,
+  DEFAULT_PATH,
+  enrolControlState,
+  safeNext,
+  shouldRenderLogin,
+  switcherMode,
+} from './session'
 
 // Two branches nobody would notice breaking.
 //
@@ -124,5 +131,29 @@ describe('enrolControlState', () => {
     // the warning would name a date belonging to a different machine.
     expect(enrolControlState(enabled(['backend-worker']), 'backend')).toBe('first')
     expect(enrolControlState(enabled(['backend']), 'backend-worker')).toBe('first')
+  })
+})
+
+// safeNext is the only thing standing between a fragment that arrived through
+// Cloud and window.location. Everything it rejects is a navigation off this
+// origin that a sign-in would have performed on the browser's behalf.
+describe('safeNext', () => {
+  it('keeps a path on this console', () => {
+    expect(safeNext('/approvals')).toBe('/approvals')
+    expect(safeNext('/schema?namespace=consumer')).toBe('/schema?namespace=consumer')
+  })
+
+  it('refuses anything that names another origin', () => {
+    expect(safeNext('https://evil.example')).toBe(DEFAULT_PATH)
+    expect(safeNext('//evil.example')).toBe(DEFAULT_PATH)
+    expect(safeNext('/\\evil.example')).toBe(DEFAULT_PATH)
+    expect(safeNext('javascript:alert(1)')).toBe(DEFAULT_PATH)
+  })
+
+  it('falls back when there is nothing to use', () => {
+    expect(safeNext(null)).toBe(DEFAULT_PATH)
+    expect(safeNext(undefined)).toBe(DEFAULT_PATH)
+    expect(safeNext('')).toBe(DEFAULT_PATH)
+    expect(safeNext('approvals')).toBe(DEFAULT_PATH)
   })
 })

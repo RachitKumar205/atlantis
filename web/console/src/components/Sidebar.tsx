@@ -11,6 +11,7 @@ import {
   History,
   Archive,
   Layers,
+  ExternalLink,
   LogOut,
   Settings,
   Users,
@@ -20,6 +21,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import { useMe } from '@/hooks/useAuth'
 import { switcherMode } from '@/lib/session'
+import { markSignInRedirect } from '@/lib/signin'
 
 const NAV = [
   { to: '/schema',     icon: Layers,   tip: 'Schema' },
@@ -44,11 +46,22 @@ export function Sidebar() {
   const qc = useQueryClient()
   const { data: me } = useMe()
 
+  // Sign out of the console, then hand the browser to Cloud to end the session
+  // there. Clearing the cookie here ends only this console: Cloud is a separate
+  // origin, and its session is what mints the next assertion.
+  //
+  // onSettled, so a failed delete still reaches Cloud. Stopping on the error
+  // leaves the browser signed in on both with nothing said.
+  //
+  // markSignInRedirect before leaving: a Cloud that cannot be reached drops the
+  // browser back here with no session, and the mark is what makes /login render
+  // its card in place of bouncing to Cloud again.
   const logoutMutation = useMutation({
     mutationFn: api.auth.logout,
-    onSuccess: () => {
+    onSettled: () => {
       qc.clear()
-      window.location.href = '/login'
+      markSignInRedirect()
+      window.location.href = me?.cloud_signout_url ?? '/login'
     },
   })
 
@@ -101,6 +114,19 @@ export function Sidebar() {
           <Settings />
           <span className="rail-btn__label">Settings</span>
         </Link>
+        {/* Sits outside the organisation switcher, which renders as inert text
+            for an account in one organisation and so would hide this from the
+            accounts with the least reason to stay. */}
+        {me?.cloud_url && (
+          <a
+            className="rail-btn"
+            href={me.cloud_url}
+            aria-label="Back to Atlantis Cloud"
+          >
+            <ExternalLink />
+            <span className="rail-btn__label">Atlantis Cloud</span>
+          </a>
+        )}
         <button
           type="button"
           className="rail-btn"

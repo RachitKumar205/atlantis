@@ -44,6 +44,14 @@ export interface MeResult {
   // asking about.
   step_up_url: string
 
+  // Cloud itself. Following it keeps both sessions, so coming back is one
+  // click.
+  cloud_url: string
+
+  // Where sign-out goes after this console drops its own session. Clearing the
+  // console cookie ends nothing at Cloud, which is a separate origin.
+  cloud_signout_url: string
+
   // Every organisation this account belongs to, each with the URL that
   // switches to it, including the one currently in use.
   //
@@ -54,6 +62,13 @@ export interface MeResult {
   //
   // Empty for a session opened before this existed, which renders no switcher.
   orgs: OrgTarget[]
+}
+
+// What the SPA reads before it holds a session.
+export interface ConfigResult {
+  // Cloud's sign-in address, built by the server from its own CLOUD_ISSUER.
+  // The page assembles no part of it, as with step_up_url.
+  cloud_signin_url: string
 }
 
 export interface OrgTarget {
@@ -691,6 +706,12 @@ export const api = {
 
     me: (): Promise<MeResult> =>
       apiFetch<MeResult>('/api/auth/me'),
+
+    // The one call that answers without a session cookie. The URL names no
+    // organisation: this console serves several, and a request carrying no
+    // session identifies none of them.
+    config: (): Promise<ConfigResult> =>
+      apiFetch<ConfigResult>('/api/config'),
 
     // Step-up for destructive actions. Takes a *fresh* assertion, which means
     // returning to Cloud — proving yourself again is the whole point, and the

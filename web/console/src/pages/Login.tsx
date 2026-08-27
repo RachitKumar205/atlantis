@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { useNavigate } from '@tanstack/react-router'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation } from '@tanstack/react-query'
 import { api } from '@/api/client'
-import { ASSERTION_PARAM, MODE_PARAM } from '@/lib/session'
+import {
+  ASSERTION_PARAM,
+  DEFAULT_PATH,
+  MODE_PARAM,
+  RETURN_TO_PARAM,
+  safeNext,
+} from '@/lib/session'
+import { clearSignInRedirect, startSignIn } from '@/lib/signin'
 
 // Centered authcard: concentric-ring logo above lowercase "atlantis"
 // wordmark. Multiple bolder redesigns (porthole + serif wordmark + depth
@@ -32,7 +38,7 @@ import { ASSERTION_PARAM, MODE_PARAM } from '@/lib/session'
 // a message nobody sends.
 export const STEP_UP_MESSAGE = 'atlantis:step-up'
 
-type Arrival = { assertion: string; stepUp: boolean }
+type Arrival = { assertion: string; stepUp: boolean; next: string }
 
 function takeAssertionFromURL(): Arrival | null {
   const raw = window.location.hash.replace(/^#/, '')
@@ -41,6 +47,11 @@ function takeAssertionFromURL(): Arrival | null {
   const params = new URLSearchParams(raw)
   const assertion = params.get(ASSERTION_PARAM)
   if (!assertion) return null
+
+  // Where the browser was headed before it was sent to Cloud. safeNext reduces
+  // it to a path on this console; it arrived through Cloud, so it comes from
+  // outside.
+  const next = safeNext(params.get(RETURN_TO_PARAM))
 
   // mode=reauth means Cloud sent this to a popup the console opened to confirm
   // a destructive action, not to a tab signing somebody in. The assertion says
@@ -52,23 +63,30 @@ function takeAssertionFromURL(): Arrival | null {
   // location.hash, which would push a history entry that still contains it.
   params.delete(ASSERTION_PARAM)
   params.delete(MODE_PARAM)
+  params.delete(RETURN_TO_PARAM)
   const rest = params.toString()
   window.history.replaceState(null, '', window.location.pathname + (rest ? `#${rest}` : ''))
 
-  return { assertion, stepUp }
+  return { assertion, stepUp, next }
 }
 
 export function Login() {
-  const navigate = useNavigate()
-  const qc = useQueryClient()
   const [arrival] = useState(takeAssertionFromURL)
   const assertion = arrival?.assertion ?? null
+
+  // Cloud's address, for the card's link. Null until the request answers, and
+  // null for good when the console cannot read its own config.
+  const [cloudURL, setCloudURL] = useState<string | null>(null)
 
   const exchange = useMutation({
     mutationFn: (token: string) => api.auth.exchange(token),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['auth', 'me'] })
-      navigate({ to: '/schema', search: { namespace: undefined, entity: undefined } })
+      clearSignInRedirect()
+
+      // A full load. The destination arrived from outside the route tree, so
+      // the typed router cannot check it, and the load starts the console on
+      // the session that now exists.
+      window.location.replace(arrival?.next ?? DEFAULT_PATH)
     },
   })
 
@@ -95,6 +113,38 @@ export function Login() {
 
     exchange.mutate(arrival.assertion)
   }, [arrival, exchange])
+
+  // Reached with no assertion, so a sign-in starts here. startSignIn navigates
+  // to Cloud unless the mark is set, which is the return leg of a trip that
+  // produced none.
+  //
+  // DEFAULT_PATH as the return path: /login is this page, and sending it would
+  // land the browser back here once the session exists.
+  useEffect(() => {
+    if (arrival) return
+    void startSignIn(DEFAULT_PATH)
+  }, [arrival])
+
+  // The card links to Cloud whenever it renders — no assertion arrived, or the
+  // exchange failed. Both leave the browser on this page with a session to
+  // start.
+  const needsLink = !arrival || exchange.isError
+  useEffect(() => {
+    if (!needsLink) return
+    let live = true
+    api.auth
+      .config()
+      .then(cfg => {
+        if (live) setCloudURL(cfg.cloud_signin_url)
+      })
+      .catch(() => {
+        // The console cannot reach its own API. The card renders without a
+        // link, which is the state it is in.
+      })
+    return () => {
+      live = false
+    }
+  }, [needsLink])
 
   return (
     <div className="auth">
@@ -130,17 +180,27 @@ export function Login() {
               <span className="banner__icon" />
               <span>
                 {exchange.error?.message ?? 'That sign-in link could not be used.'}
-                {' '}Start again from Atlantis Cloud.
               </span>
             </div>
           )}
 
           {!assertion && !exchange.isPending && (
             <p className="auth__note">
-              Sign in from Atlantis Cloud, then choose this console. Opening this
-              page directly cannot sign you in — the console keeps no accounts of
-              its own.
+              This console keeps no accounts. Sign in at Atlantis Cloud and
+              choose it there.
             </p>
+          )}
+
+          {needsLink && !exchange.isPending && (
+            cloudURL ? (
+              <a className="btn btn--primary auth__cta" href={cloudURL}>
+                Continue to Atlantis Cloud
+              </a>
+            ) : (
+              <p className="auth__note">
+                Atlantis Cloud could not be reached from this console.
+              </p>
+            )
           )}
         </div>
       </div>

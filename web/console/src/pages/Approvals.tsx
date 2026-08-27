@@ -49,11 +49,11 @@ export function Approvals() {
   })
 
   // Approve elevates first; reject does not. The worst a wrongly-rejected plan
-  // costs is a re-plan, and putting a password prompt in front of "no" is how
-  // reviewers stop saying it.
+  // costs is a re-plan, and a trip to Cloud in front of "no" is how a review
+  // stops being said.
   const approve = useMutation({
-    mutationFn: async ({ id, password }: { id: string; password: string }) => {
-      await api.auth.sudo(password)
+    mutationFn: async ({ id, assertion }: { id: string; assertion: string }) => {
+      await api.auth.sudo(assertion)
       return api.plans.approve(id, reason)
     },
     onSuccess: () => {
@@ -182,7 +182,7 @@ export function Approvals() {
           pending={approve.isPending}
           error={approve.error ? (approve.error as Error).message : null}
           onCancel={() => { approve.reset(); setConfirm(null) }}
-          onConfirm={(password) => approve.mutate({ id: confirm.plan.plan_id, password })}
+          onConfirm={(assertion) => approve.mutate({ id: confirm.plan.plan_id, assertion })}
         />
       )}
 

@@ -10,6 +10,7 @@ import { Sidebar } from '@/components/Sidebar'
 import { CommandBar, useCommandBar } from '@/components/CommandBar'
 import { queries, ApiError } from '@/api/client'
 import { shouldRenderLogin } from '@/lib/session'
+import { startSignIn } from '@/lib/signin'
 
 // Last-resort error boundary. Without this, an uncaught throw blanks
 // the whole console; with it, the user sees the actual message + stack
@@ -82,6 +83,19 @@ export const Route = createRootRouteWithContext<RouterContext>()({
     }
 
     if (!authed) {
+      // Cloud holds the accounts, so a session starts there.
+      //
+      // pathname and search, no hash: the return path becomes a query
+      // parameter at Cloud, and a fragment folded into one reaches Cloud's
+      // access log.
+      if (await startSignIn(location.pathname + location.searchStr)) {
+        // Never resolves. The browser is leaving, and resolving renders a
+        // console page for a session that does not exist.
+        await new Promise(() => {})
+      }
+
+      // Cloud is unreachable, or this browser has been and returned with no
+      // assertion. /login reports both.
       throw redirect({ to: '/login' })
     }
   },
