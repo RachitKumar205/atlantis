@@ -193,9 +193,9 @@ export function App() {
   const [imported, setImported] = useState<SchemaImport | null>(null)
 
   const runImport = useCallback(
-    (dsn: string, namespace: string, schemas: string[]) =>
+    (dsn: string, namespace: string, schemas: string[], allowInsecure: boolean) =>
       run(async () => {
-        setImported(await importSchema(dsn, namespace, schemas))
+        setImported(await importSchema(dsn, namespace, schemas, allowInsecure))
       }),
     [run],
   )

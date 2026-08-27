@@ -63,14 +63,14 @@ func TestConfigRefusesUnixSockets(t *testing.T) {
 		"host=/var/run/postgresql user=u password=p dbname=db",
 		"postgres:///db?host=/var/run/postgresql&sslmode=require",
 	} {
-		if _, err := Config(dsn); !errors.Is(err, ErrUnixSocket) {
+		if _, err := Config(dsn, false); !errors.Is(err, ErrUnixSocket) {
 			t.Errorf("Config(%q) error = %v, want ErrUnixSocket", dsn, err)
 		}
 	}
 }
 
 func TestConfigRefusesPlaintext(t *testing.T) {
-	if _, err := Config("postgres://u:p@db.example.com/db?sslmode=disable"); !errors.Is(err, ErrNoTLS) {
+	if _, err := Config("postgres://u:p@db.example.com/db?sslmode=disable", false); !errors.Is(err, ErrNoTLS) {
 		t.Error("sslmode=disable was accepted; the password would cross the internet in clear")
 	}
 }
@@ -79,7 +79,7 @@ func TestConfigRefusesPlaintext(t *testing.T) {
 // Refusing it would make the guard look broken; accepting it as written would
 // let pgx fall back to plaintext after TLS failed.
 func TestConfigUpgradesPreferToRequire(t *testing.T) {
-	cfg, err := Config("postgres://u:p@db.example.com/db")
+	cfg, err := Config("postgres://u:p@db.example.com/db", false)
 	if err != nil {
 		t.Fatalf("a DSN with no sslmode was refused: %v", err)
 	}
@@ -96,14 +96,14 @@ func TestConfigUpgradesPreferToRequire(t *testing.T) {
 // A DSN may name several hosts, and pgconn tries each. Checking only the first
 // leaves the rest unguarded.
 func TestConfigChecksEveryHost(t *testing.T) {
-	_, err := Config("host=db.example.com,/var/run/postgresql user=u password=p dbname=db sslmode=require")
+	_, err := Config("host=db.example.com,/var/run/postgresql user=u password=p dbname=db sslmode=require", false)
 	if !errors.Is(err, ErrUnixSocket) {
 		t.Errorf("a socket path in the second host position was not refused: %v", err)
 	}
 }
 
 func TestConfigSetsBounds(t *testing.T) {
-	cfg, err := Config("postgres://u:p@db.example.com/db?sslmode=require")
+	cfg, err := Config("postgres://u:p@db.example.com/db?sslmode=require", false)
 	if err != nil {
 		t.Fatalf("Config: %v", err)
 	}
@@ -142,5 +142,59 @@ func TestRedactRemovesTheConnectionString(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), dsn) {
 		t.Errorf("the connection string survived redaction: %s", err)
+	}
+}
+
+// The acknowledged-insecure path.
+//
+// A public read-only dataset that offers no TLS is a real thing to want to
+// read, and refusing it outright refuses the case this feature exists for. The
+// switch is per request and never a default.
+func TestConfigAllowsPlaintextWhenAcknowledged(t *testing.T) {
+	cfg, err := Config("postgres://u:p@db.example.com/db?sslmode=disable", true)
+	if err != nil {
+		t.Fatalf("an acknowledged plaintext DSN was still refused: %v", err)
+	}
+	if cfg.ConnConfig.TLSConfig != nil {
+		t.Error("sslmode=disable produced a TLS candidate, so the acknowledgement changed nothing")
+	}
+}
+
+// Insecure means unencrypted, not unrestricted. Every address rule has to hold
+// with the switch on, or the checkbox becomes a way to reach the metadata
+// service.
+func TestAcknowledgementDoesNotRelaxTheAddressRules(t *testing.T) {
+	if _, err := Config("host=/var/run/postgresql user=u password=p dbname=db", true); !errors.Is(err, ErrUnixSocket) {
+		t.Error("the acknowledgement let a unix socket through")
+	}
+
+	cfg, err := Config("postgres://u:p@db.example.com/db?sslmode=disable", true)
+	if err != nil {
+		t.Fatalf("Config: %v", err)
+	}
+	if cfg.ConnConfig.LookupFunc == nil || cfg.ConnConfig.DialFunc == nil {
+		t.Fatal("the acknowledgement unpinned resolution or dialling")
+	}
+	if _, err := dialPublic(context.Background(), "tcp", "169.254.169.254:5432"); !errors.Is(err, ErrNotPublic) {
+		t.Error("the metadata address became reachable")
+	}
+}
+
+// The driver blames the server for a policy this package set, so a caller
+// relaying it verbatim tells somebody their database is broken.
+func TestIsTLSRefusalRecognisesTheDriverWording(t *testing.T) {
+	for _, msg := range []string{
+		"tls error: server refused TLS connection",
+		"server does not support SSL, but SSL was required",
+	} {
+		if !IsTLSRefusal(errors.New(msg)) {
+			t.Errorf("not recognised as a TLS refusal: %s", msg)
+		}
+	}
+	if IsTLSRefusal(errors.New("connection refused")) {
+		t.Error("an ordinary connection failure was reported as a TLS refusal")
+	}
+	if IsTLSRefusal(nil) {
+		t.Error("nil was reported as a TLS refusal")
 	}
 }

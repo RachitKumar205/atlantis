@@ -212,11 +212,13 @@ export async function importSchema(
   dsn: string,
   namespace: string,
   schemas: string[],
+  allowInsecure: boolean,
 ): Promise<SchemaImport> {
   return (await request('POST', '/api/onboarding/introspect', {
     dsn,
     namespace,
     schemas,
+    allow_insecure: allowInsecure,
   })) as SchemaImport
 }
 

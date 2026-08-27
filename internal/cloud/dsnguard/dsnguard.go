@@ -44,12 +44,20 @@ var ErrNoTLS = errors.New(
 	"sslmode=disable would send the password in clear: use sslmode=require or stronger")
 
 // Config parses dsn and returns a pool configuration that can reach only a
-// public Postgres, over TLS.
+// public Postgres.
 //
 // Refusals happen here, before anything is dialled. What survives is pinned:
 // LookupFunc is the only resolver pgx uses, so no name is resolved twice and a
 // record that changes between the check and the connection changes nothing.
-func Config(dsn string) (*pgxpool.Config, error) {
+//
+// allowInsecure keeps the plaintext candidates, for a server that offers no
+// TLS. Public read-only datasets are the case: they publish the credential, and
+// requiring TLS refuses them outright. It is passed per request and never
+// defaulted on, because the same switch on a production database sends a live
+// password across the internet in clear.
+//
+// The address rules do not move. Insecure means unencrypted, not unrestricted.
+func Config(dsn string, allowInsecure bool) (*pgxpool.Config, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		// The parse error can quote the DSN back.
@@ -75,21 +83,27 @@ func Config(dsn string) (*pgxpool.Config, error) {
 	// require: the connection is encrypted or it does not happen.
 	//
 	// Nothing survives only when TLS was disabled outright, which is ErrNoTLS.
-	kept := cc.Fallbacks[:0]
-	for _, fb := range cc.Fallbacks {
-		if fb.TLSConfig != nil {
-			kept = append(kept, fb)
+	//
+	// Skipped entirely for an acknowledged insecure connection, which leaves
+	// prefer as libpq wrote it: TLS attempted, plaintext accepted.
+	if !allowInsecure {
+		kept := cc.Fallbacks[:0]
+		for _, fb := range cc.Fallbacks {
+			if fb.TLSConfig != nil {
+				kept = append(kept, fb)
+			}
 		}
-	}
-	cc.Fallbacks = kept
-	if cc.TLSConfig == nil {
-		if len(cc.Fallbacks) == 0 {
-			return nil, ErrNoTLS
+		cc.Fallbacks = kept
+		if cc.TLSConfig == nil {
+			if len(cc.Fallbacks) == 0 {
+				return nil, ErrNoTLS
+			}
+			// The primary was the plaintext half of prefer. Promote a TLS
+			// candidate into its place so the first attempt is already
+			// encrypted.
+			cc.Host, cc.Port, cc.TLSConfig = cc.Fallbacks[0].Host, cc.Fallbacks[0].Port, cc.Fallbacks[0].TLSConfig
+			cc.Fallbacks = cc.Fallbacks[1:]
 		}
-		// The primary was the plaintext half of prefer. Promote a TLS
-		// candidate into its place so the first attempt is already encrypted.
-		cc.Host, cc.Port, cc.TLSConfig = cc.Fallbacks[0].Host, cc.Fallbacks[0].Port, cc.Fallbacks[0].TLSConfig
-		cc.Fallbacks = cc.Fallbacks[1:]
 	}
 
 	cc.ConnectTimeout = ConnectTimeout
@@ -180,6 +194,23 @@ func allowed(ip net.IP) error {
 		return fmt.Errorf("%s: %w", ip, ErrNotPublic)
 	}
 	return nil
+}
+
+// IsTLSRefusal reports whether a connection failed because the server offers no
+// TLS and this package required it.
+//
+// The driver's wording — "server refused TLS connection", "server does not
+// support SSL" — describes the server and not the policy that made it fatal,
+// so a caller relaying it verbatim tells somebody their database is broken when
+// the answer is a checkbox.
+func IsTLSRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "refused tls") ||
+		strings.Contains(msg, "does not support ssl") ||
+		strings.Contains(msg, "server refused tls connection")
 }
 
 // Redact removes a DSN from an error's text.

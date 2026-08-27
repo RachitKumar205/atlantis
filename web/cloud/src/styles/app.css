@@ -482,3 +482,27 @@ body {
   font-size: 0.9rem;
   color: var(--ink-2);
 }
+
+/*
+  The plaintext acknowledgement. Deliberately not styled as a quiet footnote:
+  ticking it sends a password across the internet in clear, and a control that
+  looks incidental gets ticked to make an error go away.
+*/
+.import__ack {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  margin: 0 0 1rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--canvas-1);
+  font-size: 0.85rem;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+
+.import__ack input {
+  margin-top: 0.15rem;
+  flex: none;
+}

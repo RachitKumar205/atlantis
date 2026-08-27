@@ -59,6 +59,11 @@ func (s *Server) handleIntrospectDatabase(w http.ResponseWriter, r *http.Request
 		DSN       string   `json:"dsn"`
 		Namespace string   `json:"namespace"`
 		Schemas   []string `json:"schemas"`
+
+		// Sent only when somebody ticked the box saying this database offers no
+		// TLS. Never defaulted on: the same switch against a production
+		// database sends a live password across the internet in clear.
+		AllowInsecure bool `json:"allow_insecure"`
 	}
 	if !decode(w, r, &body) {
 		return
@@ -80,7 +85,7 @@ func (s *Server) handleIntrospectDatabase(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	cfg, err := dsnguard.Config(dsn)
+	cfg, err := dsnguard.Config(dsn, body.AllowInsecure)
 	if err != nil {
 		// Refusals name what is wrong with the connection string and nothing
 		// about this deployment's network.
@@ -93,6 +98,17 @@ func (s *Server) handleIntrospectDatabase(w http.ResponseWriter, r *http.Request
 		// Logged without the connection string, and answered without it.
 		s.log.Warn("schema import failed", "user", user.ID, "host", cfg.ConnConfig.Host,
 			"err", dsnguard.Redact(err, dsn))
+
+		// The driver says the server refused TLS, which reads as a broken
+		// database. It is this deployment requiring TLS, and the remedy is a
+		// checkbox rather than anything on their side.
+		if !body.AllowInsecure && dsnguard.IsTLSRefusal(err) {
+			jsonError(w, "that server offers no TLS, and atlantis requires it. "+
+				"Tick \"this database has no TLS\" to read it anyway — the password "+
+				"will cross the internet in clear, so use a credential that is "+
+				"read-only and disposable.", http.StatusBadRequest)
+			return
+		}
 		jsonError(w, dsnguard.Redact(err, dsn).Error(), http.StatusBadGateway)
 		return
 	}

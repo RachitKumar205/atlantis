@@ -13,12 +13,17 @@ export function ImportSchema({ error, busy, result, onSubmit, onBack }: {
   error: string | null
   busy: boolean
   result: SchemaImport | null
-  onSubmit: (dsn: string, namespace: string, schemas: string[]) => void
+  onSubmit: (dsn: string, namespace: string, schemas: string[], allowInsecure: boolean) => void
   onBack: () => void
 }) {
   const [dsn, setDsn] = useState('')
   const [namespace, setNamespace] = useState('')
   const [schemas, setSchemas] = useState('public')
+
+  // Off every time the screen opens, and never remembered. A database that
+  // needed it once is not evidence the next one does, and the cost of being
+  // wrong is a live password sent in clear.
+  const [allowInsecure, setAllowInsecure] = useState(false)
 
   function submit(e: FormEvent) {
     e.preventDefault()
@@ -26,6 +31,7 @@ export function ImportSchema({ error, busy, result, onSubmit, onBack }: {
       dsn.trim(),
       namespace.trim(),
       schemas.split(',').map((s) => s.trim()).filter(Boolean),
+      allowInsecure,
     )
   }
 
@@ -76,6 +82,24 @@ export function ImportSchema({ error, busy, result, onSubmit, onBack }: {
           onChange={(e) => setSchemas(e.target.value)}
           hint="Comma separated."
         />
+        {/*
+          A plain label rather than a Field: Field renders a text input, and
+          this is the one control on the screen whose value is a decision rather
+          than a value.
+        */}
+        <label className="import__ack">
+          <input
+            type="checkbox"
+            checked={allowInsecure}
+            onChange={(e) => setAllowInsecure(e.target.checked)}
+          />
+          <span>
+            This database has no TLS — send the password in clear. Public
+            read-only datasets often need this. Never tick it for a database
+            whose credential is worth stealing.
+          </span>
+        </label>
+
         <Button type="submit" busy={busy}>Read the schema</Button>
       </form>
 
