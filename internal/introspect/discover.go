@@ -142,3 +142,41 @@ ORDER BY n.nspname, c.relname`
 	}
 	return out, rows.Err()
 }
+
+// SchemasWithTables names every schema DiscoverTables would look in that holds
+// at least one table.
+//
+// What a read of the requested schemas cannot say on its own: finding nothing
+// there is indistinguishable from a database with nothing in it, and the two
+// have different remedies. The exclusions match DiscoverTables, so a schema
+// named here is one that would yield tables if it were asked for.
+func SchemasWithTables(ctx context.Context, q Querier) ([]string, error) {
+	const query = `
+SELECT n.nspname
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r','p','f')
+  AND NOT c.relispartition
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'atlantis')
+  AND n.nspname NOT LIKE 'pg\_toast%'
+  AND n.nspname NOT LIKE 'pg\_temp%'
+  AND n.nspname NOT LIKE '\_timescaledb%'
+GROUP BY n.nspname
+ORDER BY count(*) DESC, n.nspname`
+
+	rows, err := q.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("list schemas holding tables: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, fmt.Errorf("scan schema: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}

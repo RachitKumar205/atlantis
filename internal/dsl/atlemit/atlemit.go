@@ -42,9 +42,10 @@ func Entity(e *dsl.Entity, physicalTable string) string {
 	b.WriteString("// Generated from the live database.\n")
 	b.WriteString("//\n")
 	b.WriteString("// Columns, types, keys, defaults, foreign keys, UNIQUE and CHECK\n")
-	b.WriteString("// constraints were read from the catalogue. Secondary indexes were NOT:\n")
-	b.WriteString("// their absence here means \"not discovered\", not \"not present\", and the\n")
-	b.WriteString("// first plan will propose creating any that already exist.\n")
+	b.WriteString("// constraints and btree secondary indexes were read from the catalogue.\n")
+	b.WriteString("// An index this cannot spell — on an expression, partial, unique with no\n")
+	b.WriteString("// constraint behind it, or not btree — is named in the warnings instead,\n")
+	b.WriteString("// and the first plan will propose creating one that already exists.\n")
 	b.WriteString("// Review before committing.\n")
 
 	fmt.Fprintf(&b, "entity %s in %s {\n", e.Name, e.Namespace)

@@ -245,3 +245,93 @@ func TestTenantIsolationSuggestedAgainstLiveSchema(t *testing.T) {
 			"the policy read from pg_policy is being ignored")
 	}
 }
+
+// Asking for a schema that holds no tables says so, and names the ones that do.
+//
+// The failure it replaces: the console read a database whose tables all live in
+// one non-public schema, the form's default of "public" matched none of them,
+// and the answer was "0 tables" with an empty declarations panel. Nothing on
+// that screen said which schema to ask for, and nothing distinguished it from a
+// database that is genuinely empty.
+//
+// Postgres defaults search_path to "public", so this is the ordinary case for
+// any database that keeps its tables elsewhere, not an exotic one.
+func TestAskingForAnEmptySchemaNamesTheSchemasThatHaveTables(t *testing.T) {
+	pool := adoptPool(t)
+	ctx := context.Background()
+
+	for _, stmt := range []string{
+		`DROP SCHEMA IF EXISTS adopt_elsewhere CASCADE`,
+		`DROP SCHEMA IF EXISTS adopt_empty CASCADE`,
+		`CREATE SCHEMA adopt_elsewhere`,
+		`CREATE SCHEMA adopt_empty`,
+		`CREATE TABLE adopt_elsewhere.orders (id TEXT PRIMARY KEY)`,
+	} {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			t.Fatalf("setup %q: %v", stmt, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DROP SCHEMA IF EXISTS adopt_elsewhere CASCADE`)
+		_, _ = pool.Exec(context.Background(), `DROP SCHEMA IF EXISTS adopt_empty CASCADE`)
+	})
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	_, err = Generate(ctx, tx, "shop", []string{"adopt_empty"}, nil)
+	if err == nil {
+		t.Fatal("reading a schema with no tables reported success and no tables, " +
+			"which reads as an empty database")
+	}
+	// The schema asked for, so the message is about this request, and the
+	// schema to ask for instead, which is the whole remedy.
+	for _, want := range []string{"adopt_empty", "adopt_elsewhere"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not name %q: %v", want, err)
+		}
+	}
+}
+
+// A schema whose tables are all declared already is not an error.
+//
+// The control. Without it the case above is satisfied by refusing every empty
+// result, which would make a second `tide inspect --generate` — the one that
+// correctly finds nothing left to adopt — look like a failure.
+func TestAFullyDeclaredSchemaIsNotAnError(t *testing.T) {
+	pool := adoptPool(t)
+	ctx := context.Background()
+
+	for _, stmt := range []string{
+		`DROP SCHEMA IF EXISTS adopt_declared CASCADE`,
+		`CREATE SCHEMA adopt_declared`,
+		`CREATE TABLE adopt_declared.orders (id TEXT PRIMARY KEY)`,
+	} {
+		if _, err := pool.Exec(ctx, stmt); err != nil {
+			t.Fatalf("setup %q: %v", stmt, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DROP SCHEMA IF EXISTS adopt_declared CASCADE`)
+	})
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	declared := &dsl.IR{Entities: []dsl.Entity{
+		{Name: "Order", Namespace: "shop", TableName: "adopt_declared.orders"},
+	}}
+	res, err := Generate(ctx, tx, "shop", []string{"adopt_declared"}, declared)
+	if err != nil {
+		t.Fatalf("a schema with nothing left to adopt was reported as an error: %v", err)
+	}
+	if len(res.Entities) != 0 {
+		t.Errorf("generated %d declarations for an already-declared table", len(res.Entities))
+	}
+}

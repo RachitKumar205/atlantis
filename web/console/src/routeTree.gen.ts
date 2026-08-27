@@ -14,6 +14,7 @@ import { Route as SettingsRoute } from './routes/settings'
 import { Route as CallersRoute } from './routes/callers'
 import { Route as ApprovalsRoute } from './routes/approvals'
 import { Route as ParkedRoute } from './routes/parked'
+import { Route as ImportSchemaRoute } from './routes/import'
 import { Route as OperationsRoute } from './routes/operations'
 import { Route as SandboxRoute } from './routes/sandbox'
 import { Route as WorkersRoute } from './routes/workers'
@@ -29,6 +30,7 @@ export const routeTree = RootRoute.addChildren([
   CallersRoute,
   ApprovalsRoute,
   ParkedRoute,
+  ImportSchemaRoute,
   OperationsRoute,
   SandboxRoute,
   WorkersRoute,
@@ -92,6 +94,13 @@ declare module '@tanstack/react-router' {
       path: '/parked'
       fullPath: '/parked'
       preLoaderRoute: typeof ParkedRoute
+      parentRoute: typeof RootRoute
+    }
+    '/import': {
+      id: '/import'
+      path: '/import'
+      fullPath: '/import'
+      preLoaderRoute: typeof ImportSchemaRoute
       parentRoute: typeof RootRoute
     }
     '/operations': {

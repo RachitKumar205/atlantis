@@ -15,26 +15,40 @@ import (
 
 // Removing everything the console holds for a destroyed organisation.
 //
-// The function is four DELETEs and a decision about which tables they run
+// The function is three DELETEs and a decision about which tables they run
 // against, so there is nothing to fake: the question is whether the statements
 // match the schema, and whether the one table that must survive does.
 //
-// The console schema declares no foreign keys at all, so nothing cascades and
-// every table has to be named. That is exactly the shape where a fix removes the
-// row somebody noticed and leaves the three they did not.
+// console.enroll_tokens and console.schema_imports are removed by the cascade
+// from console.orgs rather than by a statement here, so a test that only
+// counted the named tables would say nothing about them. Both are seeded and
+// both are counted.
 
+// unregisterDB returns the DSN UnregisterOrg is given and an administrative
+// pool to inspect with.
+//
+// The two are different roles, and that is the point. console.enroll_tokens and
+// console.schema_imports are under FORCE row-level security, which a superuser
+// bypasses: run UnregisterOrg as one and its DELETEs succeed against rows a
+// deployment's role cannot see. This fixture used the administrative DSN for
+// both, and every assertion below passed while the enrolment-token delete
+// removed nothing in production.
+//
+// The migrations run as the restricted role so it owns what it creates, which
+// is what FORCE binds against.
 func unregisterDB(t *testing.T) (string, *pgxpool.Pool) {
 	t.Helper()
 	adminDSN := requireTestPG(t)
 	const dbName = "atlantis_console_unregister"
-	dsn := pgcatalog.PrivateDatabase(t, adminDSN, dbName)
+	adminDBDSN := pgcatalog.PrivateDatabase(t, adminDSN, dbName)
+	dsn := isolatedRoleDSN(t, adminDSN, adminDBDSN, dbName, "unregister_probe")
 
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
 	if err := migrate.RunFS(dsn, migrations.Console, "console",
 		migrate.ConsoleHistoryTable, quiet); err != nil {
 		t.Fatalf("migrate %s: %v", dbName, err)
 	}
-	pool, err := pgxpool.New(context.Background(), dsn)
+	pool, err := pgxpool.New(context.Background(), adminDBDSN)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -80,6 +94,13 @@ func seedOrgEverywhere(t *testing.T, pool *pgxpool.Pool, org string) {
 	exec(`INSERT INTO console.caller_certs (fingerprint, org, caller, expires_at)
 	      VALUES ($1, $2, 'backend', NOW() + interval '1 hour')`,
 		[]byte(org+"-fingerprint"), org)
+	exec(`INSERT INTO console.schema_imports (id, org, source, entities, actor, expires_at)
+	      VALUES ($1, $2, 'db.example.test:5432', 1, 'e@example.test',
+	              NOW() + interval '30 days')`, org+"-import", org)
+	exec(`INSERT INTO console.schema_import_entities
+	          (import_id, org, table_name, entity_name, namespace, atl)
+	      VALUES ($1, $2, 'public.orders', 'Order', 'public', 'entity Order in public {}')`,
+		org+"-import", org)
 	exec(`INSERT INTO console.audit_log (org, actor, action)
 	      VALUES ($1, 'e@example.test', 'org.something')`, org)
 }
@@ -102,7 +123,8 @@ func TestUnregisterRemovesTheOrganisationButKeepsTheAuditLog(t *testing.T) {
 
 	// Proven present first. Without this the assertions below pass against a
 	// seed that silently inserted nothing.
-	for _, table := range []string{"orgs", "sessions", "enroll_tokens", "caller_certs", "audit_log"} {
+	for _, table := range []string{"orgs", "sessions", "enroll_tokens", "caller_certs",
+		"schema_imports", "schema_import_entities", "audit_log"} {
 		if countFor(t, pool, table, org) == 0 {
 			t.Fatalf("the fixture put nothing in console.%s", table)
 		}
@@ -112,7 +134,8 @@ func TestUnregisterRemovesTheOrganisationButKeepsTheAuditLog(t *testing.T) {
 		t.Fatalf("UnregisterOrg: %v", err)
 	}
 
-	for _, table := range []string{"orgs", "sessions", "enroll_tokens", "caller_certs"} {
+	for _, table := range []string{"orgs", "sessions", "enroll_tokens", "caller_certs",
+		"schema_imports", "schema_import_entities"} {
 		if n := countFor(t, pool, table, org); n != 0 {
 			t.Errorf("console.%s still holds %d row(s) for a destroyed organisation", table, n)
 		}
@@ -139,7 +162,8 @@ func TestUnregisterLeavesOtherOrganisationsAlone(t *testing.T) {
 		t.Fatalf("UnregisterOrg: %v", err)
 	}
 
-	for _, table := range []string{"orgs", "sessions", "enroll_tokens", "caller_certs", "audit_log"} {
+	for _, table := range []string{"orgs", "sessions", "enroll_tokens", "caller_certs",
+		"schema_imports", "schema_import_entities", "audit_log"} {
 		if n := countFor(t, pool, table, "staying"); n == 0 {
 			t.Errorf("console.%s lost the surviving organisation's rows; the delete "+
 				"is not scoped to one organisation", table)

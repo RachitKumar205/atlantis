@@ -10,6 +10,7 @@ import {
   Cpu,
   History,
   Archive,
+  DatabaseZap,
   Layers,
   ExternalLink,
   LogOut,
@@ -25,6 +26,7 @@ import { markSignInRedirect } from '@/lib/signin'
 
 const NAV = [
   { to: '/schema',     icon: Layers,   tip: 'Schema' },
+  { to: '/import',     icon: DatabaseZap, tip: 'Import' },
   { to: '/history',    icon: History,  tip: 'History' },
   { to: '/sandbox',    icon: Box,      tip: 'Sandbox' },
   { to: '/workers',    icon: Cpu,      tip: 'Workers' },

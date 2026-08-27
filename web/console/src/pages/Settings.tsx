@@ -79,7 +79,7 @@ export function Settings() {
               <MembersPanel me={me} />
             </div>
             <div className={`set-panel ${active === 'security' ? 'is-active' : ''}`}>
-              <SecurityPanel onToast={fire} />
+              <SecurityPanel onToast={fire} me={me} />
             </div>
             <div className={`set-panel ${active === 'policy' ? 'is-active' : ''}`}>
               <ChangePolicyPanel onToast={fire} isAdmin={me?.role === 'admin'} />
@@ -254,8 +254,14 @@ function MembersPanel({ me }: { me?: MeResult }) {
 // ── Security ─────────────────────────────────────────────────────────────
 function SecurityPanel({
   onToast,
+  me,
 }: {
   onToast: (msg: string) => void
+  // Carries step_up_url, which is Cloud's address with this session's
+  // organisation on it. Passed rather than fetched again, matching
+  // MembersPanel: two useMe() calls in one page is two cache reads that can
+  // disagree mid-render.
+  me?: MeResult
 }) {
   // mTLS toggle is dormant — mTLS is always required at the gRPC layer
   // today, so a UI toggle would either be a no-op or introduce a real

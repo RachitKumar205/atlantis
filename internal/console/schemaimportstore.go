@@ -22,19 +22,38 @@ const schemaImportTTL = 30 * 24 * time.Hour
 // Source is the host and port it was read from. The connection string is not
 // here, is not stored anywhere, and the column carries a CHECK refusing one.
 type SchemaImport struct {
-	ID        string
-	Source    string
-	Namespace string
-	Entities  int
-	Actor     string
-	CreatedAt time.Time
+	ID        string    `json:"import_id"`
+	Source    string    `json:"source"`
+	Entities  int       `json:"entities"`
+	Actor     string    `json:"actor"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // SchemaImportEntity is one generated declaration.
+//
+// The shape both the import that produced it and a later read of it answer
+// with: two shapes for one declaration is a browser that renders a stored
+// import and a fresh one differently.
+//
+// Namespace is per declaration, not per import. One pass reads every schema in
+// the database and gives each its own namespace, so an import spans as many as
+// the database has schemas.
 type SchemaImportEntity struct {
-	Table  string
-	Entity string
-	Atl    string
+	Table     string `json:"table"`
+	Entity    string `json:"entity"`
+	Namespace string `json:"namespace"`
+	Atl       string `json:"atl"`
+}
+
+// SchemaImportSuggestion is one change worth making to an imported table.
+//
+// Line is the .atl to add, and is empty where the remedy is not one line.
+type SchemaImportSuggestion struct {
+	Entity string `json:"entity"`
+	Table  string `json:"table"`
+	Kind   string `json:"kind"`
+	Detail string `json:"detail"`
+	Line   string `json:"line"`
 }
 
 // newSchemaImportID returns an identifier for one import.
@@ -54,7 +73,7 @@ func newSchemaImportID() (string, error) {
 //
 // source must be a host, optionally with a port. A connection string fails the
 // column's CHECK rather than being stored.
-func (o *orgStore) createSchemaImport(ctx context.Context, actor, source, namespace string, entities []SchemaImportEntity) (string, error) {
+func (o *orgStore) createSchemaImport(ctx context.Context, actor, source string, entities []SchemaImportEntity) (string, error) {
 	id, err := newSchemaImportID()
 	if err != nil {
 		return "", err
@@ -62,16 +81,17 @@ func (o *orgStore) createSchemaImport(ctx context.Context, actor, source, namesp
 
 	err = o.tx(ctx, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO console.schema_imports (id, org, source, namespace, entities, actor, expires_at)
-			VALUES ($1, $2, $3, $4, $5, $6, now() + $7::interval)
-		`, id, o.org, source, namespace, len(entities), actor, schemaImportTTL.String()); err != nil {
+			INSERT INTO console.schema_imports (id, org, source, entities, actor, expires_at)
+			VALUES ($1, $2, $3, $4, $5, now() + $6::interval)
+		`, id, o.org, source, len(entities), actor, schemaImportTTL.String()); err != nil {
 			return fmt.Errorf("record schema import: %w", err)
 		}
 		for _, e := range entities {
 			if _, err := tx.Exec(ctx, `
-				INSERT INTO console.schema_import_entities (import_id, org, table_name, entity_name, atl)
-				VALUES ($1, $2, $3, $4, $5)
-			`, id, o.org, e.Table, e.Entity, e.Atl); err != nil {
+				INSERT INTO console.schema_import_entities
+				    (import_id, org, table_name, entity_name, namespace, atl)
+				VALUES ($1, $2, $3, $4, $5, $6)
+			`, id, o.org, e.Table, e.Entity, e.Namespace, e.Atl); err != nil {
 				return fmt.Errorf("record declaration for %s: %w", e.Table, err)
 			}
 		}
@@ -92,7 +112,7 @@ func (o *orgStore) schemaImports(ctx context.Context) ([]SchemaImport, error) {
 	var out []SchemaImport
 	err := o.tx(ctx, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
-			SELECT id, source, namespace, entities, actor, created_at
+			SELECT id, source, entities, actor, created_at
 			FROM console.schema_imports
 			WHERE expires_at > now()
 			ORDER BY created_at DESC
@@ -103,7 +123,7 @@ func (o *orgStore) schemaImports(ctx context.Context) ([]SchemaImport, error) {
 		defer rows.Close()
 		for rows.Next() {
 			var im SchemaImport
-			if err := rows.Scan(&im.ID, &im.Source, &im.Namespace, &im.Entities,
+			if err := rows.Scan(&im.ID, &im.Source, &im.Entities,
 				&im.Actor, &im.CreatedAt); err != nil {
 				return err
 			}
@@ -125,7 +145,7 @@ func (o *orgStore) schemaImportEntities(ctx context.Context, importID string) ([
 	var out []SchemaImportEntity
 	err := o.tx(ctx, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
-			SELECT table_name, entity_name, atl
+			SELECT table_name, entity_name, namespace, atl
 			FROM console.schema_import_entities
 			WHERE import_id = $1
 			ORDER BY table_name
@@ -136,7 +156,7 @@ func (o *orgStore) schemaImportEntities(ctx context.Context, importID string) ([
 		defer rows.Close()
 		for rows.Next() {
 			var e SchemaImportEntity
-			if err := rows.Scan(&e.Table, &e.Entity, &e.Atl); err != nil {
+			if err := rows.Scan(&e.Table, &e.Entity, &e.Namespace, &e.Atl); err != nil {
 				return err
 			}
 			out = append(out, e)
@@ -148,13 +168,23 @@ func (o *orgStore) schemaImportEntities(ctx context.Context, importID string) ([
 
 // deleteExpiredSchemaImports removes rows past their date and reports how many.
 //
-// Entities go with them through the foreign key. Not organisation-scoped: it
-// runs on a timer with no request behind it, and every organisation's expired
-// rows are equally expired.
+// Entities go with them through the foreign key: referential integrity actions
+// bypass row security, so the cascade needs no bind of its own.
+//
+// Organisation by organisation, because the table is under a RESTRICTIVE policy
+// that admits nothing to an unbound session. See store.eachOrg.
 func (s *store) deleteExpiredSchemaImports(ctx context.Context) (int64, error) {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM console.schema_imports WHERE expires_at <= now()`)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
+	var total int64
+	err := s.eachOrg(ctx, func(o *orgStore) error {
+		return o.tx(ctx, func(tx pgx.Tx) error {
+			tag, err := tx.Exec(ctx,
+				`DELETE FROM console.schema_imports WHERE expires_at <= now()`)
+			if err != nil {
+				return err
+			}
+			total += tag.RowsAffected()
+			return nil
+		})
+	})
+	return total, err
 }

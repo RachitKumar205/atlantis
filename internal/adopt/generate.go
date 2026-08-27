@@ -13,8 +13,10 @@ package adopt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/dsl/atlemit"
@@ -30,6 +32,10 @@ type Entity struct {
 	// entity ID every caller references, so renaming it after adoption is a
 	// breaking change.
 	Name string
+
+	// Namespace is what the declaration says `in`. GenerateAll sets one per
+	// Postgres schema, so a result covering several schemas carries several.
+	Namespace string
 
 	// Atl is the declaration, ready to review and commit.
 	Atl string
@@ -70,7 +76,7 @@ func Generate(ctx context.Context, q introspect.Querier, ns string, schemas []st
 		return Result{}, err
 	}
 	if len(found) == 0 {
-		return Result{}, nil
+		return Result{}, noTablesError(ctx, q, schemas)
 	}
 
 	stubs := &dsl.IR{Entities: make([]dsl.Entity, 0, len(found))}
@@ -100,6 +106,21 @@ func Generate(ctx context.Context, q introspect.Querier, ns string, schemas []st
 	}
 
 	for _, d := range found {
+		// The physical name, before the entity name. `table "..."` is copied
+		// into the generated .atl verbatim and Lower matches it against
+		// [schema.]table, so a table in a schema named `sales-eu` produces a
+		// declaration that parses and will not lower — which is a file that
+		// cannot be committed, handed back as though it could.
+		//
+		// Checked here rather than at the emitter because the remedy is to
+		// leave the table out and say so, and only this loop can do that.
+		if !dsl.IsTableName(d.Qualified()) {
+			skipped = append(skipped, fmt.Sprintf(
+				"%s: atlantis cannot address that table — a `table \"...\"` value is "+
+					"[schema.]table where each part starts with a letter or underscore "+
+					"and continues with letters, digits or underscores", d.Qualified()))
+			continue
+		}
 		name := d.SuggestedName()
 		if name == "" {
 			skipped = append(skipped, fmt.Sprintf("%s: no entity name could be derived from the table name", d.Qualified()))
@@ -165,17 +186,27 @@ func Generate(ctx context.Context, q introspect.Querier, ns string, schemas []st
 	if err != nil {
 		return Result{}, err
 	}
+	warnings = append(warnings, demoteNarrowSerials(filled, nameFor)...)
 	warnings = append(warnings, notes...)
 	sort.Strings(warnings)
+
+	// Before the drop, so a table left out still carries the advice that would
+	// let it be read next time — "add a primary key" is the remedy for the
+	// commonest reason one is left out.
+	suggestions := Suggest(filled, nameFor)
+
+	skipped = append(skipped, dropUndeclarableEntities(filled, nameFor)...)
+	sort.Strings(skipped)
 
 	out := make([]Entity, 0, len(filled.Entities))
 	for i := range filled.Entities {
 		e := &filled.Entities[i]
 		table := nameFor[e.ID()]
 		out = append(out, Entity{
-			Table: table,
-			Name:  e.Name,
-			Atl:   atlemit.Entity(e, table),
+			Table:     table,
+			Name:      e.Name,
+			Namespace: e.Namespace,
+			Atl:       atlemit.Entity(e, table),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Table < out[j].Table })
@@ -184,6 +215,174 @@ func Generate(ctx context.Context, q introspect.Querier, ns string, schemas []st
 		Entities:    out,
 		Skipped:     skipped,
 		Warnings:    warnings,
-		Suggestions: Suggest(filled, nameFor),
+		Suggestions: suggestions,
 	}, nil
+}
+
+// ErrNothingToRead reports a request that named no readable tables.
+//
+// A property of the request, not of the database or the connection to it: the
+// remedy is to name a different schema. Callers that answer over HTTP use this
+// to say so with a 400 rather than reporting a failure to reach the database.
+var ErrNothingToRead = errors.New("no tables to read")
+
+// noTablesError explains a discovery that found nothing, or returns nil where
+// the empty result is the right answer.
+//
+// Two databases produce the same empty list and want different things said. A
+// schema that holds no tables was probably the wrong schema to ask for — the
+// remedy is to name another, so the message names the ones that would work. A
+// schema whose tables are all declared already is a finished adoption, and
+// reporting that as a failure would make a second run of `tide inspect
+// --generate` look broken.
+//
+// Postgres defaults `search_path` to "public", so "public" is what a caller
+// supplies without thinking about it, and a database keeping its tables
+// anywhere else answers "0 tables" to a request that was never going to match.
+func noTablesError(ctx context.Context, q introspect.Querier, schemas []string) error {
+	available, err := introspect.SchemasWithTables(ctx, q)
+	if err != nil {
+		return err
+	}
+	if len(available) == 0 {
+		return fmt.Errorf("%w: that database has no tables", ErrNothingToRead)
+	}
+
+	// Tables exist somewhere. If they exist in a schema that was asked for,
+	// every one of them is already declared.
+	asked := map[string]bool{}
+	for _, s := range schemas {
+		asked[s] = true
+	}
+	if len(asked) == 0 {
+		return nil
+	}
+	for _, s := range available {
+		if asked[s] {
+			return nil
+		}
+	}
+
+	const show = 8
+	names := available
+	suffix := ""
+	if len(names) > show {
+		names, suffix = names[:show], fmt.Sprintf(" and %d more", len(available)-show)
+	}
+	return fmt.Errorf("%w: nothing in %s. This database keeps its tables in %s%s — "+
+		"name the schema you want to read",
+		ErrNothingToRead, strings.Join(schemas, ", "), strings.Join(names, ", "), suffix)
+}
+
+// demoteNarrowSerials clears `serial` where the DSL cannot carry it, and
+// reports each one.
+//
+// Postgres SERIAL is int+sequence and BIGSERIAL is bigint+sequence. The .atl
+// `serial` modifier spells only the wide one — Lower rejects it on anything
+// else — so introspection reading a 32-bit sequence default emits
+// `id int primary serial`, which parses and fails to lower. Measured on a
+// public dataset: 17 of 209 tables, and the first of them stopped the whole
+// file being usable.
+//
+// The column keeps its type, because widening it here would describe a table
+// the database does not have and a plan would then propose altering it. What
+// is lost is the sequence default, so the warning says a plan will propose
+// dropping it.
+func demoteNarrowSerials(ir *dsl.IR, nameFor map[string]string) []string {
+	var out []string
+	for i := range ir.Entities {
+		e := &ir.Entities[i]
+		for j := range e.Fields {
+			f := &e.Fields[j]
+			if !f.Serial || f.Type.Name == "bigint" {
+				continue
+			}
+			f.Serial = false
+			out = append(out, fmt.Sprintf(
+				"%s: column %q is a %s sequence, which .atl can only spell on bigint. "+
+					"The declaration omits the default, so a plan will propose dropping "+
+					"it — widen the column to bigint, or declare this table by hand",
+				nameFor[e.ID()], f.Name, f.Type.Name))
+		}
+	}
+	return out
+}
+
+// dropUndeclarableEntities removes tables whose declaration would not parse,
+// and reports each one.
+//
+// A column name is a field name in .atl, and .atl reserves words the catalogue
+// does not. A table with a column called `identity` — a percent-identity
+// measure on a public bioinformatics dataset — emits `identity double`, which
+// the parser reads as a modifier and then fails on the following field. One
+// such column makes the whole FILE unparseable, so it takes every table in the
+// namespace with it.
+//
+// The table goes rather than the column. A declaration missing a column is one
+// the next plan compares against the real table and proposes reconciling, and
+// the column it would be reconciling away holds data.
+func dropUndeclarableEntities(ir *dsl.IR, nameFor map[string]string) []string {
+	var skipped []string
+	kept := ir.Entities[:0]
+	for i := range ir.Entities {
+		e := &ir.Entities[i]
+		bad := ""
+		for j := range e.Fields {
+			if !dsl.CanBeFieldName(e.Fields[j].Name) {
+				bad = e.Fields[j].Name
+				break
+			}
+		}
+		switch {
+		case bad != "":
+			skipped = append(skipped, fmt.Sprintf(
+				"%s: column %q is a reserved word in .atl and cannot be a field name, "+
+					"so no declaration was written for this table — rename the column, "+
+					"or declare the table by hand with the rest of its columns",
+				nameFor[e.ID()], bad))
+
+		// Every entity needs one, and Lower says so — so a table without one
+		// produces a declaration that parses and takes the whole file down with
+		// it at `tide plan`. hasPrimaryKey rather than a second predicate: the
+		// no-primary-key suggestion is raised by the same function, and the
+		// table must not be both suggested and emitted.
+		case !hasPrimaryKey(e):
+			skipped = append(skipped, fmt.Sprintf(
+				"%s: no primary key, which every entity must have, so no declaration "+
+					"was written for this table — add one and read the database again",
+				nameFor[e.ID()]))
+
+		default:
+			kept = append(kept, *e)
+		}
+	}
+	ir.Entities = kept
+
+	// A dropped table takes every foreign key that pointed at it.
+	//
+	// Lower resolves `references` against the entities in the file, so a
+	// declaration naming one that was left out fails — and it fails for the
+	// whole namespace, which is how one PK-less table stopped 61 good ones from
+	// being usable. The column stays and loses its reference; the note says the
+	// constraint is not declared, because it is the reference and not the
+	// column that cannot be spelled.
+	live := make(map[string]bool, len(kept))
+	for i := range kept {
+		live[kept[i].ID()] = true
+	}
+	for i := range ir.Entities {
+		e := &ir.Entities[i]
+		for j := range e.Fields {
+			f := &e.Fields[j]
+			if f.Ref == nil || live[f.Ref.TargetID] {
+				continue
+			}
+			skipped = append(skipped, fmt.Sprintf(
+				"%s: column %q references %s, which was not declared, so the foreign "+
+					"key is left out and a plan will propose dropping it",
+				nameFor[e.ID()], f.Name, f.Ref.TargetID))
+			f.Ref = nil
+		}
+	}
+	return skipped
 }

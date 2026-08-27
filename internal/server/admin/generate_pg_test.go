@@ -115,20 +115,24 @@ func TestGenerateSchemaProducesUsableDeclarations(t *testing.T) {
 		}
 	})
 
-	t.Run("the header says what was not checked", func(t *testing.T) {
-		// Risk #1 from the adopt rework: a generated file understates the
-		// schema, and a customer who believes it complete will later add an
-		// index the database already has.
+	t.Run("the header says what was not read", func(t *testing.T) {
+		// A generated file that understates the schema is one a customer
+		// believes complete, and they later add an index the database already
+		// has.
 		//
-		// UNIQUE and CHECK left this list when introspect.Enrich began reading
-		// them. Secondary indexes are what remains unread, and the header has
-		// to keep naming them: the value of this warning is that it is
-		// specific, and one that hedges about everything warns about nothing.
+		// The header has to describe what this run actually did. UNIQUE, CHECK
+		// and btree secondary indexes are read; what remains unread is an index
+		// no `index by` clause can spell, and naming that precisely is the whole
+		// value — a header that hedges about everything warns about nothing.
 		atl := byTable["legacy.customer"].GetAtl()
-		for _, want := range []string{"Secondary indexes", "not present", "Review before committing"} {
+		for _, want := range []string{"btree secondary indexes", "cannot spell", "Review before committing"} {
 			if !strings.Contains(atl, want) {
 				t.Errorf("generated header does not mention %q:\n%s", want, atl)
 			}
+		}
+		// The claim it must NOT make any more, because Enrich reads them.
+		if strings.Contains(atl, "Secondary indexes were NOT") {
+			t.Errorf("the header still says secondary indexes were not read:\n%s", atl)
 		}
 	})
 }

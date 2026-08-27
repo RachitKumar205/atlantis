@@ -1549,3 +1549,19 @@ func (p *Parser) parseEphemeral() *EphemeralDecl {
 		}
 	}
 }
+
+// CanBeFieldName reports whether name may be used as a field name.
+//
+// Exported for adoption, which reads column names out of a catalogue that
+// reserves nothing. A column named `identity` or `table` lexes as a keyword,
+// and a declaration carrying one does not parse — so the generated file is
+// unusable in a way nothing downstream reports until somebody opens it.
+//
+// The same predicate the entity-body parser applies, so the two cannot drift.
+func CanBeFieldName(name string) bool {
+	kind, reserved := keywords[name]
+	if !reserved {
+		return name != ""
+	}
+	return canBeFieldName(kind)
+}

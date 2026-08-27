@@ -1655,11 +1655,20 @@ func validateUniqueTableNames(entities []Entity) []error {
 // emits `"<schema>"."<table>"` verbatim, so anything that wouldn't be a
 // safe Postgres unquoted identifier has to fail here.
 func validateTableNameShape(name string) error {
-	if !tableNamePat.MatchString(name) {
+	if !IsTableName(name) {
 		return fmt.Errorf("must match [schema.]table where each part is [A-Za-z_][A-Za-z0-9_]*")
 	}
 	return nil
 }
+
+// IsTableName reports whether name is a usable `table "..."` value.
+//
+// Exported for adoption, which reads table names out of a catalogue that
+// accepts far more than this does — a schema or table named `sales-eu` is legal
+// Postgres and cannot be addressed here. Checking against Lower's own pattern
+// rather than against an identifier rule is what keeps the two from drifting:
+// IsIdentifier admits Unicode letters and this does not.
+func IsTableName(name string) bool { return tableNamePat.MatchString(name) }
 
 // resolveByNameInNS resolves a bare entity name, preferring preferNS. The
 // grammar's single-Ident reference shape cannot carry a namespace, so this

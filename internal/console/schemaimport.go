@@ -3,6 +3,7 @@ package console
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -12,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/rachitkumar205/atlantis/internal/adopt"
-	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/dsnguard"
 )
 
@@ -23,6 +23,12 @@ import (
 // request is held open. The message names the remedy, which is to read fewer
 // schemas rather than to give up.
 const maxImportTables = 500
+
+// errTooManyTables reports a pass that exceeded maxImportTables.
+//
+// Answered as a 400 beside adopt.ErrNothingToRead: both describe the schemas
+// the request named, and neither says anything about reaching the database.
+var errTooManyTables = errors.New("too many tables")
 
 // handleImportSchema reads a database somebody points at and returns .atl
 // describing it.
@@ -42,9 +48,7 @@ func (s *Server) handleImportSchema(w http.ResponseWriter, r *http.Request) {
 	u := r.Context().Value(ctxUser).(*User)
 
 	var body struct {
-		DSN       string   `json:"dsn"`
-		Namespace string   `json:"namespace"`
-		Schemas   []string `json:"schemas"`
+		DSN string `json:"dsn"`
 
 		// Sent only when somebody ticked the box saying this database offers no
 		// TLS. Never defaulted on: the same switch against a production
@@ -61,16 +65,6 @@ func (s *Server) handleImportSchema(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "a connection string is required", http.StatusBadRequest)
 		return
 	}
-	ns := strings.TrimSpace(body.Namespace)
-	// The namespace becomes part of every generated entity's ID, so a value
-	// that does not lex is one whose .atl will not parse — refused before the
-	// database is read rather than after.
-	if !dsl.IsIdentifier(ns) {
-		jsonError(w, "a namespace is required, and must start with a letter or "+
-			"underscore and continue with letters, digits or underscores",
-			http.StatusBadRequest)
-		return
-	}
 
 	cfg, err := dsnguard.Config(dsn, body.AllowInsecure)
 	if err != nil {
@@ -80,7 +74,7 @@ func (s *Server) handleImportSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := importOnce(r.Context(), cfg, ns, body.Schemas)
+	res, err := importOnce(r.Context(), cfg)
 	if err != nil {
 		s.log.Warn("schema import failed", "org", u.Org, "host", cfg.ConnConfig.Host,
 			"err", dsnguard.Redact(err, dsn))
@@ -95,6 +89,13 @@ func (s *Server) handleImportSchema(w http.ResponseWriter, r *http.Request) {
 				"read-only and disposable.", http.StatusBadRequest)
 			return
 		}
+		// What the request asked for, rather than a failure to reach the
+		// database. 502 here would blame the customer's server for a schema
+		// name typed on this form, and send them looking at the wrong machine.
+		if errors.Is(err, adopt.ErrNothingToRead) || errors.Is(err, errTooManyTables) {
+			jsonError(w, dsnguard.Redact(err, dsn).Error(), http.StatusBadRequest)
+			return
+		}
 		jsonError(w, dsnguard.Redact(err, dsn).Error(), http.StatusBadGateway)
 		return
 	}
@@ -102,7 +103,14 @@ func (s *Server) handleImportSchema(w http.ResponseWriter, r *http.Request) {
 	entities := make([]SchemaImportEntity, 0, len(res.Entities))
 	for _, e := range res.Entities {
 		entities = append(entities, SchemaImportEntity{
-			Table: e.Table, Entity: e.Name, Atl: e.Atl,
+			Table: e.Table, Entity: e.Name, Namespace: e.Namespace, Atl: e.Atl,
+		})
+	}
+	suggestions := make([]SchemaImportSuggestion, 0, len(res.Suggestions))
+	for _, sg := range res.Suggestions {
+		suggestions = append(suggestions, SchemaImportSuggestion{
+			Entity: sg.Entity, Table: sg.Table, Kind: sg.Kind,
+			Detail: sg.Detail, Line: sg.Line,
 		})
 	}
 
@@ -110,7 +118,7 @@ func (s *Server) handleImportSchema(w http.ResponseWriter, r *http.Request) {
 	// format string, so an IPv6 literal keeps its brackets.
 	source := net.JoinHostPort(cfg.ConnConfig.Host, fmt.Sprint(cfg.ConnConfig.Port))
 
-	id, err := s.db.forOrg(u.Org).createSchemaImport(r.Context(), u.Subject, source, ns, entities)
+	id, err := s.db.forOrg(u.Org).createSchemaImport(r.Context(), u.Subject, source, entities)
 	if err != nil {
 		s.log.Error("store schema import", "org", u.Org, "err", err)
 		jsonError(w, "the schema was read but could not be saved", http.StatusInternalServerError)
@@ -120,11 +128,10 @@ func (s *Server) handleImportSchema(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]any{
 		"import_id":   id,
 		"source":      source,
-		"namespace":   ns,
-		"entities":    res.Entities,
-		"skipped":     res.Skipped,
-		"warnings":    res.Warnings,
-		"suggestions": res.Suggestions,
+		"entities":    entities,
+		"skipped":     orEmpty(res.Skipped),
+		"warnings":    orEmpty(res.Warnings),
+		"suggestions": suggestions,
 	})
 }
 
@@ -143,18 +150,7 @@ func (s *Server) handleListSchemaImports(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	out := make([]map[string]any, 0, len(imports))
-	for _, im := range imports {
-		out = append(out, map[string]any{
-			"import_id":  im.ID,
-			"source":     im.Source,
-			"namespace":  im.Namespace,
-			"entities":   im.Entities,
-			"actor":      im.Actor,
-			"created_at": im.CreatedAt,
-		})
-	}
-	jsonOK(w, map[string]any{"imports": out})
+	jsonOK(w, map[string]any{"imports": orEmpty(imports)})
 }
 
 // handleGetSchemaImport returns the declarations of one import.
@@ -177,7 +173,18 @@ func (s *Server) handleGetSchemaImport(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "no such import", http.StatusNotFound)
 		return
 	}
-	jsonOK(w, map[string]any{"entities": entities})
+	jsonOK(w, map[string]any{"entities": orEmpty(entities)})
+}
+
+// orEmpty returns a slice that marshals to [] rather than null.
+//
+// A nil slice reaches the browser as null, and the pages index and measure
+// these without a guard: null.length is a TypeError that blanks the screen.
+func orEmpty[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
 }
 
 // importOnce opens a pool, reads, and closes it.
@@ -185,7 +192,7 @@ func (s *Server) handleGetSchemaImport(w http.ResponseWriter, r *http.Request) {
 // READ ONLY at the transaction, so the guarantee is Postgres's rather than this
 // package's. The advice to supply a read-only role stands alongside it: this
 // stops the session writing, and the role is what stops anything else.
-func importOnce(ctx context.Context, cfg *pgxpool.Config, ns string, schemas []string) (adopt.Result, error) {
+func importOnce(ctx context.Context, cfg *pgxpool.Config) (adopt.Result, error) {
 	// One connection. The pool exists because adopt takes a Querier, not
 	// because anything here runs in parallel.
 	cfg.MaxConns = 1
@@ -202,14 +209,14 @@ func importOnce(ctx context.Context, cfg *pgxpool.Config, ns string, schemas []s
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
-	res, err := adopt.Generate(ctx, tx, ns, schemas, nil)
+	res, err := adopt.GenerateAll(ctx, tx, nil)
 	if err != nil {
 		return adopt.Result{}, err
 	}
 	if len(res.Entities) > maxImportTables {
 		return adopt.Result{}, fmt.Errorf(
-			"that database has %d tables and this reads at most %d in one pass: "+
-				"name the schemas to read", len(res.Entities), maxImportTables)
+			"%w: that database has %d tables and this reads at most %d in one pass",
+			errTooManyTables, len(res.Entities), maxImportTables)
 	}
 	return res, nil
 }

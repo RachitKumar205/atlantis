@@ -17,7 +17,7 @@
 // ROW LEVEL SECURITY plus a policy, and copying it verbatim would make the live
 // IR agree with the schema by construction — leaving `tide adopt` unable to
 // report a table whose isolation the database is not enforcing. It is read from
-// pg_policy; see loadPartitionPolicies.
+// pg_policies; see loadPartitionPolicies.
 //
 // Only the tables the declared IR claims are queried. Every entity in
 // declaredIR.Entities resolves to a physical (schema, table) pair, from its
@@ -909,20 +909,26 @@ func loadPartitionPolicies(ctx context.Context, q Querier, pairs []physRef, exis
 	// pg.VerifyPartitionPolicies asks the same question ten lines of import
 	// away. The two must agree, or `tide adopt` reports a table healthy that
 	// the server then refuses to serve.
+	// pg_policies, not pg_policy. The catalogue table is one of the few
+	// PostgreSQL withholds from an ordinary role, so reading it fails the whole
+	// import against a database whose owner did not hand out superuser —
+	// measured: `permission denied for table pg_policy (SQLSTATE 42501)` on a
+	// public read-only dataset. The view carries the same rows already
+	// deparsed, and is granted to PUBLIC.
 	rows, err := q.Query(ctx, `
-SELECT n.nspname, c.relname,
-       coalesce(pg_get_expr(p.polqual, p.polrelid), ''),
-       coalesce(pg_get_expr(p.polwithcheck, p.polrelid), ''),
-       p.polcmd::text,
-       p.polroles = '{0}',
-       p.polpermissive
-  FROM pg_class c
-  JOIN pg_namespace n ON n.oid = c.relnamespace
-  JOIN pg_policy p ON p.polrelid = c.oid
- WHERE (n.nspname, c.relname) IN (SELECT * FROM unnest($1::text[], $2::text[]))
+SELECT p.schemaname, p.tablename,
+       coalesce(p.qual, ''),
+       coalesce(p.with_check, ''),
+       p.cmd,
+       p.roles = '{public}'::name[],
+       p.permissive = 'PERMISSIVE'
+  FROM pg_policies p
+  JOIN pg_namespace n ON n.nspname = p.schemaname
+  JOIN pg_class c ON c.relname = p.tablename AND c.relnamespace = n.oid
+ WHERE (p.schemaname, p.tablename) IN (SELECT * FROM unnest($1::text[], $2::text[]))
    AND c.relrowsecurity
    AND c.relforcerowsecurity
- ORDER BY n.nspname, c.relname, p.polname`, schemas, tables)
+ ORDER BY p.schemaname, p.tablename, p.policyname`, schemas, tables)
 	if err != nil {
 		return nil, err
 	}
@@ -1004,15 +1010,18 @@ SELECT n.nspname, c.relname,
 
 // governsReadCmd and governsWriteCmd classify a policy's command.
 //
-// polcmd is '*' ALL, 'r' SELECT, 'a' INSERT, 'w' UPDATE, 'd' DELETE. UPDATE and
-// DELETE have a USING half, so they decide which rows are reachable; UPDATE and
-// INSERT have a WITH CHECK half, so they decide what may be written.
+// The spelling is pg_policies.cmd — ALL, SELECT, INSERT, UPDATE, DELETE —
+// rather than pg_policy.polcmd's '*rawd', because the view is what an ordinary
+// role may read.
+//
+// UPDATE and DELETE have a USING half, so they decide which rows are reachable;
+// UPDATE and INSERT have a WITH CHECK half, so they decide what may be written.
 func governsReadCmd(cmd string) bool {
-	return cmd == "*" || cmd == "r" || cmd == "w" || cmd == "d"
+	return cmd == "ALL" || cmd == "SELECT" || cmd == "UPDATE" || cmd == "DELETE"
 }
 
 func governsWriteCmd(cmd string) bool {
-	return cmd == "*" || cmd == "a" || cmd == "w"
+	return cmd == "ALL" || cmd == "INSERT" || cmd == "UPDATE"
 }
 
 // partitionColumnFromQual extracts the column an isolation predicate scopes.

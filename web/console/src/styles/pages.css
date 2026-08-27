@@ -84,6 +84,80 @@
    the console's GitHub pull-request flow, removed 2026-08-13. Nothing in the
    SPA carries these class names now. */
 
+/* ====== IMPORT A DATABASE ================================================== */
+/* Long monospaced content on a page otherwise made of short fields. Each
+   block scrolls on its own, so a table carrying a hundred-character CHECK
+   does not widen the card and push the page sideways. */
+.import { display: flex; flex-direction: column; gap: 14px; }
+.import__form { display: flex; flex-direction: column; gap: 16px; align-items: stretch; }
+.import__lede { font-size: 12.5px; color: var(--ink-2); line-height: 1.6; margin: 0; max-width: 560px; }
+.import__suggestions,
+.import__notes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.import__suggestions li {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--canvas-1);
+}
+.import__sughead { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.import__suggestions p { margin: 6px 0 0; font-size: 12.5px; color: var(--ink-1); line-height: 1.55; }
+.import__notes li { font-size: 12px; color: var(--ink-2); line-height: 1.55; }
+.import__table { font-size: 12.5px; color: var(--ink-0); }
+
+/* The line to paste and the declaration to commit are both copied by hand,
+   so they wrap rather than truncate: an .atl body clipped at the card's
+   edge is one that gets copied incompletely. */
+.import__line,
+.import__atl {
+  font-family: var(--mono);
+  font-feature-settings: var(--feat-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-1);
+  background: var(--canvas-0);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  margin: 8px 0 0;
+  padding: 9px 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+.import__entity {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 9px 12px;
+  margin: 0 0 8px;
+}
+.import__entity summary { cursor: pointer; font-size: 12.5px; color: var(--ink-2); }
+.import__entity summary::marker { color: var(--ink-3); }
+
+/* The plaintext acknowledgement carries a border and a fill because ticking
+   it sends a password across the internet in clear. */
+.import__ack {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--coral);
+  border-radius: var(--radius);
+  background: var(--coral-tint);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ink-1);
+  cursor: pointer;
+}
+.import__ack input { margin-top: 2px; flex: none; }
+.import__ack svg { vertical-align: -2px; color: var(--coral); }
+
 /* ====== HEALTH ============================================================= */
 .health { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 /* probe header — chip-row (default) */

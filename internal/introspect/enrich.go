@@ -39,6 +39,8 @@ func Enrich(ctx context.Context, q Querier, ir *dsl.IR) ([]string, error) {
 		idx[p] = i
 	}
 
+	var notes []string
+
 	checks, err := loadLiveChecks(ctx, q, pairs)
 	if err != nil {
 		return nil, fmt.Errorf("enrich: load live checks: %w", err)
@@ -50,6 +52,17 @@ func Enrich(ctx context.Context, q Querier, ir *dsl.IR) ([]string, error) {
 		}
 		e := &ir.Entities[i]
 		for _, c := range live {
+			// The constraint's own name, which .atl carries after `as` and
+			// therefore has to lex. Postgres admits `$` in an identifier and
+			// .atl does not, so a constraint named ck_xref$deleted — seen on a
+			// public dataset — emits `as ck_xref$deleted` and the file does not
+			// parse. One of those makes every table in the namespace unusable.
+			if !dsl.IsIdentifier(c.name) {
+				notes = append(notes, fmt.Sprintf(
+					"%s.%s: CHECK %q has a name .atl cannot spell, so the constraint is "+
+						"not declared and a plan will propose dropping it", p.schema, p.table, c.name))
+				continue
+			}
 			expr := checkBody(c.def)
 			if expr == "" {
 				continue
@@ -87,10 +100,11 @@ func Enrich(ctx context.Context, q Querier, ir *dsl.IR) ([]string, error) {
 		})
 	}
 
-	idxs, notes, err := loadSecondaryIndexes(ctx, q, pairs)
+	idxs, idxNotes, err := loadSecondaryIndexes(ctx, q, pairs)
 	if err != nil {
 		return nil, fmt.Errorf("enrich: load secondary indexes: %w", err)
 	}
+	notes = append(notes, idxNotes...)
 	for p, live := range idxs {
 		i, ok := idx[p]
 		if !ok {
@@ -107,6 +121,7 @@ func Enrich(ctx context.Context, q Querier, ir *dsl.IR) ([]string, error) {
 		}
 	}
 
+	sort.Strings(notes)
 	return notes, nil
 }
 
@@ -152,7 +167,12 @@ SELECT
     ic.relname AS index_name,
     i.indisunique,
     (i.indpred IS NOT NULL) AS is_partial,
-    am.amname,
+    -- The access method, taken out of the deparse rather than from pg_am.
+    -- PostgreSQL withholds pg_am from an ordinary role on a hardened database,
+    -- and joining it there fails the whole read with "permission denied for
+    -- table pg_am". pg_get_indexdef is a function any role may call for an
+    -- index it can see, and renders the method as USING <name> (...).
+    coalesce(substring(pg_get_indexdef(i.indexrelid) from ' USING ([a-z0-9_]+) '), '') AS amname,
     (SELECT array_agg(a.attname ORDER BY x.ord)
        FROM unnest(string_to_array(i.indkey::text, ' ')::int[]) WITH ORDINALITY AS x(attnum, ord)
        JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = x.attnum
@@ -167,7 +187,6 @@ SELECT
 FROM pg_index i
 JOIN pg_class c       ON c.oid = i.indrelid
 JOIN pg_class ic      ON ic.oid = i.indexrelid
-JOIN pg_am am         ON am.oid = ic.relam
 JOIN pg_namespace n   ON n.oid = c.relnamespace
 JOIN targets tg       ON tg.schema = n.nspname AND tg.table_name = c.relname
 WHERE i.indisprimary = false
@@ -180,6 +199,8 @@ WHERE i.indisprimary = false
 	defer rows.Close()
 
 	out := make(map[physRef][]liveIndex)
+	// Per table, the index already declared for each column shape.
+	shapes := make(map[physRef]map[string]string)
 	var notes []string
 	for rows.Next() {
 		var (
@@ -200,10 +221,31 @@ WHERE i.indisprimary = false
 			notes = append(notes, fmt.Sprintf("%s.%s: index %s is partial and is not declared", s, t, name))
 		case isUnique:
 			notes = append(notes, fmt.Sprintf("%s.%s: index %s is a unique index with no constraint behind it and is not declared", s, t, name))
+		case amName == "":
+			notes = append(notes, fmt.Sprintf("%s.%s: the access method of index %s could not be read, so it is not declared", s, t, name))
 		case amName != "btree":
 			notes = append(notes, fmt.Sprintf("%s.%s: index %s is %s, not btree, and is not declared", s, t, name, amName))
 		default:
 			p := physRef{schema: s, table: t}
+			// Two indexes over the same columns in the same order are two rows
+			// here and one `index by` clause: emitting both produces a
+			// declaration with a repeated line. Measured on a public dataset,
+			// where a framework's own index and a foreign-key index covered the
+			// same column.
+			//
+			// The duplicate is named rather than dropped silently, because a
+			// redundant index costs writes and is worth knowing about.
+			key := indexKey(cols, descs)
+			if prior, dup := shapes[p][key]; dup {
+				notes = append(notes, fmt.Sprintf(
+					"%s.%s: index %s covers the same columns as %s in the same order, "+
+						"so only one is declared", s, t, name, prior))
+				continue
+			}
+			if shapes[p] == nil {
+				shapes[p] = map[string]string{}
+			}
+			shapes[p][key] = name
 			out[p] = append(out[p], liveIndex{name: name, cols: cols, descs: descs})
 		}
 	}
@@ -235,4 +277,24 @@ func checkBody(def string) string {
 		return ""
 	}
 	return strings.TrimSpace(s[len(prefix) : len(s)-1])
+}
+
+// indexKey identifies an index by the shape the .atl clause carries.
+//
+// Columns in order plus each one's direction, which is exactly what
+// `index by a, b desc` says. Two indexes with the same key produce the same
+// clause; anything the clause does not carry — the index's name, its
+// tablespace, its fillfactor — is not part of it.
+func indexKey(cols []string, descs []bool) string {
+	var b strings.Builder
+	for i, c := range cols {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(c)
+		if i < len(descs) && descs[i] {
+			b.WriteString(" desc")
+		}
+	}
+	return b.String()
 }

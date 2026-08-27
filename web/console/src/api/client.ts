@@ -319,6 +319,50 @@ export interface ParkedObject {
   next_attempt_after: string
 }
 
+/** One generated declaration, from reading an existing database. */
+export interface ImportedEntity {
+  /** The physical table it describes, schema-qualified. */
+  table: string
+  /** The proposed entity name. A proposal: renaming it later is breaking. */
+  entity: string
+  /** The namespace it was read into, which is the Postgres schema's name. */
+  namespace: string
+  /** The declaration, ready to review and commit. */
+  atl: string
+}
+
+/** One change worth making to a discovered table. */
+export interface ImportSuggestion {
+  entity: string
+  table: string
+  /** tenant-isolation, no-primary-key or unindexed-foreign-key. */
+  kind: string
+  detail: string
+  /** The .atl to add, empty where the remedy is not one line. */
+  line: string
+}
+
+export interface SchemaImportResult {
+  import_id: string
+  /** Host and port. The connection string is not returned and not stored. */
+  source: string
+  entities: ImportedEntity[]
+  /** Tables that were found and not declared, each with a reason. */
+  skipped: string[]
+  /** Facts introspection did not verify, and indexes it could not spell. */
+  warnings: string[]
+  suggestions: ImportSuggestion[]
+}
+
+/** A stored import, without its declarations. */
+export interface SchemaImportSummary {
+  import_id: string
+  source: string
+  entities: number
+  actor: string
+  created_at: string
+}
+
 export interface ParkedObjectsResponse {
   objects: ParkedObject[]
   /** True when the server withheld rows, so the page can say so. */
@@ -787,6 +831,37 @@ export const api = {
   parked: {
     list: (includeReaped = false): Promise<ParkedObjectsResponse> =>
       apiFetch<ParkedObjectsResponse>(`/api/parked${includeReaped ? '?all=1' : ''}`),
+  },
+
+  schemaImport: {
+    /**
+     * Reads a database and returns .atl describing it.
+     *
+     * The connection string is sent once and kept nowhere: the server refuses
+     * any address that is not a public host, reads inside a READ ONLY
+     * transaction, and stores host and port alone against this organisation.
+     *
+     * allowInsecure is the acknowledgement that a server offers no TLS. Never
+     * sent unless somebody ticked the box, because the same switch against a
+     * production database sends a live password across the internet in clear.
+     *
+     * Slow by nature — it opens a connection to another database and walks its
+     * catalogue — so callers show progress rather than assume it returns
+     * promptly.
+     */
+    run: (dsn: string, allowInsecure: boolean): Promise<SchemaImportResult> =>
+      apiFetch<SchemaImportResult>('/api/schema/import', {
+        method: 'POST',
+        body: JSON.stringify({ dsn, allow_insecure: allowInsecure }),
+      }),
+
+    /** Imports this organisation has run, newest first. Excludes expired ones. */
+    list: (): Promise<{ imports: SchemaImportSummary[] }> =>
+      apiFetch<{ imports: SchemaImportSummary[] }>('/api/schema/imports'),
+
+    /** The declarations of one import. */
+    get: (id: string): Promise<{ entities: ImportedEntity[] }> =>
+      apiFetch<{ entities: ImportedEntity[] }>(`/api/schema/imports/${encodeURIComponent(id)}`),
   },
 
   owners: {
