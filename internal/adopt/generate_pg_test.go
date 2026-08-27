@@ -191,3 +191,57 @@ func TestGeneratedAtlCarriesChecksAndCompositeUniques(t *testing.T) {
 	}
 	mustLower(t, src)
 }
+
+// The suggestion that matters, against a live database rather than a
+// hand-built IR: PartitionField is set by loadPartitionPolicies reading
+// pg_policy, so only a real policy silences this.
+func TestTenantIsolationSuggestedAgainstLiveSchema(t *testing.T) {
+	res := generateFrom(t, []string{
+		`DROP SCHEMA IF EXISTS adopttenant CASCADE`,
+		`CREATE SCHEMA adopttenant`,
+		`CREATE TABLE adopttenant.exposed (
+			id        bigint PRIMARY KEY,
+			tenant_id text NOT NULL,
+			body      text NOT NULL
+		)`,
+		`CREATE TABLE adopttenant.isolated (
+			id        bigint PRIMARY KEY,
+			tenant_id text NOT NULL,
+			body      text NOT NULL
+		)`,
+		`ALTER TABLE adopttenant.isolated ENABLE ROW LEVEL SECURITY`,
+		`ALTER TABLE adopttenant.isolated FORCE ROW LEVEL SECURITY`,
+		`CREATE POLICY p ON adopttenant.isolated AS RESTRICTIVE
+		   USING (tenant_id = atlantis.current_partition())
+		   WITH CHECK (tenant_id = atlantis.current_partition())`,
+		// The permissive grant beside the restrictive boundary, which is the
+		// shape atlantis emits. Restrictive policies AND together, so a table
+		// carrying only the boundary shows no rows to anyone — and
+		// loadPartitionPolicies requires the grant for that reason.
+		`CREATE POLICY g ON adopttenant.isolated AS PERMISSIVE USING (true) WITH CHECK (true)`,
+	}, "adopttenant")
+
+	var exposed, isolated bool
+	for _, s := range res.Suggestions {
+		if s.Kind != SuggestTenantIsolation {
+			continue
+		}
+		switch s.Table {
+		case "adopttenant.exposed":
+			exposed = true
+			if s.Line != "partition by tenant_id" {
+				t.Errorf("Line = %q, want the .atl to paste", s.Line)
+			}
+		case "adopttenant.isolated":
+			isolated = true
+		}
+	}
+
+	if !exposed {
+		t.Error("a live table with tenant_id and no policy was not flagged")
+	}
+	if isolated {
+		t.Error("a live table Postgres already isolates was told to isolate it — " +
+			"the policy read from pg_policy is being ignored")
+	}
+}

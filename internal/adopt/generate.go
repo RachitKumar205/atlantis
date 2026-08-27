@@ -46,6 +46,10 @@ type Result struct {
 	// Warnings are facts introspection did not verify, plus security
 	// heuristics. Advisory: they describe the database, not this run.
 	Warnings []string
+
+	// Suggestions are changes worth making to the tables described above. Each
+	// carries the .atl line that would make it.
+	Suggestions []Suggestion
 }
 
 // Generate writes .atl describing tables declaredIR does not mention.
@@ -176,5 +180,10 @@ func Generate(ctx context.Context, q introspect.Querier, ns string, schemas []st
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Table < out[j].Table })
 
-	return Result{Entities: out, Skipped: skipped, Warnings: warnings}, nil
+	return Result{
+		Entities:    out,
+		Skipped:     skipped,
+		Warnings:    warnings,
+		Suggestions: Suggest(filled, nameFor),
+	}, nil
 }
