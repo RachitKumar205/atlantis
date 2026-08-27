@@ -583,3 +583,18 @@ func isolatedRoleDSN(t *testing.T, adminDSN, dbDSN, dbName, role string) string 
 	u.User = url.UserPassword(role, password)
 	return u.String()
 }
+
+// enrolOrg puts an organisation in the registry and nothing else.
+//
+// console.enroll_tokens and console.schema_imports carry a foreign key to
+// console.orgs since migration 0011, so a test writing either for a second
+// organisation needs a registry row for it. registerOrg is the full path and
+// wants a stack to point at; a boundary test needs neither.
+func (f *consoleFixture) enrolOrg(t *testing.T, org string) {
+	t.Helper()
+	if _, err := f.srv.db.pool.Exec(context.Background(),
+		`INSERT INTO console.orgs (org) VALUES ($1) ON CONFLICT (org) DO NOTHING`,
+		org); err != nil {
+		t.Fatalf("register %s: %v", org, err)
+	}
+}

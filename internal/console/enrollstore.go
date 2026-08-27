@@ -124,16 +124,23 @@ func (o *orgStore) spendEnrollToken(ctx context.Context, secret string) (caller 
 // proves the sweep and says nothing at all about the refusal, on a build where
 // the refusal does not happen.
 //
-// Runs on the pool rather than through a bound transaction, because it is not
-// scoped to an organisation: every expired row goes, whoever minted it. The
-// same reasoning as deleteSpentAssertions.
+// Organisation by organisation. This table is under a RESTRICTIVE policy, and
+// the same statement on the bare pool binds nothing, matches nothing and
+// reports no error — see store.eachOrg, which is where that is written down.
 func (s *store) deleteExpiredEnrollTokens(ctx context.Context) (int64, error) {
-	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM console.enroll_tokens WHERE expires_at < NOW()`)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
+	var total int64
+	err := s.eachOrg(ctx, func(o *orgStore) error {
+		return o.tx(ctx, func(tx pgx.Tx) error {
+			tag, err := tx.Exec(ctx,
+				`DELETE FROM console.enroll_tokens WHERE expires_at < NOW()`)
+			if err != nil {
+				return err
+			}
+			total += tag.RowsAffected()
+			return nil
+		})
+	})
+	return total, err
 }
 
 // callerCert is one issued certificate as this console recorded it.

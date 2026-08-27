@@ -260,3 +260,96 @@ func TestACallerWithNoEnrolmentHasNoCertificateOnRecord(t *testing.T) {
 		t.Fatalf("an unenrolled caller reported a certificate: %v", err)
 	}
 }
+
+// The retention sweep deletes an expired token, and leaves a live one.
+//
+// It had never deleted anything. `DELETE FROM console.enroll_tokens WHERE
+// expires_at < NOW()` on the bare pool binds no organisation, the RESTRICTIVE
+// policy admits no row to the scan the WHERE clause runs, and the statement
+// reports 0 rows and no error. Measured before the fix: one expired token
+// seeded, swept, still there.
+//
+// This proves the housekeeping and nothing about the refusal —
+// TestAnExpiredEnrolTokenIsRefusedWithoutBeingConsumed is what covers that, and
+// says why the distinction matters.
+func TestTheEnrolTokenSweepDeletesExpiredRows(t *testing.T) {
+	f := newConsoleFixture(t)
+	ctx := context.Background()
+	store := f.srv.db.forOrg(defaultOrg)
+
+	stale, err := store.createEnrollToken(ctx, "backend", "usr_admin")
+	if err != nil {
+		t.Fatalf("mint the stale token: %v", err)
+	}
+	live, err := store.createEnrollToken(ctx, "worker", "usr_admin")
+	if err != nil {
+		t.Fatalf("mint the live token: %v", err)
+	}
+	f.expireEnrollToken(t, stale.Secret)
+
+	n, err := f.srv.db.deleteExpiredEnrollTokens(ctx)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("the sweep reported %d rows, want 1", n)
+	}
+
+	// Read as the superuser, past the policy: a scoped read returning nothing
+	// cannot tell a deleted row from one the boundary is hiding.
+	var remaining int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM console.enroll_tokens WHERE token_sha256 = $1`,
+		hashEnrollToken(stale.Secret)).Scan(&remaining); err != nil {
+		t.Fatalf("count the stale token: %v", err)
+	}
+	if remaining != 0 {
+		t.Errorf("the expired token survived the sweep")
+	}
+	if err := f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM console.enroll_tokens WHERE token_sha256 = $1`,
+		hashEnrollToken(live.Secret)).Scan(&remaining); err != nil {
+		t.Fatalf("count the live token: %v", err)
+	}
+	if remaining != 1 {
+		t.Errorf("the sweep took a live token")
+	}
+}
+
+// A sweep visits every organisation, not the one that happens to be first.
+//
+// The failure this rules out: a sweep that binds a single organisation — or
+// stops at the first — reports a plausible count and leaves every other
+// organisation's expired rows in place forever.
+func TestTheEnrolTokenSweepReachesEveryOrganisation(t *testing.T) {
+	f := newConsoleFixture(t)
+	ctx := context.Background()
+
+	var secrets []string
+	for _, org := range []string{orgAcme, orgGlobex} {
+		f.enrolOrg(t, org)
+		tok, err := f.srv.db.forOrg(org).createEnrollToken(ctx, "backend", "usr_admin")
+		if err != nil {
+			t.Fatalf("mint for %s: %v", org, err)
+		}
+		f.expireEnrollToken(t, tok.Secret)
+		secrets = append(secrets, tok.Secret)
+	}
+
+	if n, err := f.srv.db.deleteExpiredEnrollTokens(ctx); err != nil {
+		t.Fatalf("sweep: %v", err)
+	} else if n != 2 {
+		t.Errorf("the sweep reported %d rows across two organisations, want 2", n)
+	}
+	for i, s := range secrets {
+		var remaining int
+		if err := f.pool.QueryRow(ctx,
+			`SELECT count(*) FROM console.enroll_tokens WHERE token_sha256 = $1`,
+			hashEnrollToken(s)).Scan(&remaining); err != nil {
+			t.Fatalf("count token %d: %v", i, err)
+		}
+		if remaining != 0 {
+			t.Errorf("the expired token of organisation %d survived", i)
+		}
+	}
+}

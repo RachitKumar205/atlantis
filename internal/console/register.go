@@ -246,9 +246,8 @@ func UnregisterOrg(ctx context.Context, pgURL, org string) error {
 		return errors.New("an organisation is required")
 	}
 	// The same connection setup the console itself uses, rather than a bare
-	// pgxpool.New. console.orgs carries no row-level security today, so this
-	// changes nothing yet; adding a policy later would otherwise turn these
-	// deletes into silent no-ops.
+	// pgxpool.New: AfterConnect clears any organisation arriving from outside
+	// the process, so no statement here runs bound to one.
 	cfg, err := newPoolConfig(pgURL)
 	if err != nil {
 		return fmt.Errorf("console database URL: %w", err)
@@ -273,11 +272,18 @@ func UnregisterOrg(ctx context.Context, pgURL, org string) error {
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
-	// Ordered dependents-first. Nothing here has a foreign key — the console
-	// schema declares none — so the order buys no integrity, only a readable
-	// transaction if one statement fails.
+	// The registration goes last, and takes two tables with it.
+	//
+	// console.enroll_tokens and console.schema_imports reference console.orgs
+	// ON DELETE CASCADE since migration 0011, so they are not named here. That
+	// is not a shortcut: both are under a RESTRICTIVE policy of
+	// `org = console.current_org()`, this connection binds no organisation, and
+	// a DELETE against either would match nothing and report no error.
+	// Referential integrity actions bypass row security, so the cascade reaches
+	// rows this session cannot select.
+	//
+	// The tables named below carry no policy, so their DELETEs run as written.
 	for _, q := range []struct{ what, sql string }{
-		{"enrolment tokens", `DELETE FROM console.enroll_tokens WHERE org = $1`},
 		{"caller certificates", `DELETE FROM console.caller_certs WHERE org = $1`},
 		{"sessions", `DELETE FROM console.sessions WHERE org = $1`},
 		{"the registration", `DELETE FROM console.orgs WHERE org = $1`},

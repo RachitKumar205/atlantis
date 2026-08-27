@@ -100,6 +100,53 @@ func (o *orgStore) tx(ctx context.Context, fn func(pgx.Tx) error) error {
 	return nil
 }
 
+// eachOrg runs fn once per registered organisation, bound to it.
+//
+// How housekeeping crosses a row-level-security boundary. A
+// `DELETE FROM console.enroll_tokens WHERE expires_at < now()` issued on the
+// pool binds no organisation, so current_org() is NULL, `org = NULL` is NULL,
+// and the RESTRICTIVE policy admits no row. The statement reports 0 rows
+// affected and no error. Measured: one expired token seeded, swept, still
+// there.
+//
+// A DELETE-specific policy keyed on expiry does not reach it either, which is
+// worth knowing before writing one: DELETE reads the rows it operates on, and
+// that read is governed by the SELECT policy.
+//
+// console.orgs carries no policy, which is what makes the list readable here,
+// and console.enroll_tokens and console.schema_imports reference it ON DELETE
+// CASCADE — so no row can name an organisation this loop does not visit.
+//
+// Every organisation is attempted before any error returns, so one failing does
+// not stop the rest being swept.
+func (s *store) eachOrg(ctx context.Context, fn func(*orgStore) error) error {
+	rows, err := s.pool.Query(ctx, `SELECT org FROM console.orgs ORDER BY org`)
+	if err != nil {
+		return fmt.Errorf("list organisations: %w", err)
+	}
+	var orgs []string
+	for rows.Next() {
+		var org string
+		if err := rows.Scan(&org); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan organisation: %w", err)
+		}
+		orgs = append(orgs, org)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("list organisations: %w", err)
+	}
+
+	var errs []error
+	for _, org := range orgs {
+		if err := fn(s.forOrg(org)); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", org, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // newPoolConfig builds the console pool's configuration.
 //
 // AfterConnect clears the organisation discriminator on every new physical
