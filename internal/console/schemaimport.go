@@ -1,7 +1,8 @@
-package server
+package console
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -11,49 +12,34 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/rachitkumar205/atlantis/internal/adopt"
-	"github.com/rachitkumar205/atlantis/internal/cloud/dsnguard"
-	"github.com/rachitkumar205/atlantis/internal/cloud/store"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/dsnguard"
 )
 
 // maxImportTables bounds one pass.
 //
 // A schema larger than this is not refused for being large; it is refused
-// because the response is read in a browser and the work is done while a
-// request is held open.
+// because the response is read in a browser and the work happens while a
+// request is held open. The message names the remedy, which is to read fewer
+// schemas rather than to give up.
 const maxImportTables = 500
 
-// handleIntrospectDatabase reads a database somebody points at and returns .atl
+// handleImportSchema reads a database somebody points at and returns .atl
 // describing it.
 //
-// The one route that makes Cloud dial an address a request chose, with a
+// The one route that makes this console dial an address a request chose, with a
 // credential a request supplied. dsnguard decides what may be reached; this
 // decides what is done once there, and both halves matter.
 //
+// Scoped to the session's organisation. A generated declaration targets this
+// organisation's atlantis, so the import belongs beside its schema rather than
+// beside the identity that ran it.
+//
 // The connection string is used and dropped. It reaches no log and no table —
-// cloud.schema_imports.source stores the host alone, under a CHECK — and every
-// error is passed through dsnguard.Redact before it leaves.
-func (s *Server) handleIntrospectDatabase(w http.ResponseWriter, r *http.Request) {
-	if !s.rateLimited(w, r) {
-		return
-	}
-	user, ok := s.requireSession(w, r)
-	if !ok {
-		return
-	}
-	if !s.sameOrigin(w, r) {
-		return
-	}
-
-	// A second limit, keyed on the account rather than the address.
-	// rateLimited keys on client IP, which is the wrong key for a route that
-	// dials outward: an address is something an attacker rotates, and a session
-	// already names somebody.
-	if allowed, retry := s.lim.allow("introspect:" + user.ID); !allowed {
-		w.Header().Set("Retry-After", itoa(retry))
-		jsonError(w, "too many imports — try again shortly", http.StatusTooManyRequests)
-		return
-	}
+// console.schema_imports.source holds host and port under a CHECK — and every
+// error passes through dsnguard.Redact before it leaves.
+func (s *Server) handleImportSchema(w http.ResponseWriter, r *http.Request) {
+	u := r.Context().Value(ctxUser).(*User)
 
 	var body struct {
 		DSN       string   `json:"dsn"`
@@ -65,7 +51,8 @@ func (s *Server) handleIntrospectDatabase(w http.ResponseWriter, r *http.Request
 		// database sends a live password across the internet in clear.
 		AllowInsecure bool `json:"allow_insecure"`
 	}
-	if !decode(w, r, &body) {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		jsonError(w, "could not read the request", http.StatusBadRequest)
 		return
 	}
 
@@ -76,8 +63,8 @@ func (s *Server) handleIntrospectDatabase(w http.ResponseWriter, r *http.Request
 	}
 	ns := strings.TrimSpace(body.Namespace)
 	// The namespace becomes part of every generated entity's ID, so a value
-	// that does not lex is one whose .atl will not parse — refused here rather
-	// than after the database has been read.
+	// that does not lex is one whose .atl will not parse — refused before the
+	// database is read rather than after.
 	if !dsl.IsIdentifier(ns) {
 		jsonError(w, "a namespace is required, and must start with a letter or "+
 			"underscore and continue with letters, digits or underscores",
@@ -93,10 +80,9 @@ func (s *Server) handleIntrospectDatabase(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	res, err := introspectOnce(r.Context(), cfg, ns, body.Schemas)
+	res, err := importOnce(r.Context(), cfg, ns, body.Schemas)
 	if err != nil {
-		// Logged without the connection string, and answered without it.
-		s.log.Warn("schema import failed", "user", user.ID, "host", cfg.ConnConfig.Host,
+		s.log.Warn("schema import failed", "org", u.Org, "host", cfg.ConnConfig.Host,
 			"err", dsnguard.Redact(err, dsn))
 
 		// The driver says the server refused TLS, which reads as a broken
@@ -113,26 +99,25 @@ func (s *Server) handleIntrospectDatabase(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	entities := make([]store.SchemaImportEntity, 0, len(res.Entities))
+	entities := make([]SchemaImportEntity, 0, len(res.Entities))
 	for _, e := range res.Entities {
-		entities = append(entities, store.SchemaImportEntity{
+		entities = append(entities, SchemaImportEntity{
 			Table: e.Table, Entity: e.Name, Atl: e.Atl,
 		})
 	}
 
-	// The host and port, never the credential. net.JoinHostPort rather than a
-	// format string, so an IPv6 literal keeps its brackets and the value stays
-	// something a person recognises.
-	source := net.JoinHostPort(cfg.ConnConfig.Host, itoa(int(cfg.ConnConfig.Port)))
+	// Host and port, never the credential. net.JoinHostPort rather than a
+	// format string, so an IPv6 literal keeps its brackets.
+	source := net.JoinHostPort(cfg.ConnConfig.Host, fmt.Sprint(cfg.ConnConfig.Port))
 
-	id, err := s.db.CreateSchemaImport(r.Context(), user.ID, source, ns, entities)
+	id, err := s.db.forOrg(u.Org).createSchemaImport(r.Context(), u.Subject, source, ns, entities)
 	if err != nil {
-		s.log.Error("store schema import", "user", user.ID, "err", err)
+		s.log.Error("store schema import", "org", u.Org, "err", err)
 		jsonError(w, "the schema was read but could not be saved", http.StatusInternalServerError)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	jsonOK(w, map[string]any{
 		"import_id":   id,
 		"source":      source,
 		"namespace":   ns,
@@ -143,12 +128,64 @@ func (s *Server) handleIntrospectDatabase(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// introspectOnce opens a pool, reads, and closes it.
+// handleListSchemaImports returns this organisation's imports, newest first.
+//
+// What makes storing them worth anything: an import survives the tab that
+// created it. Expired rows are excluded by the query rather than by whether the
+// sweeper has run yet.
+func (s *Server) handleListSchemaImports(w http.ResponseWriter, r *http.Request) {
+	u := r.Context().Value(ctxUser).(*User)
+
+	imports, err := s.db.forOrg(u.Org).schemaImports(r.Context())
+	if err != nil {
+		s.log.Error("list schema imports", "org", u.Org, "err", err)
+		jsonError(w, "could not read the imports", http.StatusInternalServerError)
+		return
+	}
+
+	out := make([]map[string]any, 0, len(imports))
+	for _, im := range imports {
+		out = append(out, map[string]any{
+			"import_id":  im.ID,
+			"source":     im.Source,
+			"namespace":  im.Namespace,
+			"entities":   im.Entities,
+			"actor":      im.Actor,
+			"created_at": im.CreatedAt,
+		})
+	}
+	jsonOK(w, map[string]any{"imports": out})
+}
+
+// handleGetSchemaImport returns the declarations of one import.
+//
+// An identifier from another organisation selects nothing: every statement runs
+// with console.current_org() bound, and the RESTRICTIVE policy admits no other
+// organisation's rows. The empty result is reported as not-found rather than as
+// an empty import, so a wrong id and an id belonging to somebody else answer
+// identically.
+func (s *Server) handleGetSchemaImport(w http.ResponseWriter, r *http.Request) {
+	u := r.Context().Value(ctxUser).(*User)
+
+	entities, err := s.db.forOrg(u.Org).schemaImportEntities(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.log.Error("read schema import", "org", u.Org, "err", err)
+		jsonError(w, "could not read the import", http.StatusInternalServerError)
+		return
+	}
+	if len(entities) == 0 {
+		jsonError(w, "no such import", http.StatusNotFound)
+		return
+	}
+	jsonOK(w, map[string]any{"entities": entities})
+}
+
+// importOnce opens a pool, reads, and closes it.
 //
 // READ ONLY at the transaction, so the guarantee is Postgres's rather than this
 // package's. The advice to supply a read-only role stands alongside it: this
 // stops the session writing, and the role is what stops anything else.
-func introspectOnce(ctx context.Context, cfg *pgxpool.Config, ns string, schemas []string) (adopt.Result, error) {
+func importOnce(ctx context.Context, cfg *pgxpool.Config, ns string, schemas []string) (adopt.Result, error) {
 	// One connection. The pool exists because adopt takes a Querier, not
 	// because anything here runs in parallel.
 	cfg.MaxConns = 1

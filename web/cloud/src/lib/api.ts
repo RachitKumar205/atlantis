@@ -163,65 +163,6 @@ export async function deleteOrg(name: string, confirm: string): Promise<Org> {
   )
 }
 
-/** One generated declaration. */
-export type ImportedEntity = {
-  /** The physical table it describes, schema-qualified. */
-  Table: string
-  /** The proposed entity name. A proposal: renaming it later is breaking. */
-  Name: string
-  /** The declaration, ready to review and commit. */
-  Atl: string
-}
-
-/** One change worth making to a discovered table. */
-export type ImportSuggestion = {
-  Entity: string
-  Table: string
-  /** tenant-isolation, no-primary-key or unindexed-foreign-key. */
-  Kind: string
-  Detail: string
-  /** The .atl to add, empty where the remedy is not one line. */
-  Line: string
-}
-
-export type SchemaImport = {
-  import_id: string
-  /** Host and port. The connection string is not returned and not stored. */
-  source: string
-  namespace: string
-  entities: ImportedEntity[]
-  /** Tables that were found and not declared, each with a reason. */
-  skipped: string[]
-  /** Facts introspection did not verify, and indexes it could not spell. */
-  warnings: string[]
-  suggestions: ImportSuggestion[]
-}
-
-/**
- * Reads a database and returns .atl describing it.
- *
- * The connection string is sent once and kept nowhere: the server refuses any
- * address that is not a public host, reads inside a READ ONLY transaction, and
- * stores the host alone against the account.
- *
- * Slow by nature — it opens a connection to somebody else's database and walks
- * its catalogue — so the caller shows progress rather than assuming this
- * returns promptly.
- */
-export async function importSchema(
-  dsn: string,
-  namespace: string,
-  schemas: string[],
-  allowInsecure: boolean,
-): Promise<SchemaImport> {
-  return (await request('POST', '/api/onboarding/introspect', {
-    dsn,
-    namespace,
-    schemas,
-    allow_insecure: allowInsecure,
-  })) as SchemaImport
-}
-
 /** Brings a deleted organisation back, while it still can be. */
 export async function restoreOrg(name: string): Promise<Org> {
   return normaliseOrg(await request('POST', `/api/orgs/${encodeURIComponent(name)}/restore`))

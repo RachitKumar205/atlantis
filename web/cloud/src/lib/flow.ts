@@ -13,10 +13,6 @@
 
 export type Screen =
   | 'organisations'
-  // Reached from the organisations list, and offered once after a first
-  // sign-in. Not part of the sign-in flow: it needs a session, and nothing
-  // gates on having visited it.
-  | 'import-schema'
   | 'signin'
   | 'signup'
   | 'check-email'

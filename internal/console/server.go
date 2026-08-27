@@ -232,6 +232,21 @@ func (s *Server) runAuditRetention() {
 	ctx, cancel := context.WithTimeout(s.bgCtx, 30*time.Second)
 	defer cancel()
 
+	// Expired schema imports, swept on the same tick.
+	//
+	// Not audit data, and not governed by AuditRetentionDays: an import carries
+	// its own expires_at, written when it was stored. It shares this loop
+	// because both are daily deletions of rows nothing reads, and a second
+	// timer for one statement is a second thing to notice has stopped.
+	//
+	// Reads already exclude expired rows, so a sweep that fails hides nothing —
+	// it leaves somebody else's schema on disk, which is the reason to run it.
+	if n, err := s.db.deleteExpiredSchemaImports(ctx); err != nil {
+		s.log.Error("schema import retention: delete", "err", err)
+	} else if n > 0 {
+		s.log.Info("schema import retention: deleted expired imports", "count", n)
+	}
+
 	// Roll forward: ensure this month and next month exist.
 	// See store.migrate for why the anchor is first-of-month, not today.
 	now := time.Now().UTC()
@@ -312,6 +327,19 @@ func (s *Server) buildMux() {
 
 	// Unauthenticated: a browser holding no session cookie is what reads it.
 	mux.HandleFunc("GET /api/config", s.handleConfig)
+
+	// Reads a database this organisation points at and returns .atl describing
+	// it. The one route that makes this console dial an address it was given;
+	// internal/dsnguard decides what it may reach.
+	//
+	// csrf as well as auth: it is a state-changing POST that costs an outbound
+	// connection, so a form on another origin must not be able to start one.
+	mux.HandleFunc("POST /api/schema/import", s.auth(s.csrf(s.handleImportSchema)))
+
+	// Reading back what was imported. Both scoped to the session's
+	// organisation by the store, and both plain reads, so no csrf.
+	mux.HandleFunc("GET /api/schema/imports", s.auth(s.handleListSchemaImports))
+	mux.HandleFunc("GET /api/schema/imports/{id}", s.auth(s.handleGetSchemaImport))
 
 	// Auth-required endpoints.
 	mux.HandleFunc("POST /api/auth/logout", s.auth(s.handleLogout))
