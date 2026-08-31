@@ -97,7 +97,14 @@ func TestGeneratedSchemaRoundTrips(t *testing.T) {
 			span        int4range,
 			days        daterange,
 			spot        point,
-			area        box
+			area        box,
+
+			-- Columns named after field modifiers. The emitted line puts the
+			-- name at member indent, which is what separates it from a
+			-- modifier of the field above; a name that emits but does not read
+			-- back fails here rather than at the customer's next plan.
+			identity    double precision,
+			"default"   text
 		)`,
 	} {
 		if _, err := pool.Exec(ctx, stmt); err != nil {
@@ -115,8 +122,8 @@ func TestGeneratedSchemaRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("introspect: %v", err)
 	}
-	if n := len(first.Entities[0].Fields); n != 32 {
-		t.Fatalf("introspection produced %d fields, want 32 — the stub did not get "+
+	if n := len(first.Entities[0].Fields); n != 34 {
+		t.Fatalf("introspection produced %d fields, want 34 — the stub did not get "+
 			"filled in, so the rest of this test proves nothing", n)
 	}
 

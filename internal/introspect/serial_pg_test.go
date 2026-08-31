@@ -32,7 +32,9 @@ func TestANullableSequenceDefaultIsNotSerial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pool: %v", err)
 	}
-	defer pool.Close()
+	// Registered before the schema drop below so it runs after it: t.Cleanup
+	// is LIFO, and a defer here would close the pool the drop needs.
+	t.Cleanup(pool.Close)
 
 	drop := func() {
 		_, _ = pool.Exec(context.Background(), `DROP SCHEMA IF EXISTS serialprobe CASCADE`)

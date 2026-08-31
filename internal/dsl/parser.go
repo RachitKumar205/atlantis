@@ -112,12 +112,30 @@ func (p *Parser) recover(syncs ...TokenKind) {
 // inside an entity/hypertable body. Job, workflow, and ephemeral
 // keywords are only special at the top level or inside their own
 // blocks — inside an entity they are ordinary identifiers.
+// namesAField reports whether a field modifier may also be a field name, and so
+// has to be told apart from one by column.
+//
+// `not` is absent: `not null` is two tokens and no column is called `not`, so
+// it stays greedy and a bare `not null` at member indent still belongs to the
+// field above. `check`, `primary` and `unique` are absent because each already
+// begins an entity member and is separated by its own arm.
+func namesAField(k TokenKind) bool {
+	switch k {
+	case TokIdentity, TokSerial, TokDefault, TokReferences, TokBackfill:
+		return true
+	}
+	return false
+}
+
 func canBeFieldName(k TokenKind) bool {
 	switch k {
 	case TokIdent,
 		TokState, TokQueue, TokArgs, TokRetries, TokTimeout,
 		TokSchedule, TokStep, TokCompensate, TokVisibleTo,
-		TokJob, TokWorkflow, TokEphemeral, TokEnqueue, TokEnum:
+		TokJob, TokWorkflow, TokEphemeral, TokEnqueue, TokEnum,
+		// Field modifiers, told apart from a modifier by column. See
+		// namesAField.
+		TokIdentity, TokSerial, TokDefault, TokReferences, TokBackfill:
 		return true
 	}
 	return false
@@ -497,6 +515,23 @@ func (p *Parser) parseFieldModifiers(fieldPos Position, tableChecksPossible bool
 	var mods []FieldModifier
 	for {
 		t := p.peek()
+		// A modifier keyword at or left of the field's own column starts the
+		// next member, and names it. The same test the TokCheck arm below
+		// makes, for the modifiers a legacy column is plausibly named after:
+		//
+		//	id       bigint primary
+		//	identity double                 <- a column, on a public dataset
+		//
+		// Consuming greedily instead took `identity` as a modifier of `id` and
+		// left `double` to begin a member it cannot begin, which failed the
+		// whole namespace rather than the one table.
+		//
+		// Lookahead cannot decide it. In `id bigint identity` followed by
+		// `name text`, reading `identity name` as a field of type `name` is
+		// equally consistent, and `name` is a type.
+		if namesAField(t.Kind) && t.Pos.Col <= fieldPos.Col {
+			return mods
+		}
 		switch t.Kind {
 		case TokPrimary:
 			// Disambiguate field-modifier `primary` from top-level composite

@@ -33,12 +33,21 @@ var hazards = []string{
 	    a  int REFERENCES adopt_hz.no_pk_nullable(a)
 	 )`,
 
-	// A column named for an .atl keyword. `identity double` parses as a
-	// modifier and swallows the next field.
+	// A column named for a keyword that also begins an entity member. `check`
+	// at member indent is a table CHECK whichever way it is read, so it cannot
+	// name a field and the table goes.
 	`CREATE TABLE adopt_hz.reserved_col (
 	    id bigint PRIMARY KEY,
-	    identity double precision,
+	    "check" text,
 	    cols text[]
+	 )`,
+
+	// A column named for a field modifier. Column tells the two apart: at
+	// member indent it names a field, on a field's own line it modifies it.
+	`CREATE TABLE adopt_hz.modifier_col (
+	    id bigint PRIMARY KEY,
+	    identity double precision,
+	    "default" text
 	 )`,
 
 	// No primary key. Every entity must have one.
@@ -95,6 +104,9 @@ func TestEveryGeneratedNamespaceLowers(t *testing.T) {
 }
 
 // A column named for an .atl keyword takes its table out, not the file.
+//
+// `check` begins an entity member, so it cannot also name a field: both
+// readings are available at member indent and nothing separates them.
 func TestAReservedColumnNameSkipsTheTable(t *testing.T) {
 	res := generateHazards(t)
 	for _, e := range res.Entities {
@@ -102,7 +114,24 @@ func TestAReservedColumnNameSkipsTheTable(t *testing.T) {
 			t.Errorf("a declaration was generated for %s:\n%s", e.Table, e.Atl)
 		}
 	}
-	assertSkipped(t, res, "reserved_col", "identity")
+	assertSkipped(t, res, "reserved_col", "check")
+}
+
+// A column named for a field modifier is declared, because column separates
+// the two readings.
+//
+// `identity` is a percent-identity measure on a public bioinformatics dataset,
+// and the table carrying it is the target of four foreign keys — so skipping it
+// dropped those too.
+func TestAModifierColumnNameIsDeclared(t *testing.T) {
+	res := generateHazards(t)
+	atl := atlOf(t, res, "adopt_hz.modifier_col")
+	for _, want := range []string{"identity", "default"} {
+		if !strings.Contains(atl, want) {
+			t.Errorf("the declaration lost the %q column:\n%s", want, atl)
+		}
+	}
+	mustLower(t, "// generated\n"+atl)
 }
 
 // A table with no primary key is skipped, and still gets the suggestion that
