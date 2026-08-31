@@ -39,6 +39,13 @@ func buildSnapshot(ir *dsl.IR, contentHash string) (*entitySnapshot, error) {
 
 	for i := range ir.Entities {
 		e := &ir.Entities[i]
+		// A keyless entity publishes no service, so the dispatcher has nothing
+		// to route to it. Building its descriptors would reach the primary-key
+		// paths — the PK message, the by-key WHERE clause, the keyset
+		// tiebreaker — none of which it has.
+		if e.Keyless {
+			continue
+		}
 		meta := buildEntityMeta(e, ir, inbound, procWritten)
 
 		fd, err := buildProtoDescriptors(e)

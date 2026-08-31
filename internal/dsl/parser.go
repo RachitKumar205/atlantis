@@ -322,6 +322,9 @@ func (p *Parser) parseEntityMembers() []EntityMember {
 			if m := p.parseTableNameDecl(); m != nil {
 				members = append(members, m)
 			}
+		case TokKeyless:
+			kw := p.advance()
+			members = append(members, &KeylessDecl{Pos: kw.Pos})
 		default:
 			if canBeFieldName(t.Kind) {
 				if m := p.parseField(true); m != nil {

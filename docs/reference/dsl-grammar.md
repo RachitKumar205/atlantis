@@ -184,6 +184,7 @@ The only unique-index form is `unique index partial`; `index by`, `index hnsw`, 
 - `soft_delete by <field>` — replaces row deletion with setting `<field>` (must be `timestamptz`) to `now()`. Reads filter `<field> IS NULL` automatically.
 - `touch_on_update by <field>` — Postgres trigger sets `<field>` (must be `timestamptz`) to `now()` on every `UPDATE`.
 - `partition by <field>` — row-level multi-tenancy. `<field>` identifies which tenant a row belongs to and must be `not null`. The server binds the caller's tenant per request from the `atlantis-tenant` request header, on both the dynamic dispatcher and the server `tidectl codegen` emits. Adding, removing or moving the clause on an entity that already exists produces a migration; the plan is classified cross-caller breaking, because it changes what every caller of that table can read. It produces `ENABLE` + `FORCE ROW LEVEL SECURITY`, **two** policies, and an index on the column. The first, `<table>_tenant_isolation`, is `AS RESTRICTIVE` and compares the column to `atlantis.current_partition()` (cast to the column's type when it is not text-shaped) in both `USING` and `WITH CHECK` — restrictive means it ANDs with every other policy, so nothing you add can read outside the tenant. The second, `<table>_default_access`, is `AS PERMISSIVE USING (true)`: PostgreSQL admits a row only when some permissive policy allows it, so without a grant a restrictive-only table returns nothing at all. **`<table>_default_access` is yours to replace** — drop it and write narrower permissive policies to add your own access control, and tenant isolation is unaffected because it does not live there. A later `tide apply` re-creates the grant only when the table carries no permissive policy at all, so your replacement is not undone. The index is emitted — always, even when the schema declares one covering it, because the policy's index must not have its lifetime tied to a droppable constraint. The tenant itself is the transaction-local run-time parameter `atlantis.tenant`; because PostgreSQL cannot lock a custom parameter, `tide apply` rejects any query or procedure body that calls `set_config`. See [Per-tenant partition](../guides/add-a-new-entity.md#per-tenant-partition).
+- `keyless` — the table has no key. atlantis owns its schema — DDL, plan, apply and drift all run — and generates **no service** for it: no `Get`, `List`, `Create`, `Update`, `Delete` or `Query`. Mutually exclusive with `primary` and `primary by`, and cannot be combined with `cache`, because a cached row is addressed by its key. Another entity may still `references` one of its columns, provided that column is `unique` — which is what PostgreSQL requires of a foreign-key target. Without a key there is no `Get` to generate, no way for an `Update` or `Delete` to confirm it changed one row, and no non-nullable column for the keyset cursor to break ties on, which is what guarantees a page advances. `tide inspect --generate` emits it for a table it finds with no key, and suggests the key that would give it an API.
 - `table "<schema.table>"` — overrides the physical table name. Without it, atlantis stores the entity at `atlantis.<namespace>_<snake_entity>`. The value's shape is `[schema.]table`, each segment matching `[A-Za-z_][A-Za-z0-9_]*`; a bare name (`table "vendors"`) lands in `public`. Foreign keys whose target carries the modifier render `REFERENCES "<schema>"."<table>"`. Changing the value on a previously-applied entity is classified `cross_caller_breaking` and rejected by `tide plan`; atlantis does not auto-rename. Used when adopting an existing database — see [Adopt an existing database](../guides/adopt-an-existing-database.md).
 
 ### Cache block
@@ -277,16 +278,41 @@ Entity, namespace, query, and procedure names use `PascalIdent`. Field, input, a
 The following are reserved everywhere and cannot be used as identifiers:
 
 ```
-entity, hypertable, query, procedure,
+entity, hypertable, query, procedure, enum,
 in, for, input, output, steps, sql, touches, as,
-primary, serial, not, null, default, unique, references, check,
+primary, not, null, unique, check,
 on, update, delete, cascade, set, restrict,
 index, partial, where, is,
 hnsw, ops, cosine, l2, ip, gin, asc, desc, expr,
 soft_delete, touch_on_update, partition, by,
-table,
+table, keyless,
 cache
 ```
+
+The following are field modifiers, and may also name a field. Indentation
+separates the two: at or left of the field's own column the word begins the
+next member and names it; to its right, or on the field's own line, it modifies
+the field above.
+
+```
+identity, serial, default, references, backfill
+```
+
+```
+entity Region in rnacen {
+  id       bigint primary
+  identity double                  // a column called identity
+}
+
+entity Account in app {
+  id bigint primary identity       // the modifier
+}
+```
+
+`primary`, `unique` and `check` are absent from that list because each also
+begins an entity member — `primary by`, `unique by`, `check "..."` — so both
+readings are available at member indent and nothing separates them. `not` is
+absent because `not null` is two tokens.
 
 The following are contextual — they are keywords only inside specific blocks and may otherwise be used as identifiers:
 
@@ -297,4 +323,4 @@ chunk_time_interval            // only inside hypertable { ... }
 
 ## Known gaps
 
-This reference does not yet cover: the `ivfflat` vector-index method (only `hnsw` is supported), GiST indexes, `on update` foreign-key actions, enum types, view declarations, and import statements. Tracked in the project issue tracker.
+This reference does not yet cover: the `ivfflat` vector-index method (only `hnsw` is supported), GiST indexes, `on update` foreign-key actions, view declarations, and import statements. Tracked in the project issue tracker.

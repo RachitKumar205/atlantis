@@ -213,6 +213,13 @@ var clauseCases = map[string]struct {
 		mutate: func(e *dsl.Entity) { e.TableName = "public.legacy_orders" },
 		effect: clauseEffect{kind: emits, why: "changes the physical table every statement targets"},
 	},
+	"Keyless": {
+		// Setting it alone leaves the entity carrying a primary key, which
+		// lowering refuses; the emitters read the flag regardless, and what
+		// changes is which artifacts exist rather than what any of them says.
+		mutate: func(e *dsl.Entity) { e.Keyless = true },
+		effect: clauseEffect{kind: emits, why: "gates every API emitter — the entity's proto, server, client and cache-key files are not written at all"},
+	},
 	"QueryTimeoutMS": {
 		mutate: func(e *dsl.Entity) { e.QueryTimeoutMS = 5000 },
 		effect: clauseEffect{kind: emits, why: "emitted into the generated server handlers"},

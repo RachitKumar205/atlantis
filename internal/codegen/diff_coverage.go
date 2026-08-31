@@ -79,6 +79,12 @@ var entityCoverage = map[string]coverage{
 	// database schema — what a migration changes and a rehearsal proves safe.
 	// Wire compatibility needs its own completeness check.
 	"RetiredProtoNumbers": {notSchema, "", "wire-stability bookkeeping; emits no DDL and changes no generated query — it is rendered into the .proto, which is a separate completeness question"},
+	// Turning it on or off changes which generated artifacts exist, not the
+	// table: the DDL for a keyless entity is the DDL for the same entity with
+	// a key, minus the PRIMARY KEY clause, which the Primary gap above already
+	// covers. Flipping it is add-service or drop-service, and that is the same
+	// wire question RetiredProtoNumbers is.
+	"Keyless": {notSchema, "", "gates the API emitters, not the DDL — a change adds or removes a generated service, which is a wire question rather than a migration one"},
 }
 
 var fieldCoverage = map[string]coverage{

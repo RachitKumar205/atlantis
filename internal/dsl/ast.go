@@ -881,3 +881,14 @@ type EnumDecl struct {
 func (*EnumDecl) isDecl()              {}
 func (e *EnumDecl) Position() Position { return e.Pos }
 func (e *EnumDecl) DeclName() string   { return e.Name }
+
+// KeylessDecl: `keyless`, an entity member.
+//
+// The table has no key, so atlantis owns its schema and addresses no row in
+// it. Explicit rather than inferred from the absence of `primary`: a forgotten
+// key would otherwise turn an ordinary entity into one silently, and nothing
+// downstream would report it.
+type KeylessDecl struct{ Pos Position }
+
+func (*KeylessDecl) isEntityMember()      {}
+func (d *KeylessDecl) Position() Position { return d.Pos }

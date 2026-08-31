@@ -41,6 +41,14 @@ func (s *Sandbox) LoadIR(ir *dsl.IR) error {
 	var loaded, skipped int
 	for i := range ir.Entities {
 		e := &ir.Entities[i]
+		// A keyless entity has no generated API, so the sim has nothing to
+		// serve for it. Named rather than left to fail on the missing key,
+		// which reads as a malformed declaration.
+		if e.Keyless {
+			warn(fmt.Sprintf("entity %s skipped: keyless, so it has no generated API to run against", e.ID()))
+			skipped++
+			continue
+		}
 		desc, err := buildTableDescFromEntity(e)
 		if err != nil {
 			warn(fmt.Sprintf("entity %s skipped: %v", e.ID(), err))

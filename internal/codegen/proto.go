@@ -38,6 +38,18 @@ type ProtoFile struct {
 	Content string
 }
 
+// servesAPI reports whether an entity gets a generated service.
+//
+// A keyless entity does not: with no key there is no Get, no Update or Delete
+// by key, and the keyset cursor has no non-nullable tiebreaker to advance on.
+// atlantis still owns its table — DDL, plan, apply and drift all run — so this
+// gates the API emitters and none of the SQL ones.
+//
+// TestNoAPIArtifactNamesAKeylessEntity holds every emitter to this, so a new
+// one that forgets the check fails there rather than by generating a service
+// whose SQL addresses a row it cannot find.
+func servesAPI(e *dsl.Entity) bool { return !e.Keyless }
+
 // AssignProtoNumbers walks newIR and sets ProtoNumber on every field, copying
 // from oldIR where possible. Newly-added fields get fresh numbers higher than
 // any existing or retired number in the entity. Removed fields' numbers are
@@ -123,6 +135,9 @@ func EmitProto(newIR *dsl.IR) ([]ProtoFile, error) {
 	var out []ProtoFile
 	for i := range newIR.Entities {
 		e := &newIR.Entities[i]
+		if !servesAPI(e) {
+			continue
+		}
 		f, err := emitProtoEntity(e, inboundByEntity[e.ID()])
 		if err != nil {
 			return nil, err

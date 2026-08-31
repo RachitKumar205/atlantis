@@ -311,13 +311,15 @@ func dropUndeclarableEntities(ir *dsl.IR, nameFor map[string]string) []string {
 		// it at `tide plan`. hasPrimaryKey rather than a second predicate: the
 		// no-primary-key suggestion is raised by the same function, and the
 		// table must not be both suggested and emitted.
-		case !hasPrimaryKey(e):
-			skipped = append(skipped, fmt.Sprintf(
-				"%s: no primary key, which every entity must have, so no declaration "+
-					"was written for this table — add one and read the database again",
-				nameFor[e.ID()]))
-
 		default:
+			// A table with no key is declared `keyless`: atlantis owns its
+			// schema and serves no API for it, because with no key there is no
+			// Get, no Update or Delete by key, and the keyset cursor has no
+			// non-nullable tiebreaker to advance on. adopt.Suggest names the
+			// key that would give it one.
+			if !hasPrimaryKey(e) {
+				e.Keyless = true
+			}
 			kept = append(kept, *e)
 		}
 	}

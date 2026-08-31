@@ -49,6 +49,11 @@ func Entity(e *dsl.Entity, physicalTable string) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "entity %s in %s {\n", e.Name, e.Namespace)
+	if e.Keyless {
+		// Before `table`, because it is the fact that decides what the rest of
+		// the declaration can carry.
+		fmt.Fprintf(&b, "  keyless\n")
+	}
 	if physicalTable != "" {
 		fmt.Fprintf(&b, "  table %q\n", physicalTable)
 	}

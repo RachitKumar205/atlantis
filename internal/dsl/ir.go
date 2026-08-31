@@ -401,6 +401,12 @@ type Entity struct {
 	// dropped. Protobuf forbids reusing a field number after a field is
 	// removed, so the IR checkpoint carries them forward.
 	RetiredProtoNumbers []int `json:"retired_proto_numbers,omitempty"`
+
+	// Keyless marks a table with no key. atlantis owns its schema — DDL, plan,
+	// apply and drift — and generates no service for it: with no key there is
+	// no Get, no Update or Delete by key, and the keyset cursor has no
+	// non-nullable tiebreaker to advance on.
+	Keyless bool `json:"keyless,omitempty"`
 }
 
 // EntityKind selects between regular tables and TimescaleDB hypertables.
@@ -1122,6 +1128,8 @@ func lowerMembers(_ string, ms []EntityMember, e *Entity) []error {
 			e.ChunkTimeIntervalMS = ms
 		case *TableNameDecl:
 			e.TableName = mm.Name
+		case *KeylessDecl:
+			e.Keyless = true
 		case *CacheBlock:
 			c, cerrs := lowerCache(mm, e)
 			errs = append(errs, cerrs...)
@@ -1419,10 +1427,20 @@ func validateEntity(e *Entity, byID map[string]*Entity) []error {
 		errs = append(errs, fmt.Errorf("%s: multiple fields carry primary; use `primary by a, b` for composite keys", e.ID()))
 	case primaries == 1 && hasComposite:
 		errs = append(errs, fmt.Errorf("%s: cannot combine field-level `primary` with `primary by`", e.ID()))
-	case primaries == 0 && !hasComposite:
-		errs = append(errs, fmt.Errorf("%s: must have a primary key (single `primary` field or `primary by ...`)", e.ID()))
-	case hasComposite:
-		// Validate each named field exists.
+	case primaries == 0 && !hasComposite && !e.Keyless:
+		errs = append(errs, fmt.Errorf("%s: must have a primary key (single `primary` field or `primary by ...`), or `keyless` if the table has none", e.ID()))
+	case (primaries > 0 || hasComposite) && e.Keyless:
+		errs = append(errs, fmt.Errorf("%s: `keyless` and a primary key are alternatives", e.ID()))
+	}
+
+	// A cache entry is addressed by its row's key, so there is nothing to
+	// address one by here. runtime.CompositeID builds the id from key values
+	// and would produce the same id for every row.
+	if e.Keyless && e.Cache != nil {
+		errs = append(errs, fmt.Errorf("%s: `keyless` and `cache` cannot be combined; a cached row is addressed by its key", e.ID()))
+	}
+
+	if hasComposite {
 		for _, name := range e.CompositePK {
 			if e.FindField(name) == nil {
 				errs = append(errs, fmt.Errorf("%s: primary by references unknown field %q", e.ID(), name))

@@ -33,6 +33,9 @@ func EmitGoCacheKeys(newIR *dsl.IR) ([]GoFile, error) {
 	var out []GoFile
 	for i := range newIR.Entities {
 		e := &newIR.Entities[i]
+		if !servesAPI(e) {
+			continue
+		}
 		f, err := emitGoCacheKeysEntity(e)
 		if err != nil {
 			return nil, fmt.Errorf("entity %s: %w", e.ID(), err)

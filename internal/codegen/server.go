@@ -61,6 +61,9 @@ func EmitGoServer(newIR *dsl.IR, cfg GenConfig) ([]GoFile, error) {
 	var out []GoFile
 	for i := range newIR.Entities {
 		e := &newIR.Entities[i]
+		if !servesAPI(e) {
+			continue
+		}
 		f, err := emitGoServerEntity(e, inboundByEntity[e.ID()], cfg)
 		if err != nil {
 			return nil, fmt.Errorf("entity %s: %w", e.ID(), err)
@@ -99,6 +102,9 @@ func emitGoServerRegister(newIR *dsl.IR, cfg GenConfig) GoFile {
 	namespaces := []string{}
 	for i := range newIR.Entities {
 		e := &newIR.Entities[i]
+		if !servesAPI(e) {
+			continue
+		}
 		if _, seen := byNS[e.Namespace]; !seen {
 			namespaces = append(namespaces, e.Namespace)
 		}

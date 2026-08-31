@@ -155,6 +155,10 @@ const (
 	// A column of that type carries its label as a string, and Postgres
 	// refuses a label the type does not list.
 	TokEnum
+
+	// TokKeyless marks an entity whose table has no key. atlantis owns its
+	// schema and addresses no row in it.
+	TokKeyless
 )
 
 var tokenNames = map[TokenKind]string{
@@ -266,6 +270,7 @@ var tokenNames = map[TokenKind]string{
 	TokState:             "state",
 	TokEphemeral:         "ephemeral",
 	TokEnum:              "enum",
+	TokKeyless:           "keyless",
 }
 
 // String returns the textual form of the token kind.
@@ -366,6 +371,7 @@ var keywords = map[string]TokenKind{
 	"state":               TokState,
 	"ephemeral":           TokEphemeral,
 	"enum":                TokEnum,
+	"keyless":             TokKeyless,
 }
 
 // Position is a 1-indexed source position used for error reporting,

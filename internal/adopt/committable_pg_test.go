@@ -42,6 +42,14 @@ var hazards = []string{
 	    cols text[]
 	 )`,
 
+	// The reserved-word table keeps its primary key, so a foreign key can
+	// point at it — the one way a reference is left dangling now that a table
+	// with no key is declared rather than dropped.
+	`CREATE TABLE adopt_hz.points_at_reserved (
+	    id bigint PRIMARY KEY,
+	    r  bigint REFERENCES adopt_hz.reserved_col(id)
+	 )`,
+
 	// A column named for a field modifier. Column tells the two apart: at
 	// member indent it names a field, on a field's own line it modifies it.
 	`CREATE TABLE adopt_hz.modifier_col (
@@ -134,19 +142,20 @@ func TestAModifierColumnNameIsDeclared(t *testing.T) {
 	mustLower(t, "// generated\n"+atl)
 }
 
-// A table with no primary key is skipped, and still gets the suggestion that
-// would let it be read next time.
-func TestATableWithNoPrimaryKeyIsSkippedAndSuggested(t *testing.T) {
+// A table with no primary key is declared `keyless`, and still gets the
+// suggestion that would give it an API.
+//
+// atlantis owns its schema either way. What the key buys is the service: with
+// none there is no Get, no Update or Delete by key, and the keyset cursor has
+// no non-nullable tiebreaker to advance on.
+func TestATableWithNoPrimaryKeyIsKeylessAndSuggested(t *testing.T) {
 	res := generateHazards(t)
-	for _, e := range res.Entities {
-		if strings.HasSuffix(e.Table, ".no_pk") {
-			t.Errorf("a declaration was generated for %s, which has no primary key", e.Table)
-		}
+	atl := atlOf(t, res, "adopt_hz.no_pk")
+	if !strings.Contains(atl, "keyless") {
+		t.Errorf("the declaration does not mark the table keyless:\n%s", atl)
 	}
-	assertSkipped(t, res, "no_pk", "primary key")
+	mustLower(t, "// generated\n"+atl)
 
-	// Computed before the drop. Without that the only table the advice applies
-	// to is the one it is never shown for.
 	var suggested bool
 	for _, s := range res.Suggestions {
 		if strings.HasSuffix(s.Table, ".no_pk") && s.Kind == SuggestNoPrimaryKey {
@@ -164,16 +173,34 @@ func TestATableWithNoPrimaryKeyIsSkippedAndSuggested(t *testing.T) {
 // Lower resolves references against the file, so leaving one dangling fails the
 // whole namespace — which is how a single PK-less table took 61 good ones down.
 //
-// The target has a nullable unique constraint: enough for Postgres to accept
-// the foreign key, not enough to address a row, so the table is skipped and the
-// reference has nowhere to resolve.
+// The target here is skipped for a column .atl cannot name, which is the one
+// way a table is left out now that having no key does not remove it.
 func TestAReferenceToASkippedTableIsDropped(t *testing.T) {
 	res := generateHazards(t)
-	atl := atlOf(t, res, "adopt_hz.points_at_nullable")
+	atl := atlOf(t, res, "adopt_hz.points_at_reserved")
 	if strings.Contains(atl, "references") {
 		t.Errorf("the declaration kept a reference to a table that was not declared:\n%s", atl)
 	}
-	assertSkipped(t, res, "points_at_nullable", "references")
+	assertSkipped(t, res, "points_at_reserved", "references")
+}
+
+// A foreign key to a keyless table resolves, because the table is declared.
+//
+// Postgres needs a unique constraint on the target, not a primary key, and the
+// primary-or-unique rule in lowering says the same — so the reference is as
+// valid in the declaration as it is in the database.
+func TestAReferenceToAKeylessTableSurvives(t *testing.T) {
+	res := generateHazards(t)
+
+	target := atlOf(t, res, "adopt_hz.no_pk_nullable")
+	if !strings.Contains(target, "keyless") {
+		t.Errorf("the target is not declared keyless:\n%s", target)
+	}
+
+	atl := atlOf(t, res, "adopt_hz.points_at_nullable")
+	if !strings.Contains(atl, "references") {
+		t.Errorf("the reference was dropped although its target is declared:\n%s", atl)
+	}
 }
 
 // A table whose key comes from a UNIQUE constraint is declared, and the
