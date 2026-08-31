@@ -275,24 +275,30 @@ Entity, namespace, query, and procedure names use `PascalIdent`. Field, input, a
 
 ## Reserved words
 
-The following are reserved everywhere and cannot be used as identifiers:
+A keyword either can name a field or cannot, and which it is follows from one
+rule: **a word that can begin an entity member cannot also name a field**, since
+both readings would be available at member indent and nothing would separate
+them.
+
+The following cannot name a field:
 
 ```
-entity, hypertable, query, procedure, enum,
-in, for, input, output, steps, sql, touches, as,
-primary, not, null, unique, check,
-on, update, delete, cascade, set, restrict,
-index, partial, where, is,
-hnsw, ops, cosine, l2, ip, gin, asc, desc, expr,
-soft_delete, touch_on_update, partition, by,
-table, keyless,
-cache
+as, asc, by, cache, cascade, check,
+chunk_time_interval, consistency, cosine, deferrable, delete, desc,
+entity, eventual, expr, false, for, gin,
+has_many, has_one, heartbeat, hnsw, hypertable,
+in, index, input, insert, invalidate, invalidate_on, ip, is,
+keyless, l2, not, now, null,
+on, ops, output, partial, partition, primary, procedure,
+query, query_timeout, raw, restrict, self, set, soft_delete,
+sql, steps, strict, table, touch_on_update, touches, true,
+ttl_field, unique, update, via, where, write
 ```
 
-The following are field modifiers, and may also name a field. Indentation
-separates the two: at or left of the field's own column the word begins the
-next member and names it; to its right, or on the field's own line, it modifies
-the field above.
+These are field modifiers, and may **also** name a field. Indentation separates
+the two: at or left of the field's own column the word begins the next member
+and names it; to its right, or on the field's own line, it modifies the field
+above.
 
 ```
 identity, serial, default, references, backfill
@@ -309,18 +315,22 @@ entity Account in app {
 }
 ```
 
-`primary`, `unique` and `check` are absent from that list because each also
-begins an entity member — `primary by`, `unique by`, `check "..."` — so both
-readings are available at member indent and nothing separates them. `not` is
-absent because `not null` is two tokens.
+`primary`, `unique` and `check` are in the first list rather than this one
+because each also begins an entity member — `primary by`, `unique by`,
+`check "..."`. `not` is there because `not null` is two tokens.
 
-The following are contextual — they are keywords only inside `cache { ... }` and may otherwise be used as identifiers, a field name included:
+The following are keywords only inside a block or declaration of their own, and
+may name a field anywhere else:
 
 ```
-read_through, ttl, tag
+args, compensate, enqueue, enum, ephemeral, job, queue,
+read_through, retries, schedule, state, step, tag,
+timeout, ttl, visible_to, workflow
 ```
 
-`chunk_time_interval` is **not** contextual, though it is only meaningful on a hypertable: it begins an entity member wherever it appears, so it cannot name a field.
+`enum` is here rather than in the first list because it begins a *top-level*
+declaration, not an entity member. `read_through`, `ttl` and `tag` belong to
+`cache { ... }`; the rest to `job`, `workflow` and `ephemeral`.
 
 ## Known gaps
 
