@@ -18,10 +18,20 @@ import (
 var hazards = []string{
 	`CREATE SCHEMA adopt_hz`,
 
-	// Something for the foreign key below to point at. A UNIQUE satisfies
-	// Postgres and does not satisfy atlantis, so this table is dropped and the
-	// key that references it dangles — which is the case under test.
+	// No PRIMARY KEY, and a NOT NULL UNIQUE column that addresses a row just
+	// as well. The key is taken from it, so this table is declared and the
+	// foreign key below survives.
 	`CREATE TABLE adopt_hz.no_pk_unique (a int NOT NULL UNIQUE, b text)`,
+
+	// The same shape with a nullable unique. Two rows may hold NULL there, so
+	// it addresses nothing and no key is taken; Postgres still accepts a
+	// foreign key to it, which is what makes a dangling reference reachable.
+	`CREATE TABLE adopt_hz.no_pk_nullable (a int UNIQUE, b text)`,
+
+	`CREATE TABLE adopt_hz.points_at_nullable (
+	    id bigint PRIMARY KEY,
+	    a  int REFERENCES adopt_hz.no_pk_nullable(a)
+	 )`,
 
 	// A column named for an .atl keyword. `identity double` parses as a
 	// modifier and swallows the next field.
@@ -34,7 +44,7 @@ var hazards = []string{
 	// No primary key. Every entity must have one.
 	`CREATE TABLE adopt_hz.no_pk (a int NOT NULL, b text)`,
 
-	// A foreign key to a table that will be dropped for having no primary key.
+	// A foreign key to the table whose key is taken from a unique constraint.
 	`CREATE TABLE adopt_hz.points_at_no_pk (
 	    id bigint PRIMARY KEY,
 	    a  int REFERENCES adopt_hz.no_pk_unique(a)
@@ -124,13 +134,38 @@ func TestATableWithNoPrimaryKeyIsSkippedAndSuggested(t *testing.T) {
 //
 // Lower resolves references against the file, so leaving one dangling fails the
 // whole namespace — which is how a single PK-less table took 61 good ones down.
+//
+// The target has a nullable unique constraint: enough for Postgres to accept
+// the foreign key, not enough to address a row, so the table is skipped and the
+// reference has nowhere to resolve.
 func TestAReferenceToASkippedTableIsDropped(t *testing.T) {
 	res := generateHazards(t)
-	atl := atlOf(t, res, "adopt_hz.points_at_no_pk")
+	atl := atlOf(t, res, "adopt_hz.points_at_nullable")
 	if strings.Contains(atl, "references") {
 		t.Errorf("the declaration kept a reference to a table that was not declared:\n%s", atl)
 	}
-	assertSkipped(t, res, "points_at_no_pk", "references")
+	assertSkipped(t, res, "points_at_nullable", "references")
+}
+
+// A table whose key comes from a UNIQUE constraint is declared, and the
+// foreign keys pointing at it survive with it.
+//
+// Postgres refuses a foreign key to a table with no unique constraint, so every
+// table a key points at has a candidate. Requiring a declared PRIMARY KEY
+// dropped those tables and every reference to them: five such references on one
+// public dataset.
+func TestAPromotedKeyKeepsItsInboundReference(t *testing.T) {
+	res := generateHazards(t)
+
+	target := atlOf(t, res, "adopt_hz.no_pk_unique")
+	if !strings.Contains(target, "primary") {
+		t.Errorf("the target has a NOT NULL UNIQUE column and no key was taken from it:\n%s", target)
+	}
+
+	atl := atlOf(t, res, "adopt_hz.points_at_no_pk")
+	if !strings.Contains(atl, "references") {
+		t.Errorf("the reference was dropped although its target is declared:\n%s", atl)
+	}
 }
 
 // A CHECK whose name does not lex is left out, with the table kept.

@@ -176,6 +176,7 @@ func FromPostgres(ctx context.Context, q Querier, declaredIR *dsl.IR) (*dsl.IR, 
 		assembleEntity(oe, de, cols[p], cons[p], entityByPhys, tableNameByID)
 		warnings = append(warnings, partitionWarnings(oe, de)...)
 		warnings = append(warnings, unverifiedWarnings(de, cons[p])...)
+		warnings = append(warnings, promotedKeyWarnings(de, cols[p], cons[p])...)
 	}
 	sort.Strings(warnings)
 	return out, existingIDs, warnings, nil
@@ -519,6 +520,8 @@ func assembleEntity(out, declared *dsl.Entity, cols []colMeta, cons constraints,
 		}
 	}
 
+	promotedKey := promotableKey(cols, cons)
+
 	fkByCol := make(map[string]fkSpec, len(cons.fks))
 	for _, f := range cons.fks {
 		if f.col != "" {
@@ -546,7 +549,7 @@ func assembleEntity(out, declared *dsl.Entity, cols []colMeta, cons constraints,
 			// expression normalisation, not a string compare.
 			Check: declaredChecks[c.name],
 		}
-		if len(cons.pk) == 1 && cons.pk[0] == c.name {
+		if (len(cons.pk) == 1 && cons.pk[0] == c.name) || c.name == promotedKey {
 			f.Primary = true
 		}
 		if uniqColSet[c.name] {
@@ -860,6 +863,55 @@ func unverifiedWarnings(declared *dsl.Entity, cons constraints) []string {
 		warns = append(warns, fmt.Sprintf("%s: %d declared composite UNIQUE(s), %d live composite UNIQUE(s) — not verified", declared.ID(), n, multiColUniqCount(cons.uniqs)))
 	}
 	return warns
+}
+
+// promotableKey names the column an entity is addressed by when its table has
+// no PRIMARY KEY: a single-column UNIQUE constraint whose column is NOT NULL.
+//
+// PRIMARY KEY is UNIQUE and NOT NULL together, so such a column addresses a row
+// exactly as a declared key would. Postgres refuses a foreign key to a table
+// with no unique constraint — `there is no unique constraint matching given
+// keys for referenced table` — so a table any foreign key points at always has
+// a candidate here.
+//
+// Empty when the table has a PRIMARY KEY, when no unique constraint covers a
+// single column, or when the column it covers is nullable. Ties go to the
+// lowest attnum, which is the order cols arrives in, so the choice does not
+// move between reads of the same table.
+func promotableKey(cols []colMeta, cons constraints) string {
+	if len(cons.pk) > 0 {
+		return ""
+	}
+	single := make(map[string]bool, len(cons.uniqs))
+	for _, u := range cons.uniqs {
+		if len(u.cols) == 1 {
+			single[u.cols[0]] = true
+		}
+	}
+	for _, c := range cols {
+		if single[c.name] && c.notNull {
+			return c.name
+		}
+	}
+	return ""
+}
+
+// promotedKeyWarnings reports a key taken from a UNIQUE constraint.
+//
+// The declaration says `primary` where the catalogue says UNIQUE NOT NULL. The
+// two describe the same addressability and differ in what a fresh CREATE TABLE
+// would emit, so the choice is named rather than left for a reader to infer
+// from a table that has no primary key and a declaration that claims one.
+func promotedKeyWarnings(declared *dsl.Entity, cols []colMeta, cons constraints) []string {
+	key := promotableKey(cols, cons)
+	if key == "" {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"%s: no primary key; column %q is addressed as the key because it is "+
+			"NOT NULL and UNIQUE, which is what a primary key is. Applying this "+
+			"declaration to a new database creates it as PRIMARY KEY",
+		declared.ID(), key)}
 }
 
 func multiColUniqCount(us []uniqSpec) int {
