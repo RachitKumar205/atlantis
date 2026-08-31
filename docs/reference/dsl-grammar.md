@@ -314,12 +314,13 @@ begins an entity member — `primary by`, `unique by`, `check "..."` — so both
 readings are available at member indent and nothing separates them. `not` is
 absent because `not null` is two tokens.
 
-The following are contextual — they are keywords only inside specific blocks and may otherwise be used as identifiers:
+The following are contextual — they are keywords only inside `cache { ... }` and may otherwise be used as identifiers, a field name included:
 
 ```
-read_through, ttl, tag         // only inside cache { ... }
-chunk_time_interval            // only inside hypertable { ... }
+read_through, ttl, tag
 ```
+
+`chunk_time_interval` is **not** contextual, though it is only meaningful on a hypertable: it begins an entity member wherever it appears, so it cannot name a field.
 
 ## Known gaps
 

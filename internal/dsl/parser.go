@@ -135,7 +135,11 @@ func canBeFieldName(k TokenKind) bool {
 		TokJob, TokWorkflow, TokEphemeral, TokEnqueue, TokEnum,
 		// Field modifiers, told apart from a modifier by column. See
 		// namesAField.
-		TokIdentity, TokSerial, TokDefault, TokReferences, TokBackfill:
+		TokIdentity, TokSerial, TokDefault, TokReferences, TokBackfill,
+		// The cache block's own keywords. None begins an entity member, so
+		// they need no separating from one — the grammar reference calls them
+		// contextual for this reason.
+		TokReadThrough, TokTtl, TokTag:
 		return true
 	}
 	return false
