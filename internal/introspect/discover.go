@@ -93,10 +93,18 @@ func DiscoverTables(ctx context.Context, q Querier, declaredIR *dsl.IR, schemas 
 		}
 	}
 
-	// relispartition excludes the children of a partitioned table. They are
-	// ordinary relations in pg_class and would otherwise be discovered as
-	// tables in their own right — one per partition, none of them separately
-	// declarable, and on a time-partitioned table there may be hundreds.
+	// pg_inherits excludes the children of a partitioned table, whichever
+	// mechanism attaches them. They are ordinary relations in pg_class and
+	// would otherwise be discovered as tables in their own right — one per
+	// partition, none of them separately declarable, and on a time-partitioned
+	// table there may be hundreds.
+	//
+	// Not relispartition, which Postgres sets only for declarative
+	// partitioning. A child attached with INHERITS has it false and a
+	// pg_inherits row, so the narrower test admits every child of an
+	// inheritance parent: 112 arrived as skipped tables from one public
+	// dataset. A declarative partition has a pg_inherits row too, so this
+	// covers both.
 	//
 	// The atlantis schema holds this server's own machinery (jobs, the IR
 	// checkpoint, caller registrations). Offering to generate declarations for
@@ -109,7 +117,7 @@ SELECT n.nspname, c.relname
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r','p','f')
-  AND NOT c.relispartition
+  AND NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid)
   AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'atlantis')
   AND n.nspname NOT LIKE 'pg\_toast%'
   AND n.nspname NOT LIKE 'pg\_temp%'
@@ -156,7 +164,7 @@ SELECT n.nspname
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r','p','f')
-  AND NOT c.relispartition
+  AND NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid)
   AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'atlantis')
   AND n.nspname NOT LIKE 'pg\_toast%'
   AND n.nspname NOT LIKE 'pg\_temp%'
