@@ -334,3 +334,49 @@ func CarriedAsText(t dsl.FieldType) bool {
 	i, ok := registry[t.Name]
 	return ok && i.textCodec
 }
+
+// ATLSpelling renders the .atl form of a type, parameters included, and
+// reports whether the type has one.
+//
+// The spelling has to round-trip: a declaration emitted from a live database is
+// parsed back, and a `char(6)` column written as bare `char` reads as CHAR(1)
+// and reports a type change against the column it came from.
+func ATLSpelling(t dsl.FieldType) (string, bool) {
+	if t.Array {
+		if t.Elem == nil {
+			return "", false
+		}
+		elem, ok := ATLSpelling(*t.Elem)
+		if !ok {
+			return "", false
+		}
+		return "[]" + elem, true
+	}
+	if t.Enum {
+		return t.Name, true
+	}
+	i, ok := registry[t.Name]
+	if !ok {
+		return "", false
+	}
+	switch i.param {
+	case paramLen:
+		if t.Len > 0 {
+			return fmt.Sprintf("%s(%d)", t.Name, t.Len), true
+		}
+		return t.Name, true
+	case paramNumeric:
+		if t.HasNumP {
+			return fmt.Sprintf("%s(%d, %d)", t.Name, t.NumP, t.NumS), true
+		}
+		return t.Name, true
+	case paramVecDim:
+		if t.VecDim > 0 {
+			return fmt.Sprintf("%s(%d)", t.Name, t.VecDim), true
+		}
+		// parseType requires the parenthesised dimension for this name, so a
+		// bare `vector` does not parse.
+		return "", false
+	}
+	return t.Name, true
+}

@@ -214,30 +214,14 @@ func renderType(t *dsl.FieldType) (string, bool) {
 		}
 		return "[]" + elem, true
 	}
-	switch t.Name {
-	case "varchar":
-		if t.Len > 0 {
-			return "varchar(" + strconv.Itoa(t.Len) + ")", true
-		}
-		return "varchar", true
-	case "numeric":
-		if t.HasNumP {
-			return "numeric(" + strconv.Itoa(t.NumP) + ", " + strconv.Itoa(t.NumS) + ")", true
-		}
-		return "numeric", true
-	case "vector":
-		if t.VecDim > 0 {
-			return "vector(" + strconv.Itoa(t.VecDim) + ")", true
-		}
-		// pgvector allows `vector` with no dimension. parseType calls
-		// p.expect(TokLParen) for this name with no optional branch, so bare
-		// `vector` does not parse.
+	if !toolchainHandles(t) {
 		return "", false
 	}
-	if toolchainHandles(t) {
-		return t.Name, true
-	}
-	return "", false
+	// The spelling comes from the registry, which knows which types take a
+	// parameter. A list here loses one: `char(6)` written as bare `char` reads
+	// back as CHAR(1) and reports a type change against the column it was read
+	// from.
+	return coltype.ATLSpelling(*t)
 }
 
 // toolchainHandles reports whether the whole pipeline can carry a column of

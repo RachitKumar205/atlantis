@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/rachitkumar205/atlantis/internal/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/dsl/predsql"
 )
@@ -1408,14 +1409,11 @@ func typeString(t dsl.FieldType) string {
 		}
 		return "[]" + t.Name
 	}
-	switch t.Name {
-	case "vector":
-		return fmt.Sprintf("vector(%d)", t.VecDim)
-	case "numeric":
-		if t.HasNumP {
-			return fmt.Sprintf("numeric(%d,%d)", t.NumP, t.NumS)
-		}
-		return "numeric"
+	// Parameters included, from the registry. Without them a width change
+	// reads as "char → char", which names neither side of the difference it is
+	// reporting.
+	if s, ok := coltype.ATLSpelling(t); ok {
+		return s
 	}
 	return t.Name
 }

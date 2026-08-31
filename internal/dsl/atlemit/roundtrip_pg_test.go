@@ -72,7 +72,32 @@ func TestGeneratedSchemaRoundTrips(t *testing.T) {
 			lat         double precision,
 			unbounded   varchar,
 			ref         uuid,
-			payload     jsonb
+			payload     jsonb,
+
+			-- Every type added to the registry that can sit in a column, for
+			-- the reason the comment above gives. A width dropped on the way
+			-- out -- char(6) emitted as bare char -- reads back as CHAR(1) and
+			-- reports a type change against the column it came from.
+			code        char(6),
+			seen_at     timestamp,
+			wallclock   time,
+			zoned       timetz,
+			doc         json,
+			markup      xml,
+			price       money,
+			ident       name,
+			q           tsquery,
+			mac         macaddr,
+			mac8        macaddr8,
+			addr        inet,
+			net         cidr,
+			flags       bit(8),
+			bits        varbit,
+			search      tsvector,
+			span        int4range,
+			days        daterange,
+			spot        point,
+			area        box
 		)`,
 	} {
 		if _, err := pool.Exec(ctx, stmt); err != nil {
@@ -90,8 +115,8 @@ func TestGeneratedSchemaRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("introspect: %v", err)
 	}
-	if n := len(first.Entities[0].Fields); n != 12 {
-		t.Fatalf("introspection produced %d fields, want 12 — the stub did not get "+
+	if n := len(first.Entities[0].Fields); n != 32 {
+		t.Fatalf("introspection produced %d fields, want 32 — the stub did not get "+
 			"filled in, so the rest of this test proves nothing", n)
 	}
 

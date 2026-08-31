@@ -555,7 +555,15 @@ func assembleEntity(out, declared *dsl.Entity, cols []colMeta, cons constraints,
 		switch {
 		case c.attIdentity == "a" || c.attIdentity == "d":
 			f.Identity = true
-		case c.hasDefault && isSerialDefault(c.defaultExpr):
+		// A sequence default on a NOT NULL column. Postgres's SERIAL is an
+		// integer, a sequence and NOT NULL together, and lowering reads
+		// `serial` back as all three — so calling a nullable column with a
+		// nextval default `serial` declares a NOT NULL the database does not
+		// have, and the next plan proposes tightening it.
+		//
+		// The nullable form falls through and keeps the default verbatim,
+		// which is what the column actually is.
+		case c.hasDefault && c.notNull && isSerialDefault(c.defaultExpr):
 			f.Serial = true
 		case c.hasDefault:
 			f.Default = parseDefault(c.defaultExpr)
