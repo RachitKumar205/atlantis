@@ -8,6 +8,8 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
+
+	"github.com/rachitkumar205/atlantis/internal/coltype"
 )
 
 // bindForInsert returns values ordered to match meta.insertCols
@@ -55,8 +57,12 @@ func bindColumnValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) an
 		return bindArrayValue(msg, fd)
 	}
 
-	switch t.Name {
-	case "text", "varchar", "citext", "uuid", "numeric":
+	// By behaviour class: a name list here diverges from the descriptor
+	// silently, and an unset nullable column then binds a zero value where
+	// Postgres should receive NULL.
+	c, _ := coltype.ClassOf(t)
+	switch c {
+	case coltype.ClassString:
 		if !cm.nullable {
 			return msg.Get(fd).String()
 		}
@@ -65,7 +71,7 @@ func bindColumnValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) an
 		}
 		return sql.NullString{}
 
-	case "interval":
+	case coltype.ClassInterval:
 		// Split out of the string arm above, where it silently did the wrong
 		// thing once the wire type became a message: msg.Get(fd).String() on a
 		// message field returns its debug rendering, and pgx would have sent
@@ -79,7 +85,7 @@ func bindColumnValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) an
 		}
 		return intervalFromProto(msg.Get(fd).Message())
 
-	case "bigint":
+	case coltype.ClassInt64:
 		if !cm.nullable {
 			return msg.Get(fd).Int()
 		}
@@ -88,7 +94,7 @@ func bindColumnValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) an
 		}
 		return sql.NullInt64{}
 
-	case "int", "smallint":
+	case coltype.ClassInt32:
 		if !cm.nullable {
 			return int32(msg.Get(fd).Int())
 		}
@@ -97,7 +103,7 @@ func bindColumnValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) an
 		}
 		return sql.NullInt32{}
 
-	case "real":
+	case coltype.ClassFloat32:
 		// protoreflect.Value.Float returns float64 for both float and
 		// double fields; the cast is what makes pgx send four bytes.
 		if !cm.nullable {
@@ -108,7 +114,7 @@ func bindColumnValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) an
 		}
 		return sql.NullFloat64{}
 
-	case "double":
+	case coltype.ClassFloat64:
 		if !cm.nullable {
 			return msg.Get(fd).Float()
 		}
@@ -117,7 +123,7 @@ func bindColumnValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) an
 		}
 		return sql.NullFloat64{}
 
-	case "boolean":
+	case coltype.ClassBool:
 		if !cm.nullable {
 			return msg.Get(fd).Bool()
 		}
@@ -126,7 +132,7 @@ func bindColumnValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) an
 		}
 		return sql.NullBool{}
 
-	case "timestamptz", "date":
+	case coltype.ClassTime:
 		if !cm.nullable {
 			return timestampToTime(msg, fd)
 		}
@@ -136,14 +142,14 @@ func bindColumnValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) an
 		}
 		return (*time.Time)(nil)
 
-	case "bytea", "jsonb":
+	case coltype.ClassBytes:
 		b := msg.Get(fd).Bytes()
 		if len(b) == 0 {
 			return []byte(nil)
 		}
 		return b
 
-	case "vector":
+	case coltype.ClassVector:
 		// An unset vector binds SQL NULL, not an empty pgvector: a
 		// dimensioned column (e.g. vector(32)) rejects a 0-dimension
 		// value ("vector must have at least 1 dimension"). NULL is the
@@ -190,20 +196,24 @@ func bindPKValue(meta *entityMeta, cm columnMeta, msg *dynamicpb.Message) any {
 	}
 
 	t := cm.field.Type
-	switch t.Name {
-	case "text", "varchar", "citext", "uuid", "numeric":
+	// By behaviour class: a name list here diverges from the descriptor
+	// silently, and an unset nullable column then binds a zero value where
+	// Postgres should receive NULL.
+	c, _ := coltype.ClassOf(t)
+	switch c {
+	case coltype.ClassString:
 		return msg.Get(fd).String()
-	case "bigint":
+	case coltype.ClassInt64:
 		return msg.Get(fd).Int()
-	case "int", "smallint":
+	case coltype.ClassInt32:
 		return int32(msg.Get(fd).Int())
-	case "real":
+	case coltype.ClassFloat32:
 		return float32(msg.Get(fd).Float())
-	case "double":
+	case coltype.ClassFloat64:
 		return msg.Get(fd).Float()
-	case "boolean":
+	case coltype.ClassBool:
 		return msg.Get(fd).Bool()
-	case "timestamptz", "date":
+	case coltype.ClassTime:
 		return timestampToTime(msg, fd)
 	}
 	return msg.Get(fd).Interface()

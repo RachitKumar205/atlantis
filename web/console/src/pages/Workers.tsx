@@ -6,7 +6,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from '@tanstack/react-router'
-import { Cpu, RefreshCw } from 'lucide-react'
+import { ArrowsClockwise, Cpu } from '@phosphor-icons/react'
 import { api, ApiError } from '@/api/client'
 import type { WorkerSessionSummary } from '@/api/client'
 import { PageShell } from '@/components/PageShell'
@@ -70,7 +70,7 @@ export function Workers() {
       title="Refresh"
       style={{ gap: 6 }}
     >
-      <RefreshCw size={12} />
+      <ArrowsClockwise size={12} />
       <span>Refresh</span>
     </button>
   )

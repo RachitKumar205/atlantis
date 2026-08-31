@@ -37,10 +37,19 @@ func main() {
 	defer srv.Close()
 
 	httpSrv := &http.Server{
-		Addr:         cfg.Listen,
-		Handler:      srv,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:        cfg.Listen,
+		Handler:     srv,
+		ReadTimeout: 15 * time.Second,
+
+		// Long enough for the slowest thing this console proxies: reading a
+		// schema out of a database it does not run. An organisation that
+		// adopted an existing database is introspected across the internet,
+		// and 621 tables took longer than the 30s this used to allow — the
+		// browser saw a closed connection and no error.
+		//
+		// It bounds a stalled write, not the work: a handler that takes this
+		// long is one to make asynchronous rather than one to wait longer for.
+		WriteTimeout: 5 * time.Minute,
 		IdleTimeout:  120 * time.Second,
 	}
 

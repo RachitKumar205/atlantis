@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Search } from 'lucide-react'
+import { MagnifyingGlass } from '@phosphor-icons/react'
 import { openCommandBar } from './CommandBar'
 
 interface PageShellProps {
@@ -13,6 +13,9 @@ interface PageShellProps {
   // flush pages (.schema, .health) zero out body padding so 3-pane grids
   // and the log stream can run edge-to-edge.
   flush?: boolean
+  // fill pages keep their padding but stop the body scrolling, so a child
+  // sized to 100% takes the height that is left and scrolls its own panes.
+  fill?: boolean
   // optional brass action button rendered on the right of the head
   // (e.g. "Add caller" / "Issue cert").
   action?: ReactNode
@@ -23,7 +26,7 @@ interface PageShellProps {
 // action) + .page__body. flush=true zeroes the body padding for pages
 // that own their full-bleed layout (Schema's 3-pane grid, Health's log
 // stream).
-export function PageShell({ title, sub, pathTitle, flush, action, children }: PageShellProps) {
+export function PageShell({ title, sub, pathTitle, flush, fill, action, children }: PageShellProps) {
   return (
     <div className={`page ${flush ? 'page--flush' : ''}`}>
       <header className="page__head">
@@ -39,7 +42,7 @@ export function PageShell({ title, sub, pathTitle, flush, action, children }: Pa
               onClick={() => openCommandBar()}
               type="button"
             >
-              <Search size={14} />
+              <MagnifyingGlass size={14} />
               <span className="muted" style={{ fontSize: 12 }}>Search</span>
               <span className="kbd">⌘K</span>
             </button>
@@ -47,7 +50,7 @@ export function PageShell({ title, sub, pathTitle, flush, action, children }: Pa
           </div>
         </div>
       </header>
-      <div className="page__body">{children}</div>
+      <div className={`page__body ${fill ? 'page__body--fill' : ''}`}>{children}</div>
     </div>
   )
 }

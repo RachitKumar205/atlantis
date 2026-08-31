@@ -1,0 +1,358 @@
+/* ============================================================================
+   DATUM — design tokens, scoped
+
+   The palette replacing Bathysphere, introduced one surface at a time. Every
+   token is declared under `.datum` rather than `:root`, so a page picks it up
+   by carrying the class and nothing else in the product moves. tokens.css
+   still holds Bathysphere and still serves everything that has not been
+   converted.
+
+   When the last surface carries the class, these declarations move to `:root`,
+   tokens.css is deleted, and the class comes off.
+
+   Light is the primary theme and dark is derived from it. The palette is a
+   light-mode family: against a near-white ground its colours score 4.9–7.2,
+   and against a near-black one 2.6–3.8, which is under the 4.5 body text needs
+   and under the 3.0 a UI shape needs.
+
+   ── No @font-face and no @import here ───────────────────────────────────────
+
+   This file names the families and stops. How a face is fetched is the
+   application's decision: the console may use a CDN, and Cloud may not — it is
+   the origin where passwords are typed and makes no third-party request, so it
+   self-hosts from src/assets/fonts.
+   ============================================================================ */
+
+.datum {
+  color-scheme: light;
+
+  /* ---- Ground ------------------------------------------------------------- */
+  /* Warm, and pulled slightly green so it sits under sage hairlines rather
+     than fighting them. */
+  --canvas-0: #FAFAF8;   /* app background */
+  --canvas-1: #F3F4EF;   /* sunk wells, inputs, rails */
+  --canvas-2: #FFFFFF;   /* cards, panes */
+  --canvas-3: #F6F7F2;   /* raised rows, hover */
+  --canvas-4: #EEF0E9;   /* active rows */
+  --canvas-5: #FFFFFF;   /* popovers */
+
+  /* ---- Ink: biased toward the olive rather than neutral ------------------- */
+  --ink-0: #1B2019;      /* headings — 15.86 on canvas-0 */
+  --ink-1: #3A4238;      /* body — 9.97 */
+  --ink-2: #6B7268;      /* muted labels — 4.75 */
+  --ink-3: #9AA096;      /* placeholders */
+  --ink-4: #C3C7BF;      /* disabled */
+
+  /* ---- Hairlines ---------------------------------------------------------- */
+  /* Sage, not grey. #BFBEAE is the one light colour in the palette, and the
+     hairline is where a light colour does the most work for the least risk. */
+  --line-soft: rgba(191, 190, 174, 0.45);
+  --line: #BFBEAE;
+  --line-strong: #A8A796;
+
+  /* ---- Roles -------------------------------------------------------------- */
+  /* Each is one of the five supplied colours, assigned to the role the console
+     uses most: --accent appears in 192 places, --coral in 75, --sage in 43 and
+     --slate in 22.
+
+     The interactive colour is the slate blue rather than the olive, because
+     the sign-in artwork is teal: its dominant tones sit at hue 152–189, the
+     olive sits at 80, and 90 degrees of separation reads as tension beside a
+     picture rather than harmony. The slate is 38 degrees off — analogous — and
+     is the most saturated blue in the set (0.23 against the teal's 0.17), so
+     the button still reads as the action instead of dissolving into the
+     water. */
+  --accent: #485F73;          /* links, selection, focus, filled actions */
+  --accent-hover: #3B4E5E;
+  --accent-tint: rgba(72, 95, 115, 0.10);
+  --accent-tint-2: rgba(72, 95, 115, 0.18);
+  --accent-ink: #FFFFFF;
+
+  --primary: #485F73;
+  --primary-ink: #FFFFFF;
+
+  /* Navigation icons. Its own role rather than --slate or --ink-2: those mean
+     "foreign-key reference" and "muted text", and an icon borrowing a token
+     changes colour the day that role does.
+
+     In the accent's hue family, so the rail reads as coloured rather than grey,
+     but a step back from it — the current item's icon takes the full --accent,
+     and an inactive icon brighter than the active one would say the wrong
+     thing. 4.44 against the trough, where a UI graphic needs 3.0. */
+  --icon-nav: #5A7286;
+
+  /* ---- Semantic ----------------------------------------------------------- */
+  /* --coral and --warn are not in the supplied palette and cannot be derived
+     from it. A schema tool has to say "this migration destroys data" and "this
+     one rewrites every row", and neither reads as a shade of olive. */
+  /* Both olives keep a job. The deep one carries additive TEXT, where 7.18
+     beats the bright one's 4.93; the bright one fills chips and bands, where a
+     fill wants to be seen rather than read. */
+  --sage: #4B593E;            /* additive */
+  --sage-bright: #647345;
+  --sage-tint: rgba(100, 115, 69, 0.12);
+  --warn: #9A6B1E;            /* backfill */
+  --warn-tint: rgba(154, 107, 30, 0.10);
+  /* Text on --warn-tint. --warn itself lands at 4.1:1 there, which carries an
+     icon and not a 10.5px badge. */
+  --warn-ink: #8A5F1A;
+  --coral: #B4453C;           /* breaking */
+  --coral-tint: rgba(180, 69, 60, 0.10);
+  --slate: #516D73;           /* foreign-key references */
+  --slate-tint: rgba(81, 109, 115, 0.10);
+
+  /* The code ground. Fixed in both themes: a declaration is read against one
+     surface, and a token colour that has to hold on two grounds holds well on
+     neither.
+
+     Every token that carries content clears 4.5 on --code-bg — comments
+     included, because a generated declaration explains itself in them. The
+     gutter is the one exception at 3.43: line numbers are a reference, and a
+     gutter that scores like the code competes with it. */
+  --code-bg: #0F1417;
+  --code-ink: #DCE3DD;
+  --code-gutter: #616D65;
+  --code-gutter-hi: #8B958D;
+  --code-comment: #7C8D81;
+  --code-keyword: #8FB4D4;
+  --code-type: #A8C47E;
+  --code-string: #D8A96B;
+  --code-number: #C9946B;
+  --code-entity: #EDF2EC;
+  --code-ref: #7FC4C0;
+  --code-punct: #8A948C;
+
+  /* ---- Elevation ---------------------------------------------------------- */
+  /* Stacked soft drops rather than one blurred shadow, so the falloff reads as
+     ambient light. Measured off Linear, which uses four layers at decreasing
+     blur on the one filled element in its system. */
+  --edge-hi: rgba(255, 255, 255, 0.16);
+  --edge-lo: rgba(27, 32, 25, 0.05);
+  --drop: 0 1px 2px 0 rgba(27, 32, 25, 0.06);
+  --drop-lg:
+    0 3px 2px 0 rgba(27, 32, 25, 0.03),
+    0 1px 1px 0 rgba(27, 32, 25, 0.05),
+    0 0 1px 0 rgba(27, 32, 25, 0.07);
+
+  /* ---- Filled control surfaces -------------------------------------------- */
+  /* One sheen over whatever colour sits beneath it — a lit top edge and a
+     shaded bottom at a fixed opacity — plus a ring and two inset edges per
+     role. The edges are what read as dimension; a flat fill reads flat, and the
+     sheen is what stops the edges reading as a border.
+
+     One sheen rather than a gradient per state, because background-image cannot
+     be interpolated: a hover that swapped one gradient for another snapped
+     while the colour underneath eased. Held constant, the colour is the only
+     thing that moves, and it moves smoothly.
+
+     The ring and edge deltas come from the ones Cluely uses on its own primary
+     — +0.153 for the top light, −0.376 for the bottom shade, −0.259 for the
+     ring — so every control is lit from the same angle.
+
+     The ink clears 4.5 against the lightest point of every fill below. */
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.10) 0%, rgba(0, 0, 0, 0.08) 100%);
+  --primary-ring: #2E3D4A;
+  --primary-hi: #7D97AE;
+  --primary-shade: rgba(21, 28, 33, 0.55);
+
+  --accent-ring: #2E3D4A;
+  --accent-hi: #7D97AE;
+  --accent-shade: rgba(21, 28, 33, 0.55);
+
+  --coral-ring: #82322B;
+  --coral-hi: #D88F89;
+  --coral-shade: rgba(81, 31, 27, 0.55);
+
+  /* ---- Type --------------------------------------------------------------- */
+  /* Outfit is display only. At 13px it and Manrope have the same skeleton, so
+     pairing them as display-and-body spends two font loads on one voice.
+
+     Plex Mono is a third family because the console renders monospace in 160
+     places — SQL, .atl, table names, content hashes, versions — and neither of
+     the other two ships one. */
+  --display: 'Outfit', system-ui, -apple-system, sans-serif;
+  --sans: 'Manrope', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', 'Menlo', monospace;
+  --feat-mono: "zero" 1, "tnum" 1;   /* slashed zero + tabular */
+  --track-display: -0.025em;
+  --track-tight: -0.015em;
+
+  /* ---- Motion ------------------------------------------------------------- */
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --fast: 140ms;
+  --med: 220ms;
+
+  /* ---- Geometry ----------------------------------------------------------- */
+  /* 10px follows coss's --radius: 0.625rem, which is Cal.com's own value. The
+     Bathysphere ceiling was 8px. */
+  --radius-sm: 6px;
+  --radius: 8px;
+  --radius-lg: 10px;
+
+  /* Every input and every button is this tall, and they share --radius. One
+     token rather than a number per component: an input and the button under it
+     that differ by two pixels is the kind of drift nobody files and everybody
+     sees. 40px is also the smallest comfortable pointer target on a desktop. */
+  --control-h: 40px;
+
+  /* ---- Density ------------------------------------------------------------ */
+  --pad-page: 32px;
+  --gap: 12px;
+  --font-body: 13px;
+
+  background: var(--canvas-0);
+  color: var(--ink-1);
+  font-family: var(--sans);
+}
+
+/* ============================================================================
+   Dark
+
+   Every role is the same hue raised until it clears 4.5 against the dark
+   ground. The hairline is the exception: #BFBEAE scores 9.59 there and is left
+   alone, which is what keeps the two themes recognisably one palette.
+
+   Declared twice — once for the system preference and once for an explicit
+   choice — so a toggle wins in both directions. Only tokens change here;
+   nothing selects a component.
+   ============================================================================ */
+
+/* One selector, not two joined by a comma. `.datum:not([data-theme="light"])`
+   on its own matches whenever the attribute is set on <html> rather than on
+   the scope element — which is where it is set — so the union admitted dark
+   even for a surface that had opted out of it. Both halves have to fail to opt
+   out before dark applies. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .datum:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --canvas-0: #14171A;
+    --canvas-1: #101315;
+    --canvas-2: #191D20;
+    --canvas-3: #1E2226;
+    --canvas-4: #23282C;
+    --canvas-5: #22272B;
+
+    --ink-0: #ECEFE9;
+    --ink-1: #B9BEB4;
+    --ink-2: #878D82;
+    --ink-3: #5F655C;
+    --ink-4: #40453E;
+
+    --line-soft: rgba(191, 190, 174, 0.12);
+    --line: #333A33;
+    --line-strong: #454D44;
+
+    --accent: #64839E;
+    --accent-hover: #7A9BB8;
+    --accent-tint: rgba(100, 131, 158, 0.16);
+    --accent-tint-2: rgba(100, 131, 158, 0.26);
+    --accent-ink: #10141A;
+
+    --primary: #64839E;
+    --primary-ink: #10141A;
+
+    --icon-nav: #5F7688;
+
+    --sage: #71865D;
+    --sage-bright: #869A5E;
+    --sage-tint: rgba(113, 134, 93, 0.16);
+    --warn: #A97521;
+    --warn-tint: rgba(169, 117, 33, 0.16);
+    --warn-ink: #CE9840;
+    --coral: #C76158;
+    --coral-tint: rgba(199, 97, 88, 0.16);
+    --slate: #62858C;
+    --slate-tint: rgba(98, 133, 140, 0.16);
+
+    --edge-hi: rgba(255, 255, 255, 0.10);
+    --edge-lo: rgba(0, 0, 0, 0.20);
+    --drop: 0 1px 2px 0 rgba(0, 0, 0, 0.40);
+    --drop-lg:
+      0 3px 2px 0 rgba(0, 0, 0, 0.20),
+      0 1px 1px 0 rgba(0, 0, 0, 0.30),
+      0 0 1px 0 rgba(0, 0, 0, 0.40);
+
+    --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(0, 0, 0, 0.12) 100%);
+    --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(0, 0, 0, 0.12) 100%);
+  --primary-ring: #4A6176;
+    --primary-hi: #A9BAC9;
+    --primary-shade: rgba(16, 20, 26, 0.55);
+
+    --accent-ring: #4A6176;
+    --accent-hi: #A9BAC9;
+    --accent-shade: rgba(16, 20, 26, 0.55);
+
+    --coral-ring: #9C4840;
+    --coral-hi: #E0A19C;
+    --coral-shade: rgba(30, 12, 10, 0.55);
+  }
+}
+
+:root[data-theme="dark"] .datum,
+.datum[data-theme="dark"] {
+  color-scheme: dark;
+
+  --canvas-0: #14171A;
+  --canvas-1: #101315;
+  --canvas-2: #191D20;
+  --canvas-3: #1E2226;
+  --canvas-4: #23282C;
+  --canvas-5: #22272B;
+
+  --ink-0: #ECEFE9;
+  --ink-1: #B9BEB4;
+  --ink-2: #878D82;
+  --ink-3: #5F655C;
+  --ink-4: #40453E;
+
+  --line-soft: rgba(191, 190, 174, 0.12);
+  --line: #333A33;
+  --line-strong: #454D44;
+
+  --accent: #64839E;
+  --accent-hover: #7A9BB8;
+  --accent-tint: rgba(100, 131, 158, 0.16);
+  --accent-tint-2: rgba(100, 131, 158, 0.26);
+  --accent-ink: #10141A;
+
+  --primary: #64839E;
+  --primary-ink: #10141A;
+
+  --icon-nav: #5F7688;
+
+  --sage: #71865D;
+  --sage-bright: #869A5E;
+  --sage-tint: rgba(113, 134, 93, 0.16);
+  --warn: #A97521;
+  --warn-tint: rgba(169, 117, 33, 0.16);
+  --warn-ink: #CE9840;
+  --coral: #C76158;
+  --coral-tint: rgba(199, 97, 88, 0.16);
+  --slate: #62858C;
+  --slate-tint: rgba(98, 133, 140, 0.16);
+
+  --edge-hi: rgba(255, 255, 255, 0.10);
+  --edge-lo: rgba(0, 0, 0, 0.20);
+  --drop: 0 1px 2px 0 rgba(0, 0, 0, 0.40);
+  --drop-lg:
+    0 3px 2px 0 rgba(0, 0, 0, 0.20),
+    0 1px 1px 0 rgba(0, 0, 0, 0.30),
+    0 0 1px 0 rgba(0, 0, 0, 0.40);
+
+  --primary-ring: #4A6176;
+  --primary-hi: #A9BAC9;
+  --primary-shade: rgba(16, 20, 26, 0.55);
+
+  --accent-ring: #4A6176;
+  --accent-hi: #A9BAC9;
+  --accent-shade: rgba(16, 20, 26, 0.55);
+
+  --coral-ring: #9C4840;
+  --coral-hi: #E0A19C;
+  --coral-shade: rgba(30, 12, 10, 0.55);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .datum { --fast: 0ms; --med: 0ms; }
+}

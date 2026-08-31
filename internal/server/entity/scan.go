@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/rachitkumar205/atlantis/internal/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
@@ -88,8 +89,14 @@ func makeScanTarget(cm columnMeta) scanTarget {
 		return makeArrayScanTarget(t)
 	}
 
-	switch t.Name {
-	case "text", "varchar", "citext", "uuid", "numeric":
+	// By behaviour class, not by name: the scan shape is what the class is,
+	// and a second list here diverges from coltype.ProtoType silently — a
+	// column that falls through scans through fmt.Sprintf while the descriptor
+	// says the field is a message.
+	// An unregistered type falls past this switch to the scanAny fallback.
+	c, _ := coltype.ClassOf(t)
+	switch c {
+	case coltype.ClassString:
 		if !cm.nullable {
 			v := new(string)
 			return scanTarget{ptr: v, tag: scanString}
@@ -97,7 +104,7 @@ func makeScanTarget(cm columnMeta) scanTarget {
 		v := new(sql.NullString)
 		return scanTarget{ptr: v, tag: scanNullString}
 
-	case "bigint":
+	case coltype.ClassInt64:
 		if !cm.nullable {
 			v := new(int64)
 			return scanTarget{ptr: v, tag: scanInt64}
@@ -105,7 +112,7 @@ func makeScanTarget(cm columnMeta) scanTarget {
 		v := new(sql.NullInt64)
 		return scanTarget{ptr: v, tag: scanNullInt64}
 
-	case "int", "smallint":
+	case coltype.ClassInt32:
 		if !cm.nullable {
 			v := new(int32)
 			return scanTarget{ptr: v, tag: scanInt32}
@@ -113,7 +120,7 @@ func makeScanTarget(cm columnMeta) scanTarget {
 		v := new(sql.NullInt32)
 		return scanTarget{ptr: v, tag: scanNullInt32}
 
-	case "real":
+	case coltype.ClassFloat32:
 		if !cm.nullable {
 			v := new(float32)
 			return scanTarget{ptr: v, tag: scanFloat32}
@@ -124,7 +131,7 @@ func makeScanTarget(cm columnMeta) scanTarget {
 		v := new(sql.NullFloat64)
 		return scanTarget{ptr: v, tag: scanNullFloat}
 
-	case "double":
+	case coltype.ClassFloat64:
 		if !cm.nullable {
 			v := new(float64)
 			return scanTarget{ptr: v, tag: scanFloat64}
@@ -132,7 +139,7 @@ func makeScanTarget(cm columnMeta) scanTarget {
 		v := new(sql.NullFloat64)
 		return scanTarget{ptr: v, tag: scanNullFloat}
 
-	case "boolean":
+	case coltype.ClassBool:
 		if !cm.nullable {
 			v := new(bool)
 			return scanTarget{ptr: v, tag: scanBool}
@@ -140,7 +147,7 @@ func makeScanTarget(cm columnMeta) scanTarget {
 		v := new(sql.NullBool)
 		return scanTarget{ptr: v, tag: scanNullBool}
 
-	case "timestamptz", "date":
+	case coltype.ClassTime:
 		if !cm.nullable {
 			v := new(time.Time)
 			return scanTarget{ptr: v, tag: scanTime}
@@ -148,11 +155,11 @@ func makeScanTarget(cm columnMeta) scanTarget {
 		v := new(sql.NullTime)
 		return scanTarget{ptr: v, tag: scanNullTime}
 
-	case "bytea", "jsonb":
+	case coltype.ClassBytes:
 		v := new([]byte)
 		return scanTarget{ptr: v, tag: scanBytes}
 
-	case "vector":
+	case coltype.ClassVector:
 		if !cm.nullable {
 			v := new(pgvector.Vector)
 			return scanTarget{ptr: v, tag: scanVector}
@@ -160,14 +167,12 @@ func makeScanTarget(cm columnMeta) scanTarget {
 		var v *pgvector.Vector
 		return scanTarget{ptr: &v, tag: scanNullVector}
 
-	case "interval":
+	case coltype.ClassInterval:
 		// pgtype.Interval for both nullabilities — it carries Valid itself.
 		//
-		// This used to scan a string, which was consistent with the descriptor
-		// when that also said string. Now that both name
-		// atlantis.common.v1.Interval, setting a string on a message field
-		// would panic inside protoreflect rather than fail a comparison, so
-		// the two have to move together.
+		// Setting a string on a message field panics inside protoreflect
+		// rather than failing a comparison, so this and the descriptor have to
+		// name atlantis.common.v1.Interval together.
 		v := new(pgtype.Interval)
 		return scanTarget{ptr: v, tag: scanInterval}
 	}

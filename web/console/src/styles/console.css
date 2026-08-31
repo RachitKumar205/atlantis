@@ -2,6 +2,14 @@
    console.css — reset, shell, shared components
    ============================================================================ */
 
+/* The root element is not inside `.datum`, so it keeps the old tokens and its
+   colour scheme — which the browser uses for scrollbars, form controls and the
+   canvas outside the body. Pinned to match the theme this app is fixed to. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  background: #FAFAF8;
+}
+
 *, *::before, *::after { box-sizing: border-box; }
 * { margin: 0; padding: 0; }
 
@@ -25,7 +33,7 @@ input, select, textarea { font-family: inherit; color: inherit; }
 a { color: inherit; text-decoration: none; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--canvas-4); border-radius: 6px; border: 3px solid transparent; background-clip: content-box; }
-::-webkit-scrollbar-thumb:hover { background: #34343c; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--line-strong); background-clip: content-box; }
 
 /* ---- App layout ----------------------------------------------------------- */
 /* Grid columns animate with rail width, so the content reflows smoothly
@@ -118,8 +126,8 @@ a { color: inherit; text-decoration: none; }
 }
 .rail-org__face {
   display: flex; align-items: center;
-  width: 100%; height: 34px;
-  padding: 0 13px;   /* 13 + 18/2 = 22; +6 rail pad = 28 (rail center) ✓ */
+  width: 100%; height: 44px;
+  padding: 0 6px;   /* 6 + 32/2 = 22; +6 rail pad = 28 (rail centre) ✓ */
   border-radius: var(--radius);
   color: var(--ink-2);
   transition: color var(--fast) var(--ease), background var(--fast) var(--ease);
@@ -127,28 +135,29 @@ a { color: inherit; text-decoration: none; }
 .rail-org__face svg {
   width: 18px; height: 18px;
   flex-shrink: 0;
-  color: var(--ink-3);
+  color: var(--icon-nav);
   transition: color var(--fast) var(--ease);
 }
 .rail-org__face--btn:hover { background: var(--canvas-3); color: var(--ink-0); }
 .rail-org__face--btn:hover svg { color: var(--ink-1); }
 .rail-org__face--btn.is-open { background: var(--canvas-3); color: var(--ink-0); }
 .rail-org__face--btn.is-open svg { color: var(--accent); }
+/* Type only. The reveal belongs to .rail-org__block, which is the element that
+   collapses with the rail — this used to animate as well, from when it was a
+   direct child of the face, and the two margins were applied one after the
+   other. That is what put the name 22px off the monogram instead of 12.
+
+   Sans, not mono: the display name is prose. The slug beneath it is the
+   identifier, and it is the one that takes the mono face. */
 .rail-org__name {
-  font-family: var(--mono); font-size: 11.5px; color: var(--ink-1);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  margin-left: 0;
-  max-width: 0;
-  opacity: 0;
-  transition:
-    margin-left 220ms cubic-bezier(0.32, 0.72, 0, 1),
-    max-width 220ms cubic-bezier(0.32, 0.72, 0, 1),
-    opacity 200ms cubic-bezier(0.32, 0.72, 0, 1);
-}
-.rail:hover .rail-org__name {
-  margin-left: 11px;
-  max-width: 140px;
-  opacity: 1;
+  font-family: var(--sans);
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--ink-0);
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 /* The chevron only earns its space once the rail is open — collapsed, it
    would sit outside the 56px and be clipped mid-glyph. */
@@ -202,22 +211,52 @@ a { color: inherit; text-decoration: none; }
 .auth-switch__enter:hover { color: var(--accent-hover); background: var(--accent-tint); }
 .auth-switch__sep { width: 1px; height: 18px; background: var(--line); margin: 0 2px; }
 .rail__logo svg { display: block; }
-.rail__group { display: flex; flex-direction: column; gap: 1px; }
+/* The nav is coss's vertical tabs: a trough with the current item raised out
+   of it as a pill.
+
+   From the source — TabsList is `rounded-lg bg-muted p-0.5`, and the active
+   indicator is `rounded-md bg-background shadow-sm/5`. --muted there is black
+   at 4%, which is --canvas-1 here; the pill is --canvas-2, the same fill every
+   card uses.
+
+   A tint rather than a solid, so the trough sits on whatever the rail's ground
+   is instead of needing its own colour per theme. */
+.rail__group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--ink-0) 4%, transparent);
+}
 .rail__spacer { flex: 1; }
 
 .rail-btn {
   display: flex; align-items: center;
   width: 100%; height: 36px;
-  padding: 0 13px;   /* 13 + 18/2 = 22; +6 rail pad = 28 (rail center) ✓ */
+  /* 11 + 18/2 = 20; +6 rail pad +2 trough pad = 28 (rail centre) ✓
+     Was 13 before the nav gained a trough. The rail's invariant is that the
+     logo, every nav icon and the role badge share one x, and a trough pushes
+     its own padding into that sum. */
+  padding: 0 11px;
   border-radius: var(--radius);
+  border: 1px solid transparent;
   color: var(--ink-2);
   position: relative;
   font-size: 12.5px; font-weight: 500;
-  transition: color var(--fast) var(--ease), background var(--fast) var(--ease);
+  /* The three properties coss names, and only those. */
+  transition:
+    color var(--fast) var(--ease),
+    background-color var(--fast) var(--ease),
+    box-shadow var(--fast) var(--ease);
 }
+/* Coloured, not grey. --icon-nav is the accent's hue held a step back, so the
+   rail reads as part of the palette while the current item's icon — at the full
+   --accent — is still the strongest thing in the column. */
 .rail-btn svg {
   width: 18px; height: 18px;
   flex-shrink: 0;
+  color: var(--icon-nav);
   transition: color var(--fast) var(--ease);
 }
 .rail-btn__label {
@@ -237,19 +276,37 @@ a { color: inherit; text-decoration: none; }
   opacity: 1;
 }
 
-/* Brass active tick — slides in from the left edge of the rail. */
-.rail-btn::before {
-  content: ""; position: absolute; left: -3px; top: 50%;
-  width: 2px; height: 18px; background: var(--accent);
-  transform: translate(-2px, -50%); opacity: 0;
-  transition: transform var(--fast) var(--ease), opacity var(--fast) var(--ease);
-  border-radius: 0 1px 1px 0;
+/* The tick that slid in from the rail's edge is gone: in a trough the raised
+   pill is what says which item is current, and two markers for one state is one
+   more than the state has.
+
+   Hover only tints — lifting an inactive tab would give two raised items. */
+@media (hover: hover) {
+  .rail-btn:hover { color: var(--ink-0); background: color-mix(in srgb, var(--ink-0) 4%, transparent); }
+  /* Hover shows the colour the icon will hold once the tab is current. */
+  .rail-btn:hover svg { color: var(--accent); }
 }
-.rail-btn:hover { color: var(--ink-0); background: var(--canvas-3); }
-.rail-btn:hover svg { color: var(--ink-1); }
-.rail-btn.is-active { color: var(--ink-0); background: var(--canvas-3); }
+
+.rail-btn.is-active {
+  color: var(--ink-0);
+  background: var(--canvas-2);
+  box-shadow: inset 0 1px 0 var(--edge-hi), var(--drop);
+}
 .rail-btn.is-active svg { color: var(--accent); }
-.rail-btn.is-active::before { transform: translate(0, -50%); opacity: 1; }
+
+/* Sign out is the one item in the rail that ends the session, so its glyph
+   carries the colour the rest of the product uses for a destructive act. The
+   label stays in the ordinary ink: a red word in a nav column reads as a
+   warning about the page, and this is a control.
+   
+   It is never a tab, so there is no active state to reach — it keeps coral
+   through hover, where every other icon moves to the accent. */
+.rail-btn--danger svg { color: var(--coral); }
+
+@media (hover: hover) {
+  .rail-btn--danger:hover svg { color: var(--coral); }
+  .rail-btn--danger:hover { background: var(--coral-tint); color: var(--coral); }
+}
 .rail-btn:hover::before { transform: translate(0, -50%); opacity: .5; }
 .rail-btn.is-active:hover::before { opacity: 1; }
 
@@ -299,7 +356,7 @@ a { color: inherit; text-decoration: none; }
   padding-bottom: 18px;
 }
 .page__title { font-size: 22px; font-weight: 500; color: var(--ink-0); letter-spacing: -0.01em; line-height: 1.15; }
-.page__title.is-path { font-family: var(--mono); font-size: 19px; font-weight: 450; }
+.page__title.is-path { font-family: var(--mono); font-size: 19px; font-weight: 500; }
 .page__sub { font-size: 12.5px; color: var(--ink-2); margin-top: 5px; white-space: nowrap; }
 .page__head-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .page__body { flex: 1; overflow: auto; padding: var(--pad-page); }
@@ -367,7 +424,9 @@ a { color: inherit; text-decoration: none; }
 .badge::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .badge--add   { color: var(--sage);  background: var(--sage-tint); }
 .badge--break { color: var(--coral); background: var(--coral-tint); }
-.badge--back  { color: var(--accent); background: var(--accent-tint); }
+/* Amber, between the accent that marks attention and the coral that marks
+   alarm. A backfill breaks nothing and rewrites every row, which is neither. */
+.badge--back  { color: var(--warn-ink); background: var(--warn-tint); }
 /* Destructive inverts rather than taking a new hue. The palette has one alarm
    colour and both classes are at the top of the scale, so the fill — not the
    hue — is what separates "this loses rows" from "this breaks a caller" at a
@@ -568,3 +627,387 @@ a { color: inherit; text-decoration: none; }
 .hide { display: none !important; }
 .tick-in { animation: tickIn var(--med) var(--ease); }
 @keyframes tickIn { from { background: var(--accent-tint); } to { background: transparent; } }
+
+/* ---- Organisation face in the rail ----------------------------------------
+ *
+ * The monogram and name block, matching the shape the organisation rows in
+ * Cloud use. Square with the control radius rather than a circle: an
+ * organisation is not a person.
+ *
+ * 18px in the switcher menu, where it sits in a row of list items. The rail's
+ * own face takes the full 32px below.
+ */
+.rail-org__avatar {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: var(--radius-sm);
+  background: var(--canvas-1);
+  border: 1px solid var(--line-soft);
+  font-family: var(--display);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--ink-2);
+  text-transform: uppercase;
+}
+
+/* The rail's own face, at the size Cloud's organisation rows use: a 32px
+   monogram, the display name at 13.5, the slug under it in the mono face.
+   
+   The rail's invariant survives the change. .rail-org__face drops to 6px of
+   padding, so 6 rail + 6 face + 16 half-avatar = 28, the x every leading glyph
+   in the column shares. */
+.rail-org__face .rail-org__avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius);
+  font-size: 14px;
+}
+
+/* Collapses to nothing with the rest of the labels, so the rail keeps its
+   56px until it is hovered. */
+.rail-org__block {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  margin-left: 0;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition:
+    margin-left 220ms cubic-bezier(0.32, 0.72, 0, 1),
+    max-width 220ms cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 200ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.rail:hover .rail-org__block {
+  margin-left: 12px;   /* the gap Cloud's organisation rows use */
+  max-width: 140px;
+  opacity: 1;
+}
+
+
+.rail-org__slug {
+  font-family: var(--mono);
+  font-feature-settings: var(--feat-mono);
+  font-size: 11.5px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
+/* The modal was drawn against the dark shell, so its scrim and shadow are
+   literal rgba rather than tokens. On the light canvas a 62% black scrim reads
+   as a power cut; these restate the two of them at light-theme weights. */
+.datum .overlay {
+  background: rgba(27, 32, 25, 0.30);
+}
+
+.datum .modal {
+  box-shadow:
+    0 24px 60px rgba(21, 28, 33, 0.16),
+    0 2px 8px rgba(21, 28, 33, 0.07);
+}
+
+/* The onboarding dialog holds a result the others do not: every namespace read,
+   the suggestions, and the files to commit. It is wider than the 440px
+   confirmations and its body scrolls, so the gauge and the footer buttons stay
+   put over 209 tables. */
+.modal--onboard {
+  width: 620px;
+  max-height: calc(100dvh - 80px);
+  display: flex;
+  flex-direction: column;
+}
+
+.modal--onboard > form {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.modal--onboard .modal__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.modal--onboard .modal__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+
+/* ── coss components ───────────────────────────────────────────────────────
+   Anatomy and variant names follow coss; the values are Datum's. Radius is
+   --radius-lg, which is coss's 0.625rem. */
+
+.alert {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 12px 14px; border: 1px solid var(--line);
+  border-radius: var(--radius-lg); background: var(--canvas-1);
+}
+.alert__icon { flex: none; display: grid; place-items: center; height: 18px; color: var(--ink-2); }
+.alert__content { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.alert__title { font-size: 12.5px; font-weight: 500; color: var(--ink-0); }
+.alert__desc { font-size: 12px; color: var(--ink-2); line-height: 1.55; }
+
+.alert--error {
+  border-color: color-mix(in srgb, var(--coral) 36%, transparent);
+  background: color-mix(in srgb, var(--coral) 7%, var(--canvas-2));
+}
+.alert--error .alert__icon { color: var(--coral); }
+.alert--warning {
+  border-color: color-mix(in srgb, var(--warn) 34%, transparent);
+  background: color-mix(in srgb, var(--warn) 7%, var(--canvas-2));
+}
+.alert--warning .alert__icon { color: var(--warn); }
+.alert--info {
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  background: color-mix(in srgb, var(--accent) 6%, var(--canvas-2));
+}
+.alert--info .alert__icon { color: var(--accent); }
+.alert--success {
+  border-color: color-mix(in srgb, var(--sage-bright) 34%, transparent);
+  background: color-mix(in srgb, var(--sage-bright) 7%, var(--canvas-2));
+}
+.alert--success .alert__icon { color: var(--sage); }
+
+.progress { display: grid; grid-template-columns: 1fr auto; gap: 7px 12px; align-items: baseline; }
+.progress__label { font-size: 12px; font-weight: 500; color: var(--ink-0); }
+.progress__value { font-size: 11.5px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.progress__track {
+  grid-column: 1 / -1; height: 4px; border-radius: 2px; overflow: hidden;
+  background: color-mix(in srgb, var(--ink-0) 8%, transparent);
+}
+.progress__indicator {
+  height: 100%; background: var(--accent); border-radius: 2px;
+  transition: width var(--med) var(--ease);
+}
+
+.accordion { border: 1px solid var(--line-soft); border-radius: var(--radius-lg); overflow: hidden; }
+.accordion__item + .accordion__item { border-top: 1px solid var(--line-soft); }
+.accordion__trigger {
+  display: flex; align-items: center; gap: 9px; cursor: pointer;
+  padding: 11px 14px; font-size: 12.5px; color: var(--ink-1); list-style: none;
+}
+.accordion__trigger::-webkit-details-marker { display: none; }
+@media (hover: hover) {
+  .accordion__trigger:hover { background: color-mix(in srgb, var(--ink-0) 3%, transparent); }
+}
+.accordion__trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.accordion__caret { flex: none; color: var(--ink-3); transition: transform var(--med) var(--ease); }
+.accordion__item[open] > .accordion__trigger .accordion__caret { transform: rotate(180deg); }
+.accordion__label { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.accordion__meta { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.accordion__panel { padding: 2px 14px 13px 36px; }
+@media (prefers-reduced-motion: reduce) { .accordion__caret { transition: none; } }
+
+.radiocards { display: flex; flex-direction: column; gap: 10px; }
+.radiocard {
+  position: relative; display: flex; align-items: flex-start; gap: 13px;
+  padding: 15px 16px; cursor: pointer;
+  background: var(--canvas-2); border: 1px solid var(--line);
+  border-radius: var(--radius-lg); box-shadow: inset 0 1px 0 var(--edge-hi);
+  transition: border-color var(--med) var(--ease), background-color var(--med) var(--ease);
+}
+@media (hover: hover) { .radiocard:hover { border-color: var(--line-strong); } }
+.radiocard.is-selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 5%, var(--canvas-2));
+}
+.radiocard:has(.radiocard__input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.radiocard__input { position: absolute; opacity: 0; pointer-events: none; }
+.radiocard__icon {
+  flex: none; width: 34px; height: 34px; display: grid; place-items: center;
+  color: var(--icon-nav); border: 1px solid var(--line);
+  border-radius: var(--radius); background: var(--canvas-1);
+  transition: color var(--med) var(--ease), border-color var(--med) var(--ease);
+}
+.radiocard.is-selected .radiocard__icon { color: var(--accent); border-color: var(--accent); }
+.radiocard__text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.radiocard__title { font-size: 13.5px; font-weight: 500; color: var(--ink-0); }
+.radiocard__desc { font-size: 12px; color: var(--ink-2); line-height: 1.55; }
+.radiocard__dot {
+  flex: none; margin-left: auto; width: 15px; height: 15px; margin-top: 2px;
+  border: 1px solid var(--line-strong); border-radius: 50%; background: var(--canvas-2);
+  transition: border-color var(--med) var(--ease);
+}
+.radiocard.is-selected .radiocard__dot {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 4px var(--accent), inset 0 0 0 5px var(--canvas-2);
+}
+
+.separator { height: 1px; border: 0; margin: 0; background: var(--line-soft); }
+
+
+/* ── buttons ───────────────────────────────────────────────────────────────
+   The same treatment Cloud's controls carry, at the console's 32px density.
+   The roles are the other way round in the two apps: here .btn is the neutral
+   control and .btn--brass is the filled one.
+
+   background-color and background-image are set separately throughout. The
+   shorthand drops the gradient to `none` while the colour animates, which
+   reads as a black flash for one frame of the hover transition. */
+.datum .btn {
+  background-color: var(--canvas-2);
+  background-image: none;
+  color: var(--ink-0);
+  border-color: var(--line);
+  box-shadow: inset 0 1px 0 var(--edge-hi), var(--drop);
+  transition:
+    background-color var(--med) var(--ease),
+    border-color var(--med) var(--ease),
+    color var(--med) var(--ease),
+    box-shadow var(--med) var(--ease),
+    scale 200ms ease-out;
+}
+
+/* Behind a hover query. On touch, :hover latches after a tap and the button
+   stays looking pressed until something else is tapped. */
+@media (hover: hover) {
+  .datum .btn:hover:not(:disabled) {
+    background-color: var(--canvas-3);
+    border-color: var(--line-strong);
+  }
+}
+
+.datum .btn:active:not(:disabled) {
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.12);
+  scale: 0.98;
+}
+
+.datum .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.datum .btn:disabled { box-shadow: none; }
+
+.datum .btn--brass {
+  background-color: var(--accent);
+  background-image: var(--sheen);
+  color: var(--accent-ink);
+  border-color: var(--accent-ring);
+  box-shadow:
+    inset 0 1px 0 var(--accent-hi),
+    inset 0 -1px 0 var(--accent-shade),
+    var(--drop-lg);
+}
+
+@media (hover: hover) {
+  .datum .btn--brass:hover:not(:disabled) {
+    background-color: var(--accent-hover);
+    border-color: var(--accent-ring);
+  }
+}
+
+.datum .btn--brass:active:not(:disabled) {
+  background-color: var(--accent-hover);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+/* Flat, and the only one that is: a ghost sits inside toolbars and dialog
+   footers beside a raised control, and two raised controls read as two
+   primary actions. */
+.datum .btn--ghost {
+  background-color: transparent;
+  background-image: none;
+  color: var(--ink-2);
+  border-color: transparent;
+  box-shadow: none;
+}
+
+@media (hover: hover) {
+  .datum .btn--ghost:hover:not(:disabled) {
+    background-color: color-mix(in srgb, var(--ink-0) 5%, transparent);
+    border-color: transparent;
+    color: var(--ink-0);
+  }
+}
+
+.datum .btn--ghost:active:not(:disabled) { box-shadow: none; }
+
+.datum .btn--danger {
+  background-color: var(--canvas-2);
+  background-image: none;
+  color: var(--coral);
+  border-color: color-mix(in srgb, var(--coral) 36%, transparent);
+  box-shadow: inset 0 1px 0 var(--edge-hi), var(--drop);
+}
+
+@media (hover: hover) {
+  .datum .btn--danger:hover:not(:disabled) {
+    background-color: var(--coral-tint);
+    border-color: var(--coral);
+    color: var(--coral);
+  }
+}
+
+
+/* ── display face ──────────────────────────────────────────────────────────
+   Outfit on headings, Manrope on everything read as prose or as a control
+   label. The negative tracking matches Cloud's wordmark: Outfit sets loose at
+   these sizes, and a heading beside 12px Manrope reads as wider than it is.
+
+   Not on .page__title.is-path, which is a schema path and stays monospaced. */
+.datum .page__title:not(.is-path),
+.datum .modal__title {
+  font-family: var(--display);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.datum .radiocard__title,
+.datum .alert__title,
+.datum .progress__label {
+  font-family: var(--display);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+/* Outfit's numerals carry the counts on the review step. Tabular so the three
+   cells stay aligned when one reads 209 and another reads 3. */
+.datum .stat__n {
+  font-family: var(--display);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+
+/* ── Alert Dialog ──────────────────────────────────────────────────────────
+   Sits over the flow that raised it, so it needs a scrim above .overlay's 100.
+   No pointer handler on this one: an alertdialog is dismissed by answering it,
+   and a stray click on the scrim is not an answer. */
+.overlay--nested { z-index: 120; }
+.datum .overlay--nested { background: rgba(27, 32, 25, 0.34); }
+
+.modal--alert { width: 420px; }
+.alertdialog { padding: 22px 22px 18px; }
+.alertdialog__title {
+  font-family: var(--display);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--ink-0);
+}
+.alertdialog__desc {
+  margin-top: 8px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+
+/* The head and the footer hold their height so the body is what absorbs a
+   long result. Flex items shrink by default, so without this a tall panel
+   squeezes the chrome instead of scrolling. */
+.modal--onboard > .modal__head,
+.modal--onboard .modal__foot { flex: none; }
+.modal--onboard .modal__body { overscroll-behavior: contain; }

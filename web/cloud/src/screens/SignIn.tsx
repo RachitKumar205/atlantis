@@ -19,7 +19,7 @@ export function SignIn({ providers, error, busy, onSubmit, onSignUp, onForgot }:
   }
 
   return (
-    <Card title="Sign in">
+    <Card title="Log in to Atlantis">
       {error ? <Notice kind="error">{error}</Notice> : null}
 
       <form onSubmit={submit}>

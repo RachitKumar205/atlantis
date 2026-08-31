@@ -31,6 +31,7 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/dsl/sqlvalidate"
 	"github.com/rachitkumar205/atlantis/internal/introspect"
 	"github.com/rachitkumar205/atlantis/internal/obs"
+	"github.com/rachitkumar205/atlantis/internal/secrets"
 )
 
 // Service is safe for concurrent use; one instance per process.
@@ -55,7 +56,36 @@ import (
 // list falling back to a global wildcard when unset — the shipped default —
 // makes every mutation-capable caller an operator.
 type Service struct {
-	pool               *pgxpool.Pool
+	// pool is the control database: everything under the atlantis schema —
+	// the checkpoint, schema versions, lineage, plans, callers, capabilities,
+	// jobs and workflows. It is the pod's own Postgres.
+	pool *pgxpool.Pool
+
+	// managed is the database whose schema this server manages: what
+	// introspection reads and what DDL is applied to. Equal to pool unless a
+	// managed DSN was configured, which is how every deployment predating the
+	// split keeps working.
+	//
+	// The two are separate connections, so an apply cannot be one transaction
+	// across both. DDL commits to managed first and the checkpoint is written
+	// to pool after, which fails toward the record lagging the database —
+	// the state the drift checks already detect and report on the next plan.
+	// The other order would have atlantis claim a change that did not happen.
+	managed *pgxpool.Pool
+
+	// managedFromEnv records that `managed` came from ATL_MANAGED_PG_URL
+	// rather than the table. An environment DSN pins the managed database and
+	// is never reopened from atlantis.managed_database.
+	managedFromEnv bool
+
+	// managedState caches the pool opened from the stored DSN, and the version
+	// it was opened at. See manageddb.go.
+	managedState managedState
+
+	// keys seals the managed database's DSN. Nil leaves it unsettable, which
+	// is every deployment that configures no keyring.
+	keys secrets.Keyring
+
 	mirrorDir          string
 	mirrorEnabled      bool
 	allowApplyMutation bool
@@ -152,12 +182,36 @@ type Config struct {
 	// itself is populated by the slog handler installed in
 	// cmd/server/main.go's buildLogger — see internal/obs/logring.go.
 	LogRing *obs.LogRing
+
+	// Keys seals the managed database's DSN in atlantis.managed_database.
+	// Nil leaves it unsettable and the server manages its own database.
+	Keys secrets.Keyring
+
+	// Managed is the database whose schema this server manages. Nil means the
+	// control database manages itself.
+	//
+	// Set from ATL_MANAGED_PG_URL. An organisation that adopted an existing
+	// database points this at it: the tables are already there, so introspection
+	// reads them and apply emits no DDL for what already matches.
+	Managed *pgxpool.Pool
 }
 
 // New returns a Service backed by pool.
+//
+// cfg.Managed names the database whose schema is managed. Nil means the
+// control database manages itself, which is what every deployment before the
+// split did and still does.
 func New(pool *pgxpool.Pool, cfg Config) *Service {
+	managed := cfg.Managed
+	fromEnv := managed != nil
+	if managed == nil {
+		managed = pool
+	}
 	return &Service{
 		pool:               pool,
+		managed:            managed,
+		managedFromEnv:     fromEnv,
+		keys:               cfg.Keys,
 		mirrorDir:          cfg.MirrorDir,
 		mirrorEnabled:      cfg.MirrorEnabled,
 		allowApplyMutation: cfg.AllowApplyMutation,
@@ -532,13 +586,20 @@ func (s *Service) PlanSchema(ctx context.Context, req *adminpb.PlanSchemaRequest
 	// apply runs. Read-only: pg_available_extensions + pg_extension.
 	// Errors here don't fail the plan — the extension check is best-
 	// effort, and the apply path will hard-refuse if anything's missing.
-	extStatuses, _ := inspectExtensions(ctx, s.pool, newIR)
+	// The database the plan describes. A failure here is reported as no
+	// extension information rather than a failed plan, matching how the
+	// drift reads below degrade.
+	mpool, mperr := s.managedPool(ctx)
+	if mperr != nil {
+		return nil, fmt.Errorf("plan: %w", mperr)
+	}
+	extStatuses, _ := inspectExtensions(ctx, mpool, newIR)
 
 	// Surface live unique-index drift so `tide plan` warns before apply.
 	// Best-effort and read-only (no lock); the apply path re-checks inside
 	// the locked tx and refuses. The error is recorded rather than swallowed as
 	// extensions are, so a check that could not run does not read as clean.
-	indexDrift, driftNotes, driftErr := introspect.DetectUniqueIndexDrift(ctx, s.pool, newIR)
+	indexDrift, driftNotes, driftErr := introspect.DetectUniqueIndexDrift(ctx, mpool, newIR)
 	var driftErrMsg string
 	if driftErr != nil {
 		driftErrMsg = driftErr.Error()
@@ -548,7 +609,7 @@ func (s *Service) PlanSchema(ctx context.Context, req *adminpb.PlanSchemaRequest
 	// constraint that diverged from the .atl at adoption stays divergent and
 	// only surfaces as a runtime 23514. Read-only here; the apply path
 	// re-checks inside the locked tx and refuses.
-	checkDrift, checkNotes, checkErr := introspect.DetectCheckConstraintDrift(ctx, s.pool, newIR)
+	checkDrift, checkNotes, checkErr := introspect.DetectCheckConstraintDrift(ctx, mpool, newIR)
 	var checkErrMsg string
 	if checkErr != nil {
 		checkErrMsg = checkErr.Error()
@@ -556,7 +617,7 @@ func (s *Service) PlanSchema(ctx context.Context, req *adminpb.PlanSchemaRequest
 
 	// And column type/width drift (live column type ≠ declared) — the
 	// checkpoint→live half of the varchar-length gap. Read-only here.
-	columnDrift, columnNotes, columnErr := introspect.DetectColumnTypeDrift(ctx, s.pool, newIR)
+	columnDrift, columnNotes, columnErr := introspect.DetectColumnTypeDrift(ctx, mpool, newIR)
 	var columnErrMsg string
 	if columnErr != nil {
 		columnErrMsg = columnErr.Error()
@@ -748,6 +809,36 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 		return nil, fmt.Errorf("advisory lock: %w", err)
 	}
 
+	// The transaction the schema is read from and the DDL is applied to.
+	//
+	// The same transaction as the control one when no managed database is
+	// configured, which is every deployment predating the split: one
+	// connection, one commit, exactly as before.
+	//
+	// Two separate databases cannot share a transaction, so mtx commits before
+	// the checkpoint is written and the two are consistent only across that
+	// gap. Ordered so a crash inside it leaves the database ahead of the
+	// record — what the drift checks above already detect — rather than a
+	// record of a change that did not happen.
+	mpool, err := s.managedPool(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("apply: %w", err)
+	}
+	mtx := tx
+	if mpool != s.pool {
+		m, err := mpool.BeginTx(ctx, pgx.TxOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("apply: begin on the managed database: %w", err)
+		}
+		defer func() { _ = m.Rollback(context.Background()) }()
+		// The same lock, on the database the DDL lands in: two servers sharing
+		// a managed database must not apply over each other.
+		if _, err := m.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", int64(0x70636661706c79)); err != nil {
+			return nil, fmt.Errorf("advisory lock on the managed database: %w", err)
+		}
+		mtx = m
+	}
+
 	if err := s.upsertCallerFiles(ctx, tx, req.GetCaller(), reqFiles); err != nil {
 		return nil, err
 	}
@@ -867,7 +958,7 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 	// authoritative. The operator either drops the index, declares the
 	// uniqueness, or sets ATLANTIS_ALLOW_INDEX_DRIFT=1 to proceed knowingly.
 	if os.Getenv("ATLANTIS_ALLOW_INDEX_DRIFT") != "1" {
-		drift, _, derr := introspect.DetectUniqueIndexDrift(ctx, tx, newIR)
+		drift, _, derr := introspect.DetectUniqueIndexDrift(ctx, mtx, newIR)
 		if derr != nil {
 			return nil, fmt.Errorf("apply: index-drift check failed: %w", derr)
 		}
@@ -925,7 +1016,7 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 	// ATLANTIS_ALLOW_CHECK_DRIFT=1 to proceed knowingly (e.g. a cosmetic
 	// `col IS NULL OR ...` difference).
 	if os.Getenv("ATLANTIS_ALLOW_CHECK_DRIFT") != "1" {
-		drift, _, derr := introspect.DetectCheckConstraintDrift(ctx, tx, newIR)
+		drift, _, derr := introspect.DetectCheckConstraintDrift(ctx, mtx, newIR)
 		if derr != nil {
 			return nil, fmt.Errorf("apply: check-drift check failed: %w", derr)
 		}
@@ -941,7 +1032,7 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 	// operator reconciles the column out-of-band, or sets
 	// ATLANTIS_ALLOW_COLUMN_DRIFT=1 to proceed knowingly.
 	if os.Getenv("ATLANTIS_ALLOW_COLUMN_DRIFT") != "1" {
-		drift, _, derr := introspect.DetectColumnTypeDrift(ctx, tx, newIR)
+		drift, _, derr := introspect.DetectColumnTypeDrift(ctx, mtx, newIR)
 		if derr != nil {
 			return nil, fmt.Errorf("apply: column-drift check failed: %w", derr)
 		}
@@ -950,8 +1041,16 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 		}
 	}
 
-	if _, err := tx.Exec(ctx, scripts.Up); err != nil {
+	if _, err := mtx.Exec(ctx, scripts.Up); err != nil {
 		return nil, fmt.Errorf("apply: %w", err)
+	}
+
+	// The DDL lands before the record of it. See the note on mtx above for
+	// why this order and not the other.
+	if mtx != tx {
+		if err := mtx.Commit(ctx); err != nil {
+			return nil, fmt.Errorf("apply: commit to the managed database: %w", err)
+		}
 	}
 
 	meta := versionMeta{

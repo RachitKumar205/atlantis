@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react'
+import { TrashIcon } from '@phosphor-icons/react'
 
 import { Button, Card, Field, LinkButton, Notice } from '@/components/ui'
 import {
@@ -70,6 +71,7 @@ export function Organisations({
 
   return (
     <Card
+      mark={false}
       title={empty ? 'Create your organisation' : 'Your organisations'}
       subtitle={
         empty
@@ -98,16 +100,19 @@ export function Organisations({
             onChange={e => setName(e.target.value)}
             required
             autoFocus={empty}
+            /*
+              Through the prop, so it renders inside the field and takes the
+              field's own spacing. As a sibling paragraph it sat in the gap
+              between two fields, 18px below the input it described and flush
+              against the label of the next one.
+
+              Said before the field is submitted rather than after it is
+              refused. The rule is enforced in three places — this hint, Go, and
+              a CHECK constraint — and only the last of those is the
+              enforcement.
+            */
+            hint="Lowercase letters, digits and hyphens. This becomes part of every address and certificate for the organisation, and cannot be changed."
           />
-          {/*
-            Said before the field is submitted rather than after it is refused.
-            The rule is enforced in three places — this hint, Go, and a CHECK
-            constraint — and only the last of those is the enforcement.
-          */}
-          <p className="hint">
-            Lowercase letters, digits and hyphens. This becomes part of every
-            address and certificate for the organisation, and cannot be changed.
-          </p>
           <Field
             label="Display name (optional)"
             name="display_name"
@@ -160,21 +165,58 @@ function OrgRow({
 
   return (
     <li className="orglist__item">
-      <span className="orglist__name">{org.displayName || org.name}</span>
+      {/*
+        The row is the link, by way of an ::after that covers it. The delete
+        control sits above that overlay rather than inside the anchor, which is
+        how the whole row can be clickable without nesting one interactive
+        element in another.
+      */}
+      <span className="orglist__avatar" aria-hidden="true">
+        {(org.displayName || org.name).trim().charAt(0)}
+      </span>
 
-      {canEnter(org) ? (
-        <a className="orglist__enter" href={enterURL(org.url, RETURN_TO)}>Open</a>
-      ) : (
-        <span className="orglist__state">{label}</span>
-      )}
+      <span className="orglist__main">
+        {canEnter(org) ? (
+          <a className="orglist__link" href={enterURL(org.url, RETURN_TO)}>
+            {org.displayName || org.name}
+          </a>
+        ) : (
+          <span className="orglist__name">{org.displayName || org.name}</span>
+        )}
+        {/* The slug carries into every address and certificate the organisation
+            has, so it is shown rather than left to be remembered. Only when it
+            differs from the name above it. */}
+        {org.displayName && org.displayName !== org.name ? (
+          <span className="orglist__meta">{org.name}</span>
+        ) : null}
+      </span>
 
-      {canDelete(org) && !confirming ? (
-        <LinkButton onClick={() => setConfirming(true)}>Delete</LinkButton>
+      {/* A word, not just a colour. Absent while the organisation is simply
+          ready, because a badge on every row says nothing. */}
+      {!canEnter(org) ? (
+        <span className={`badge ${org.state === 'deleted' ? 'badge--danger' : 'badge--warn'}`}>
+          {label}
+        </span>
       ) : null}
 
-      {canRestore(org) ? (
-        <LinkButton onClick={() => onRestore(org.name)}>Restore</LinkButton>
-      ) : null}
+      <span className="orglist__actions">
+        {canDelete(org) && !confirming ? (
+          <button
+            type="button"
+            className="btn btn--inline btn--outline-danger"
+            onClick={() => setConfirming(true)}
+          >
+            <TrashIcon aria-hidden="true" weight="regular" />
+            Delete
+          </button>
+        ) : null}
+
+        {canRestore(org) ? (
+          <LinkButton className="linkbtn linkbtn--quiet" onClick={() => onRestore(org.name)}>
+            Restore
+          </LinkButton>
+        ) : null}
+      </span>
 
       {/*
         Said where the decision is made. A deleted organisation is not gone, and

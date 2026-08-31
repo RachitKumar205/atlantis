@@ -312,6 +312,18 @@ func (k *Kube) atlantisEnv() []corev1.EnvVar {
 				},
 			},
 		},
+		{
+			// Seals the managed database's DSN in atlantis.managed_database.
+			// Minted once per organisation and never rotated automatically:
+			// a new keyset cannot decrypt what the old one sealed.
+			Name: "ATL_DATA_KEY",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: secretDataKey},
+					Key:                  "keyset",
+				},
+			},
+		},
 		{Name: "TLS_CERT_FILE", Value: mountAtlantisTLS + "/tls.crt"},
 		{Name: "TLS_KEY_FILE", Value: mountAtlantisTLS + "/tls.key"},
 		{Name: "TLS_CA_FILE", Value: mountAtlantisTLS + "/ca.crt"},

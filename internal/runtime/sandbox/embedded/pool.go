@@ -19,8 +19,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/rachitkumar205/atlantis/internal/coltype"
 	"github.com/rachitkumar205/atlantis/internal/runtime"
 )
 
@@ -50,9 +52,22 @@ func newLocalPool(ctx context.Context, url string) (*localPool, error) {
 		if _, err := conn.Exec(ctx, "SET TIME ZONE 'UTC'"); err != nil {
 			return fmt.Errorf("set timezone: %w", err)
 		}
-		// Deliberately no pgvector registration — the embedded PG
-		// doesn't have the extension. Vector queries belong to the
-		// sim backend.
+		// No pgvector registration — the embedded PG doesn't have the
+		// extension. Vector queries belong to the sim backend.
+		//
+		// The text codecs are registered, because the types needing them are
+		// built in: without them a read of an inet or a range column fails
+		// with "cannot scan in binary format into *string" here but not
+		// against a server pool, and the sandbox would disagree with
+		// production on a schema both accept.
+		tm := conn.TypeMap()
+		for _, name := range coltype.TextCodecTypes() {
+			t, ok := tm.TypeForName(name)
+			if !ok {
+				continue
+			}
+			tm.RegisterType(&pgtype.Type{Name: name, OID: t.OID, Codec: &pgtype.TextCodec{}})
+		}
 		return nil
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)

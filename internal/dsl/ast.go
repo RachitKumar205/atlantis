@@ -136,11 +136,12 @@ func (*ModIdentityDecl) isFieldModifier()           {}
 func (*ModIdentityDecl) ModifierKind() ModifierKind { return ModIdentity }
 func (m *ModIdentityDecl) Position() Position       { return m.Pos }
 
-// ModSerialDecl marks a column as BIGSERIAL (legacy auto-increment). Like
-// Identity, it's excluded from server-emitted INSERTs; unlike Identity, the
-// SQL emitter renders the column type as `BIGSERIAL` rather than
-// `BIGINT GENERATED ALWAYS AS IDENTITY`. Only valid on `bigint` fields —
-// the IR validator enforces this.
+// ModSerialDecl marks a column as a sequence-backed integer (legacy
+// auto-increment). Like Identity, it's excluded from server-emitted INSERTs;
+// unlike Identity, the SQL emitter renders the column type as
+// `SMALLSERIAL`/`SERIAL`/`BIGSERIAL` rather than
+// `<type> GENERATED ALWAYS AS IDENTITY`. Only valid on integer fields — the
+// IR validator enforces this.
 type ModSerialDecl struct{ Pos Position }
 
 func (*ModSerialDecl) isFieldModifier()           {}
@@ -864,3 +865,19 @@ type EphemeralDecl struct {
 func (*EphemeralDecl) isDecl()              {}
 func (e *EphemeralDecl) Position() Position { return e.Pos }
 func (e *EphemeralDecl) DeclName() string   { return e.Name }
+
+// EnumDecl: `enum Name in namespace { a, b, "in progress" }`.
+//
+// Values are the labels in declaration order, which is the order Postgres
+// sorts them in. A label that is not an identifier is written as a quoted
+// string; Postgres accepts any text.
+type EnumDecl struct {
+	Pos       Position
+	Name      string
+	Namespace string
+	Values    []string
+}
+
+func (*EnumDecl) isDecl()              {}
+func (e *EnumDecl) Position() Position { return e.Pos }
+func (e *EnumDecl) DeclName() string   { return e.Name }

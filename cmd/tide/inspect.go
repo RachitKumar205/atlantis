@@ -15,6 +15,7 @@ import (
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/dsl/atlemit"
 )
 
 // cmdInspect exits with:
@@ -260,7 +261,10 @@ func runGenerate(ctx context.Context, client *adminClient, cfg *tideConfig,
 			kept++
 			continue
 		}
-		if err := os.WriteFile(path, []byte(e.GetAtl()), 0o644); err != nil {
+		// The header opens the file, once. The server returns declarations
+		// without one: a file holding several carries a single header.
+		body := atlemit.Header("") + "\n" + e.GetAtl()
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 			fmt.Fprintln(os.Stderr, "tide inspect --generate: write", path, err)
 			return 3
 		}

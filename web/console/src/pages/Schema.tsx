@@ -1,9 +1,13 @@
-import { useMemo, useEffect } from 'react'
+import { useMemo, useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearch, useNavigate } from '@tanstack/react-router'
-import { Box, Link as LinkIcon, ShieldQuestion } from 'lucide-react'
+// LinkSimple aliased, because @tanstack/react-router's Link is the other thing
+// called that in this codebase and the JSX here reads clearer with the suffix.
+import { ArrowSquareIn, Cube, LinkSimple as LinkIcon, ShieldChevron } from '@phosphor-icons/react'
 import { api, indexPlansByEntity, planClassBadge, planClassLabel, queries } from '@/api/client'
 import { PageShell } from '@/components/PageShell'
+import { OnboardingDialog } from '@/components/OnboardingDialog'
+import { takeOnboardingPending } from '@/lib/onboarding'
 
 // ── IR shapes (mirror internal/dsl/ir.go) ──────────────────────────────────
 interface IRFieldType {
@@ -174,8 +178,40 @@ export function Schema() {
   const ver = (canonical?.ir as IRRoot | undefined)?.version
   const sub = `${entities.length} entit${entities.length === 1 ? 'y' : 'ies'} · ${namespaces.length} namespace${namespaces.length === 1 ? '' : 's'}${ver ? ` · server v${String(ver).padStart(4, '0')}` : ''}`
 
+  // Every arrival from Cloud opens the flow, whatever the organisation holds
+  // and however many times it has been closed before. While onboarding is being
+  // written, seeing it costs a sign-in; the conditions that will gate it are in
+  // lib/onboarding.ts and nothing reads them yet.
+  //
+  // takeOnboardingPending clears the mark, so one sign-in opens it once rather
+  // than on every return to this page.
+  //
+  // Which step it opens at is the difference between the two entry points: an
+  // arrival is asked what it wants, and a button press already said.
+  const [onboarding, setOnboarding] = useState<'welcome' | 'connect' | null>(null)
+  useEffect(() => {
+    if (takeOnboardingPending()) setOnboarding('welcome')
+  }, [])
+
+  function closeOnboarding() {
+    setOnboarding(null)
+  }
+
   return (
-    <PageShell title="Schema" sub={sub} flush>
+    <PageShell
+      title="Schema"
+      sub={sub}
+      flush
+      action={
+        <button className="btn btn--brass" type="button" onClick={() => setOnboarding('connect')}>
+          <ArrowSquareIn size={14} />
+          Import a database
+        </button>
+      }
+    >
+    {onboarding && (
+      <OnboardingDialog start={onboarding} onClose={closeOnboarding} />
+    )}
     <div className="schema">
       {/* ── Namespace pane ── */}
       <div className="schema__pane">
@@ -216,7 +252,27 @@ export function Schema() {
           ) : nsEntities.length === 0 ? (
             <div className="empty">
               <div className="empty__title">No entities</div>
-              <div className="empty__sub">{selectedNS ? 'This namespace has no entities yet.' : 'Pick a namespace.'}</div>
+              {/* With no namespaces there is nothing to pick, so the empty
+                  pane names the one action that fills it. */}
+              {namespaces.length === 0 ? (
+                <>
+                  <div className="empty__sub">
+                    Import an existing database to generate declarations for it.
+                  </div>
+                  <button
+                    className="btn btn--brass"
+                    type="button"
+                    onClick={() => setOnboarding('welcome')}
+                  >
+                    <ArrowSquareIn size={14} />
+                    Import a database
+                  </button>
+                </>
+              ) : (
+                <div className="empty__sub">
+                  {selectedNS ? 'This namespace has no entities yet.' : 'Pick a namespace.'}
+                </div>
+              )}
             </div>
           ) : (
             nsEntities.map(e => (
@@ -296,7 +352,7 @@ export function Schema() {
                   })}
                   title="Open this entity in a sandbox — sub-millisecond boot, fully isolated."
                 >
-                  <Box size={14} />
+                  <Cube size={14} />
                   <span>Try in sandbox</span>
                 </button>
               </div>
@@ -355,7 +411,7 @@ export function Schema() {
                         onClick={() => navigate({ to: '/approvals' })}
                         title="Review this change on the Approvals page"
                       >
-                        <ShieldQuestion size={14} />
+                        <ShieldChevron size={14} />
                         <span>Review</span>
                       </button>
                     </div>

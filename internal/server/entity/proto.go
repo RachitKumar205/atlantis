@@ -3,6 +3,7 @@ package entity
 import (
 	"fmt"
 
+	"github.com/rachitkumar205/atlantis/internal/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/schema"
 	"google.golang.org/protobuf/reflect/protodesc"
@@ -28,10 +29,11 @@ func buildProtoDescriptors(e *dsl.Entity) (protoreflect.FileDescriptor, error) {
 		Syntax:  strPtr("proto3"),
 	}
 
-	// Whether the Timestamp import is needed.
+	// Whether the Timestamp import is needed. Asked of the class, so a type
+	// added to it publishes a message field the descriptor can resolve.
 	needsTimestamp := false
 	for _, f := range e.Fields {
-		if f.Type.Name == "timestamptz" || f.Type.Name == "date" {
+		if c, ok := coltype.ClassOf(f.Type); ok && c == coltype.ClassTime {
 			needsTimestamp = true
 			break
 		}
@@ -265,53 +267,49 @@ func applyProtoFieldType(fd *descriptorpb.FieldDescriptorProto, t dsl.FieldType)
 	setProtoType(fd, t)
 }
 
+// setProtoType publishes the descriptor field type for a column.
+//
+// It reads coltype.ProtoType, which is the same function `tide codegen` emits
+// from, so a generated client and this dispatcher describe a column the same
+// way. A second switch here diverges silently: a client putting a message on
+// the wire against a descriptor declaring a string unmarshals without error and
+// leaves the field unset, so the value vanishes between the caller and
+// Postgres.
+//
+// An unmapped type falls to string, which is what a column of no known type
+// stringifies to on the read path.
 func setProtoType(fd *descriptorpb.FieldDescriptorProto, t dsl.FieldType) {
-	switch t.Name {
-	case "smallint", "int":
-		typ := descriptorpb.FieldDescriptorProto_TYPE_INT32
-		fd.Type = &typ
-	case "bigint":
-		typ := descriptorpb.FieldDescriptorProto_TYPE_INT64
-		fd.Type = &typ
-	case "real":
-		typ := descriptorpb.FieldDescriptorProto_TYPE_FLOAT
-		fd.Type = &typ
+	set := func(k descriptorpb.FieldDescriptorProto_Type) {
+		fd.Type = &k
+	}
+	pt, err := coltype.ProtoType(t)
+	if err != nil {
+		set(descriptorpb.FieldDescriptorProto_TYPE_STRING)
+		return
+	}
+	switch pt {
+	case "int32":
+		set(descriptorpb.FieldDescriptorProto_TYPE_INT32)
+	case "int64":
+		set(descriptorpb.FieldDescriptorProto_TYPE_INT64)
+	case "float", "repeated float":
+		set(descriptorpb.FieldDescriptorProto_TYPE_FLOAT)
 	case "double":
-		typ := descriptorpb.FieldDescriptorProto_TYPE_DOUBLE
-		fd.Type = &typ
-	case "text", "varchar", "citext", "uuid", "numeric":
-		typ := descriptorpb.FieldDescriptorProto_TYPE_STRING
-		fd.Type = &typ
-	case "boolean":
-		typ := descriptorpb.FieldDescriptorProto_TYPE_BOOL
-		fd.Type = &typ
-	case "timestamptz", "date":
-		typ := descriptorpb.FieldDescriptorProto_TYPE_MESSAGE
-		fd.Type = &typ
+		set(descriptorpb.FieldDescriptorProto_TYPE_DOUBLE)
+	case "string":
+		set(descriptorpb.FieldDescriptorProto_TYPE_STRING)
+	case "bool":
+		set(descriptorpb.FieldDescriptorProto_TYPE_BOOL)
+	case "bytes":
+		set(descriptorpb.FieldDescriptorProto_TYPE_BYTES)
+	case "google.protobuf.Timestamp":
+		set(descriptorpb.FieldDescriptorProto_TYPE_MESSAGE)
 		fd.TypeName = strPtr(".google.protobuf.Timestamp")
-	case "bytea", "jsonb":
-		typ := descriptorpb.FieldDescriptorProto_TYPE_BYTES
-		fd.Type = &typ
-	case "interval":
-		// The same message coltype.ProtoType names, so a caller's generated
-		// client and this dispatcher agree on the wire.
-		//
-		// It used to be TYPE_STRING, justified by "the codegen historically
-		// maps it to string" — which was false when it was written: codegen
-		// said google.protobuf.Duration. A generated client putting a message
-		// on the wire against a descriptor declaring a string unmarshals
-		// without error and leaves the field unset, so the value vanished
-		// silently. documented_types_test.go gated the divergence as a known
-		// defect; that gate is now deleted.
-		typ := descriptorpb.FieldDescriptorProto_TYPE_MESSAGE
-		fd.Type = &typ
+	case "atlantis.common.v1.Interval":
+		set(descriptorpb.FieldDescriptorProto_TYPE_MESSAGE)
 		fd.TypeName = strPtr(".atlantis.common.v1.Interval")
-	case "vector":
-		typ := descriptorpb.FieldDescriptorProto_TYPE_FLOAT
-		fd.Type = &typ
 	default:
-		typ := descriptorpb.FieldDescriptorProto_TYPE_STRING
-		fd.Type = &typ
+		set(descriptorpb.FieldDescriptorProto_TYPE_STRING)
 	}
 }
 
@@ -620,32 +618,13 @@ func buildServiceDescriptor(e *dsl.Entity) *descriptorpb.ServiceDescriptorProto 
 }
 
 // predicateMessageForField maps a DSL field type to the predicate proto
-// message name. Mirrors codegen/query_emit.go predicateMessageForField.
+// message name.
 func predicateMessageForField(t dsl.FieldType) (string, bool) {
-	if t.Array {
+	stem, ok := coltype.PredicateStem(t)
+	if !ok {
 		return "", false
 	}
-	switch t.Name {
-	case "text", "varchar", "citext", "uuid":
-		return "StringPredicate", true
-	case "numeric":
-		return "NumericPredicate", true
-	case "real":
-		return "FloatPredicate", true
-	case "double":
-		return "DoublePredicate", true
-	case "int", "smallint":
-		return "Int32Predicate", true
-	case "bigint":
-		return "Int64Predicate", true
-	case "boolean":
-		return "BoolPredicate", true
-	case "timestamptz", "date":
-		return "TimestampPredicate", true
-	case "jsonb", "bytea":
-		return "BytesPredicate", true
-	}
-	return "", false
+	return stem + "Predicate", true
 }
 
 // wrapEntityRequest creates a message with a single entity field at number 1.

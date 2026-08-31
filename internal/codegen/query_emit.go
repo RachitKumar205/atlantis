@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/rachitkumar205/atlantis/internal/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
@@ -124,39 +125,16 @@ func includeSlotName(sourceEntity, fkField string) string {
 // message name. Returns ("", false) when the type isn't filterable via
 // QueryX (vector, interval, arrays).
 func predicateMessageForField(t dsl.FieldType) (string, bool) {
-	if t.Array {
+	stem, ok := coltype.PredicateStem(t)
+	if !ok {
 		return "", false
 	}
-	switch t.Name {
-	case "text", "varchar", "citext", "uuid":
-		return "StringPredicate", true
-	case "numeric":
-		return "NumericPredicate", true
-	case "real":
-		return "FloatPredicate", true
-	case "double":
-		return "DoublePredicate", true
-	case "int", "smallint":
-		return "Int32Predicate", true
-	case "bigint":
-		return "Int64Predicate", true
-	case "boolean":
-		return "BoolPredicate", true
-	case "timestamptz", "date":
-		return "TimestampPredicate", true
-	case "jsonb", "bytea":
-		return "BytesPredicate", true
-	}
-	return "", false
+	return stem + "Predicate", true
 }
 
-// orderableType is true when the field can sit in an ORDER BY clause. We
-// allow every scalar; vectors and arrays don't sort meaningfully.
+// orderableType is true when the field can sit in an ORDER BY clause.
 func orderableType(t dsl.FieldType) bool {
-	if t.Array || t.Name == "vector" {
-		return false
-	}
-	return true
+	return coltype.Orderable(t)
 }
 
 // inboundRef captures a foreign key pointing AT some entity X — used to

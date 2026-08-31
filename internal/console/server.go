@@ -340,6 +340,10 @@ func (s *Server) buildMux() {
 	// organisation by the store, and both plain reads, so no csrf.
 	mux.HandleFunc("GET /api/schema/imports", s.auth(s.handleListSchemaImports))
 	mux.HandleFunc("GET /api/schema/imports/{id}", s.auth(s.handleGetSchemaImport))
+	mux.HandleFunc("GET /api/schema/imports/{id}/entities", s.auth(s.handleGetSchemaImportEntities))
+	mux.HandleFunc("GET /api/schema/imports/{id}/notes", s.auth(s.handleGetSchemaImportNotes))
+	mux.HandleFunc("POST /api/schema/imports/{id}/plan", s.auth(s.csrf(s.handlePlanImport)))
+	mux.HandleFunc("POST /api/schema/imports/{id}/apply", s.auth(s.csrf(s.handleApplyImport)))
 
 	// Auth-required endpoints.
 	mux.HandleFunc("POST /api/auth/logout", s.auth(s.handleLogout))
@@ -786,6 +790,11 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		// a console can clear no cookie but its own.
 		"cloud_signout_url": s.cfg.CloudIssuer + "/logout",
 
+		// What this organisation calls itself, when that is not its name.
+		// Omitted otherwise, so the page renders one line rather than the same
+		// word twice.
+		"org_display_name": u.OrgNames[u.Org],
+
 		// Every organisation this person belongs to, each with the URL that
 		// switches to it. Built here for the same two reasons as step_up_url,
 		// and one more: a name assembled into a URL by the page is a name the
@@ -811,10 +820,16 @@ func (s *Server) switchTargets(u *User) []map[string]string {
 	// handle for no gain.
 	out := make([]map[string]string, 0, len(u.Orgs))
 	for _, org := range u.Orgs {
-		out = append(out, map[string]string{
+		t := map[string]string{
 			"name": org,
 			"url":  s.cfg.CloudIssuer + "/authorize?org=" + url.QueryEscape(org),
-		})
+		}
+		// Only where it differs. The page falls back to the name, so an entry
+		// without one draws exactly as it did before this existed.
+		if d := u.OrgNames[org]; d != "" && d != org {
+			t["display_name"] = d
+		}
+		out = append(out, t)
 	}
 	return out
 }
@@ -1773,6 +1788,17 @@ func jsonError(w http.ResponseWriter, msg string, code int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// jsonErrorCode answers with a machine-readable reason beside the sentence.
+//
+// For a refusal the browser must act on rather than print. The message still
+// stands on its own: a client that ignores the code shows a sentence that
+// makes sense.
+func jsonErrorCode(w http.ResponseWriter, msg, reason string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg, "code": reason})
 }
 
 func readJSON(r *http.Request, dst any) error {

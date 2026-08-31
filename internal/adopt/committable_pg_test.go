@@ -143,11 +143,12 @@ func TestACheckNameThatDoesNotLexIsNotDeclared(t *testing.T) {
 	assertWarned(t, res, "ck_t$flag")
 }
 
-// A 32-bit sequence keeps its type and loses `serial`.
+// A 32-bit sequence keeps both its type and `serial`.
 //
-// Widening it to bigint would describe a table the database does not have, and
-// a plan would then propose altering the column.
-func TestANarrowSerialKeepsItsTypeAndLosesSerial(t *testing.T) {
+// `serial` renders SMALLSERIAL, SERIAL or BIGSERIAL from the column width, so
+// the declaration describes the sequence the database has rather than dropping
+// it. Nothing is warned about, because nothing was lost.
+func TestANarrowSerialKeepsItsTypeAndItsSerial(t *testing.T) {
 	res := generateHazards(t)
 	atl := atlOf(t, res, "adopt_hz.narrow_serial")
 
@@ -162,13 +163,17 @@ func TestANarrowSerialKeepsItsTypeAndLosesSerial(t *testing.T) {
 	if idLine == "" {
 		t.Fatalf("no id column in the declaration:\n%s", atl)
 	}
-	if strings.Contains(idLine, "serial") {
-		t.Errorf("id = %q; `serial` is only valid on bigint", idLine)
+	if !strings.Contains(idLine, "serial") {
+		t.Errorf("id = %q; the sequence was dropped, so a plan would propose removing it", idLine)
 	}
 	if !strings.Contains(idLine, "int") {
 		t.Errorf("id = %q; the column lost its type", idLine)
 	}
-	assertWarned(t, res, "narrow_serial")
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "narrow_serial") {
+			t.Errorf("a narrow sequence is declarable, so it should raise no warning: %q", w)
+		}
+	}
 }
 
 // Two indexes over the same columns produce one clause.

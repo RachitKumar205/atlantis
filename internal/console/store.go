@@ -79,6 +79,13 @@ type User struct {
 	// authorizes a move between them is Cloud's /authorize, which re-reads the
 	// membership rather than trusting this.
 	Orgs []string
+
+	// OrgNames maps an organisation's name to what it calls itself, for the
+	// ones that call themselves something else. Only those: an organisation
+	// absent here is drawn under the name already in Orgs.
+	//
+	// A label, and nothing more — the same standing as Orgs.
+	OrgNames map[string]string
 }
 
 type store struct {
@@ -418,11 +425,17 @@ func (s *store) createSession(ctx context.Context, c *identity.Claims) (string, 
 	if orgs == nil {
 		orgs = []string{}
 	}
+	// Same reason as orgs above: the column is NOT NULL, and an assertion from
+	// a Cloud that predates the claim carries none.
+	orgNames := c.OrgNames
+	if orgNames == nil {
+		orgNames = map[string]string{}
+	}
 
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO console.sessions (token, subject, org, role, email, name, orgs, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, token, c.Subject, c.Org, string(c.Role), c.Email, c.Name, orgs,
+		INSERT INTO console.sessions (token, subject, org, role, email, name, orgs, org_names, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`, token, c.Subject, c.Org, string(c.Role), c.Email, c.Name, orgs, orgNames,
 		time.Now().Add(sessionTTL))
 	return token, err
 }
@@ -762,10 +775,10 @@ func (s *store) getSessionInfo(ctx context.Context, token string) (*sessionInfo,
 		sudoUntil *time.Time
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT subject, org, role, email, name, orgs, expires_at, sudo_until
+		SELECT subject, org, role, email, name, orgs, org_names, expires_at, sudo_until
 		FROM console.sessions
 		WHERE token = $1 AND expires_at > NOW()
-	`, token).Scan(&u.Subject, &u.Org, &u.Role, &u.Email, &u.Name, &u.Orgs,
+	`, token).Scan(&u.Subject, &u.Org, &u.Role, &u.Email, &u.Name, &u.Orgs, &u.OrgNames,
 		&expiresAt, &sudoUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound

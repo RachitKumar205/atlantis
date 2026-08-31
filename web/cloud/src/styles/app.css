@@ -48,6 +48,7 @@ body {
   font-size: var(--font-body);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 /* A centred card on an empty ground. The console's /login settled on the same
@@ -83,13 +84,9 @@ body {
   margin: 0;
 }
 
-.title {
-  font-size: 18px;
-  font-weight: 500;
-  color: var(--ink-0);
-  letter-spacing: -0.01em;
-  margin: 14px 0 6px;
-}
+/* .title was the small heading under the wordmark. The two are one element
+   now — Card renders the mark and the screen's title as a single <h1> — so
+   nothing carries this class. */
 
 /* ---- Form ----------------------------------------------------------------- */
 
@@ -505,4 +502,778 @@ body {
 .import__ack input {
   margin-top: 0.15rem;
   flex: none;
+}
+
+/* ============================================================================
+   Datum
+   ============================================================================
+ *
+ * The palette above is Bathysphere and the rules above are written against it.
+ * This block is the retheme, scoped to `.datum` on <body>, so a surface that
+ * has not been converted keeps the old look and nothing here reaches it.
+ *
+ * Layout is untouched: same centred card, same widths, same field order. The
+ * card shape has been reverted twice after bolder attempts, so this changes
+ * palette, type and the button and stops.
+ *
+ * When every surface carries the class the selectors here lose their `.datum`
+ * prefix and the rules above are deleted.
+ */
+
+/* The root element is not inside `.datum`, so it keeps Bathysphere's tokens
+ * and, more visibly, its colour scheme — which is what the browser uses for
+ * scrollbars, form controls and the canvas outside the body. Pinned to match
+ * the theme this app is fixed to.
+ */
+:root[data-theme="light"] {
+  color-scheme: light;
+  background: #FAFAF8;
+}
+
+/* ---- Split shell ---------------------------------------------------------
+ *
+ * Artwork left, form right. The form column is the one that scrolls; the art
+ * is fixed height and cropped, so a long screen (backup codes) never stretches
+ * the picture.
+ *
+ * Applied to the shell rather than to SignIn, because every screen here shares
+ * Card — a split sign-in handing off to a centred verify step would move the
+ * form across the viewport mid-flow.
+ */
+/* Ruled rather than framed. Five hairlines, each running the whole width or
+ * the whole height of the window: two verticals inset from the sides, one down
+ * the middle, and two horizontals inset from the top and bottom. They cross and
+ * carry on to the edge instead of turning a corner, so the page reads as a
+ * sheet ruled by guides rather than as a box sitting on one.
+ *
+ * The padding is what puts the content inside those guides: at 24px the columns
+ * begin exactly on the left rule, and a 1fr 1fr grid then divides the remaining
+ * width at 50% of the window — which is where the middle rule is drawn. The two
+ * agree by construction rather than by a number kept in step by hand. */
+.datum .shell {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  place-items: stretch;
+  padding: 24px;
+  min-height: 100dvh;
+}
+
+/* The rules themselves: fixed, so they span the window rather than the shell,
+ * and stay put while the form column scrolls under them.
+ *
+ * pointer-events: none — decoration must never swallow a click meant for the
+ * form beneath it. */
+.datum .shell::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  background:
+    linear-gradient(var(--line), var(--line)) 24px 0 / 1px 100% no-repeat,
+    linear-gradient(var(--line), var(--line)) 50% 0 / 1px 100% no-repeat,
+    linear-gradient(var(--line), var(--line)) calc(100% - 24px) 0 / 1px 100% no-repeat,
+    linear-gradient(var(--line), var(--line)) 0 24px / 100% 1px no-repeat,
+    linear-gradient(var(--line), var(--line)) 0 calc(100% - 24px) / 100% 1px no-repeat;
+}
+
+/* Fills its half. It carries no rule of its own — the middle guide is drawn
+ * with the others above, because it has to run the full height of the window
+ * and a border here would stop at the artwork.
+ *
+ * The picture is on a pseudo-element, not on this box: the mask below fades the
+ * image and would take the fill with it if it were applied here. That fill is
+ * also what the picture dissolves into. */
+.datum .shell__art {
+  position: relative;
+  background-color: var(--canvas-0);
+  overflow: hidden;
+}
+
+/* A vignette with no hard boundary anywhere: full strength through the middle,
+ * roughly a third of the way out at the middle of each edge, gone at the
+ * corners.
+ *
+ * The 71% radii are what put those numbers where they belong. At that size the
+ * ellipse reaches the corners at exactly 100% of the gradient and the middle of
+ * each edge at 70%, so the stops read directly as the alpha at each place —
+ * 0.35 at the edges, 0 at the corners.
+ *
+ * -webkit- as well: Safari still needs the prefixed property. */
+.datum .shell__art::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: url('../assets/atlantis-city.webp');
+  background-size: cover;
+  /* Right of centre, so the crop keeps the city rather than the open water
+     to its left. */
+  background-position: 62% 50%;
+  background-repeat: no-repeat;
+  -webkit-mask-image: radial-gradient(
+    ellipse 71% 71% at 50% 48%,
+    #000 25%,
+    rgba(0, 0, 0, 0.35) 70%,
+    transparent 100%
+  );
+  mask-image: radial-gradient(
+    ellipse 71% 71% at 50% 48%,
+    #000 25%,
+    rgba(0, 0, 0, 0.35) 70%,
+    transparent 100%
+  );
+  pointer-events: none;
+}
+
+/* Off centre, and only just.
+ *
+ * The extra padding is on the right, which narrows the box the form centres
+ * inside and carries it 24px to the left of the column's true middle. Enough
+ * that the form leans toward the artwork rather than floating equidistant
+ * between it and the window edge; not enough to read as a mistake.
+ *
+ * Padding rather than a transform or a margin, so the shift is inside the
+ * scroll box and a short window still scrolls to the bottom of the form. */
+.datum .shell__form {
+  display: grid;
+  place-items: center;
+  padding-block: var(--pad-page);
+  padding-inline: var(--pad-page) calc(var(--pad-page) + 48px);
+  overflow-y: auto;
+}
+
+/* Square it up again once the columns stack, where there is no artwork to lean
+   toward and the offset would just look crooked. */
+@media (max-width: 860px) {
+  .datum .shell__form {
+    padding: var(--pad-page);
+  }
+}
+
+/* One column below the split. The artwork becomes a band deep enough to read
+   as a picture and short enough to leave the form above the fold. */
+@media (max-width: 860px) {
+  .datum .shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 168px minmax(0, 1fr);
+    /* A narrower gutter, so the guides do not eat a phone's width. */
+    padding: 12px;
+  }
+  /* Four rules, not five: stacked, the middle guide would run down the centre
+     of a single column and divide nothing. */
+  .datum .shell::before {
+    background:
+      linear-gradient(var(--line), var(--line)) 12px 0 / 1px 100% no-repeat,
+      linear-gradient(var(--line), var(--line)) calc(100% - 12px) 0 / 1px 100% no-repeat,
+      linear-gradient(var(--line), var(--line)) 0 12px / 100% 1px no-repeat,
+      linear-gradient(var(--line), var(--line)) 0 calc(100% - 12px) / 100% 1px no-repeat;
+  }
+  .datum .shell__art {
+    border-bottom: 1px solid var(--line);
+  }
+}
+
+/* No border and no shadow: the card is no longer floating on an empty ground,
+ * it is one half of a split, and a boxed form inside a column reads as a box
+ * inside a box. */
+.datum .card {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+  max-width: 340px;
+}
+
+/* The heading, and the only display line on the screen. Outfit at this size is
+ * where its width is a feature; at 13px it and Manrope share a skeleton, so
+ * setting anything smaller in it would spend a second font on one voice.
+ *
+ * 25px rather than 30 because the line now carries a sentence: "Log in to
+ * atlantis" fits beside the mark at this size in a 340px column, and at 30 it
+ * did not.
+ *
+ * flex-start, not center. The longest title here is "Set up two-factor
+ * authentication", which wraps to two lines, and centring would drop the mark
+ * into the gap between them. The 28px mark sits almost exactly on the 28.75px
+ * first line, so it reads as centred on the line it belongs to.
+ *
+ * No text-transform: the titles are sentences and are stored that way. */
+.datum .wordmark {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  font-family: var(--display);
+  font-size: 25px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  color: var(--ink-0);
+  margin: 0 0 26px;
+  text-wrap: balance;
+}
+
+.datum .wordmark__mark {
+  width: 28px;
+  height: 28px;
+  flex: none;
+}
+
+/* Five screens pass a subtitle, which now follows the heading directly. The
+   two are one block, so the heading loses its gap and the subtitle carries it. */
+.datum .wordmark:has(+ .muted) {
+  margin-bottom: 8px;
+}
+
+.datum .wordmark + .muted {
+  margin-bottom: 26px;
+}
+
+/* ---- Form ----------------------------------------------------------------
+ *
+ * One spacing scale, and the gap between groups is at least twice the gap
+ * inside one. Before this every gap was 14–20px, so the label, its input, the
+ * next field and the button all read as one undifferentiated column.
+ *
+ *   6px   label to its own input
+ *   18px  field to field
+ *   26px  brand to the form, last field to the button, button to the footer
+ *
+ * 6 within, 18 between, 26 across groups.
+ */
+.datum .field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 18px;
+}
+
+.datum .field:last-of-type {
+  margin-bottom: 26px;
+}
+
+.datum .label {
+  font-weight: 500;
+  font-size: 12.5px;
+  color: var(--ink-1);
+  margin: 0;
+}
+
+/* Sunk rather than raised: an input is a well, and the inset edge is the only
+ * thing separating it from the card behind it now that both are light.
+ *
+ * Height and radius come from tokens, so this and the button under it cannot
+ * drift apart by a pixel. */
+.datum .input {
+  height: var(--control-h);
+  padding: 0 12px;
+  background: var(--canvas-1);
+  border-color: var(--line-soft);
+  border-radius: var(--radius);
+  box-shadow: inset 0 1px 2px var(--edge-lo);
+  transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
+}
+
+.datum .input::placeholder {
+  color: var(--ink-3);
+}
+
+@media (hover: hover) {
+  .datum .input:hover:not(:focus) {
+    border-color: var(--line);
+  }
+}
+
+.datum .input:focus {
+  border-color: var(--accent);
+  box-shadow: inset 0 1px 2px var(--edge-lo), 0 0 0 3px var(--accent-tint-2);
+}
+
+/* A hint has two homes and they want different spacing.
+ *
+ * Inside a field it is the third item in a flex column and the 6px gap already
+ * places it. Standing between blocks it has nothing under it, so it needs the
+ * gap a field would have left — without it the paragraph sat 18px below the
+ * input it described and flush against the label of the next field.
+ *
+ * The two-class selectors win over the one below them on specificity, so the
+ * order of these rules is not load-bearing. */
+.datum .hint {
+  margin: 0 0 18px;
+  color: var(--ink-3);
+}
+
+.datum .field .hint {
+  margin: 0;
+}
+
+/* In a row it already claims a line of its own; see .orglist__item .hint. */
+.datum .orglist__item .hint {
+  margin: 0;
+}
+
+/* ---- Buttons -------------------------------------------------------------- */
+
+/* A vertical gradient with a lit top edge and a shaded bottom edge, both
+ * inset. The edges are what read as dimension; the gradient alone reads flat,
+ * and the gradient is what stops the edges reading as a border. On press the
+ * top edge inverts inward and the outer drop is removed, so the cap sinks.
+ *
+ * Only box-shadow and background transition. Every variant keeps its 1px
+ * border, transparent where it has none, so nothing shifts between states. */
+/* background-color and background-image separately, never the `background`
+ * shorthand.
+ *
+ * The shorthand set to a gradient leaves background-color at transparent, and a
+ * hover rule setting it to a flat colour then asks the browser to interpolate
+ * an image into a colour — which it cannot do. background-image drops to none
+ * at once while background-color animates up from transparent, and for one
+ * frame the button is see-through; on a dark ground that reads as a black
+ * flash.
+ *
+ * The sheen is identical in every state, so only the colour beneath it moves
+ * and it moves smoothly. Colour, border, text and shadow all run on the same
+ * curve over --med — one of them arriving late is what made this feel abrupt. */
+.datum .btn {
+  background-color: var(--accent);
+  background-image: var(--sheen);
+  color: var(--accent-ink);
+  border-color: var(--accent-ring);
+  font-weight: 600;
+  box-shadow:
+    inset 0 1px 0 var(--accent-hi),
+    inset 0 -1px 0 var(--accent-shade),
+    var(--drop-lg);
+  height: var(--control-h);
+  font-size: 13.5px;
+  border-radius: var(--radius);
+  transition:
+    background-color var(--med) var(--ease),
+    border-color var(--med) var(--ease),
+    color var(--med) var(--ease),
+    box-shadow var(--med) var(--ease),
+    scale 200ms ease-out;
+}
+
+/* Behind a hover query. On touch, :hover latches after a tap and the button
+ * stays looking pressed until something else is tapped. */
+@media (hover: hover) {
+  .datum .btn:hover:not(:disabled) {
+    background-color: var(--accent-hover);
+  }
+}
+
+.datum .btn:active:not(:disabled) {
+  background-color: var(--accent-hover);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.18);
+  scale: 0.98;
+}
+
+.datum .btn:disabled {
+  box-shadow: none;
+}
+
+.datum .btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The provider buttons. Raised, not filled — one filled control per screen, so
+ * the submit stays the obvious one. */
+/* `background-image: none` explicitly. This variant inherits the filled rule
+ * above, and setting only a background-color would leave the accent gradient
+ * painted over it. */
+.datum .btn--ghost {
+  background-color: var(--canvas-2);
+  background-image: none;
+  color: var(--ink-0);
+  border-color: var(--line-soft);
+  font-weight: 500;
+  box-shadow: inset 0 1px 0 var(--edge-hi), var(--drop);
+}
+
+@media (hover: hover) {
+  .datum .btn--ghost:hover:not(:disabled) {
+    background-color: var(--canvas-3);
+    background-image: none;
+    border-color: var(--line-soft);
+  }
+}
+
+.datum .btn--ghost:active:not(:disabled) {
+  box-shadow: inset 0 1px 2px var(--edge-lo);
+}
+
+.datum .linkbtn {
+  color: var(--accent);
+  text-decoration-color: var(--accent-tint-2);
+}
+
+.datum .linkbtn:hover {
+  color: var(--accent-hover);
+  text-decoration-color: currentColor;
+}
+
+/* ---- Notices -------------------------------------------------------------- */
+
+.datum .notice {
+  border-color: var(--line-soft);
+  background: var(--canvas-1);
+}
+
+/* ---- Footer --------------------------------------------------------------
+ *
+ * Left, with everything else. It was centred while the labels, inputs and
+ * button were all flush left, so the last line of the page pulled away from
+ * the column it belongs to.
+ */
+.datum .foot {
+  margin: 26px 0 0;
+  text-align: start;
+}
+
+.datum .linkbtn {
+  text-underline-position: from-font;
+  text-decoration-skip-ink: auto;
+}
+
+/* ---- Providers ------------------------------------------------------------ */
+
+.datum .providers {
+  margin-top: 26px;
+}
+
+.datum .btn--ghost {
+  margin-top: 10px;
+}
+
+/* ---- Notices -------------------------------------------------------------- */
+
+.datum .notice {
+  margin: 0 0 18px;
+  text-wrap: pretty;
+}
+
+.datum .muted {
+  text-wrap: pretty;
+}
+
+/* The artwork's hairline is the plate's own border, set where the plate is
+   defined. It was an inset shadow here while the panel bled to the window edge
+   and had no border to carry it. */
+
+/* ---- OTP field ------------------------------------------------------------
+ *
+ * coss's shape: a row of square inputs at gap 8, centred text, the same radius
+ * and lit top edge the other controls carry, and a dash between the groups of
+ * three. Sizes come from the same tokens as the inputs and the button, so all
+ * three agree.
+ *
+ * Sunk like .input rather than raised like .btn — these are fields, and the
+ * well is what says so.
+ */
+.datum .otp {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.datum .otp__slot {
+  width: var(--control-h);
+  height: var(--control-h);
+  min-width: 0;
+  padding: 0;
+  text-align: center;
+  font-family: var(--mono);
+  font-feature-settings: var(--feat-mono);
+  font-size: 16px;
+  color: var(--ink-0);
+  background: var(--canvas-1);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  box-shadow: inset 0 1px 2px var(--edge-lo);
+  transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
+}
+
+@media (hover: hover) {
+  .datum .otp__slot:hover:not(:focus) {
+    border-color: var(--line);
+  }
+}
+
+/* z-index so the focus ring is drawn over the neighbouring boxes rather than
+   clipped by them. */
+.datum .otp__slot:focus {
+  outline: none;
+  z-index: 1;
+  border-color: var(--accent);
+  box-shadow: inset 0 1px 2px var(--edge-lo), 0 0 0 3px var(--accent-tint-2);
+}
+
+.datum .otp__sep {
+  width: 10px;
+  height: 2px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+/* The label above the boxes is a <span>, not a <label>: it names a group of six
+   inputs and there is no single control for it to point at. The group carries
+   its own name, and each box says which digit it is. */
+.datum .otp + .hint,
+.datum .field > .label + .otp {
+  margin: 0;
+}
+
+/* ---- Anchor reset ---------------------------------------------------------
+ *
+ * This app never had one. Any <a> without its own colour fell through to the
+ * user agent's link blue and visited purple, which is how the "Open" control on
+ * the organisation list came to be purple and underlined.
+ */
+.datum a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+@media (hover: hover) {
+  .datum a:hover {
+    color: var(--accent-hover);
+  }
+}
+
+/* ---- Organisations --------------------------------------------------------
+ *
+ * One container, rows divided by hairlines, following coss's table:
+ * `[&_tr]:border-b` with the last row's border removed and a small wash on
+ * hover. A box per row reads as a stack of unrelated fields rather than a list.
+ *
+ * The row is the link. An "Open" control floating between the name and the
+ * delete action was the alignment problem — three things competing for the
+ * middle of the row with nothing anchoring them. Now the whole row opens the
+ * organisation and the only control is the one that destroys it.
+ */
+.datum .orglist {
+  gap: 0;
+  margin: 0 0 26px;
+  background: var(--canvas-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--drop);
+  overflow: hidden;
+}
+
+.datum .orglist__item {
+  position: relative;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: 0;
+  transition: background var(--fast) var(--ease);
+}
+
+.datum .orglist__item:last-child {
+  border-bottom: 0;
+}
+
+@media (hover: hover) {
+  .datum .orglist__item:has(.orglist__link):hover {
+    background: color-mix(in srgb, var(--canvas-2), var(--ink-0) 3%);
+  }
+}
+
+/* A monogram, so a row has something to aim at before it is read. Square with
+   the control radius rather than a circle: an organisation is not a person. */
+.datum .orglist__avatar {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: var(--radius);
+  background: var(--canvas-1);
+  border: 1px solid var(--line-soft);
+  font-family: var(--display);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-2);
+  text-transform: uppercase;
+}
+
+.datum .orglist__main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* ::after covers the row, which is what makes the whole row clickable without
+   putting the delete button inside the anchor. Nested interactive elements are
+   the thing this avoids. */
+.datum .orglist__link {
+  font-weight: 500;
+  font-size: 13.5px;
+  color: var(--ink-0);
+  overflow-wrap: anywhere;
+}
+
+.datum .orglist__link::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+}
+
+.datum .orglist__link:focus-visible {
+  outline: none;
+}
+
+.datum .orglist__item:has(.orglist__link:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.datum .orglist__name {
+  font-weight: 500;
+  font-size: 13.5px;
+  color: var(--ink-0);
+  overflow-wrap: anywhere;
+}
+
+.datum .orglist__meta {
+  font-family: var(--mono);
+  font-feature-settings: var(--feat-mono);
+  font-size: 11.5px;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+}
+
+/* coss's badge: 18px tall, 6px of side padding, medium weight, the small
+   radius. Carries a word as well as a colour — a state told by hue alone is
+   one nobody can read. */
+.datum .badge {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  flex: none;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  background: var(--canvas-1);
+  color: var(--ink-2);
+  border: 1px solid var(--line-soft);
+}
+
+.datum .badge--warn {
+  background: var(--warn-tint);
+  color: var(--warn);
+  border-color: transparent;
+}
+
+.datum .badge--danger {
+  background: var(--coral-tint);
+  color: var(--coral);
+  border-color: transparent;
+}
+
+/* Above the row overlay, or the link swallows the click. */
+.datum .orglist__actions {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.datum .orglist__confirm {
+  position: relative;
+  z-index: 1;
+}
+
+/* Inline size: .btn here is a full-width submit by default, and a row needs a
+   control the width of its label. */
+.datum .btn--inline {
+  width: auto;
+  height: 30px;
+  padding: 0 11px;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+/* Quiet, and visible. A destructive control dressed as the primary one gets
+   pressed by mistake; one revealed only on hover cannot be reached at all on a
+   touch screen. */
+.datum .linkbtn--quiet {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  color: var(--ink-3);
+  text-decoration: none;
+}
+
+@media (hover: hover) {
+  .datum .linkbtn--quiet:hover {
+    color: var(--coral);
+    background: var(--coral-tint);
+  }
+}
+
+/* Destructive, outlined. coss's `destructive-outline`: the card's own fill and
+ * a neutral border at rest, taking the destructive colour for its text, and
+ * only tinting on hover — so the row does not carry a red block until the
+ * control is being aimed at.
+ *
+ * Bordered rather than filled because it sits in a list. A solid red button per
+ * row would make destruction the loudest thing on the screen.
+ */
+.datum .btn--outline-danger {
+  background-color: var(--canvas-2);
+  background-image: none;
+  color: var(--coral);
+  border-color: color-mix(in srgb, var(--coral) 36%, transparent);
+  font-weight: 500;
+  box-shadow: inset 0 1px 0 var(--edge-hi), var(--drop);
+}
+
+@media (hover: hover) {
+  .datum .btn--outline-danger:hover:not(:disabled) {
+    background-color: var(--coral-tint);
+    background-image: none;
+    border-color: color-mix(in srgb, var(--coral) 56%, transparent);
+  }
+}
+
+.datum .btn--outline-danger:active:not(:disabled) {
+  background-color: var(--coral-tint);
+  background-image: none;
+  box-shadow: inset 0 1px 2px var(--edge-lo);
+}
+
+.datum .btn--outline-danger:focus-visible {
+  outline-color: var(--coral);
+}
+
+/* The glyph, sized against the label rather than fixed, and dimmed a little so
+   the word stays the thing being read. coss does the same: svg at 80% opacity
+   inside a button. */
+.datum .btn svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  opacity: 0.85;
+}
+
+.datum .btn--inline {
+  gap: 6px;
 }

@@ -21,6 +21,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/rachitkumar205/atlantis/internal/cloud/provision/certs"
+	"github.com/rachitkumar205/atlantis/internal/secrets"
 )
 
 // fieldOwner identifies this process to Kubernetes' server-side apply.
@@ -48,6 +49,7 @@ const (
 	secretAtlantisTLS  = "atlantis-tls"
 	secretSignerPKI    = "signer-pki"
 	secretConsoleCreds = "console-client"
+	secretDataKey      = "atlantis-data-key"
 )
 
 // Ports. atlantis serves health on its own listener, separate from gRPC and
@@ -132,6 +134,11 @@ func (k *Kube) Ensure(ctx context.Context, spec Spec) (Status, error) {
 	bundle, err := k.ensureCerts(ctx, ns, spec.Org)
 	if err != nil {
 		return Status{}, fmt.Errorf("certificates: %w", err)
+	}
+	// Minted before the workloads, because the atlantis Deployment mounts it.
+	// The value is not read here: the pod reads the Secret.
+	if _, err := k.ensureDataKey(ctx, ns, spec.Org); err != nil {
+		return Status{}, fmt.Errorf("data keyset: %w", err)
 	}
 	for _, s := range k.derivedSecrets(ns, bundle) {
 		if err := k.apply(ctx, s); err != nil {
@@ -224,6 +231,51 @@ func (k *Kube) ensureCerts(ctx context.Context, ns, org string) (*certs.Bundle, 
 		return nil, err
 	}
 	return bundle, nil
+}
+
+// ensureDataKey returns this organisation's data keyset, minting one the first
+// time.
+//
+// It seals the managed database's DSN in atlantis.managed_database. Never
+// regenerated: a new keyset cannot decrypt what the old one sealed, so the
+// organisation would keep running against a DSN nothing can read and the only
+// symptom would be plans against the wrong database.
+//
+// Refused rather than replaced when unreadable, for the same reason
+// ensureCerts refuses a broken authority.
+func (k *Kube) ensureDataKey(ctx context.Context, ns, org string) (string, error) {
+	var existing corev1.Secret
+	err := k.c.Get(ctx, types.NamespacedName{Namespace: ns, Name: secretDataKey}, &existing)
+	switch {
+	case err == nil:
+		keyset := string(existing.Data["keyset"])
+		if keyset == "" {
+			return "", fmt.Errorf(
+				"the stored data keyset for %q is empty.\n\n"+
+					"It is not regenerated automatically: a new keyset cannot decrypt "+
+					"the managed-database connection string the old one sealed. Delete "+
+					"secret %s/%s to mint a fresh one, accepting that the managed "+
+					"database must be named again",
+				org, ns, secretDataKey)
+		}
+		return keyset, nil
+	case !apierrors.IsNotFound(err):
+		return "", err
+	}
+
+	keyset, err := secrets.NewKeyset()
+	if err != nil {
+		return "", fmt.Errorf("generate data keyset for %q: %w", org, err)
+	}
+	if err := k.apply(ctx, &corev1.Secret{
+		TypeMeta:   typeMeta("v1", "Secret"),
+		ObjectMeta: k.meta(ns, secretDataKey, "data-key"),
+		Type:       corev1.SecretTypeOpaque,
+		Data:       map[string][]byte{"keyset": []byte(keyset)},
+	}); err != nil {
+		return "", err
+	}
+	return keyset, nil
 }
 
 // bundleFromSecret reads a stored bundle back and refuses anything it cannot

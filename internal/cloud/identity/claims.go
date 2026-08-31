@@ -53,6 +53,17 @@ type Private struct {
 	// Names only, no roles or endpoints, so a console draws its switcher
 	// without calling Cloud per page. A hint; see the field in Claims.
 	Orgs []string `json:"orgs,omitempty"`
+
+	// OrgNames maps an organisation's name to what it calls itself, for the
+	// organisations that call themselves something.
+	//
+	// Only the ones that differ. An organisation whose display name equals its
+	// name is absent, so the common case adds nothing to the token, and a
+	// console that finds no entry draws the name it already has.
+	//
+	// A hint, exactly as Orgs is: it decides what a switcher renders and never
+	// what anybody may reach.
+	OrgNames map[string]string `json:"org_names,omitempty"`
 }
 
 // Claims is a verified assertion. A value of this type means the signature
@@ -110,6 +121,10 @@ type Claims struct {
 	//
 	// Empty is normal, and a console that finds it empty draws no switcher.
 	Orgs []string
+
+	// OrgNames maps organisation name to display name, for those that differ.
+	// A hint, like Orgs; see the field in Private.
+	OrgNames map[string]string
 }
 
 // ErrMissingClaim reports an assertion that verified cryptographically but did

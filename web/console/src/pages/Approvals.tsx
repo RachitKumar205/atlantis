@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CheckCircle2, ShieldQuestion, XCircle } from 'lucide-react'
+import { CheckCircle, ShieldChevron, XCircle } from '@phosphor-icons/react'
 import { api, planClassBadge, planClassLabel, type SchemaPlanSummary } from '@/api/client'
 import { useMe } from '@/hooks/useAuth'
 import { PageShell } from '@/components/PageShell'
@@ -86,7 +86,7 @@ export function Approvals() {
 
         {!isLoading && plans.length === 0 && (
           <div className="empty">
-            <ShieldQuestion size={20} />
+            <ShieldChevron size={20} />
             <p>Nothing is waiting. Changes appear here when the change policy asks for a human.</p>
           </div>
         )}
@@ -148,7 +148,7 @@ export function Approvals() {
                       title={mine ? undefined : `Only ${p.approver_role} can decide this`}
                       onClick={() => setConfirm({ plan: p, approve: true })}
                     >
-                      <CheckCircle2 size={12} /><span>Approve</span>
+                      <CheckCircle size={12} /><span>Approve</span>
                     </button>
                     <button
                       className="btn btn--sm btn--danger"
@@ -169,7 +169,7 @@ export function Approvals() {
       {confirm?.approve && (
         <SudoConfirmDialog
           title="Approve this change"
-          icon={<CheckCircle2 />}
+          icon={<CheckCircle />}
           body={
             <p>
               <strong>{confirm.plan.caller}</strong> will be able to apply a{' '}

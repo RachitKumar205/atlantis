@@ -15,7 +15,7 @@
 // implements a test failure. Restating the list inside each test adds a seventh
 // place to forget.
 //
-// A package rather than a helper per test: internal/codegen/coltype owns four
+// A package rather than a helper per test: internal/coltype owns four
 // of the mappings and internal/server/entity the dispatcher's, so a copy of the
 // parser in each is the same drift one level up.
 package dsltypes

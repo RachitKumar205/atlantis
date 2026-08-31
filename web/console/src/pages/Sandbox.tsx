@@ -16,15 +16,15 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import {
+  ArrowCounterClockwise,
   Cpu,
   Database,
-  Download,
-  GitCompare,
+  DownloadSimple,
+  GitDiff,
   GitFork,
   Plus,
-  RotateCcw,
-  Trash2,
-} from 'lucide-react'
+  Trash,
+} from '@phosphor-icons/react'
 import {
   api,
   queries,
@@ -470,8 +470,8 @@ function ActiveStrip({ active, perf, strict, onDownloadSnapshot, onDestroy }: Ac
       <span className="strip-sep" />
 
       {isSim && (
-        <button className="strip-btn" onClick={onDownloadSnapshot} title="Download a binary snapshot you can replay later">
-          <Download size={12} /> Snapshot
+        <button className="strip-btn" onClick={onDownloadSnapshot} title="DownloadSimple a binary snapshot you can replay later">
+          <DownloadSimple size={12} /> Snapshot
         </button>
       )}
       <button
@@ -479,7 +479,7 @@ function ActiveStrip({ active, perf, strict, onDownloadSnapshot, onDestroy }: Ac
         onClick={() => onDestroy(active.pub_id)}
         title="Destroy this sandbox and free its memory"
       >
-        <Trash2 size={12} /> Destroy
+        <Trash size={12} /> Destroy
       </button>
     </div>
   )
@@ -668,7 +668,7 @@ function CheckpointsList({ backend, marks, capturePending, restorePending, hasAc
                 onClick={() => onRestore(m.id)}
                 title={busy ? 'Wait for the current capture/restore to finish' : 'Restore the sandbox to this checkpoint'}
               >
-                <RotateCcw size={11} />
+                <ArrowCounterClockwise size={11} />
               </button>
               <div className="ckpt-body mono">
                 <div className="ckpt-time">{formatRelative(m.at)}</div>
@@ -1172,7 +1172,7 @@ function CompareTab({ pubID, backend, marks }: CompareTabProps) {
           </label>
           <div className="cmp-actions">
             <button className="btn" disabled={running || !earlier || !later || earlier === later} onClick={compare}>
-              <GitCompare size={13} /> {running ? 'Comparing…' : 'Compare'}
+              <GitDiff size={13} /> {running ? 'Comparing…' : 'Compare'}
             </button>
             {latencyUs !== null && (
               <span className="mono cmp-latency">computed in {latencyUs} µs</span>

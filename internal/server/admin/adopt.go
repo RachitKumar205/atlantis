@@ -149,7 +149,17 @@ func (s *Service) AdoptBaseline(ctx context.Context, req *adminpb.AdoptBaselineR
 		return &adminpb.AdoptBaselineResponse{AlreadyAdopted: true, CheckpointWritten: true}, nil
 	}
 
-	cmp, err := s.compareToLive(ctx, tx, subs)
+	// The comparison describes the managed database, not the one atlantis
+	// keeps its tables in. Adopt exists to record what a database already has,
+	// so reading the wrong one baselines nothing and reports every declared
+	// entity as absent — which is what it did before this was split.
+	live, releaseLive, err := s.liveTx(ctx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("adopt: %w", err)
+	}
+	defer releaseLive()
+
+	cmp, err := s.compareToLive(ctx, tx, live, subs)
 	if err != nil {
 		return nil, err
 	}
@@ -369,11 +379,18 @@ type liveComparison struct {
 // registered caller so cross-caller FKs resolve, introspects the live database
 // and returns the classified difference.
 //
-// Takes a Querier rather than a Tx so a caller can hand it a READ ONLY
+// Takes Queriers rather than a Tx so a caller can hand it a READ ONLY
 // transaction. InspectSchema does exactly that, which is what makes "inspect
 // writes nothing" a property Postgres enforces rather than one a reviewer has
 // to check.
-func (s *Service) compareToLive(ctx context.Context, q introspect.Querier, subs []CallerSubmission) (*liveComparison, error) {
+//
+// Two of them, because this reads from both databases: ctl holds the other
+// callers' declarations under the atlantis schema, and live is the database
+// being described. They are the same connection unless a managed database is
+// configured — passing live for both sent a SELECT on
+// atlantis.caller_registrations to the customer's database, which does not
+// have it.
+func (s *Service) compareToLive(ctx context.Context, ctl, live introspect.Querier, subs []CallerSubmission) (*liveComparison, error) {
 	submitterNames := make(map[string]bool, len(subs))
 	var parsed []*dsl.File
 	for _, sub := range subs {
@@ -384,7 +401,7 @@ func (s *Service) compareToLive(ctx context.Context, q introspect.Querier, subs 
 		}
 		parsed = append(parsed, ps...)
 	}
-	others, err := s.loadOtherCallersExcluding(ctx, q, submitterNames)
+	others, err := s.loadOtherCallersExcluding(ctx, ctl, submitterNames)
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +410,7 @@ func (s *Service) compareToLive(ctx context.Context, q introspect.Querier, subs 
 		return nil, fmt.Errorf("admin: lower failed: %w", err)
 	}
 
-	introspectedIR, existingIDs, warnings, err := introspect.FromPostgres(ctx, q, declaredIR)
+	introspectedIR, existingIDs, warnings, err := introspect.FromPostgres(ctx, live, declaredIR)
 	if err != nil {
 		return nil, fmt.Errorf("introspect: %w", err)
 	}
@@ -486,7 +503,12 @@ func classifyDriftSeverity(kind string) string {
 		// carries that weight — the three are addition, removal and
 		// modification — so this is filed by DDL direction and the severity
 		// lives in the plan class, which is ClassDestructive.
-		"partition_added":
+		"partition_added",
+		// An enum type or one of its labels present in the declaration and not
+		// in the database. Reconciling means CREATE TYPE, or ALTER TYPE ...
+		// ADD VALUE, so both are additions in the same sense as index_added.
+		"enum_added",
+		"enum_value_added":
 		return "addition"
 	case "entity_removed",
 		"field_removed",
@@ -503,7 +525,18 @@ func classifyDriftSeverity(kind string) string {
 		// the live database is enforcing, after which every caller reads every
 		// tenant's rows. A removal, and the most consequential one in this
 		// list.
-		"partition_removed":
+		"partition_removed",
+		// An enum type present in the database and not in the declaration.
+		// Reconciling means DROP TYPE, which drops every column of it.
+		"enum_removed",
+		// A label the database has and the declaration does not.
+		//
+		// Filed as a removal by DDL direction, like partition_removed, though
+		// Postgres cannot perform it: there is no ALTER TYPE ... DROP VALUE, so
+		// reconciling needs a new type, a rewrite of every column using it, and
+		// a drop of the old one. EmitSQL refuses the migration, and the plan
+		// class carries that weight.
+		"enum_value_removed":
 		return "removal"
 	}
 	return "mismatch"

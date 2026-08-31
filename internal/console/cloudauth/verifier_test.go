@@ -734,3 +734,42 @@ func TestEndToEndWithTheRealIssuer(t *testing.T) {
 		t.Error("an assertion for one organisation's console verified at another's")
 	}
 }
+
+// The switcher's two hint claims survive verification.
+//
+// Both were added to identity.Private and to identity.Claims and then dropped
+// in the middle: the verifier builds a Claims field by field, so a claim it
+// does not name is minted, signed, transmitted and discarded, with no error
+// anywhere. org_names shipped that way — Cloud put the display names in the
+// token and every session recorded an empty map.
+//
+// Asserted together, because the pair is what the switcher draws and the next
+// hint claim will be dropped the same way.
+func TestVerifyCarriesTheSwitcherHints(t *testing.T) {
+	key := newTestKey(t)
+	cloud := newTestCloud(t, key)
+	clk := &testClock{t: testNow}
+	v := newVerifier(t, cloud, clk)
+
+	c := validClaims()
+	c["orgs"] = []string{"acme", "globex"}
+	c["org_names"] = map[string]string{"globex": "Globex Corporation"}
+
+	claims, err := v.Verify(context.Background(), key.sign(t, key.kid, c))
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+
+	if len(claims.Orgs) != 2 || claims.Orgs[0] != "acme" || claims.Orgs[1] != "globex" {
+		t.Errorf("Orgs = %v, want [acme globex]", claims.Orgs)
+	}
+	if got := claims.OrgNames["globex"]; got != "Globex Corporation" {
+		t.Errorf("OrgNames[globex] = %q, want %q — the display name was dropped "+
+			"between the token and the session", got, "Globex Corporation")
+	}
+	// Absent for an organisation that calls itself what it is called, which is
+	// what lets the rail draw one line instead of the same word twice.
+	if _, ok := claims.OrgNames["acme"]; ok {
+		t.Errorf("OrgNames carries an entry for acme, which sent none: %v", claims.OrgNames)
+	}
+}

@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rachitkumar205/atlantis/internal/codegen/coltype"
+	"github.com/rachitkumar205/atlantis/internal/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/schema"
 	"github.com/rachitkumar205/atlantis/internal/testsupport/dsltypes"
@@ -58,6 +58,42 @@ var samples = map[string]typeSample{
 	"date":        {ft: dsl.FieldType{Name: "date"}, goOverride: "time.Time"},
 	"interval":    {ft: dsl.FieldType{Name: "interval"}, goOverride: "pgtype.Interval"},
 	"vector(N)":   {ft: dsl.FieldType{Name: "vector", VecDim: 3}, placeholders: map[string]string{"N": "3"}, goOverride: "[]float32"},
+
+	"char(N)":  {ft: dsl.FieldType{Name: "char", Len: 10}, placeholders: map[string]string{"N": "10"}},
+	"char":     {ft: dsl.FieldType{Name: "char"}},
+	"name":     {ft: dsl.FieldType{Name: "name"}},
+	"money":    {ft: dsl.FieldType{Name: "money"}},
+	"xml":      {ft: dsl.FieldType{Name: "xml"}},
+	"tsquery":  {ft: dsl.FieldType{Name: "tsquery"}},
+	"json":     {ft: dsl.FieldType{Name: "json"}},
+	"time":     {ft: dsl.FieldType{Name: "time"}},
+	"timetz":   {ft: dsl.FieldType{Name: "timetz"}},
+	"macaddr":  {ft: dsl.FieldType{Name: "macaddr"}},
+	"macaddr8": {ft: dsl.FieldType{Name: "macaddr8"}},
+
+	// The page names the wire-side type; GoType names the scan side.
+	"timestamp": {ft: dsl.FieldType{Name: "timestamp"}, goOverride: "time.Time"},
+
+	"bit(N)":    {ft: dsl.FieldType{Name: "bit", Len: 8}, placeholders: map[string]string{"N": "8"}},
+	"bit":       {ft: dsl.FieldType{Name: "bit"}},
+	"varbit(N)": {ft: dsl.FieldType{Name: "varbit", Len: 8}, placeholders: map[string]string{"N": "8"}},
+	"varbit":    {ft: dsl.FieldType{Name: "varbit"}},
+	"inet":      {ft: dsl.FieldType{Name: "inet"}},
+	"cidr":      {ft: dsl.FieldType{Name: "cidr"}},
+	"tsvector":  {ft: dsl.FieldType{Name: "tsvector"}},
+	"int4range": {ft: dsl.FieldType{Name: "int4range"}},
+	"int8range": {ft: dsl.FieldType{Name: "int8range"}},
+	"numrange":  {ft: dsl.FieldType{Name: "numrange"}},
+	"tsrange":   {ft: dsl.FieldType{Name: "tsrange"}},
+	"tstzrange": {ft: dsl.FieldType{Name: "tstzrange"}},
+	"daterange": {ft: dsl.FieldType{Name: "daterange"}},
+	"point":     {ft: dsl.FieldType{Name: "point"}},
+	"line":      {ft: dsl.FieldType{Name: "line"}},
+	"lseg":      {ft: dsl.FieldType{Name: "lseg"}},
+	"box":       {ft: dsl.FieldType{Name: "box"}},
+	"path":      {ft: dsl.FieldType{Name: "path"}},
+	"polygon":   {ft: dsl.FieldType{Name: "polygon"}},
+	"circle":    {ft: dsl.FieldType{Name: "circle"}},
 }
 
 func TestEveryDocumentedTypeIsImplemented(t *testing.T) {

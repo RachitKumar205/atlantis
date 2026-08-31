@@ -139,13 +139,18 @@ func TestGeneratedSchemaRoundTrips(t *testing.T) {
 // TestGeneratedSchemaOmitsWhatCodegenCannotCarry is the other half of the
 // round trip: what happens to a column atlantis cannot describe.
 //
-// A legacy database is full of them — `timestamp` without a zone, `json`,
-// `inet`, `char(n)`. A whitelist testing whether the spelling is one token
-// rather than whether the toolchain implements the type declares four of these.
-// Each renders valid Postgres, so plan and apply are clean and the checkpoint
-// is written; `tide codegen` is the first step to fail.
+// A legacy database is full of them. The property is total: every column is
+// either declared, or named in the NOT DECLARED block — none vanishes, because
+// a declaration that silently omits a column reads as complete.
 //
-// The column is omitted and named in the file, so the omission is visible.
+// The fixture mixes types the registry carries with one it does not, so the
+// test keeps working as types are added: `inet` moves from the second group to
+// the first by being registered, and nothing here has to be edited except this
+// comment.
+//
+// A column that renders valid Postgres but has no proto mapping is the case
+// that matters. Plan and apply are clean and the checkpoint is written;
+// `tide codegen` is the first step to fail.
 func TestGeneratedSchemaOmitsWhatCodegenCannotCarry(t *testing.T) {
 	pool := roundTripPool(t)
 	ctx := context.Background()
@@ -160,7 +165,8 @@ func TestGeneratedSchemaOmitsWhatCodegenCannotCarry(t *testing.T) {
 			blob       json,
 			addr       inet,
 			code       char(4),
-			at_time    time
+			at_time    time,
+			rel        oid
 		)`,
 	} {
 		if _, err := pool.Exec(ctx, stmt); err != nil {
@@ -175,8 +181,8 @@ func TestGeneratedSchemaOmitsWhatCodegenCannotCarry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("introspect: %v", err)
 	}
-	if n := len(ir.Entities[0].Fields); n != 7 {
-		t.Fatalf("introspection produced %d fields, want 7 — the fixture is not "+
+	if n := len(ir.Entities[0].Fields); n != 8 {
+		t.Fatalf("introspection produced %d fields, want 8 — the fixture is not "+
 			"exercising what this test claims", n)
 	}
 
@@ -201,23 +207,34 @@ func TestGeneratedSchemaOmitsWhatCodegenCannotCarry(t *testing.T) {
 	for _, fl := range lowered.Entities[0].Fields {
 		declared[fl.Name] = true
 	}
-	for _, name := range []string{"id", "kept"} {
-		if !declared[name] {
-			t.Errorf("column %q is supported and was dropped anyway", name)
+
+	// Total over the fixture: declared, or named in the file. EmitProto above
+	// already established that everything declared survives codegen, so a
+	// column in neither group is one that vanished.
+	for _, name := range []string{"id", "kept", "created", "blob", "addr", "code", "at_time", "rel"} {
+		if declared[name] {
+			continue
+		}
+		if !strings.Contains(src, name) {
+			t.Errorf("column %q was neither declared nor named in the "+
+				"NOT DECLARED block, so the declaration reads as complete "+
+				"while the column is missing:\n%s", name, src)
 		}
 	}
-	for _, name := range []string{"created", "blob", "addr", "code", "at_time"} {
-		if declared[name] {
-			t.Errorf("column %q was declared, but codegen has no mapping for its "+
-				"type — the file passes plan and apply and then fails at "+
-				"`tide codegen`", name)
+
+	// The columns the registry carries are declared rather than parked.
+	for _, name := range []string{"id", "kept", "created", "blob", "addr", "code", "at_time"} {
+		if !declared[name] {
+			t.Errorf("column %q has a registered type and was left out anyway:\n%s", name, src)
 		}
-		// Dropped is only half right. A column that vanishes without a trace
-		// hands the customer a declaration that reads as complete.
-		if !strings.Contains(src, name) {
-			t.Errorf("column %q was dropped without being named in the "+
-				"NOT DECLARED block:\n%s", name, src)
-		}
+	}
+
+	// oid has no .atl spelling. pgx reads oid columns in its own type
+	// resolution, so it is the one type excluded from the text codecs rather
+	// than carried by them, and a column of it is parked.
+	if declared["rel"] {
+		t.Errorf("rel was declared, but codegen has no mapping for oid — the "+
+			"file passes plan and apply and then fails at `tide codegen`:\n%s", src)
 	}
 }
 

@@ -29,7 +29,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rachitkumar205/atlantis/internal/codegen/coltype"
+	"github.com/rachitkumar205/atlantis/internal/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/dsl/sqlparams"
 )

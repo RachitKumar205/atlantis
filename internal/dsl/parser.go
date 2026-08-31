@@ -117,7 +117,7 @@ func canBeFieldName(k TokenKind) bool {
 	case TokIdent,
 		TokState, TokQueue, TokArgs, TokRetries, TokTimeout,
 		TokSchedule, TokStep, TokCompensate, TokVisibleTo,
-		TokJob, TokWorkflow, TokEphemeral, TokEnqueue:
+		TokJob, TokWorkflow, TokEphemeral, TokEnqueue, TokEnum:
 		return true
 	}
 	return false
@@ -158,9 +158,13 @@ func (p *Parser) parseFile() *File {
 			if d := p.parseEphemeral(); d != nil {
 				f.Decls = append(f.Decls, d)
 			}
+		case TokEnum:
+			if d := p.parseEnum(); d != nil {
+				f.Decls = append(f.Decls, d)
+			}
 		default:
 			p.errf(t.Pos, "expected top-level declaration, got %s", t.Kind)
-			p.recover(TokEntity, TokHypertable, TokQuery, TokProcedure, TokJob, TokWorkflow, TokEphemeral)
+			p.recover(TokEntity, TokHypertable, TokQuery, TokProcedure, TokJob, TokWorkflow, TokEphemeral, TokEnum)
 		}
 	}
 }
@@ -440,9 +444,10 @@ func (p *Parser) parseType() TypeRef {
 		if n, err := strconv.Atoi(dim.Value); err == nil {
 			ref.VecDim = n
 		}
-	case "varchar":
-		// The length is optional, matching Postgres: `varchar` with no
-		// limit accepts strings of any size. Len stays 0, which is already
+	case "varchar", "char", "bit", "varbit":
+		// The length is optional, matching Postgres: `varchar` and `varbit`
+		// with no limit accept any size, and bare `char` and `bit` are
+		// CHAR(1) and BIT(1). Len stays 0, which is already
 		// the unbounded sentinel every consumer reads — classifyTypeChange
 		// treats it as the widest possible varchar, and SQLType renders it
 		// as bare VARCHAR.
@@ -1564,4 +1569,50 @@ func CanBeFieldName(name string) bool {
 		return name != ""
 	}
 	return canBeFieldName(kind)
+}
+
+// parseEnum reads `enum Name in ns { a, b, "in progress" }`.
+//
+// A label is an identifier or a quoted string. Postgres accepts any text as a
+// label, and `in progress` is a label a legacy database can hold, so the quoted
+// form is what makes such a type declarable at all.
+//
+// Commas separate labels and a trailing one is allowed, matching how a list
+// reads when a label is added on its own line.
+func (p *Parser) parseEnum() *EnumDecl {
+	kw := p.expect(TokEnum)
+	if kw.Kind == TokError {
+		p.recover(TokEntity, TokHypertable, TokQuery, TokProcedure, TokJob, TokWorkflow, TokEphemeral, TokEnum)
+		return nil
+	}
+	name := p.expect(TokIdent)
+	p.expect(TokIn)
+	ns := p.expect(TokIdent)
+	p.expect(TokLBrace)
+
+	d := &EnumDecl{Pos: kw.Pos, Name: name.Value, Namespace: ns.Value}
+	for {
+		t := p.peek()
+		switch t.Kind {
+		case TokRBrace, TokEOF:
+			p.expect(TokRBrace)
+			return d
+		case TokComma:
+			p.advance()
+		case TokString:
+			p.advance()
+			d.Values = append(d.Values, t.Value)
+		default:
+			// Any keyword is a legal label: the lexer reads `state` as
+			// TokState, and a database with a status enum holding that word
+			// would otherwise have no declaration.
+			if t.Value == "" {
+				p.errf(t.Pos, "expected an enum label, got %s", t.Kind)
+				p.recover(TokEntity, TokHypertable, TokQuery, TokProcedure, TokJob, TokWorkflow, TokEphemeral, TokEnum)
+				return nil
+			}
+			p.advance()
+			d.Values = append(d.Values, t.Value)
+		}
+	}
 }

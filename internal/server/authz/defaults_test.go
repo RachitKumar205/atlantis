@@ -243,17 +243,20 @@ func TestConsoleBootstrapGrantsEveryRPCTheConsoleCalls(t *testing.T) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".up.sql") {
 			continue
 		}
-		body, err := os.ReadFile(migrationsDir + "/" + e.Name())
-		if err != nil {
-			t.Fatalf("read %s: %v", e.Name(), err)
-		}
-		// Only files that actually name the console identity outside a comment
-		// count, so prose about a capability is not read as a grant of it.
-		if !strings.Contains(stripSQLLineComments(string(body)), "'atlantis-console'") {
+		// Per statement, not per file.
+		//
+		// Scanning the whole file counted any capability it mentioned as
+		// granted to any caller it mentioned. 0018 grants SCHEMA_APPLY to
+		// callers WHERE can_mutate and, further down, OPERATOR to the console —
+		// so the console read as holding SCHEMA_APPLY, which it did not, and
+		// this test passed while ApplyMigration returned PermissionDenied on
+		// every deployment.
+		names := consoleCapabilitiesIn(t, migrationsDir+"/"+e.Name())
+		if len(names) == 0 {
 			continue
 		}
 		seeding = append(seeding, e.Name())
-		for name := range capabilityNamesIn(t, migrationsDir+"/"+e.Name()) {
+		for name := range names {
 			granted[name] = true
 		}
 	}
@@ -280,6 +283,32 @@ func TestConsoleBootstrapGrantsEveryRPCTheConsoleCalls(t *testing.T) {
 				"that page returns PermissionDenied on every deployment", name, want, seeding)
 		}
 	}
+}
+
+// consoleCapabilitiesIn returns the capabilities a migration grants to
+// 'atlantis-console'.
+//
+// Split on the statement terminator and keep only the statements naming the
+// console, so a capability granted to somebody else in the same file is not
+// read as the console's. Comments are stripped first, so prose about a
+// capability is not read as a grant of it.
+func consoleCapabilitiesIn(t *testing.T, path string) map[string]bool {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	quoted := regexp.MustCompile(`'(CAPABILITY_[A-Z_]+)'`)
+	out := make(map[string]bool)
+	for _, stmt := range strings.Split(stripSQLLineComments(string(body)), ";") {
+		if !strings.Contains(stmt, "'atlantis-console'") {
+			continue
+		}
+		for _, m := range quoted.FindAllStringSubmatch(stmt, -1) {
+			out[m[1]] = true
+		}
+	}
+	return out
 }
 
 // stripSQLLineComments drops `-- ...` so a migration that discusses the console

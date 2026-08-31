@@ -158,6 +158,25 @@ const (
 	// ARE real changes (validated + persisted), so the diff must surface
 	// them or a procedure-only apply misreports as "0 changes". EntityID
 	// holds the decl's "namespace.Name" id.
+	// KindEnumAdded: a new enum type. Additive — nothing referenced it before.
+	KindEnumAdded ChangeKind = "enum_added"
+
+	// KindEnumRemoved: an enum type dropped, taking any column of it.
+	KindEnumRemoved ChangeKind = "enum_removed"
+
+	// KindEnumValueAdded: a label appended to an existing type.
+	//
+	// ALTER TYPE ... ADD VALUE runs inside a transaction block on PG12+, but
+	// the new label cannot be used until that transaction commits.
+	KindEnumValueAdded ChangeKind = "enum_value_added"
+
+	// KindEnumValueRemoved: a label no longer declared.
+	//
+	// Postgres has no ALTER TYPE ... DROP VALUE. Removing one means a new
+	// type, a rewrite of every column using it, and a drop of the old — so
+	// this is refused rather than emitted.
+	KindEnumValueRemoved ChangeKind = "enum_value_removed"
+
 	KindCustomQueryAdded   ChangeKind = "custom_query_added"
 	KindCustomQueryRemoved ChangeKind = "custom_query_removed"
 	KindCustomQueryChanged ChangeKind = "custom_query_changed"
@@ -396,8 +415,104 @@ func ComputeDiff(oldIR, newIR *dsl.IR, opts ...DiffOption) *Diff {
 	// change to one is a real, persisted change — diff it so plan/apply
 	// don't report "0 changes" for a procedure-only edit.
 	diffCustomDecls(oldIR, newIR, d)
+	diffEnums(oldIR, newIR, d)
 
 	return d
+}
+
+// diffEnums compares the enum sets by id, and their labels for those on both
+// sides.
+//
+// Label order is not compared. Postgres assigns a sort order at CREATE TYPE and
+// ALTER TYPE ... ADD VALUE places a label relative to an existing one; there is
+// no operation that reorders an existing type, so a reordering in the .atl
+// describes a type Postgres cannot produce and is reported as nothing rather
+// than as a change that would silently not happen.
+func diffEnums(oldIR, newIR *dsl.IR, d *Diff) {
+	oldByID := indexEnums(oldIR)
+	newByID := indexEnums(newIR)
+
+	ids := make([]string, 0, len(oldByID)+len(newByID))
+	seen := map[string]bool{}
+	for id := range oldByID {
+		ids, seen[id] = append(ids, id), true
+	}
+	for id := range newByID {
+		if !seen[id] {
+			ids, seen[id] = append(ids, id), true
+		}
+	}
+	sort.Strings(ids)
+
+	for _, id := range ids {
+		oldE, hasOld := oldByID[id]
+		newE, hasNew := newByID[id]
+		switch {
+		case hasOld && !hasNew:
+			d.append(Change{
+				Kind:     KindEnumRemoved,
+				Class:    ClassDestructive,
+				EntityID: id,
+				Detail:   "enum type removed — dropping it drops every column of that type",
+			})
+		case !hasOld && hasNew:
+			d.Additive = append(d.Additive, Change{
+				Kind:     KindEnumAdded,
+				Class:    ClassAdditive,
+				EntityID: id,
+				Detail:   fmt.Sprintf("enum type added with %d label(s)", len(newE.Values)),
+			})
+		default:
+			diffEnumValues(id, oldE, newE, d)
+		}
+	}
+}
+
+// diffEnumValues reports labels added to and removed from one type.
+func diffEnumValues(id string, oldE, newE *dsl.Enum, d *Diff) {
+	had := make(map[string]bool, len(oldE.Values))
+	for _, v := range oldE.Values {
+		had[v] = true
+	}
+	has := make(map[string]bool, len(newE.Values))
+	for _, v := range newE.Values {
+		has[v] = true
+	}
+	for _, v := range newE.Values {
+		if !had[v] {
+			d.Additive = append(d.Additive, Change{
+				Kind:     KindEnumValueAdded,
+				Class:    ClassAdditive,
+				EntityID: id,
+				Detail: fmt.Sprintf("label %q added — it cannot be used until the "+
+					"migration adding it has committed", v),
+			})
+		}
+	}
+	for _, v := range oldE.Values {
+		if !has[v] {
+			d.append(Change{
+				Kind:     KindEnumValueRemoved,
+				Class:    ClassDestructive,
+				EntityID: id,
+				Detail: fmt.Sprintf("label %q removed — Postgres has no ALTER TYPE "+
+					"DROP VALUE, so this needs a new type and a rewrite of every "+
+					"column using it", v),
+			})
+		}
+	}
+}
+
+// indexEnums keys an IR's enums by id.
+func indexEnums(ir *dsl.IR) map[string]*dsl.Enum {
+	out := map[string]*dsl.Enum{}
+	if ir == nil {
+		return out
+	}
+	for i := range ir.Enums {
+		out[ir.Enums[i].ID()] = &ir.Enums[i]
+	}
+	return out
 }
 
 // diffCustomDecls compares the custom-query and procedure sets by id, and by
@@ -1272,7 +1387,7 @@ func mergedNames[V any](a, b map[string]V) []string {
 // typeEqual compares two field types structurally.
 func typeEqual(a, b dsl.FieldType) bool {
 	if a.Name != b.Name || a.Array != b.Array || a.VecDim != b.VecDim ||
-		a.Len != b.Len ||
+		a.Len != b.Len || a.Enum != b.Enum ||
 		a.NumP != b.NumP || a.NumS != b.NumS || a.HasNumP != b.HasNumP {
 		return false
 	}

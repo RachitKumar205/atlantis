@@ -51,7 +51,15 @@ func (s *Service) InspectSchema(ctx context.Context, req *adminpb.InspectSchemaR
 	// was for.
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
-	cmp, err := s.compareToLive(ctx, tx, subs)
+	// Introspection describes the managed database, which is the control one
+	// unless this organisation adopted an existing database.
+	live, releaseLive, err := s.liveTx(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseLive()
+
+	cmp, err := s.compareToLive(ctx, tx, live, subs)
 	if err != nil {
 		return nil, err
 	}

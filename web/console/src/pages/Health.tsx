@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Search, Pause, Play } from 'lucide-react'
+import { MagnifyingGlass, Pause, Play } from '@phosphor-icons/react'
 import { api, queries, type LogLevel, type LogRecord } from '@/api/client'
 import { PageShell } from '@/components/PageShell'
 
@@ -275,7 +275,7 @@ export function Health() {
             {filterChip('debug', 'debug')}
           </div>
           <div className="logsearch">
-            <Search />
+            <MagnifyingGlass />
             <input
               type="text"
               placeholder="filter substring…"
@@ -301,7 +301,7 @@ export function Health() {
             {cold ? skeleton : filtered.length === 0 ? (
               <div className="empty">
                 <div className="empty__icon">
-                  <Search size={18} />
+                  <MagnifyingGlass size={18} />
                 </div>
                 <div className="empty__title">
                   {level || q ? 'No lines match this filter' : 'No log activity yet'}

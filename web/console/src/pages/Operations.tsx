@@ -1,7 +1,17 @@
 import { Component, useEffect, useState, type ErrorInfo, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { AlertTriangle, Box, Check, ChevronRight, Inbox, RefreshCw, Search, Shield, Undo2 } from 'lucide-react'
+import {
+  ArrowUUpLeft,
+  ArrowsClockwise,
+  CaretRight,
+  Check,
+  Cube,
+  MagnifyingGlass,
+  Shield,
+  Tray,
+  Warning,
+} from '@phosphor-icons/react'
 import { api, queries, planClassBadge, type AuditEntry, type JobStatus } from '@/api/client'
 import { useIsAdmin } from '@/hooks/useAuth'
 import { PageShell } from '@/components/PageShell'
@@ -129,13 +139,13 @@ function RollbackPanel({ onToast }: { onToast: (msg: string) => void }) {
   return (
     <div className="card">
       <div className="card__head">
-        <Undo2 size={14} />
+        <ArrowUUpLeft size={14} />
         <span className="card__title">Schema rollback</span>
         <span className="badge badge--break" style={{ marginLeft: 'auto' }}>destructive</span>
       </div>
       <div className="card__body">
         <div className="banner banner--warn" style={{ marginBottom: 18 }}>
-          <AlertTriangle size={14} className="banner__icon" />
+          <Warning size={14} className="banner__icon" />
           <span>
             Rollback re-points the active schema and runs <b>down</b> migrations.
             Callers on the newer version will fail until they re-apply.
@@ -231,7 +241,7 @@ function PreviewBlock({
 
       <details className="sqlblock" open>
         <summary>
-          <ChevronRight size={12} /> down migration SQL
+          <CaretRight size={12} /> down migration SQL
         </summary>
         <Sql>{data.up_sql || '-- no SQL emitted (target IR identical to current)'}</Sql>
       </details>
@@ -267,7 +277,7 @@ function PreviewBlock({
       {result && (
         <details className="sqlblock" open style={{ marginTop: 18 }}>
           <summary>
-            <ChevronRight size={12} /> executed SQL — now v{result.new_version}
+            <CaretRight size={12} /> executed SQL — now v{result.new_version}
           </summary>
           <Sql>{result.up_sql || '(no SQL emitted)'}</Sql>
         </details>
@@ -296,7 +306,7 @@ function DeadJobsPanel({ onToast }: { onToast: (msg: string) => void }) {
   return (
     <div className="card">
       <div className="card__head">
-        <Inbox size={14} />
+        <Tray size={14} />
         <span className="card__title">Dead job queue</span>
         <span className="chip" style={{ marginLeft: 'auto' }}>{jobs.length} stuck</span>
       </div>
@@ -382,7 +392,7 @@ function DeadJob({
           {job.attempts}/{job.max_retries} attempts
         </span>
         <span className="brass" style={{ display: 'flex', transform: isOpen ? 'rotate(90deg)' : '', transition: 'transform var(--fast) var(--ease)' }}>
-          <ChevronRight size={14} />
+          <CaretRight size={14} />
         </span>
       </div>
 
@@ -390,7 +400,7 @@ function DeadJob({
         <div style={{ padding: '4px 12px 14px 40px' }}>
           {job.last_error && (
             <div className="banner banner--error" style={{ marginBottom: 12 }}>
-              <AlertTriangle size={13} className="banner__icon" />
+              <Warning size={13} className="banner__icon" />
               <span className="mono" style={{ fontSize: 12 }}>{job.last_error}</span>
             </div>
           )}
@@ -406,7 +416,7 @@ function DeadJob({
           )}
           <div className="row" style={{ gap: 8 }}>
             <button className="btn btn--sm" onClick={onRetry} disabled={!canAdmin || retrying}>
-              <RefreshCw size={12} />
+              <ArrowsClockwise size={12} />
               <span>{retrying ? 'Retrying…' : 'Retry job'}</span>
             </button>
             <button className="btn btn--sm btn--ghost" onClick={onDiscard} disabled={!canAdmin}>
@@ -452,7 +462,7 @@ function AuditPanel() {
         <Shield size={14} />
         <span className="card__title">Audit log</span>
         <div className="logsearch" style={{ marginLeft: 'auto', height: 26, minWidth: 160 }}>
-          <Search />
+          <MagnifyingGlass />
           <input placeholder="filter…" value={q} onChange={e => setQ(e.target.value)} />
         </div>
       </div>
@@ -530,7 +540,7 @@ function SandboxPreviewButton() {
       onClick={() => navigate({ to: '/sandbox', search: { boot: 'sim' } })}
       title="Open a sandbox booted from the current schema — exec the rollback SQL there first."
     >
-      <Box size={13} />
+      <Cube size={13} />
       <span>Preview in sandbox</span>
     </button>
   )

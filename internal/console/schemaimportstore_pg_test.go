@@ -2,9 +2,12 @@ package console
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // The schema-import store, against the real catalogue.
@@ -31,6 +34,12 @@ func sampleEntities(prefix string) []SchemaImportEntity {
 	}
 }
 
+// sampleFindings wraps sampleEntities for the store, which takes one value
+// rather than four slices.
+func sampleFindings(prefix string) SchemaImportFindings {
+	return SchemaImportFindings{Entities: sampleEntities(prefix)}
+}
+
 // countImports reads the table as the superuser, past every policy.
 func countImports(t *testing.T, f *consoleFixture) int {
 	t.Helper()
@@ -53,7 +62,7 @@ func TestAnImportRoundTrips(t *testing.T) {
 
 	want := sampleEntities("acme")
 	id, err := org.createSchemaImport(ctx, subjectFor(orgAcme, "a@example.com"),
-		"db.example.com:5432", want)
+		"db.example.com:5432", SchemaImportFindings{Entities: want})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -81,9 +90,9 @@ func TestAnImportRoundTrips(t *testing.T) {
 		t.Error("created_at came back zero")
 	}
 
-	ents, err := org.schemaImportEntities(ctx, id)
+	ents, err := org.schemaImportEntities(ctx, id, "")
 	if err != nil {
-		t.Fatalf("entities: %v", err)
+		t.Fatalf("read the declarations: %v", err)
 	}
 	if len(ents) != len(want) {
 		t.Fatalf("read %d declarations, want %d", len(ents), len(want))
@@ -105,13 +114,13 @@ func TestSchemaImportsDoNotCrossOrganisations(t *testing.T) {
 
 	acmeID, err := f.srv.db.forOrg(orgAcme).createSchemaImport(ctx,
 		subjectFor(orgAcme, "a@example.com"), "acme.example.com:5432",
-		sampleEntities("acme"))
+		sampleFindings("acme"))
 	if err != nil {
 		t.Fatalf("create as acme: %v", err)
 	}
 	if _, err := f.srv.db.forOrg(orgGlobex).createSchemaImport(ctx,
 		subjectFor(orgGlobex, "g@example.com"), "globex.example.com:5432",
-		sampleEntities("globex")); err != nil {
+		sampleFindings("globex")); err != nil {
 		t.Fatalf("create as globex: %v", err)
 	}
 
@@ -138,15 +147,22 @@ func TestSchemaImportsDoNotCrossOrganisations(t *testing.T) {
 		t.Errorf("globex saw an import of %s", globex[0].Source)
 	}
 
-	// The claim schemaImportEntities is written on: it puts no organisation in
-	// its WHERE clause and relies on the policy for the boundary. An id from
-	// elsewhere must select nothing.
-	stolen, err := f.srv.db.forOrg(orgGlobex).schemaImportEntities(ctx, acmeID)
+	// The claim every read here is written on: none puts an organisation in its
+	// WHERE clause, and all rely on the policy for the boundary. An id from
+	// elsewhere must select nothing — the overview says so as ErrNoSuchImport,
+	// and the declarations come back empty.
+	if _, err := f.srv.db.forOrg(orgGlobex).schemaImportOverview(ctx, acmeID); !errors.Is(err, ErrNoSuchImport) {
+		t.Errorf("globex read acme's import: err = %v, want ErrNoSuchImport", err)
+	}
+	if _, err := f.srv.db.forOrg(orgGlobex).schemaImportNotes(ctx, acmeID); !errors.Is(err, ErrNoSuchImport) {
+		t.Errorf("globex read acme's notes: err = %v, want ErrNoSuchImport", err)
+	}
+	stolen, err := f.srv.db.forOrg(orgGlobex).schemaImportEntities(ctx, acmeID, "")
 	if err != nil {
-		t.Fatalf("read acme's import as globex: %v", err)
+		t.Fatalf("read acme's declarations as globex: %v", err)
 	}
 	if len(stolen) != 0 {
-		t.Errorf("globex read %d of acme's declarations with acme's import id", len(stolen))
+		t.Errorf("globex got %d of acme's declarations", len(stolen))
 	}
 }
 
@@ -157,12 +173,12 @@ func TestAnExpiredImportIsNotListed(t *testing.T) {
 	org := f.srv.db.forOrg(orgAcme)
 
 	live, err := org.createSchemaImport(ctx, subjectFor(orgAcme, "a@example.com"),
-		"live.example.com:5432", sampleEntities("live"))
+		"live.example.com:5432", sampleFindings("live"))
 	if err != nil {
 		t.Fatalf("create the live import: %v", err)
 	}
 	stale, err := org.createSchemaImport(ctx, subjectFor(orgAcme, "a@example.com"),
-		"stale.example.com:5432", sampleEntities("stale"))
+		"stale.example.com:5432", sampleFindings("stale"))
 	if err != nil {
 		t.Fatalf("create the stale import: %v", err)
 	}
@@ -200,12 +216,12 @@ func TestTheSweepDeletesOnlyExpiredImports(t *testing.T) {
 	org := f.srv.db.forOrg(orgAcme)
 
 	live, err := org.createSchemaImport(ctx, subjectFor(orgAcme, "a@example.com"),
-		"live.example.com:5432", sampleEntities("live"))
+		"live.example.com:5432", sampleFindings("live"))
 	if err != nil {
 		t.Fatalf("create the live import: %v", err)
 	}
 	stale, err := org.createSchemaImport(ctx, subjectFor(orgAcme, "a@example.com"),
-		"stale.example.com:5432", sampleEntities("stale"))
+		"stale.example.com:5432", sampleFindings("stale"))
 	if err != nil {
 		t.Fatalf("create the stale import: %v", err)
 	}
@@ -236,7 +252,7 @@ func TestTheSweepDeletesOnlyExpiredImports(t *testing.T) {
 		t.Errorf("%d declarations of the expired import survived it", orphans)
 	}
 
-	if got, err := org.schemaImportEntities(ctx, live); err != nil {
+	if got, err := org.schemaImportEntities(ctx, live, ""); err != nil {
 		t.Fatalf("read the live import: %v", err)
 	} else if len(got) == 0 {
 		t.Error("the sweep took the live import's declarations")
@@ -258,7 +274,7 @@ func TestSourceRefusesAConnectionString(t *testing.T) {
 	} {
 		t.Run(dsn, func(t *testing.T) {
 			_, err := f.srv.db.forOrg(orgAcme).createSchemaImport(ctx,
-				subjectFor(orgAcme, "a@example.com"), dsn, nil)
+				subjectFor(orgAcme, "a@example.com"), dsn, SchemaImportFindings{})
 			if err == nil {
 				t.Fatalf("stored %q as a source", dsn)
 			}
@@ -284,7 +300,8 @@ func TestAFailedDeclarationRollsBackTheImport(t *testing.T) {
 		{Table: "public.orders", Entity: "OrderAgain", Atl: "entity OrderAgain {}"},
 	}
 	if _, err := f.srv.db.forOrg(orgAcme).createSchemaImport(ctx,
-		subjectFor(orgAcme, "a@example.com"), "db.example.com:5432", dup); err == nil {
+		subjectFor(orgAcme, "a@example.com"), "db.example.com:5432",
+		SchemaImportFindings{Entities: dup}); err == nil {
 		t.Fatal("two declarations of one table were stored")
 	}
 
@@ -310,7 +327,7 @@ func TestImportsAreListedNewestFirst(t *testing.T) {
 	var ids []string
 	for i := range 3 {
 		id, err := org.createSchemaImport(ctx, subjectFor(orgAcme, "a@example.com"),
-			fmt.Sprintf("db%d.example.com:5432", i), nil)
+			fmt.Sprintf("db%d.example.com:5432", i), SchemaImportFindings{})
 		if err != nil {
 			t.Fatalf("create %d: %v", i, err)
 		}
@@ -336,5 +353,152 @@ func TestImportsAreListedNewestFirst(t *testing.T) {
 		if list[i].ID != want {
 			t.Errorf("position %d is %s, want %s", i, list[i].ID, want)
 		}
+	}
+}
+
+// A stored declaration starts at its `entity` line.
+//
+// Migration 0015 stripped the header from rows written before it moved to the
+// file. The invariant matters because the browser prepends one header per file:
+// a row that still carries its own puts a second copy inside the file.
+func TestStoredDeclarationsCarryNoHeader(t *testing.T) {
+	f := newConsoleFixture(t)
+	ctx := context.Background()
+	org := f.srv.db.forOrg(orgAcme)
+
+	id, err := org.createSchemaImport(ctx, subjectFor(orgAcme, "a@example.com"),
+		"db.example.com:5432", sampleFindings("acme"))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	ents, err := org.schemaImportEntities(ctx, id, "")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	for _, e := range ents {
+		if !strings.HasPrefix(e.Atl, "entity ") {
+			t.Errorf("%s does not start at its entity line:\n%s", e.Table, e.Atl)
+		}
+		if strings.Contains(e.Atl, "Generated by atlantis") ||
+			strings.Contains(e.Atl, "Generated from the live database") {
+			t.Errorf("%s carries a file header:\n%s", e.Table, e.Atl)
+		}
+	}
+}
+
+// 0015 strips a stale header from a row it cannot see through the policy.
+//
+// The table carries FORCE ROW LEVEL SECURITY and a RESTRICTIVE policy on
+// console.current_org(). A migration binds no organisation, so an UPDATE runs
+// against a table admitting no rows and reports success having rewritten none.
+// The first version of this migration did exactly that: 672 rows in, 672 rows
+// still stale, and a migration recorded as applied.
+//
+// Run as the console's own role — NOSUPERUSER NOBYPASSRLS — because a
+// superuser bypasses the policy and would pass whether or not the migration
+// lifts FORCE.
+func TestMigration0015RewritesRowsThePolicyHides(t *testing.T) {
+	f := newConsoleFixture(t)
+	ctx := context.Background()
+
+	const header = "// Generated from the live database.\n//\n// Review before committing.\n"
+	const decl = "entity Order in public {\n  id int primary\n}\n"
+
+	if _, err := f.pool.Exec(ctx, `
+		INSERT INTO console.schema_imports (id, org, source, entities, actor, expires_at)
+		VALUES ('imp_stale', $1, 'db.example.com:5432', 1, 'a', now() + interval '1 day')
+	`, orgAcme); err != nil {
+		t.Fatalf("seed import: %v", err)
+	}
+	if _, err := f.pool.Exec(ctx, `
+		INSERT INTO console.schema_import_entities
+		    (import_id, org, table_name, entity_name, namespace, atl)
+		VALUES ('imp_stale', $1, 'public.orders', 'Order', 'public', $2)
+	`, orgAcme, header+decl); err != nil {
+		t.Fatalf("seed declaration: %v", err)
+	}
+
+	conn, err := pgx.Connect(ctx, f.consoleDSN)
+	if err != nil {
+		t.Fatalf("connect as the console role: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+
+	// The migration's statements, in its order, with no organisation bound.
+	for _, sql := range []string{
+		`ALTER TABLE console.schema_import_entities NO FORCE ROW LEVEL SECURITY`,
+		`UPDATE console.schema_import_entities
+		    SET atl = substring(atl FROM position('entity ' IN atl))
+		  WHERE atl LIKE '// Generated from the live database.%'
+		    AND position('entity ' IN atl) > 0`,
+		`ALTER TABLE console.schema_import_entities FORCE ROW LEVEL SECURITY`,
+	} {
+		if _, err := conn.Exec(ctx, sql); err != nil {
+			t.Fatalf("as the console role: %v\n%s", err, sql)
+		}
+	}
+
+	var got string
+	if err := f.pool.QueryRow(ctx, `
+		SELECT atl FROM console.schema_import_entities WHERE import_id = 'imp_stale'
+	`).Scan(&got); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got != decl {
+		t.Errorf("the header survived:\n%q\nwant\n%q", got, decl)
+	}
+
+	// FORCE is back on, so the boundary the policy enforces is unchanged.
+	var forced bool
+	if err := f.pool.QueryRow(ctx, `
+		SELECT relforcerowsecurity FROM pg_class
+		WHERE oid = 'console.schema_import_entities'::regclass
+	`).Scan(&forced); err != nil {
+		t.Fatalf("read relforcerowsecurity: %v", err)
+	}
+	if !forced {
+		t.Error("the migration left FORCE ROW LEVEL SECURITY off, so the " +
+			"organisation boundary on this table is inert")
+	}
+}
+
+// A row already starting at `entity` is left alone.
+func TestMigration0015IsIdempotentOverCleanRows(t *testing.T) {
+	f := newConsoleFixture(t)
+	ctx := context.Background()
+
+	const body = "entity Order in public {\n  id int primary\n}\n"
+	if _, err := f.pool.Exec(ctx, `
+		INSERT INTO console.schema_imports (id, org, source, entities, actor, expires_at)
+		VALUES ('imp_clean', $1, 'db.example.com:5432', 1, 'a', now() + interval '1 day')
+	`, orgAcme); err != nil {
+		t.Fatalf("seed import: %v", err)
+	}
+	if _, err := f.pool.Exec(ctx, `
+		INSERT INTO console.schema_import_entities
+		    (import_id, org, table_name, entity_name, namespace, atl)
+		VALUES ('imp_clean', $1, 'public.orders', 'Order', 'public', $2)
+	`, orgAcme, body); err != nil {
+		t.Fatalf("seed declaration: %v", err)
+	}
+
+	if _, err := f.pool.Exec(ctx, `
+		UPDATE console.schema_import_entities
+		   SET atl = substring(atl FROM position('entity ' IN atl))
+		 WHERE atl LIKE '// Generated from the live database.%'
+		   AND position('entity ' IN atl) > 0
+	`); err != nil {
+		t.Fatalf("rerun: %v", err)
+	}
+
+	var got string
+	if err := f.pool.QueryRow(ctx, `
+		SELECT atl FROM console.schema_import_entities WHERE import_id = 'imp_clean'
+	`).Scan(&got); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got != body {
+		t.Errorf("a clean row was rewritten:\n%q\nwant\n%q", got, body)
 	}
 }

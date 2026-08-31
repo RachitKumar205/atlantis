@@ -34,6 +34,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/schema"
 )
 
 // Querier is the read-only subset of pgxpool.Pool / pgx.Tx introspect
@@ -80,6 +81,14 @@ func FromPostgres(ctx context.Context, q Querier, declaredIR *dsl.IR) (*dsl.IR, 
 		Queries:    append([]dsl.CustomQuery(nil), declaredIR.Queries...),
 		Procedures: append([]dsl.CustomProcedure(nil), declaredIR.Procedures...),
 	}
+
+	// Enum types as the database has them. Without this every declared enum
+	// reads as removed, because the live IR would carry none.
+	liveEnums, err := loadLiveEnums(ctx, q, declaredIR.Enums)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	out.Enums = liveEnums
 	for i, e := range declaredIR.Entities {
 		out.Entities[i] = dsl.Entity{
 			Name:               e.Name,
@@ -1067,4 +1076,66 @@ func partitionColumnFromQual(qual string) string {
 		return ""
 	}
 	return lhs
+}
+
+// loadLiveEnums reads the labels of the declared enum types that exist.
+//
+// Keyed by the flattened name schema.EnumTypeName produces, so the lookup is
+// exact. Recovering a declared `namespace.Name` from an arbitrary live type
+// name is not possible — `rnacen.status` could be namespace `rnacen` and name
+// `status` or a namespace called `rnacen_status` — so an enum atlantis did not
+// create is not read here. Adopting one needs a way to write the live type name
+// in the declaration.
+//
+// A declared enum with no live type is omitted, so the diff reports it as added
+// rather than as a mismatch.
+func loadLiveEnums(ctx context.Context, q Querier, declared []dsl.Enum) ([]dsl.Enum, error) {
+	if len(declared) == 0 {
+		return nil, nil
+	}
+	byTypeName := make(map[string]*dsl.Enum, len(declared))
+	names := make([]string, 0, len(declared))
+	for i := range declared {
+		tn := schema.EnumTypeName(&declared[i])
+		byTypeName[tn] = &declared[i]
+		names = append(names, tn)
+	}
+
+	rows, err := q.Query(ctx, `
+SELECT t.typname, e.enumlabel
+FROM pg_type t
+JOIN pg_namespace n ON n.oid = t.typnamespace
+JOIN pg_enum e ON e.enumtypid = t.oid
+WHERE t.typtype = 'e'
+  AND n.nspname = 'atlantis'
+  AND t.typname = ANY($1)
+ORDER BY t.typname, e.enumsortorder`, names)
+	if err != nil {
+		return nil, fmt.Errorf("introspect enums: %w", err)
+	}
+	defer rows.Close()
+
+	labels := map[string][]string{}
+	for rows.Next() {
+		var typname, label string
+		if err := rows.Scan(&typname, &label); err != nil {
+			return nil, fmt.Errorf("introspect enums: %w", err)
+		}
+		labels[typname] = append(labels[typname], label)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("introspect enums: %w", err)
+	}
+
+	var out []dsl.Enum
+	for _, tn := range names {
+		vals, ok := labels[tn]
+		if !ok {
+			continue
+		}
+		d := byTypeName[tn]
+		out = append(out, dsl.Enum{Name: d.Name, Namespace: d.Namespace, Values: vals})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID() < out[j].ID() })
+	return out, nil
 }

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { AlertTriangle, Archive, Check, Info } from 'lucide-react'
+import { Archive, Check, Info, Warning } from '@phosphor-icons/react'
 import { queries, type ParkedObject } from '@/api/client'
 import { PageShell } from '@/components/PageShell'
 import { HoverInfo } from '@/components/HoverInfo'
@@ -81,7 +81,7 @@ export function Parked() {
 
       {error && (
         <div className="banner banner--error">
-          <AlertTriangle size={14} className="banner__icon" />
+          <Warning size={14} className="banner__icon" />
           <span>Could not read the register: {(error as Error).message}</span>
         </div>
       )}
@@ -90,7 +90,7 @@ export function Parked() {
         <>
           {stuck.length > 0 && (
             <div className="banner banner--warn" style={{ marginBottom: 14 }}>
-              <AlertTriangle size={14} className="banner__icon" />
+              <Warning size={14} className="banner__icon" />
               <span>
                 {stuck.length} object{stuck.length === 1 ? '' : 's'} have failed to drop
                 repeatedly. Usually something was created against them after they were

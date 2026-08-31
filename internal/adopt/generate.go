@@ -186,7 +186,6 @@ func Generate(ctx context.Context, q introspect.Querier, ns string, schemas []st
 	if err != nil {
 		return Result{}, err
 	}
-	warnings = append(warnings, demoteNarrowSerials(filled, nameFor)...)
 	warnings = append(warnings, notes...)
 	sort.Strings(warnings)
 
@@ -272,40 +271,6 @@ func noTablesError(ctx context.Context, q introspect.Querier, schemas []string) 
 	return fmt.Errorf("%w: nothing in %s. This database keeps its tables in %s%s — "+
 		"name the schema you want to read",
 		ErrNothingToRead, strings.Join(schemas, ", "), strings.Join(names, ", "), suffix)
-}
-
-// demoteNarrowSerials clears `serial` where the DSL cannot carry it, and
-// reports each one.
-//
-// Postgres SERIAL is int+sequence and BIGSERIAL is bigint+sequence. The .atl
-// `serial` modifier spells only the wide one — Lower rejects it on anything
-// else — so introspection reading a 32-bit sequence default emits
-// `id int primary serial`, which parses and fails to lower. Measured on a
-// public dataset: 17 of 209 tables, and the first of them stopped the whole
-// file being usable.
-//
-// The column keeps its type, because widening it here would describe a table
-// the database does not have and a plan would then propose altering it. What
-// is lost is the sequence default, so the warning says a plan will propose
-// dropping it.
-func demoteNarrowSerials(ir *dsl.IR, nameFor map[string]string) []string {
-	var out []string
-	for i := range ir.Entities {
-		e := &ir.Entities[i]
-		for j := range e.Fields {
-			f := &e.Fields[j]
-			if !f.Serial || f.Type.Name == "bigint" {
-				continue
-			}
-			f.Serial = false
-			out = append(out, fmt.Sprintf(
-				"%s: column %q is a %s sequence, which .atl can only spell on bigint. "+
-					"The declaration omits the default, so a plan will propose dropping "+
-					"it — widen the column to bigint, or declare this table by hand",
-				nameFor[e.ID()], f.Name, f.Type.Name))
-		}
-	}
-	return out
 }
 
 // dropUndeclarableEntities removes tables whose declaration would not parse,

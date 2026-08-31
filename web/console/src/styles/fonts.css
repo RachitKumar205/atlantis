@@ -1,16 +1,12 @@
-/* The console's typeface load.
+/* The console's typeface load lives in index.html, not here.
  *
- * Lifted verbatim out of tokens.css when that file moved to @atlantis/shared.
- * The URL is unchanged, including the weight list: 450 is not a rounding of
- * 400, it is asked for by name in three rules (`console.css:302`,
- * `pages.css:33`, `pages.css:411`), and dropping it from this request would
- * silently synthesise those three instead of loading them.
+ * A <link> in the document head is fetched in parallel with the stylesheet; an
+ * @import inside a stylesheet cannot start until that sheet has been fetched
+ * and parsed, so it serialises the request. This file used to carry an @import
+ * for Geist and index.html carried a <link> for the same two families with a
+ * different weight list, which made two requests for the union of the weights.
  *
- * This is the SECOND place the console fetches Geist. `index.html` links the
- * same two families with a different weight list (300;400;500;600;700 and
- * 400;500;600), so between them the browser makes two requests and the union
- * of the weights arrives. That duplication predates the workspace split and
- * is left exactly as it was — reconciling it is a visual change, and this
- * commit is supposed to have none.
+ * Both are now one <link> for the three Datum families. The file is kept, and
+ * kept first in main.tsx, so anything that does need to lead a stylesheet has
+ * somewhere to go.
  */
-@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;450;500;600&family=Geist+Mono:wght@400;450;500&display=swap');

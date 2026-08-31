@@ -13,11 +13,18 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    // The server's machine-readable reason, where it sends one. Present only
+    // for refusals a caller is expected to act on rather than print.
+    public readonly code?: string,
   ) {
     super(message)
     this.name = 'ApiError'
   }
 }
+
+// TLS_REQUIRED marks the database that offers no TLS. The request carries
+// allow_insecure and is sent again.
+export const TLS_REQUIRED = 'tls_required'
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -52,6 +59,13 @@ export interface MeResult {
   // console cookie ends nothing at Cloud, which is a separate origin.
   cloud_signout_url: string
 
+  // What the current organisation calls itself, when that is not its name.
+  //
+  // Absent when the two are the same, so the rail draws one line rather than
+  // the same word twice. Reaches here from the assertion's org_names claim by
+  // way of the session — no call to Cloud per page.
+  org_display_name?: string
+
   // Every organisation this account belongs to, each with the URL that
   // switches to it, including the one currently in use.
   //
@@ -74,6 +88,10 @@ export interface ConfigResult {
 export interface OrgTarget {
   name: string
   url: string
+
+  // Present only where it differs from name. The switcher falls back to name,
+  // so an entry without one draws as it always did.
+  display_name?: string
 }
 
 export interface SubmittedFile {
@@ -342,16 +360,80 @@ export interface ImportSuggestion {
   line: string
 }
 
-export interface SchemaImportResult {
+/** What POST /api/schema/import answers: the identifier of what it stored.
+ *
+ * The declarations are read back from the import's own URL, so the review is a
+ * screen somebody can reload, link to and come back to. */
+export interface SchemaImportStarted {
   import_id: string
-  /** Host and port. The connection string is not returned and not stored. */
+}
+
+/** One namespace an import read into, and how many tables it found there. */
+export interface ImportNamespace {
+  name: string
+  tables: number
+}
+
+/** An import's header and its counts, without the payload behind them.
+ *
+ * The declarations and the findings run to hundreds of kilobytes together, so
+ * the screen draws its header from this and fetches each section on its own. */
+export interface SchemaImportOverview {
+  import_id: string
+  /** Host and port. The connection string is never returned. */
   source: string
-  entities: ImportedEntity[]
+  actor: string
+  created_at: string
+  entities: number
+  namespaces: ImportNamespace[]
+  suggestions: number
+  skipped: number
+  warnings: number
+}
+
+/** What planning an import's declarations would do.
+ *
+ * class is the plan class — additive, backfill_required, cross_caller_breaking,
+ * destructive — and decides how the confirmation reads. up_sql is the DDL. */
+export interface ImportPlan {
+  plan_id?: string
+  class?: string
+  up_sql?: string
+  down_sql?: string
+  parse_errors?: string[]
+  breaking_detail?: string[]
+  custom_sql_errors?: string[]
+  checkpoint_hash?: string
+}
+
+/** One difference between the declarations and the managed database.
+ *
+ * Field names mirror atlantis.admin.v1.AdoptDriftItem: entity_id and field are
+ * what say which column a row is about, and a report without them is a list of
+ * identical verbs. */
+export interface AdoptDrift {
+  entity_id?: string
+  field?: string
+  kind?: string
+  /** "addition", "removal" or "mismatch". */
+  severity?: string
+  detail?: string
+}
+
+export interface ImportApplied {
+  checkpoint_written?: boolean
+  already_adopted?: boolean
+  drift?: AdoptDrift[]
+  warnings?: string[]
+}
+
+/** What a pass found, without the declarations. */
+export interface SchemaImportNotes {
+  suggestions: ImportSuggestion[]
   /** Tables that were found and not declared, each with a reason. */
   skipped: string[]
   /** Facts introspection did not verify, and indexes it could not spell. */
   warnings: string[]
-  suggestions: ImportSuggestion[]
 }
 
 /** A stored import, without its declarations. */
@@ -713,13 +795,15 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
+    let code: string | undefined
     try {
-      const body = await res.json() as { error?: string; message?: string }
+      const body = await res.json() as { error?: string; message?: string; code?: string }
       msg = body.error ?? body.message ?? msg
+      code = body.code
     } catch {
       // ignore JSON parse failure
     }
-    throw new ApiError(res.status, msg)
+    throw new ApiError(res.status, msg, code)
   }
 
   // 204 No Content
@@ -837,9 +921,11 @@ export const api = {
     /**
      * Reads a database and returns .atl describing it.
      *
-     * The connection string is sent once and kept nowhere: the server refuses
-     * any address that is not a public host, reads inside a READ ONLY
-     * transaction, and stores host and port alone against this organisation.
+     * Naming a database here is asking atlantis to manage it, so the server
+     * hands the connection string to the organisation's own atlantis, which
+     * seals it. The console stores host and port alone. The server still
+     * refuses any address that is not a public host and reads inside a READ
+     * ONLY transaction.
      *
      * allowInsecure is the acknowledgement that a server offers no TLS. Never
      * sent unless somebody ticked the box, because the same switch against a
@@ -849,8 +935,8 @@ export const api = {
      * catalogue — so callers show progress rather than assume it returns
      * promptly.
      */
-    run: (dsn: string, allowInsecure: boolean): Promise<SchemaImportResult> =>
-      apiFetch<SchemaImportResult>('/api/schema/import', {
+    run: (dsn: string, allowInsecure: boolean): Promise<SchemaImportStarted> =>
+      apiFetch<SchemaImportStarted>('/api/schema/import', {
         method: 'POST',
         body: JSON.stringify({ dsn, allow_insecure: allowInsecure }),
       }),
@@ -859,9 +945,49 @@ export const api = {
     list: (): Promise<{ imports: SchemaImportSummary[] }> =>
       apiFetch<{ imports: SchemaImportSummary[] }>('/api/schema/imports'),
 
-    /** The declarations of one import. */
-    get: (id: string): Promise<{ entities: ImportedEntity[] }> =>
-      apiFetch<{ entities: ImportedEntity[] }>(`/api/schema/imports/${encodeURIComponent(id)}`),
+    /** One import's header and counts. Small: no declarations, no findings. */
+    get: (id: string): Promise<SchemaImportOverview> =>
+      apiFetch<SchemaImportOverview>(`/api/schema/imports/${encodeURIComponent(id)}`),
+
+    /** The declarations, optionally narrowed to one namespace.
+     *
+     * `header` is the comment a generated file opens with, composed by the
+     * server so the text lives beside the code that decided what it says. */
+    entities: (
+      id: string,
+      namespace?: string,
+    ): Promise<{ entities: ImportedEntity[]; header: string }> =>
+      apiFetch<{ entities: ImportedEntity[]; header: string }>(
+        `/api/schema/imports/${encodeURIComponent(id)}/entities` +
+          (namespace ? `?namespace=${encodeURIComponent(namespace)}` : ''),
+      ),
+
+    /** The suggestions, the skipped tables and the warnings. */
+    notes: (id: string): Promise<SchemaImportNotes> =>
+      apiFetch<SchemaImportNotes>(`/api/schema/imports/${encodeURIComponent(id)}/notes`),
+
+    /** What applying these declarations would do. Writes nothing.
+     *
+     * No caller: the server submits as its own identity, because
+     * ApplyMigration binds req.caller to the authenticated certificate. */
+    plan: (id: string): Promise<ImportPlan> =>
+      apiFetch<ImportPlan>(`/api/schema/imports/${encodeURIComponent(id)}/plan`, {
+        method: 'POST',
+        body: '{}',
+      }),
+
+    /**
+     * Registers the declarations as the schema atlantis holds.
+     *
+     * No DDL runs: the tables are already in the managed database, which is
+     * what the import read. The server checks the declarations against it and
+     * refuses if the two disagree.
+     */
+    apply: (id: string): Promise<ImportApplied> =>
+      apiFetch<ImportApplied>(`/api/schema/imports/${encodeURIComponent(id)}/apply`, {
+        method: 'POST',
+        body: '{}',
+      }),
   },
 
   owners: {
@@ -1204,6 +1330,27 @@ export interface SandboxDiffResponse {
 // ---------------------------------------------------------------------------
 
 export const queries = {
+  // One stored import. Keyed by id so the review screen is reachable by URL and
+  // survives a reload; staleTime is Infinity because an import is a snapshot
+  // and nothing rewrites it.
+  schemaImport: (id: string) => ({
+    queryKey: ['schema-import', id] as const,
+    queryFn: () => api.schemaImport.get(id),
+    staleTime: Infinity,
+  }),
+
+  schemaImportEntities: (id: string, namespace?: string) => ({
+    queryKey: ['schema-import', id, 'entities', namespace ?? ''] as const,
+    queryFn: () => api.schemaImport.entities(id, namespace),
+    staleTime: Infinity,
+  }),
+
+  schemaImportNotes: (id: string) => ({
+    queryKey: ['schema-import', id, 'notes'] as const,
+    queryFn: () => api.schemaImport.notes(id),
+    staleTime: Infinity,
+  }),
+
   me: () => ({
     queryKey: ['auth', 'me'] as const,
     queryFn: () => api.auth.me(),

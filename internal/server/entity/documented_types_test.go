@@ -11,7 +11,7 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	_ "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/common/v1"
-	"github.com/rachitkumar205/atlantis/internal/codegen/coltype"
+	"github.com/rachitkumar205/atlantis/internal/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/testsupport/dsltypes"
 )
@@ -70,6 +70,38 @@ var samples = map[string]dsl.FieldType{
 	"date":          {Name: "date"},
 	"interval":      {Name: "interval"},
 	"vector(N)":     {Name: "vector", VecDim: 3},
+	"timestamp":     {Name: "timestamp"},
+	"char(N)":       {Name: "char", Len: 10},
+	"char":          {Name: "char"},
+	"name":          {Name: "name"},
+	"money":         {Name: "money"},
+	"xml":           {Name: "xml"},
+	"tsquery":       {Name: "tsquery"},
+	"json":          {Name: "json"},
+	"time":          {Name: "time"},
+	"timetz":        {Name: "timetz"},
+	"macaddr":       {Name: "macaddr"},
+	"macaddr8":      {Name: "macaddr8"},
+	"bit(N)":        {Name: "bit", Len: 8},
+	"bit":           {Name: "bit"},
+	"varbit(N)":     {Name: "varbit", Len: 8},
+	"varbit":        {Name: "varbit"},
+	"inet":          {Name: "inet"},
+	"cidr":          {Name: "cidr"},
+	"tsvector":      {Name: "tsvector"},
+	"int4range":     {Name: "int4range"},
+	"int8range":     {Name: "int8range"},
+	"numrange":      {Name: "numrange"},
+	"tsrange":       {Name: "tsrange"},
+	"tstzrange":     {Name: "tstzrange"},
+	"daterange":     {Name: "daterange"},
+	"point":         {Name: "point"},
+	"line":          {Name: "line"},
+	"lseg":          {Name: "lseg"},
+	"box":           {Name: "box"},
+	"path":          {Name: "path"},
+	"polygon":       {Name: "polygon"},
+	"circle":        {Name: "circle"},
 }
 
 func TestDispatcherPublishesTheSameWireTypeAsCodegen(t *testing.T) {

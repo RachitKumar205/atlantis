@@ -150,6 +150,11 @@ const (
 	// No Postgres table, no migration, no VACUUM. Codegen emits typed
 	// Get/Set/Delete backed by the atlantis memcached client.
 	TokEphemeral
+
+	// TokEnum declares a Postgres enum type: `enum Name in ns { a, b }`.
+	// A column of that type carries its label as a string, and Postgres
+	// refuses a label the type does not list.
+	TokEnum
 )
 
 var tokenNames = map[TokenKind]string{
@@ -260,6 +265,7 @@ var tokenNames = map[TokenKind]string{
 	TokCompensate:        "compensate",
 	TokState:             "state",
 	TokEphemeral:         "ephemeral",
+	TokEnum:              "enum",
 }
 
 // String returns the textual form of the token kind.
@@ -359,6 +365,7 @@ var keywords = map[string]TokenKind{
 	"compensate":          TokCompensate,
 	"state":               TokState,
 	"ephemeral":           TokEphemeral,
+	"enum":                TokEnum,
 }
 
 // Position is a 1-indexed source position used for error reporting,

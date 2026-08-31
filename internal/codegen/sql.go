@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rachitkumar205/atlantis/internal/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/dsl/predsql"
 	"github.com/rachitkumar205/atlantis/internal/schema"
@@ -68,6 +69,9 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 	// from the *old* IR (emitChange/KindEntityRemoved), so an old entity with
 	// two identically-named checks produced a rollback Postgres rejects —
 	// EmitInitial refused the very same IR while EmitSQL emitted it happily.
+	if err := assertNoTextCarriedArrays(newIR); err != nil {
+		return SQLScripts{}, err
+	}
 	if err := assertCheckNamesUnique(newIR); err != nil {
 		return SQLScripts{}, err
 	}
@@ -101,6 +105,13 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 	}
 	if len(collectNewSchemas(d.Additive, newByID)) > 0 {
 		up.blank()
+	}
+
+	// Enum types before any column that names one, and their new labels with
+	// them. A type added in the same migration as the table using it has to
+	// exist by the time the CREATE TABLE runs.
+	if err := emitEnumChanges(up, down, oldIR, newIR, d); err != nil {
+		return SQLScripts{}, err
 	}
 
 	// Changes are split by class so the reader sees additive first, then
@@ -1382,6 +1393,21 @@ func quoteIdent(s string) string {
 
 // tableName maps an entity to its physical table name.
 // Delegates to the shared schema package.
+
+// serialType names the sequence-backed spelling for an integer width.
+//
+// format_type reports a SERIAL column as its underlying integer, so a
+// declaration and the column it created compare equal at drift.
+func serialType(name string) string {
+	switch name {
+	case "smallint":
+		return "SMALLSERIAL"
+	case "int":
+		return "SERIAL"
+	}
+	return "BIGSERIAL"
+}
+
 func tableName(e *dsl.Entity) string {
 	return schema.TableName(e)
 }
@@ -1390,16 +1416,17 @@ func tableName(e *dsl.Entity) string {
 //
 // Identity strategy precedence:
 //
-//	serial   → render `BIGSERIAL` as the type itself (carries the
-//	           sequence + NOT NULL + DEFAULT nextval(...) implicitly).
+//	serial   → render `SMALLSERIAL`/`SERIAL`/`BIGSERIAL` as the type itself
+//	           (each carries the sequence + NOT NULL + DEFAULT nextval(...)
+//	           implicitly).
 //	identity → render `<type> GENERATED ALWAYS AS IDENTITY`.
 //	neither  → render `<type>` with explicit NOT NULL / DEFAULT modifiers.
 func columnDecl(f dsl.Field, checkName string) string {
 	var parts []string
 	switch {
 	case f.Serial:
-		// BIGSERIAL replaces both the type and the GENERATED clause.
-		parts = []string{quoteIdent(f.Name), "BIGSERIAL"}
+		// The serial spelling replaces both the type and the GENERATED clause.
+		parts = []string{quoteIdent(f.Name), serialType(f.Type.Name)}
 	case f.Identity:
 		parts = []string{quoteIdent(f.Name), sqlType(f.Type), "GENERATED ALWAYS AS IDENTITY"}
 	default:
@@ -1715,6 +1742,9 @@ func EmitInitial(newIR *dsl.IR) (SQLScripts, error) {
 	if newIR == nil {
 		return SQLScripts{}, fmt.Errorf("EmitInitial: newIR is required")
 	}
+	if err := assertNoTextCarriedArrays(newIR); err != nil {
+		return SQLScripts{}, err
+	}
 	if err := assertCheckNamesUnique(newIR); err != nil {
 		return SQLScripts{}, err
 	}
@@ -1739,6 +1769,17 @@ func EmitInitial(newIR *dsl.IR) (SQLScripts, error) {
 	for _, name := range collectInitialSchemas(newIR) {
 		up.linef("CREATE SCHEMA IF NOT EXISTS %s;", quoteIdent(name))
 	}
+	// Enum types before the tables whose columns name them.
+	//
+	// CREATE TYPE takes no IF NOT EXISTS, so a re-run of the same migration
+	// would fail on an existing type; the down drops them, and apply runs a
+	// migration once.
+	for i := range newIR.Enums {
+		emitEnumCreate(up, &newIR.Enums[i])
+	}
+	if len(newIR.Enums) > 0 {
+		up.blank()
+	}
 	up.blank()
 	down.line("-- atlantis initial migration (down)")
 	for _, e := range order {
@@ -1751,6 +1792,18 @@ func EmitInitial(newIR *dsl.IR) (SQLScripts, error) {
 	}
 	down.line("DROP SCHEMA IF EXISTS atlantis CASCADE;")
 	return SQLScripts{Up: up.String(), Down: down.String()}, nil
+}
+
+// emitEnumCreate writes the CREATE TYPE for one enum.
+//
+// Labels are single-quoted with embedded quotes doubled: Postgres accepts any
+// text as a label, so a schema holding `it's` is ordinary rather than hostile.
+func emitEnumCreate(b *sqlBuilder, e *dsl.Enum) {
+	labels := make([]string, len(e.Values))
+	for i, v := range e.Values {
+		labels[i] = "'" + strings.ReplaceAll(v, "'", "''") + "'"
+	}
+	b.linef("CREATE TYPE %s AS ENUM (%s);", schema.QualifiedEnum(e), strings.Join(labels, ", "))
 }
 
 // topoSortEntities orders entities so that FK target tables are created
@@ -1805,6 +1858,40 @@ func topoSortEntities(entities []dsl.Entity) ([]*dsl.Entity, error) {
 		}
 	}
 	return out, nil
+}
+
+// assertNoTextCarriedArrays refuses an array whose element is carried by a text
+// codec.
+//
+// pgx resolves an array's codec from its element's, so replacing the element
+// codec makes `inet[]` decode the binary array body as text: the scan succeeds
+// and returns the wire bytes reinterpreted as characters. Measured on
+// PostgreSQL 17 — `point[]` reads back as "?\ufffd\t@\t" rather than
+// "(1,2)".
+//
+// Without the codec the same read fails with "cannot scan _inet in binary
+// format into *[]string", so refusing here is what keeps a silent wrong answer
+// from replacing a loud one.
+func assertNoTextCarriedArrays(ir *dsl.IR) error {
+	if ir == nil {
+		return nil
+	}
+	for i := range ir.Entities {
+		e := &ir.Entities[i]
+		for _, f := range e.Fields {
+			if !f.Type.Array || f.Type.Elem == nil {
+				continue
+			}
+			if coltype.CarriedAsText(*f.Type.Elem) {
+				return fmt.Errorf("%s.%s is an array of %s, which atlantis carries "+
+					"as text — pgx decodes the array body with the element's codec, "+
+					"so the values read back as the wire bytes. Store them as text[] "+
+					"and cast in a custom query",
+					e.ID(), f.Name, f.Type.Elem.Name)
+			}
+		}
+	}
+	return nil
 }
 
 // assertCheckNamesUnique refuses to emit a schema in which two author-supplied
@@ -2159,4 +2246,110 @@ func withoutBracketedPartitionChanges(changes []Change, rebuilt []partitionRebui
 		out = append(out, ch)
 	}
 	return out
+}
+
+// emitEnumChanges writes the DDL for enum types added and labels appended, and
+// refuses the two shapes Postgres cannot perform.
+//
+// A removed label has no DDL: Postgres has no ALTER TYPE ... DROP VALUE, so the
+// change is reported by the differ and refused here rather than emitted as
+// something that would not run.
+//
+// ALTER TYPE ... ADD VALUE is accepted inside a transaction block from PG12,
+// but the added label cannot be used until that transaction commits. Apply runs
+// its DDL in one transaction, so a migration that both adds a label and writes
+// it — as a column default — is refused with that reason instead of failing at
+// the database as `unsafe use of new value`.
+//
+// Postgres exempts a type CREATEd in the same transaction, which is why only
+// KindEnumValueAdded is checked: a column defaulting to a label of a type this
+// same migration creates is legal, and refusing it would cost a migration that
+// runs.
+func emitEnumChanges(up, down *sqlBuilder, oldIR, newIR *dsl.IR, d *Diff) error {
+	oldByID := indexEnums(oldIR)
+	newByID := indexEnums(newIR)
+
+	var wrote bool
+	for _, c := range d.All() {
+		switch c.Kind {
+		case KindEnumValueRemoved:
+			return fmt.Errorf("%s: %s. Add a new type with the labels you want, "+
+				"move the columns to it, and drop the old one", c.EntityID, c.Detail)
+
+		case KindEnumAdded:
+			e, ok := newByID[c.EntityID]
+			if !ok {
+				continue
+			}
+			emitEnumCreate(up, e)
+			down.linef("DROP TYPE IF EXISTS %s;", schema.QualifiedEnum(e))
+			wrote = true
+
+		case KindEnumRemoved:
+			e, ok := oldByID[c.EntityID]
+			if !ok {
+				continue
+			}
+			up.linef("DROP TYPE IF EXISTS %s;", schema.QualifiedEnum(e))
+			emitEnumCreate(down, e)
+			wrote = true
+
+		case KindEnumValueAdded:
+			e, ok := newByID[c.EntityID]
+			if !ok {
+				continue
+			}
+			label, ok := addedLabel(c.Detail)
+			if !ok {
+				continue
+			}
+			if err := refuseLabelUsedWhenAdded(newIR, c.EntityID, label); err != nil {
+				return err
+			}
+			up.linef("ALTER TYPE %s ADD VALUE IF NOT EXISTS '%s';",
+				schema.QualifiedEnum(e), strings.ReplaceAll(label, "'", "''"))
+			// No down: Postgres cannot remove a label, so a rollback leaves the
+			// type wider than it was. Nothing reads a label no column holds.
+			down.linef("-- %s keeps the label %q: Postgres has no ALTER TYPE DROP VALUE.",
+				schema.QualifiedEnum(e), label)
+			wrote = true
+		}
+	}
+	if wrote {
+		up.blank()
+	}
+	return nil
+}
+
+// addedLabel reads the label back out of a KindEnumValueAdded detail.
+func addedLabel(detail string) (string, bool) {
+	i := strings.IndexByte(detail, '"')
+	if i < 0 {
+		return "", false
+	}
+	j := strings.IndexByte(detail[i+1:], '"')
+	if j < 0 {
+		return "", false
+	}
+	return detail[i+1 : i+1+j], true
+}
+
+// refuseLabelUsedWhenAdded rejects a migration that adds a label and writes it
+// in the same transaction.
+func refuseLabelUsedWhenAdded(ir *dsl.IR, enumID, label string) error {
+	for i := range ir.Entities {
+		e := &ir.Entities[i]
+		for _, f := range e.Fields {
+			if !f.Type.Enum || f.Type.Name != enumID || f.Default == nil {
+				continue
+			}
+			if f.Default.Kind == dsl.DefaultIRString && f.Default.Str == label {
+				return fmt.Errorf("%s.%s defaults to %q, a label this migration adds "+
+					"to %s. Postgres refuses a new enum label in the transaction that "+
+					"added it; add the label first, then the default",
+					e.ID(), f.Name, label, enumID)
+			}
+		}
+	}
+	return nil
 }

@@ -27,46 +27,11 @@ func GoType(t dsl.FieldType, notNull bool) string {
 		}
 		return "[]" + GoType(*t.Elem, true)
 	}
-	base := ""
-	switch t.Name {
-	case "smallint":
-		base = "int32"
-	case "int":
-		base = "int32"
-	case "bigint":
-		base = "int64"
-	case "real":
-		base = "float32"
-	case "double":
-		base = "float64"
-	case "text", "varchar", "citext":
-		base = "string"
-	case "boolean":
-		base = "bool"
-	case "timestamptz", "date":
-		base = "time.Time"
-	case "interval":
-		// The scan-side type, which is what this function returns; the docs
-		// page's Go column describes the proto-generated type instead.
-		//
-		// pgtype.Interval is the only Go shape holding a Postgres interval
-		// without converting between months, days and microseconds. A
-		// time.Duration here disagrees with whatever ScanFragments declares,
-		// and the two halves of one column then emit code that does not
-		// compile.
-		base = "pgtype.Interval"
-	case "uuid":
-		base = "string"
-	case "bytea":
-		base = "[]byte"
-	case "jsonb":
-		base = "[]byte"
-	case "vector":
-		base = "[]float32"
-	case "numeric":
-		base = "string"
-	default:
-		base = "any"
+	// An unregistered type keeps the `any` fallback so a lowering miss reads
+	// as a column of no usable type; toolchainHandles tests for it.
+	base := "any"
+	if c, ok := classOf(t); ok {
+		base = goBase(c)
 	}
 	switch base {
 	// pgtype.Interval joins the naturally-nullable shapes for the same reason
@@ -80,6 +45,39 @@ func GoType(t dsl.FieldType, notNull bool) string {
 		return "*" + base
 	}
 	return base
+}
+
+// goBase names the scan-side Go type for a behaviour Class, before any
+// nullable pointer wrap.
+//
+// pgtype.Interval is the only Go shape holding a Postgres interval without
+// converting between months, days and microseconds. A time.Duration here
+// disagrees with what ScanFragments declares, and the two halves of one column
+// then emit code that does not compile.
+func goBase(c Class) string {
+	switch c {
+	case ClassInt32:
+		return "int32"
+	case ClassInt64:
+		return "int64"
+	case ClassFloat32:
+		return "float32"
+	case ClassFloat64:
+		return "float64"
+	case ClassString:
+		return "string"
+	case ClassBool:
+		return "bool"
+	case ClassTime:
+		return "time.Time"
+	case ClassBytes:
+		return "[]byte"
+	case ClassInterval:
+		return "pgtype.Interval"
+	case ClassVector:
+		return "[]float32"
+	}
+	return "any"
 }
 
 // ProtoType maps a DSL type to its protobuf field-type representation
@@ -96,41 +94,37 @@ func ProtoType(t dsl.FieldType) (string, error) {
 		}
 		return "repeated " + inner, nil
 	}
-	switch t.Name {
-	case "smallint":
+	c, ok := classOf(t)
+	if !ok {
+		return "", fmt.Errorf("unsupported type %q for proto", t.Name)
+	}
+	switch c {
+	case ClassInt32:
 		return "int32", nil
-	case "int":
-		return "int32", nil
-	case "bigint":
+	case ClassInt64:
 		return "int64", nil
-	case "real":
+	case ClassFloat32:
 		return "float", nil
-	case "double":
+	case ClassFloat64:
 		return "double", nil
-	case "text", "varchar", "citext":
+	case ClassString:
+		// Exact decimals travel as string and are parsed server-side; proto's
+		// double and int64 forms both lose digits numeric holds.
 		return "string", nil
-	case "boolean":
+	case ClassBool:
 		return "bool", nil
-	case "timestamptz", "date":
+	case ClassTime:
 		// proto3 well-known type covers wall-clock dates too at the wire
 		// boundary; the server converts to Postgres `date` on read/write.
 		return "google.protobuf.Timestamp", nil
-	case "interval":
+	case ClassBytes:
+		return "bytes", nil
+	case ClassInterval:
 		// Not google.protobuf.Duration. Duration is one magnitude (seconds +
 		// nanos); a Postgres interval is three, and collapsing them needs a
 		// calendar this layer does not have. See atlantis/common/v1/interval.proto.
 		return "atlantis.common.v1.Interval", nil
-	case "uuid":
-		return "string", nil
-	case "bytea":
-		return "bytes", nil
-	case "jsonb":
-		return "bytes", nil
-	case "numeric":
-		// Exact decimals: convey as string and parse server-side rather
-		// than collapsing precision through proto's double/int64 forms.
-		return "string", nil
-	case "vector":
+	case ClassVector:
 		return "repeated float", nil
 	}
 	return "", fmt.Errorf("unsupported type %q for proto", t.Name)
@@ -160,8 +154,17 @@ func ScanFragments(t dsl.FieldType, notNull bool, local, protoField string) (dec
 		return
 	}
 
-	switch t.Name {
-	case "smallint", "int":
+	c, ok := classOf(t)
+	if !ok {
+		// Defensive fallback so an IR lowering miss surfaces as "scan
+		// target is any" rather than a panic at codegen time.
+		decl = fmt.Sprintf("var %s any", local)
+		assign = fmt.Sprintf("_ = %s // unknown type %s", local, t.Name)
+		return
+	}
+
+	switch c {
+	case ClassInt32:
 		if notNull {
 			decl = fmt.Sprintf("var %s int32", local)
 			assign = fmt.Sprintf("%s = %s", protoField, local)
@@ -169,7 +172,7 @@ func ScanFragments(t dsl.FieldType, notNull bool, local, protoField string) (dec
 			decl = fmt.Sprintf("var %s sql.NullInt32", local)
 			assign = fmt.Sprintf("%s = runtime.Int32PtrFromNull(%s)", protoField, local)
 		}
-	case "bigint":
+	case ClassInt64:
 		if notNull {
 			decl = fmt.Sprintf("var %s int64", local)
 			assign = fmt.Sprintf("%s = %s", protoField, local)
@@ -177,7 +180,7 @@ func ScanFragments(t dsl.FieldType, notNull bool, local, protoField string) (dec
 			decl = fmt.Sprintf("var %s sql.NullInt64", local)
 			assign = fmt.Sprintf("%s = runtime.Int64PtrFromNull(%s)", protoField, local)
 		}
-	case "real":
+	case ClassFloat32:
 		if notNull {
 			decl = fmt.Sprintf("var %s float32", local)
 			assign = fmt.Sprintf("%s = %s", protoField, local)
@@ -187,7 +190,7 @@ func ScanFragments(t dsl.FieldType, notNull bool, local, protoField string) (dec
 			decl = fmt.Sprintf("var %s sql.NullFloat64", local)
 			assign = fmt.Sprintf("%s = runtime.Float32PtrFromNull(%s)", protoField, local)
 		}
-	case "double":
+	case ClassFloat64:
 		if notNull {
 			decl = fmt.Sprintf("var %s float64", local)
 			assign = fmt.Sprintf("%s = %s", protoField, local)
@@ -195,7 +198,7 @@ func ScanFragments(t dsl.FieldType, notNull bool, local, protoField string) (dec
 			decl = fmt.Sprintf("var %s sql.NullFloat64", local)
 			assign = fmt.Sprintf("%s = runtime.Float64PtrFromNull(%s)", protoField, local)
 		}
-	case "text", "varchar", "citext", "uuid", "numeric":
+	case ClassString:
 		if notNull {
 			decl = fmt.Sprintf("var %s string", local)
 			assign = fmt.Sprintf("%s = %s", protoField, local)
@@ -203,7 +206,7 @@ func ScanFragments(t dsl.FieldType, notNull bool, local, protoField string) (dec
 			decl = fmt.Sprintf("var %s sql.NullString", local)
 			assign = fmt.Sprintf("%s = runtime.StringPtrFromNull(%s)", protoField, local)
 		}
-	case "boolean":
+	case ClassBool:
 		if notNull {
 			decl = fmt.Sprintf("var %s bool", local)
 			assign = fmt.Sprintf("%s = %s", protoField, local)
@@ -211,7 +214,7 @@ func ScanFragments(t dsl.FieldType, notNull bool, local, protoField string) (dec
 			decl = fmt.Sprintf("var %s sql.NullBool", local)
 			assign = fmt.Sprintf("%s = runtime.BoolPtrFromNull(%s)", protoField, local)
 		}
-	case "timestamptz", "date":
+	case ClassTime:
 		if notNull {
 			decl = fmt.Sprintf("var %s time.Time", local)
 			assign = fmt.Sprintf("%s = runtime.TimeToProto(%s)", protoField, local)
@@ -225,7 +228,7 @@ func ScanFragments(t dsl.FieldType, notNull bool, local, protoField string) (dec
 		%s = runtime.TimeToProto(%s.Time)
 	}`, local, protoField, local)
 		}
-	case "interval":
+	case ClassInterval:
 		// One declaration for both nullabilities: pgtype.Interval carries Valid
 		// itself, so the NULL case needs no separate shape.
 		//
@@ -240,10 +243,10 @@ func ScanFragments(t dsl.FieldType, notNull bool, local, protoField string) (dec
 		assign = fmt.Sprintf(`if %s.Valid {
 		%s = &commonpb.Interval{Months: %s.Months, Days: %s.Days, Microseconds: %s.Microseconds}
 	}`, local, protoField, local, local, local)
-	case "bytea", "jsonb":
+	case ClassBytes:
 		decl = fmt.Sprintf("var %s []byte", local)
 		assign = fmt.Sprintf("%s = %s", protoField, local)
-	case "vector":
+	case ClassVector:
 		if notNull {
 			decl = fmt.Sprintf("var %s pgvector.Vector", local)
 			assign = fmt.Sprintf("%s = runtime.VectorToFloat32(%s.Slice())", protoField, local)
@@ -253,11 +256,6 @@ func ScanFragments(t dsl.FieldType, notNull bool, local, protoField string) (dec
 		%s = runtime.VectorToFloat32(%s.Slice())
 	}`, local, protoField, local)
 		}
-	default:
-		// Defensive fallback so an IR lowering miss surfaces as "scan
-		// target is any" rather than a panic at codegen time.
-		decl = fmt.Sprintf("var %s any", local)
-		assign = fmt.Sprintf("_ = %s // unknown type %s", local, t.Name)
 	}
 	return
 }
@@ -277,43 +275,47 @@ func BindExpr(t dsl.FieldType, notNull bool, protoGetter, protoFieldPtr string) 
 	if t.Array {
 		return protoGetter
 	}
-	switch t.Name {
-	case "smallint", "int":
+	c, ok := classOf(t)
+	if !ok {
+		return protoGetter
+	}
+	switch c {
+	case ClassInt32:
 		if notNull {
 			return protoGetter
 		}
 		return "runtime.NullableInt32(" + protoFieldPtr + ")"
-	case "bigint":
+	case ClassInt64:
 		if notNull {
 			return protoGetter
 		}
 		return "runtime.NullableInt64(" + protoFieldPtr + ")"
-	case "real":
+	case ClassFloat32:
 		if notNull {
 			return protoGetter
 		}
 		return "runtime.NullableFloat32(" + protoFieldPtr + ")"
-	case "double":
+	case ClassFloat64:
 		if notNull {
 			return protoGetter
 		}
 		return "runtime.NullableFloat64(" + protoFieldPtr + ")"
-	case "text", "varchar", "citext", "uuid", "numeric":
+	case ClassString:
 		if notNull {
 			return protoGetter
 		}
 		return "runtime.NullableString(" + protoFieldPtr + ")"
-	case "boolean":
+	case ClassBool:
 		if notNull {
 			return protoGetter
 		}
 		return "runtime.NullableBool(" + protoFieldPtr + ")"
-	case "timestamptz", "date":
+	case ClassTime:
 		if notNull {
 			return "runtime.ProtoToTime(" + protoGetter + ")"
 		}
 		return "runtime.ProtoToTimePtr(" + protoFieldPtr + ")"
-	case "interval":
+	case ClassInterval:
 		// Constructed inline for the same reason the scan side is: a runtime
 		// helper cannot take atlantis.common.v1.Interval without naming one
 		// generated copy of it, and the emitted server has its own.
@@ -326,9 +328,9 @@ func BindExpr(t dsl.FieldType, notNull bool, protoGetter, protoFieldPtr string) 
 			"pgtype.Interval{Months: %s.GetMonths(), Days: %s.GetDays(), "+
 				"Microseconds: %s.GetMicroseconds(), Valid: %s != nil}",
 			protoGetter, protoGetter, protoGetter, protoGetter)
-	case "bytea", "jsonb":
+	case ClassBytes:
 		return protoGetter
-	case "vector":
+	case ClassVector:
 		return "pgvector.NewVector(" + protoGetter + ")"
 	}
 	return protoGetter
@@ -347,7 +349,8 @@ func NeedsPgvector(t dsl.FieldType) bool {
 		}
 		return NeedsPgvector(*t.Elem)
 	}
-	return t.Name == "vector"
+	c, ok := classOf(t)
+	return ok && c == ClassVector
 }
 
 // NeedsDatabaseSQL reports whether emitting code for the given type
@@ -359,14 +362,6 @@ func NeedsDatabaseSQL(t dsl.FieldType, notNull bool) bool {
 	if notNull || t.Array {
 		return false
 	}
-	switch t.Name {
-	case "smallint", "int", "bigint",
-		"real", "double",
-		"text", "varchar", "citext", "uuid", "numeric",
-		"boolean",
-		"timestamptz", "date",
-		"interval":
-		return true
-	}
-	return false
+	c, ok := classOf(t)
+	return ok && usesSQLNull(c)
 }

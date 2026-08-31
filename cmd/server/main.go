@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
@@ -36,6 +37,7 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/migrate"
 	"github.com/rachitkumar205/atlantis/internal/obs"
 	"github.com/rachitkumar205/atlantis/internal/schema"
+	"github.com/rachitkumar205/atlantis/internal/secrets"
 	"github.com/rachitkumar205/atlantis/internal/server/admin"
 	"github.com/rachitkumar205/atlantis/internal/server/authz"
 	"github.com/rachitkumar205/atlantis/internal/server/entity"
@@ -356,7 +358,44 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// admin.Service is constructed early because the cert-binding
 	// interceptor needs its LookupCallerCertBinding method. Register on
 	// the gRPC server happens after server construction below.
+	// The database whose schema is managed, when it is not this one.
+	//
+	// Opened here rather than lazily so a wrong or unreachable DSN fails at
+	// boot: an organisation whose managed database is unreachable should not
+	// start and serve plans against the control database by accident.
+	var managedPool *pgxpool.Pool
+	if cfg.ManagedPGURL != "" {
+		mp, err := pg.New(ctx, pg.Config{
+			URL:                 cfg.ManagedPGURL,
+			MaxConns:            cfg.PGMaxConns,
+			MinConns:            cfg.PGMinConns,
+			MaxConnIdleTime:     cfg.PGMaxConnIdle,
+			MaxConnLifetime:     cfg.PGMaxConnLifetime,
+			HealthCheckPeriod:   cfg.PGHealthCheckPeriod,
+			QueryTimeoutDefault: cfg.PGQueryTimeoutDefault,
+		})
+		if err != nil {
+			return fmt.Errorf("managed database: %w", err)
+		}
+		defer mp.Close()
+		managedPool = mp.Raw()
+		log.Info("managing a separate database", "control", "PG_URL", "managed", "ATL_MANAGED_PG_URL")
+	}
+
+	// Seals the managed database's DSN. Absent leaves it settable only from
+	// the environment, which is the deployment that pins one and stores none.
+	var adminKeys secrets.Keyring
+	if cfg.DataKeyset != "" {
+		k, err := secrets.FromEnvKeyset(cfg.DataKeyset)
+		if err != nil {
+			return fmt.Errorf("ATL_DATA_KEY: %w", err)
+		}
+		adminKeys = k
+	}
+
 	adminSvc := admin.New(pool.Raw(), admin.Config{
+		Managed:            managedPool,
+		Keys:               adminKeys,
 		MirrorDir:          cfg.AdminMirrorDir,
 		MirrorEnabled:      cfg.AdminMirrorSchema,
 		AllowApplyMutation: cfg.AdminAllowApplyMutation,

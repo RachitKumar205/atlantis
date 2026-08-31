@@ -4,7 +4,7 @@ How each supported `.atl` field type maps to PostgreSQL, protobuf, and Go.
 
 ## Scope
 
-This page covers the types atlantis currently supports. The following PostgreSQL types are not supported yet: `char(N)`; `time`, `timetz`, and `timestamp` without timezone; `inet`/`cidr`/`macaddr`; `money`; `tsvector`; `point`/`box`/`line`; `oid`; `xml`; `json` (use `jsonb`); `hstore`; `ltree`; enums; domains; composites; ranges. File an issue if you need one.
+This page covers the types atlantis currently supports. The following PostgreSQL types are not supported yet: `oid`, `hstore`, `ltree`, domains and composites. File an issue if you need one.
 
 ## Scalars
 
@@ -24,6 +24,18 @@ This page covers the types atlantis currently supports. The following PostgreSQL
 | `bytea` | `BYTEA` | `bytes` | `[]byte` |
 | `uuid` | `UUID` | `string` | `string` |
 | `numeric(p, s)` | `NUMERIC(p,s)` | `string` | `string` |
+| `char(N)` | `CHAR(N)` | `string` | `string` |
+| `char` | `CHAR` | `string` | `string` |
+| `name` | `NAME` | `string` | `string` |
+| `money` | `MONEY` | `string` | `string` |
+| `xml` | `XML` | `string` | `string` |
+| `tsquery` | `TSQUERY` | `string` | `string` |
+| `json` | `JSON` | `bytes` | `[]byte` |
+| `bit(N)` | `BIT(N)` | `string` | `string` |
+| `bit` | `BIT` | `string` | `string` |
+| `varbit(N)` | `BIT VARYING(N)` | `string` | `string` |
+| `varbit` | `BIT VARYING` | `string` | `string` |
+| `tsvector` | `TSVECTOR` | `string` | `string` |
 
 Notes:
 
@@ -33,6 +45,14 @@ Notes:
 - `uuid` uses the canonical RFC 4122 hyphenated lowercase form on the wire. Non-canonical input is rejected by Postgres at parse time.
 - `bigint` over the wire: proto `int64`. If you serialize a response to JSON yourself, proto-JSON encodes `int64` as a string by default to preserve precision.
 - `varchar(N)` length is enforced by Postgres (`value too long for type` on `INSERT`); Atlantis does not pre-validate.
+- `char(N)` blank-pads on write: a three-character value stored in a `char(10)` column reads back with seven trailing spaces. `char` with no length is `CHAR(1)`, matching Postgres, rather than the unbounded form `varchar` takes.
+- `money` renders through `lc_monetary`, so the same row reads back as `$1.23` under the `C` locale and differently under another. The value written is a plain decimal string; the value read carries the locale's symbol and separators.
+- `json` and `xml` have no equality operator in PostgreSQL, so neither can be a primary key, a filter, or an `ORDER BY` column. `jsonb` has both and is the type to declare for a new column; `json` exists so an existing column can be described exactly.
+- `json` is stored and returned as bytes and not parsed. Unlike `jsonb` it preserves key order and whitespace exactly as written.
+- `name` is PostgreSQL's internal 63-byte identifier type. It appears in catalog-derived tables; `text` is the type for a new column.
+- `tsquery` normalises on write — `a & b` reads back as `'a' & 'b'`.
+- `bit` and `varbit` travel as a string of `0` and `1` characters. Bare `bit` is `BIT(1)`; bare `varbit` is unbounded.
+- `tsvector` normalises on write — `a b` reads back as `'a' 'b'`.
 - `varchar` without a length accepts strings of any size. It exists so a legacy column declared that way can be described exactly; `text` is the better choice in a new schema. The two are **not** interchangeable to Atlantis — they are different Postgres types, so declaring `text` against a `varchar` column reports drift rather than agreement.
 
 ## Time
@@ -41,10 +61,27 @@ Notes:
 |---|---|---|---|
 | `timestamptz` | `TIMESTAMPTZ` | `google.protobuf.Timestamp` | `*timestamppb.Timestamp` |
 | `date` | `DATE` | `google.protobuf.Timestamp` | `*timestamppb.Timestamp` |
+| `timestamp` | `TIMESTAMP` | `google.protobuf.Timestamp` | `*timestamppb.Timestamp` |
+| `time` | `TIME` | `string` | `string` |
+| `timetz` | `TIMETZ` | `string` | `string` |
 | `interval` | `INTERVAL` | `atlantis.common.v1.Interval` | `*commonpb.Interval` |
 
+- `timestamp` is PostgreSQL's `timestamp without time zone`. `google.protobuf.Timestamp` is anchored to UTC, so a value crossing the wire is read as UTC. Declare `timestamptz` for a new column; `timestamp` exists so an existing column can be described exactly.
+- `time` and `timetz` travel as strings, in PostgreSQL's own text form: `03:04:05.000000` and `03:04:05+00`. proto has no wall-clock-time well-known type to carry them.
 - `date` carries `00:00:00 UTC` as the time-of-day. A caller sending a non-zero time-of-day has the time fraction truncated to midnight on insert.
 - `interval` round-trips exactly, including months and years. PostgreSQL stores months, days and microseconds as three separate components, and `atlantis.common.v1.Interval` carries the same three unchanged. No conversion happens at the wire boundary, because none is possible there: `1 month` is 28 to 31 days depending on the month it is added to, and `1 day` is 23, 24 or 25 hours across a daylight-saving boundary. A caller that wants a single duration has the date to compute it against; this layer does not.
+
+## Network
+
+| `.atl` type | PostgreSQL | Proto | Go |
+|---|---|---|---|
+| `inet` | `INET` | `string` | `string` |
+| `cidr` | `CIDR` | `string` | `string` |
+| `macaddr` | `MACADDR` | `string` | `string` |
+| `macaddr8` | `MACADDR8` | `string` | `string` |
+
+- All four travel as PostgreSQL's own text form.
+- `inet` normalises on write: `10.0.0.1` reads back as `10.0.0.1/32`, because PostgreSQL stores the netmask alongside the address.
 
 ## Vectors
 
@@ -57,6 +94,64 @@ Notes:
 - A wire payload whose length doesn't match the declared `N` errors at request time.
 - `halfvec`, `sparsevec`, and pgvector's `bit` type are not supported yet.
 
+## Enums
+
+An enum is declared at the top level and used as a field type:
+
+```
+enum Mood in app { happy, sad, "in progress" }
+
+entity Person in app {
+  id   bigint primary
+  mood Mood not null
+}
+```
+
+| `.atl` type | PostgreSQL | Proto | Go |
+|---|---|---|---|
+| a declared enum | `<namespace>_<name>` in the `atlantis` schema | `string` | `string` |
+
+- The column carries the **label**, as a string. PostgreSQL enforces the set: a label the type does not list is refused at write time with `invalid input value for enum`.
+- A label is an identifier, or a quoted string when it is not — `"in progress"` is a legal PostgreSQL label and has no bare spelling.
+- Labels are ordered as declared, which is the order PostgreSQL sorts them in. Reordering an existing type is not something PostgreSQL can do, so a reordering in the `.atl` is not reported as a change.
+- Enum columns are filterable and orderable. Ordering follows label order, not alphabetical order.
+- **Adding a label is additive. Removing one is refused.** PostgreSQL has no `ALTER TYPE ... DROP VALUE`; removing a label needs a new type, a rewrite of every column using it, and a drop of the old one. `tide plan` says so rather than emitting DDL that cannot run.
+- A label added by a migration cannot be *used* by that same migration — PostgreSQL refuses it as `unsafe use of new value` until the transaction commits. Adding a label and defaulting a column to it in one change is refused with that reason. A type created and defaulted to in the same migration is fine; PostgreSQL exempts that case.
+- Arrays of enums are not supported, for the same reason as the text-carried types above.
+- The type lives in the `atlantis` schema whatever `table` override the entities using it carry, because it is atlantis's to create and drop.
+
+## Ranges
+
+| `.atl` type | PostgreSQL | Proto | Go |
+|---|---|---|---|
+| `int4range` | `INT4RANGE` | `string` | `string` |
+| `int8range` | `INT8RANGE` | `string` | `string` |
+| `numrange` | `NUMRANGE` | `string` | `string` |
+| `tsrange` | `TSRANGE` | `string` | `string` |
+| `tstzrange` | `TSTZRANGE` | `string` | `string` |
+| `daterange` | `DATERANGE` | `string` | `string` |
+
+- Each travels as PostgreSQL's own text form, bounds included: `[1,5)` is inclusive of 1 and exclusive of 5.
+- PostgreSQL normalises on write. A `tsrange` written as `[2024-01-01,2024-02-01)` reads back as `["2024-01-01 00:00:00","2024-02-01 00:00:00")`.
+- Multirange types (`int4multirange` and the rest) are not supported yet.
+
+## Geometric
+
+| `.atl` type | PostgreSQL | Proto | Go |
+|---|---|---|---|
+| `point` | `POINT` | `string` | `string` |
+| `line` | `LINE` | `string` | `string` |
+| `lseg` | `LSEG` | `string` | `string` |
+| `box` | `BOX` | `string` | `string` |
+| `path` | `PATH` | `string` | `string` |
+| `polygon` | `POLYGON` | `string` | `string` |
+| `circle` | `CIRCLE` | `string` | `string` |
+
+- Each travels as PostgreSQL's own text form: `(1,2)` for a point, `<(0,0),1>` for a circle.
+- **None is filterable or orderable.** PostgreSQL sorts none of the seven and defines `=` on only five, so a filter, primary key or `ORDER BY` on one could not be executed.
+- `box` normalises its corners on write: `((0,0),(1,1))` reads back as `(1,1),(0,0)`.
+- These are storage only. PostGIS `geometry` and `geography` are different types and are not supported.
+
 ## Arrays
 
 | `.atl` type | PostgreSQL | Proto | Go |
@@ -64,14 +159,16 @@ Notes:
 | `[]T` | `T[]` | `repeated <T-proto>` | `[]<T-Go>` |
 
 - Only one-dimensional arrays. `[][]T` is rejected at parse time.
-- Element type `T` is any scalar above (no `vector`, no nested arrays).
+- Element type `T` is any scalar above except `vector` and the types atlantis carries as text: `inet`, `cidr`, `bit`, `varbit`, `tsvector`, the range types and the geometric types. `tide plan` refuses an array of one of those. pgx decodes an array with its element's codec, so `inet[]` would read back as the binary array body reinterpreted as characters — a wrong answer rather than an error. Declare `text[]` and cast in a custom query.
 - A null array (nil slice in Go, missing field on the wire) is distinguishable from an empty array (`[]T{}` in Go, present-but-empty on the wire); both round-trip.
 
 ## Filtering
 
-Every type above is filterable through `Query<Entity>` except three: `vector`, `interval`, and arrays (`[]T`). A column of one of those types can still be selected and written; it just has no predicate field on the generated `<Entity>Filter` message.
+Every type above is filterable through `Query<Entity>` except `json`, `xml`, the seven geometric types, `vector`, `interval`, and arrays (`[]T`). A column of one of those types can still be selected and written; it just has no predicate field on the generated `<Entity>Filter` message.
 
-Ordering is separate and wider: every scalar type is orderable, including `real` and `double`. `vector` and arrays are not.
+They are absent for two different reasons. `json`, `xml` and the geometric types have no equality or ordering operators in PostgreSQL, so a filter on one could not be executed. `vector`, `interval` and arrays have the operators and no predicate message.
+
+Ordering is separate: every scalar type is orderable except `json`, `xml`, the geometric types, `vector` and arrays.
 
 Two notes on floats. Comparisons run at the column's own width, so a `real` column is compared as float4 rather than being widened — which is what makes `eq` on a `real` column match the literal you wrote. And `eq` on a float is still float equality: a value that was computed rather than stored from the same literal may not compare equal at either width.
 
@@ -85,9 +182,13 @@ Fields are non-nullable by default; declaring `not null` is redundant for `prima
 | `real`, `double` | `float32` / `float64` | `*float32` / `*float64` |
 | `boolean` | `bool` | `*bool` |
 | `varchar(N)`, `text`, `citext`, `uuid`, `numeric(p,s)` | `string` | `*string` |
-| `timestamptz`, `date` | `*timestamppb.Timestamp` | `*timestamppb.Timestamp` (nil = null) |
+| `char(N)`, `name`, `money`, `xml`, `tsquery`, `time`, `timetz` | `string` | `*string` |
+| `inet`, `cidr`, `macaddr`, `bit(N)`, `varbit`, `tsvector` | `string` | `*string` |
+| the range types, the geometric types | `string` | `*string` |
+| a declared enum | `string` | `*string` |
+| `timestamptz`, `date`, `timestamp` | `*timestamppb.Timestamp` | `*timestamppb.Timestamp` (nil = null) |
 | `interval` | `*commonpb.Interval` | `*commonpb.Interval` (nil = null) |
-| `jsonb`, `bytea` | `[]byte` | `[]byte` (nil = null) |
+| `jsonb`, `bytea`, `json` | `[]byte` | `[]byte` (nil = null) |
 | `vector(N)` | `[]float32` | `[]float32` (nil = null) |
 | `[]T` | `[]T-Go` | `[]T-Go` (nil = null) |
 

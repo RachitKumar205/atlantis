@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "description": "Design tokens shared by the console and the Cloud sign-in app.",
   "exports": {
-    "./tokens.css": "./tokens.css"
+    "./tokens.css": "./tokens.css",
+    "./datum.css": "./datum.css"
   }
 }

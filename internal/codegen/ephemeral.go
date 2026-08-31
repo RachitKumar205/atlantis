@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rachitkumar205/atlantis/internal/codegen/coltype"
+	"github.com/rachitkumar205/atlantis/internal/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 

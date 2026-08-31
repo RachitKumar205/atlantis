@@ -88,6 +88,11 @@ func (u *User) HasPassword() bool { return u.PasswordHash != nil && *u.PasswordH
 type Membership struct {
 	Org  string
 	Role identity.Role
+
+	// DisplayName is what the organisation calls itself, empty when it never
+	// set one. Org is the slug, which appears in every address and certificate;
+	// this is the name a person recognises.
+	DisplayName string
 }
 
 // Store is Cloud's database handle.
@@ -380,8 +385,15 @@ func (s *Store) RoleIn(ctx context.Context, userID, org string) (identity.Role, 
 // MembershipsOf lists every organisation a user belongs to, ordered by name so
 // the console's organisation switcher does not reshuffle between loads.
 func (s *Store) MembershipsOf(ctx context.Context, userID string) ([]Membership, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT org, role FROM cloud.memberships WHERE user_id = $1 ORDER BY org`, userID)
+	// LEFT JOIN, not an inner one: a membership whose organisation row has gone
+	// still names an organisation, and dropping it here would quietly shorten
+	// the switcher rather than showing an entry that cannot be entered.
+	rows, err := s.pool.Query(ctx, `
+		SELECT m.org, m.role, coalesce(o.display_name, '')
+		  FROM cloud.memberships m
+		  LEFT JOIN cloud.orgs o ON o.name = m.org
+		 WHERE m.user_id = $1
+		 ORDER BY m.org`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -391,7 +403,7 @@ func (s *Store) MembershipsOf(ctx context.Context, userID string) ([]Membership,
 	for rows.Next() {
 		var m Membership
 		var role string
-		if err := rows.Scan(&m.Org, &role); err != nil {
+		if err := rows.Scan(&m.Org, &role, &m.DisplayName); err != nil {
 			return nil, err
 		}
 		m.Role = identity.Role(role)

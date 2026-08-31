@@ -9,6 +9,7 @@ import {
   safeNext,
 } from '@/lib/session'
 import { clearSignInRedirect, startSignIn } from '@/lib/signin'
+import { markOnboardingPending } from '@/lib/onboarding'
 
 // Centered authcard: concentric-ring logo above lowercase "atlantis"
 // wordmark. Multiple bolder redesigns (porthole + serif wordmark + depth
@@ -82,6 +83,10 @@ export function Login() {
     mutationFn: (token: string) => api.auth.exchange(token),
     onSuccess: () => {
       clearSignInRedirect()
+
+      // Opening the organisation from Cloud is what starts onboarding, and
+      // this is the only place that knows it happened.
+      markOnboardingPending()
 
       // A full load. The destination arrived from outside the route tree, so
       // the typed router cannot check it, and the load starts the console on

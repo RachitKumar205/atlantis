@@ -10,6 +10,7 @@ import { routeTree } from './routeTree.gen'
 // load. See web/shared/tokens.css for why the palette does not decide that.
 import '@/styles/fonts.css'
 import '@atlantis/shared/tokens.css'
+import '@atlantis/shared/datum.css'
 import '@/styles/console.css'
 import '@/styles/pages.css'
 // Thin compat shim so legacy CSS-module imports still resolve while

@@ -14,11 +14,11 @@ import { Route as SettingsRoute } from './routes/settings'
 import { Route as CallersRoute } from './routes/callers'
 import { Route as ApprovalsRoute } from './routes/approvals'
 import { Route as ParkedRoute } from './routes/parked'
-import { Route as ImportSchemaRoute } from './routes/import'
 import { Route as OperationsRoute } from './routes/operations'
 import { Route as SandboxRoute } from './routes/sandbox'
 import { Route as WorkersRoute } from './routes/workers'
 import { Route as WorkerSessionRoute } from './routes/workers.$id'
+import { Route as ImportReviewRoute } from './routes/imports.$id'
 
 export const routeTree = RootRoute.addChildren([
   IndexRoute,
@@ -30,11 +30,11 @@ export const routeTree = RootRoute.addChildren([
   CallersRoute,
   ApprovalsRoute,
   ParkedRoute,
-  ImportSchemaRoute,
   OperationsRoute,
   SandboxRoute,
   WorkersRoute,
   WorkerSessionRoute,
+  ImportReviewRoute,
 ])
 
 // Module augmentation so typed Link / navigate work
@@ -96,13 +96,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ParkedRoute
       parentRoute: typeof RootRoute
     }
-    '/import': {
-      id: '/import'
-      path: '/import'
-      fullPath: '/import'
-      preLoaderRoute: typeof ImportSchemaRoute
-      parentRoute: typeof RootRoute
-    }
     '/operations': {
       id: '/operations'
       path: '/operations'
@@ -122,6 +115,13 @@ declare module '@tanstack/react-router' {
       path: '/workers'
       fullPath: '/workers'
       preLoaderRoute: typeof WorkersRoute
+      parentRoute: typeof RootRoute
+    }
+    '/imports/$id': {
+      id: '/imports/$id'
+      path: '/imports/$id'
+      fullPath: '/imports/$id'
+      preLoaderRoute: typeof ImportReviewRoute
       parentRoute: typeof RootRoute
     }
     '/workers/$id': {

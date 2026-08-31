@@ -20,7 +20,21 @@ type config struct {
 	GRPCAddr string
 
 	// Postgres
-	PGURL                 string
+	PGURL string
+
+	// ManagedPGURL is the database whose schema this server manages. Empty
+	// means the control database manages itself, which is the single-database
+	// deployment every organisation had before adopt could point at one.
+	//
+	// Set when an organisation adopted an existing database: atlantis keeps its
+	// own tables here in PG_URL and reads, plans and applies against that one.
+	ManagedPGURL string
+
+	// DataKeyset seals the managed database's DSN in
+	// atlantis.managed_database. Empty leaves the managed database settable
+	// only through ATL_MANAGED_PG_URL.
+	DataKeyset string // ATL_DATA_KEY
+
 	PGMaxConns            int32
 	PGMinConns            int32
 	PGMaxConnIdle         time.Duration
@@ -208,6 +222,8 @@ func loadConfig() (config, error) {
 	c := config{
 		GRPCAddr:              envStr("GRPC_LISTEN", ":9090"),
 		PGURL:                 os.Getenv("PG_URL"),
+		ManagedPGURL:          os.Getenv("ATL_MANAGED_PG_URL"),
+		DataKeyset:            os.Getenv("ATL_DATA_KEY"),
 		PGMaxConns:            envInt32("PG_MAX_CONNS", 50),
 		PGMinConns:            envInt32("PG_MIN_CONNS", 10),
 		PGMaxConnIdle:         envDuration("PG_MAX_CONN_IDLE", 5*time.Minute),

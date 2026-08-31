@@ -3,9 +3,18 @@ import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import {
-  Activity, Archive, Box, Cog, Cpu, History, Layers, Search, Settings,
-  ShieldQuestion, Users,
-} from 'lucide-react'
+  Archive,
+  ClockCounterClockwise,
+  Cpu,
+  Cube,
+  Gear,
+  GearSix,
+  MagnifyingGlass,
+  Pulse,
+  ShieldChevron,
+  Stack,
+  Users,
+} from '@phosphor-icons/react'
 import { queries, type MergedSchemaResponse } from '@/api/client'
 
 // Words people actually reach for when they cannot remember a page's name.
@@ -76,16 +85,16 @@ export function CommandBar({ open, onClose }: CommandBarProps) {
     const items: CmdItem[] = []
 
     const navs: { id: string; tip: string; icon: React.ReactNode }[] = [
-      { id: '/schema',     tip: 'Schema',     icon: <Layers size={14} /> },
-      { id: '/history',    tip: 'History',    icon: <History size={14} /> },
-      { id: '/sandbox',    tip: 'Sandbox',    icon: <Box size={14} /> },
-      { id: '/health',     tip: 'Health',     icon: <Activity size={14} /> },
+      { id: '/schema',     tip: 'Schema',     icon: <Stack size={14} /> },
+      { id: '/history',    tip: 'History',    icon: <ClockCounterClockwise size={14} /> },
+      { id: '/sandbox',    tip: 'Sandbox',    icon: <Cube size={14} /> },
+      { id: '/health',     tip: 'Health',     icon: <Pulse size={14} /> },
       { id: '/callers',    tip: 'Callers',    icon: <Users size={14} /> },
       { id: '/workers',    tip: 'Workers',    icon: <Cpu size={14} /> },
-      { id: '/approvals', tip: 'Approvals', icon: <ShieldQuestion size={14} /> },
+      { id: '/approvals', tip: 'Approvals', icon: <ShieldChevron size={14} /> },
       { id: '/parked',     tip: 'Parked',     icon: <Archive size={14} /> },
-      { id: '/operations', tip: 'Operations', icon: <Cog size={14} /> },
-      { id: '/settings',   tip: 'Settings',   icon: <Settings size={14} /> },
+      { id: '/operations', tip: 'Operations', icon: <GearSix size={14} /> },
+      { id: '/settings',   tip: 'Settings',   icon: <Gear size={14} /> },
     ]
     navs.forEach(n => items.push({
       group: 'Navigate', icon: n.icon, label: n.tip,
@@ -95,7 +104,7 @@ export function CommandBar({ open, onClose }: CommandBarProps) {
 
     extractEntities(schema).forEach(e => items.push({
       group: 'Entities',
-      icon: <Layers size={14} />,
+      icon: <Stack size={14} />,
       label: (
         <span className="mono">
           <span className="faint">{e.namespace}.</span>{e.name}
@@ -110,7 +119,7 @@ export function CommandBar({ open, onClose }: CommandBarProps) {
       const verStr = `v${String(v.version).padStart(4, '0')}`
       items.push({
         group: 'Versions',
-        icon: <History size={14} />,
+        icon: <ClockCounterClockwise size={14} />,
         label: <span className="mono">{verStr}</span>,
         meta: v.caller,
         search: `${verStr} ${v.caller}`,
@@ -186,7 +195,7 @@ export function CommandBar({ open, onClose }: CommandBarProps) {
       <div className="cmdk__scrim" onClick={onClose} />
       <div className="cmdk__box" role="dialog" aria-modal aria-label="Command palette">
         <div className="cmdk__input">
-          <Search />
+          <MagnifyingGlass />
           <input
             ref={inputRef}
             type="text"

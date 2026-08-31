@@ -31,13 +31,21 @@ func (s *Service) GenerateSchema(ctx context.Context, req *adminpb.GenerateSchem
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
+	// Introspection describes the managed database, which is the control one
+	// unless this organisation adopted an existing database.
+	live, releaseLive, err := s.liveTx(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseLive()
+
 	// Whatever is already declared, so its tables are not offered again.
 	// Absent submissions this is nil, which adopt.Generate reads as "nothing
 	// is declared yet" — the first run against a database atlantis has never
 	// seen.
 	var declaredIR *dsl.IR
 	if subs := callerSubmissionsFromPB(req.GetSubmissions()); len(subs) > 0 {
-		cmp, err := s.compareToLive(ctx, tx, subs)
+		cmp, err := s.compareToLive(ctx, tx, live, subs)
 		if err != nil {
 			return nil, err
 		}

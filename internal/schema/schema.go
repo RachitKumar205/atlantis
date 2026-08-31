@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/rachitkumar205/atlantis/internal/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
@@ -91,65 +92,21 @@ func InsertColumns(e *dsl.Entity) []string {
 }
 
 // SQLType maps a DSL field type to its Postgres type string.
+//
+// The spelling comes from the type registry. A name the registry does not
+// carry is upper-cased, which produces DDL Postgres rejects at apply rather
+// than a column of the wrong type.
 func SQLType(t dsl.FieldType) string {
-	if t.Array {
-		inner := "text"
-		if t.Elem != nil {
-			inner = SQLType(*t.Elem)
-		}
-		return inner + "[]"
+	// An array whose element was never resolved. Lowering fills Elem, so this
+	// is reached only by a hand-built FieldType.
+	if t.Array && t.Elem == nil {
+		return "text[]"
 	}
-	switch t.Name {
-	case "smallint":
-		return "SMALLINT"
-	case "int":
-		return "INTEGER"
-	case "bigint":
-		return "BIGINT"
-	case "real":
-		return "REAL"
-	case "double":
-		// Named explicitly even though "REAL" would fall out of the ToUpper
-		// below, because "double" would not: it became "DOUBLE", which is not
-		// a Postgres type, so `tide apply` failed at the DDL with a syntax
-		// error naming a column the user had declared exactly as documented.
-		// The fallthrough turns a missing case into invalid SQL rather than a
-		// compile error, so every documented type is listed here whether or
-		// not upper-casing happens to work for it.
-		return "DOUBLE PRECISION"
-	case "text":
-		return "TEXT"
-	case "varchar":
-		// Len 0 is the unbounded sentinel, not a zero-length column.
-		// VARCHAR(0) is legal Postgres and would silently create a column
-		// that accepts only the empty string.
-		if t.Len == 0 {
-			return "VARCHAR"
-		}
-		return fmt.Sprintf("VARCHAR(%d)", t.Len)
-	case "citext":
-		return "CITEXT"
-	case "boolean":
-		return "BOOLEAN"
-	case "timestamptz":
-		return "TIMESTAMPTZ"
-	case "date":
-		return "DATE"
-	case "interval":
-		return "INTERVAL"
-	case "uuid":
-		return "UUID"
-	case "bytea":
-		return "BYTEA"
-	case "jsonb":
-		return "JSONB"
-	case "vector":
-		return fmt.Sprintf("vector(%d)", t.VecDim)
-	case "numeric":
-		if t.HasNumP {
-			return fmt.Sprintf("NUMERIC(%d, %d)", t.NumP, t.NumS)
-		}
-		return "NUMERIC"
+	if t.Enum {
+		return QualifiedEnumName(t.Name)
+	}
+	if s, err := coltype.SQLName(t); err == nil {
+		return s
 	}
 	return strings.ToUpper(t.Name)
 }
@@ -311,28 +268,39 @@ func ExpiryFor(e *dsl.Entity) ExpiryMechanism {
 // PredicateKindForField maps a DSL field type to the query.PredicateKind
 // constant. Returns ("", false) when the type is not filterable.
 func PredicateKindForField(t dsl.FieldType) (string, bool) {
-	if t.Array {
+	stem, ok := coltype.PredicateStem(t)
+	if !ok {
 		return "", false
 	}
-	switch t.Name {
-	case "text", "varchar", "citext", "uuid":
-		return "PredicateString", true
-	case "numeric":
-		return "PredicateNumeric", true
-	case "real":
-		return "PredicateFloat", true
-	case "double":
-		return "PredicateDouble", true
-	case "int", "smallint":
-		return "PredicateInt32", true
-	case "bigint":
-		return "PredicateInt64", true
-	case "boolean":
-		return "PredicateBool", true
-	case "timestamptz", "date":
-		return "PredicateTimestamp", true
-	case "jsonb", "bytea":
-		return "PredicateBytes", true
+	return "Predicate" + stem, true
+}
+
+// EnumTypeName maps an enum to its computed Postgres type name,
+// `<namespace>_<snake_case_name>`, the same flattening TableName applies to an
+// entity.
+func EnumTypeName(e *dsl.Enum) string {
+	return e.Namespace + "_" + SnakeCase(e.Name)
+}
+
+// QualifiedEnum returns the schema-qualified, double-quoted type name for an
+// enum, e.g. `"atlantis"."app_mood"`.
+//
+// Enums live in the atlantis schema whatever `table` override the entities
+// using them carry: the type is atlantis's to create and drop, and putting it
+// beside a table in a schema atlantis does not own would leave it behind when
+// that schema is dropped.
+func QualifiedEnum(e *dsl.Enum) string {
+	return QuoteIdent("atlantis") + "." + QuoteIdent(EnumTypeName(e))
+}
+
+// QualifiedEnumName renders the Postgres type for an enum ID (`ns.Name`).
+//
+// Lowering rewrites an enum-typed field to hold the ID, so this is the only
+// place the flattening has to agree with EnumTypeName.
+func QualifiedEnumName(id string) string {
+	ns, name, ok := strings.Cut(id, ".")
+	if !ok {
+		return QuoteIdent("atlantis") + "." + QuoteIdent(SnakeCase(id))
 	}
-	return "", false
+	return QuoteIdent("atlantis") + "." + QuoteIdent(ns+"_"+SnakeCase(name))
 }

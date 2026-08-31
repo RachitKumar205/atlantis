@@ -2,18 +2,18 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  AlertTriangle,
-  Building2,
+  Buildings,
   Copy,
   Fingerprint,
+  HardDrives,
   Lock,
-  LogOut,
   Monitor,
-  ShieldCheck,
-  Server,
   Shield,
+  ShieldCheck,
+  SignOut,
   Users,
-} from 'lucide-react'
+  Warning,
+} from '@phosphor-icons/react'
 import { api, queries, type ChangePolicyEntry, type MeResult } from '@/api/client'
 import { useMe } from '@/hooks/useAuth'
 import { STEP_UP_MESSAGE } from '@/pages/Login'
@@ -38,11 +38,11 @@ interface Section {
 }
 
 const SECTIONS: Section[] = [
-  { id: 'general',  label: 'General',     icon: <Building2 /> },
+  { id: 'general',  label: 'General',     icon: <Buildings /> },
   { id: 'members',  label: 'Members',     icon: <Users /> },
   { id: 'security', label: 'Security',    icon: <Shield /> },
   { id: 'policy',   label: 'Change policy', icon: <ShieldCheck /> },
-  { id: 'danger',   label: 'Danger zone', icon: <AlertTriangle />, danger: true },
+  { id: 'danger',   label: 'Danger zone', icon: <Warning />, danger: true },
 ]
 
 export function Settings() {
@@ -109,7 +109,7 @@ export function Settings() {
 // ── General ──────────────────────────────────────────────────────────────
 function GeneralPanel({ onToast }: { onToast: (msg: string) => void }) {
   // Endpoint comes from the BFF's /api/instance (which reads ATL_ENDPOINT).
-  // Server version comes from the live health probe — same source the
+  // HardDrives version comes from the live health probe — same source the
   // Health page's "version" chip uses, so the two surfaces always agree.
   const instanceQ = useQuery(queries.instance())
   const healthQ = useQuery({ ...queries.health(), refetchInterval: 30_000 })
@@ -128,7 +128,7 @@ function GeneralPanel({ onToast }: { onToast: (msg: string) => void }) {
       </div>
       <section className="card">
         <div className="card__head">
-          <Building2 size={14} />
+          <Buildings size={14} />
           <span className="card__title">Instance</span>
         </div>
         <div className="card__body" style={{ padding: 0 }}>
@@ -139,7 +139,7 @@ function GeneralPanel({ onToast }: { onToast: (msg: string) => void }) {
             </div>
             <div className="setrow__control">
               <span className="set-readout">
-                <Server />
+                <HardDrives />
                 {endpoint}
               </span>
               <button
@@ -591,7 +591,7 @@ function DangerPanel({
 
       <div className="danger-card">
         <div className="danger-card__head">
-          <AlertTriangle />
+          <Warning />
           <span className="danger-card__title">Destructive actions</span>
         </div>
         <div className="setrow">
@@ -607,7 +607,7 @@ function DangerPanel({
               onClick={() => setConfirm('signoutall')}
               disabled={signOutAll.isPending}
             >
-              <LogOut size={12} />
+              <SignOut size={12} />
               <span>Sign out all</span>
             </button>
           </div>
@@ -634,7 +634,7 @@ function DangerPanel({
       {confirm === 'signoutall' && (
         <SudoConfirmDialog
           title="Sign out all sessions"
-          icon={<LogOut />}
+          icon={<SignOut />}
           body={<>End <b>every</b> active console session, including this one. You will be returned to the login screen.</>}
           confirmLabel="Sign out all"
           pending={signOutAll.isPending}
@@ -647,7 +647,7 @@ function DangerPanel({
       {confirm === 'revokeall' && (
         <SudoConfirmDialog
           title="Revoke all caller certificates"
-          icon={<AlertTriangle />}
+          icon={<Warning />}
           body={
             <>
               Drop <b>every</b> caller from the allowlist and clear their schema registrations.

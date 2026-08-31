@@ -1,5 +1,15 @@
 <!doctype html>
-<html lang="en">
+<!--
+  data-theme="light" pins the sign-in app to the light theme rather than
+  following the operating system. The artwork beside the form is a daylight
+  scene, and it does not have a dark counterpart: on a dark ground the picture
+  keeps its own sky and the panel next to it goes black, which reads as two
+  pages joined down the middle.
+
+  This is the whole opt-out. datum.css applies dark only when neither <html>
+  nor the scope element carries data-theme="light".
+-->
+<html lang="en" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -21,7 +31,17 @@
       Neither failure shows up in `vite dev`, which never applies the policy.
     -->
   </head>
-  <body>
+  <!--
+    `datum` scopes the palette in web/shared/datum.css, which is being adopted
+    one surface at a time. On the body rather than on the shell so the ground
+    covers overscroll: .shell is min-height 100%, and #root has auto height, so
+    that percentage does not resolve and the old ground would show through
+    underneath.
+
+    A class attribute, not a style attribute — style-src 'self' rejects the
+    latter.
+  -->
+  <body class="datum">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

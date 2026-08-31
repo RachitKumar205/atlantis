@@ -1,23 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useRouterState } from '@tanstack/react-router'
 import {
-  Activity,
-  Box,
-  Building2,
-  Check,
-  ChevronsUpDown,
-  Cog,
-  Cpu,
-  History,
   Archive,
-  DatabaseZap,
-  Layers,
-  ExternalLink,
-  LogOut,
-  Settings,
+  ArrowSquareOut,
+  CaretUpDown,
+  Check,
+  ClockCounterClockwise,
+  Cpu,
+  Cube,
+  Gear,
+  GearSix,
+  Pulse,
+  ShieldChevron,
+  SignOut,
+  Stack,
   Users,
-  ShieldQuestion,
-} from 'lucide-react'
+} from '@phosphor-icons/react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
 import { useMe } from '@/hooks/useAuth'
@@ -25,16 +23,15 @@ import { switcherMode } from '@/lib/session'
 import { markSignInRedirect } from '@/lib/signin'
 
 const NAV = [
-  { to: '/schema',     icon: Layers,   tip: 'Schema' },
-  { to: '/import',     icon: DatabaseZap, tip: 'Import' },
-  { to: '/history',    icon: History,  tip: 'History' },
-  { to: '/sandbox',    icon: Box,      tip: 'Sandbox' },
+  { to: '/schema',     icon: Stack,   tip: 'Schema' },
+  { to: '/history',    icon: ClockCounterClockwise,  tip: 'History' },
+  { to: '/sandbox',    icon: Cube,      tip: 'Sandbox' },
   { to: '/workers',    icon: Cpu,      tip: 'Workers' },
-  { to: '/health',     icon: Activity, tip: 'Health' },
+  { to: '/health',     icon: Pulse, tip: 'Health' },
   { to: '/callers',    icon: Users,    tip: 'Callers' },
-  { to: '/approvals', icon: ShieldQuestion, tip: 'Approvals' },
+  { to: '/approvals', icon: ShieldChevron, tip: 'Approvals' },
   { to: '/parked',     icon: Archive,  tip: 'Parked' },
-  { to: '/operations', icon: Cog,      tip: 'Operations' },
+  { to: '/operations', icon: GearSix,      tip: 'Operations' },
 ] as const
 
 // Supabase-style hover-to-expand sidebar. Collapsed (icon-only, 56px) by
@@ -113,7 +110,7 @@ export function Sidebar() {
           className={`rail-btn ${isActive('/settings') ? 'is-active' : ''}`}
           aria-label="Settings"
         >
-          <Settings />
+          <Gear />
           <span className="rail-btn__label">Settings</span>
         </Link>
         {/* Sits outside the organisation switcher, which renders as inert text
@@ -125,18 +122,18 @@ export function Sidebar() {
             href={me.cloud_url}
             aria-label="Back to Atlantis Cloud"
           >
-            <ExternalLink />
+            <ArrowSquareOut />
             <span className="rail-btn__label">Atlantis Cloud</span>
           </a>
         )}
         <button
           type="button"
-          className="rail-btn"
+          className="rail-btn rail-btn--danger"
           aria-label="Sign out"
           onClick={() => logoutMutation.mutate()}
           disabled={logoutMutation.isPending}
         >
-          <LogOut />
+          <SignOut />
           <span className="rail-btn__label">Sign out</span>
         </button>
       </div>
@@ -191,8 +188,7 @@ function OrgSwitcher() {
     return (
       <div className="rail-org" title={me.org}>
         <div className="rail-org__face" data-testid="org-label">
-          <Building2 />
-          <span className="rail-org__name">{me.org}</span>
+          <OrgFace org={me.org} display={me.org_display_name} />
         </div>
       </div>
     )
@@ -215,9 +211,8 @@ function OrgSwitcher() {
         data-testid="org-switcher"
         onClick={() => setOpen(v => !v)}
       >
-        <Building2 />
-        <span className="rail-org__name">{me.org}</span>
-        <ChevronsUpDown className="rail-org__chev" />
+          <OrgFace org={me.org} display={me.org_display_name} />
+        <CaretUpDown className="rail-org__chev" />
       </button>
 
       <div
@@ -228,14 +223,14 @@ function OrgSwitcher() {
         {targets.map(o =>
           o.name === me.org ? (
             <div key={o.name} className="screens-item is-active" aria-current="true">
-              <Building2 />
-              <span>{o.name}</span>
+              <OrgMonogram label={o.display_name || o.name} />
+              <span>{o.display_name || o.name}</span>
               <Check className="screens-item__tick" />
             </div>
           ) : (
             <a key={o.name} className="screens-item" href={o.url}>
-              <Building2 />
-              <span>{o.name}</span>
+              <OrgMonogram label={o.display_name || o.name} />
+              <span>{o.display_name || o.name}</span>
             </a>
           ),
         )}
@@ -274,4 +269,32 @@ function avatarInitials(name?: string, email?: string): string {
     return (parts[0].charAt(0) + parts[1].charAt(0)).toUpperCase()
   }
   return local.slice(0, 2).toUpperCase()
+}
+
+// OrgFace is the monogram and name block in the rail, matching the shape the
+// organisation rows in Cloud use.
+//
+// The display name arrives on the assertion's org_names claim, which carries
+// only the organisations whose display name differs from their name — so this
+// draws one line for an organisation that never set one, and two for one that
+// did, without deciding anything itself.
+function OrgMonogram({ label }: { label: string }) {
+  return (
+    <span className="rail-org__avatar" aria-hidden="true">{label.trim().charAt(0)}</span>
+  )
+}
+
+function OrgFace({ org, display }: { org: string; display?: string }) {
+  const label = display || org
+  return (
+    <>
+      <OrgMonogram label={label} />
+      <span className="rail-org__block">
+        <span className="rail-org__name">{label}</span>
+        {display && display !== org ? (
+          <span className="rail-org__slug">{org}</span>
+        ) : null}
+      </span>
+    </>
+  )
 }

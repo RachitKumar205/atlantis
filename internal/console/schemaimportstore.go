@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -56,6 +57,21 @@ type SchemaImportSuggestion struct {
 	Line   string `json:"line"`
 }
 
+// ErrNoSuchImport reports an id this organisation cannot read.
+var ErrNoSuchImport = errors.New("no such import")
+
+// SchemaImportFindings is everything one pass produced.
+//
+// One value rather than four parameters, because the four are written together
+// and read together, and a call site that passes them positionally is one
+// where skipped and warnings can be swapped without the compiler noticing.
+type SchemaImportFindings struct {
+	Entities    []SchemaImportEntity     `json:"entities"`
+	Suggestions []SchemaImportSuggestion `json:"suggestions"`
+	Skipped     []string                 `json:"skipped"`
+	Warnings    []string                 `json:"warnings"`
+}
+
 // newSchemaImportID returns an identifier for one import.
 func newSchemaImportID() (string, error) {
 	b := make([]byte, 16)
@@ -73,7 +89,7 @@ func newSchemaImportID() (string, error) {
 //
 // source must be a host, optionally with a port. A connection string fails the
 // column's CHECK rather than being stored.
-func (o *orgStore) createSchemaImport(ctx context.Context, actor, source string, entities []SchemaImportEntity) (string, error) {
+func (o *orgStore) createSchemaImport(ctx context.Context, actor, source string, f SchemaImportFindings) (string, error) {
 	id, err := newSchemaImportID()
 	if err != nil {
 		return "", err
@@ -81,12 +97,14 @@ func (o *orgStore) createSchemaImport(ctx context.Context, actor, source string,
 
 	err = o.tx(ctx, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO console.schema_imports (id, org, source, entities, actor, expires_at)
-			VALUES ($1, $2, $3, $4, $5, now() + $6::interval)
-		`, id, o.org, source, len(entities), actor, schemaImportTTL.String()); err != nil {
+			INSERT INTO console.schema_imports
+			    (id, org, source, entities, actor, expires_at, suggestions, skipped, warnings)
+			VALUES ($1, $2, $3, $4, $5, now() + $6::interval, $7, $8, $9)
+		`, id, o.org, source, len(f.Entities), actor, schemaImportTTL.String(),
+			orEmpty(f.Suggestions), orEmpty(f.Skipped), orEmpty(f.Warnings)); err != nil {
 			return fmt.Errorf("record schema import: %w", err)
 		}
-		for _, e := range entities {
+		for _, e := range f.Entities {
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO console.schema_import_entities
 				    (import_id, org, table_name, entity_name, namespace, atl)
@@ -134,22 +152,99 @@ func (o *orgStore) schemaImports(ctx context.Context) ([]SchemaImport, error) {
 	return out, err
 }
 
-// schemaImportEntities returns the declarations of one import, ordered by
-// table.
+// SchemaImportOverview is an import without its payload.
 //
-// The organisation is not in the WHERE clause because the policy is: every
-// statement here runs with console.current_org() bound, and the RESTRICTIVE
-// policy admits no other organisation's rows. An id from elsewhere selects
-// nothing.
-func (o *orgStore) schemaImportEntities(ctx context.Context, importID string) ([]SchemaImportEntity, error) {
+// Counts and namespace names, which is everything the review screen needs to
+// draw its header and its sections. The declarations and the findings are
+// several hundred kilobytes together and are fetched per section.
+type SchemaImportOverview struct {
+	ID          string           `json:"import_id"`
+	Source      string           `json:"source"`
+	Actor       string           `json:"actor"`
+	CreatedAt   time.Time        `json:"created_at"`
+	Entities    int              `json:"entities"`
+	Namespaces  []NamespaceCount `json:"namespaces"`
+	Suggestions int              `json:"suggestions"`
+	Skipped     int              `json:"skipped"`
+	Warnings    int              `json:"warnings"`
+}
+
+// NamespaceCount is one namespace an import read into, and how many tables it
+// found there.
+type NamespaceCount struct {
+	Name   string `json:"name"`
+	Tables int    `json:"tables"`
+}
+
+// SchemaImportNotes is what a pass found, without the declarations.
+type SchemaImportNotes struct {
+	Suggestions []SchemaImportSuggestion `json:"suggestions"`
+	Skipped     []string                 `json:"skipped"`
+	Warnings    []string                 `json:"warnings"`
+}
+
+// schemaImportOverview returns the header and the counts.
+//
+// jsonb_array_length rather than reading the arrays: the counts are what the
+// screen draws, and the arrays behind them are the bulk of the response this
+// call exists to avoid.
+func (o *orgStore) schemaImportOverview(ctx context.Context, importID string) (*SchemaImportOverview, error) {
+	var v SchemaImportOverview
+	err := o.tx(ctx, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `
+			SELECT id, source, actor, created_at, entities,
+			       jsonb_array_length(suggestions),
+			       jsonb_array_length(skipped),
+			       jsonb_array_length(warnings)
+			FROM console.schema_imports
+			WHERE id = $1 AND expires_at > now()
+		`, importID).Scan(&v.ID, &v.Source, &v.Actor, &v.CreatedAt, &v.Entities,
+			&v.Suggestions, &v.Skipped, &v.Warnings)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNoSuchImport
+		}
+		if err != nil {
+			return err
+		}
+
+		rows, err := tx.Query(ctx, `
+			SELECT namespace, count(*)
+			FROM console.schema_import_entities
+			WHERE import_id = $1
+			GROUP BY namespace
+			ORDER BY namespace
+		`, importID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var n NamespaceCount
+			if err := rows.Scan(&n.Name, &n.Tables); err != nil {
+				return err
+			}
+			v.Namespaces = append(v.Namespaces, n)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// schemaImportEntities returns the declarations of one import, ordered by
+// table. Optionally narrowed to one namespace, which is how the review screen
+// reads them: one file's worth at a time.
+func (o *orgStore) schemaImportEntities(ctx context.Context, importID, namespace string) ([]SchemaImportEntity, error) {
 	var out []SchemaImportEntity
 	err := o.tx(ctx, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT table_name, entity_name, namespace, atl
 			FROM console.schema_import_entities
-			WHERE import_id = $1
+			WHERE import_id = $1 AND ($2 = '' OR namespace = $2)
 			ORDER BY table_name
-		`, importID)
+		`, importID, namespace)
 		if err != nil {
 			return err
 		}
@@ -164,6 +259,46 @@ func (o *orgStore) schemaImportEntities(ctx context.Context, importID string) ([
 		return rows.Err()
 	})
 	return out, err
+}
+
+// schemaImportSource returns the host and port an import was read from.
+//
+// Its own read because the declarations endpoint needs the source and nothing
+// else on the row, and the row carries the findings — which are the bulk of it.
+func (o *orgStore) schemaImportSource(ctx context.Context, importID string) (string, error) {
+	var source string
+	err := o.tx(ctx, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `
+			SELECT source FROM console.schema_imports
+			WHERE id = $1 AND expires_at > now()
+		`, importID).Scan(&source)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNoSuchImport
+		}
+		return err
+	})
+	return source, err
+}
+
+// schemaImportNotes returns the suggestions, the skipped tables and the
+// warnings.
+func (o *orgStore) schemaImportNotes(ctx context.Context, importID string) (*SchemaImportNotes, error) {
+	var n SchemaImportNotes
+	err := o.tx(ctx, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `
+			SELECT suggestions, skipped, warnings
+			FROM console.schema_imports
+			WHERE id = $1 AND expires_at > now()
+		`, importID).Scan(&n.Suggestions, &n.Skipped, &n.Warnings)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNoSuchImport
+		}
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &n, nil
 }
 
 // deleteExpiredSchemaImports removes rows past their date and reports how many.

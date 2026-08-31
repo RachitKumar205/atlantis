@@ -30,7 +30,7 @@
 /* entity detail */
 .detail { overflow: auto; flex: 1; }
 .detail__head { padding: 22px 28px 0; border-bottom: 1px solid var(--line-soft); }
-.detail__path { font-family: var(--mono); font-size: 19px; font-weight: 450; letter-spacing: -.01em; }
+.detail__path { font-family: var(--mono); font-size: 19px; font-weight: 500; letter-spacing: -.01em; }
 .detail__path .ns { color: var(--ink-3); }
 .detail__path .nm { color: var(--ink-0); }
 .detail__meta { display: flex; align-items: center; gap: 18px; margin: 12px 0 18px; }
@@ -85,12 +85,8 @@
    SPA carries these class names now. */
 
 /* ====== IMPORT A DATABASE ================================================== */
-/* Long monospaced content on a page otherwise made of short fields. Each
-   block scrolls on its own, so a table carrying a hundred-character CHECK
-   does not widen the card and push the page sideways. */
-.import { display: flex; flex-direction: column; gap: 14px; }
-.import__form { display: flex; flex-direction: column; gap: 16px; align-items: stretch; }
-.import__lede { font-size: 12.5px; color: var(--ink-2); line-height: 1.6; margin: 0; max-width: 560px; }
+/* The suggestions and the notes the import returns, listed inside an
+   Accordion panel. */
 .import__suggestions,
 .import__notes {
   list-style: none;
@@ -111,11 +107,9 @@
 .import__notes li { font-size: 12px; color: var(--ink-2); line-height: 1.55; }
 .import__table { font-size: 12.5px; color: var(--ink-0); }
 
-/* The line to paste and the declaration to commit are both copied by hand,
-   so they wrap rather than truncate: an .atl body clipped at the card's
-   edge is one that gets copied incompletely. */
-.import__line,
-.import__atl {
+/* The line to paste is copied by hand, so it wraps rather than truncates: a
+   remedy clipped at the panel's edge is one that gets copied incompletely. */
+.import__line {
   font-family: var(--mono);
   font-feature-settings: var(--feat-mono);
   font-size: 12px;
@@ -130,33 +124,6 @@
   word-break: break-word;
   overflow-x: auto;
 }
-.import__entity {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 9px 12px;
-  margin: 0 0 8px;
-}
-.import__entity summary { cursor: pointer; font-size: 12.5px; color: var(--ink-2); }
-.import__entity summary::marker { color: var(--ink-3); }
-
-/* The plaintext acknowledgement carries a border and a fill because ticking
-   it sends a password across the internet in clear. */
-.import__ack {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  margin: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--coral);
-  border-radius: var(--radius);
-  background: var(--coral-tint);
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--ink-1);
-  cursor: pointer;
-}
-.import__ack input { margin-top: 2px; flex: none; }
-.import__ack svg { vertical-align: -2px; color: var(--coral); }
 
 /* ====== HEALTH ============================================================= */
 .health { display: flex; flex-direction: column; height: 100%; min-height: 0; }
@@ -209,7 +176,7 @@
 .logrow.is-new { animation: tickIn 1.2s var(--ease); }
 .logrow__time { color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .logrow__msg { color: var(--ink-1); }
-.logrow.lv-error .logrow__msg { color: #E89898; }
+.logrow.lv-error .logrow__msg { color: var(--coral); }
 .logrow.lv-warn .logrow__msg { color: var(--ink-0); }
 .logrow__attrs { display: flex; gap: 10px; color: var(--ink-3); font-size: 11px; white-space: nowrap; }
 .logrow__attrs .ak { color: var(--ink-3); }
@@ -1209,3 +1176,324 @@ input:-webkit-autofill:active {
 }
 .input:focus { border-color: var(--accent); }
 .input.mono { font-family: var(--mono); font-feature-settings: var(--feat-mono); font-size: 12.5px; }
+
+
+/* ── onboarding dialog ── */
+
+.onboard__body { gap: 20px; }
+.onboard__lede { font-size: 12.5px; color: var(--ink-2); line-height: 1.65; margin: 0; }
+
+/* The head is a column so Progress sits under the subtitle, and the close
+   button stays on the row above it. */
+.modal--onboard .modal__headtext { display: flex; flex-direction: column; gap: 5px; min-width: 0; flex: 1; }
+.modal--onboard .progress { margin-top: 15px; }
+
+/* Larger than the 440px confirmations this modal shares a class with. Those
+   ask one question in a narrow box; this one heads a four-step flow across
+   620px, where 15px against a 12px subtitle reads as two sizes of label
+   rather than a title and its line. */
+.modal--onboard .modal__head { padding: 21px 22px 16px; }
+.modal--onboard .modal__title { font-size: 20px; line-height: 1.2; }
+.modal--onboard .modal__sub { font-size: 13px; line-height: 1.5; margin-top: 0; }
+
+.tally { display: flex; gap: 10px; }
+.stat {
+  flex: 1; display: flex; flex-direction: column; gap: 2px;
+  padding: 12px 14px; background: var(--canvas-1);
+  border: 1px solid var(--line-soft); border-radius: var(--radius-lg);
+}
+.stat__n { font-size: 21px; font-weight: 500; color: var(--ink-0); font-variant-numeric: tabular-nums; }
+.stat__label { font-size: 11.5px; color: var(--ink-3); }
+
+/* Amber for a count that wants acting on, in the tint the backfill badge uses:
+   a suggestion is the same weight of thing — nothing is broken, and something
+   should be looked at. */
+.stat--warn {
+  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+  background: var(--warn-tint);
+}
+.stat--warn .stat__n { color: var(--warn-ink); }
+.stat--warn .stat__label { color: var(--warn-ink); }
+
+/* Slate is what a schema object is drawn in elsewhere — field types on the
+   entity table, the Postgres chips. The namespace icon follows it. */
+.accordion__label > svg { color: var(--slate); }
+
+
+
+/* ── imported schema review ── */
+
+/* Two columns: the sections on the left, one of them on the right. 209 tables
+   and 156 suggestions do not share a scroll with the instructions for
+   committing them. */
+.review { display: grid; grid-template-columns: 208px 1fr; gap: 28px; align-items: start; }
+.review__nav { display: flex; flex-direction: column; gap: 2px; position: sticky; top: 0; }
+.review__tab {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 8px 10px; border-radius: var(--radius); cursor: pointer;
+  font-size: 12.5px; color: var(--ink-2); text-align: left;
+  transition: background-color var(--med) var(--ease), color var(--med) var(--ease);
+}
+.review__tab svg { flex: none; color: var(--icon-nav); }
+@media (hover: hover) {
+  .review__tab:hover { background: color-mix(in srgb, var(--ink-0) 4%, transparent); color: var(--ink-0); }
+}
+.review__tab.is-active {
+  background: var(--canvas-2); color: var(--ink-0); font-weight: 500;
+  box-shadow: inset 0 1px 0 var(--edge-hi), var(--drop);
+}
+.review__tab.is-active svg { color: var(--accent); }
+.review__tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.review__tablabel { flex: 1; }
+.review__tab .badge { font-size: 10px; height: 16px; padding: 1px 6px; }
+.review__tab .badge::before { display: none; }
+
+.review__body { min-width: 0; }
+
+/* The guide's own spacing, now that it is not inside a dialog body. */
+.guide { display: flex; flex-direction: column; gap: 22px; max-width: 720px; }
+.guide__lede { font-size: 12.5px; color: var(--ink-2); line-height: 1.65; margin: 0; max-width: 620px; }
+
+.decls { display: flex; flex-direction: column; gap: 6px; }
+.decl { border: 1px solid var(--line-soft); border-radius: var(--radius); overflow: hidden; }
+.decl > summary {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 8px 11px; font-size: 12px; color: var(--ink-1); list-style: none;
+}
+.decl > summary::-webkit-details-marker { display: none; }
+@media (hover: hover) {
+  .decl > summary:hover { background: color-mix(in srgb, var(--ink-0) 3%, transparent); }
+}
+.decl__arrow { color: var(--ink-3); }
+.decl__entity { color: var(--ink-0); font-weight: 500; }
+.decl .codeview { border-top: 1px solid var(--line); }
+
+@media (max-width: 900px) {
+  .review { grid-template-columns: 1fr; gap: 18px; }
+  .review__nav { position: static; flex-direction: row; flex-wrap: wrap; }
+  .review__tablabel { flex: none; }
+}
+
+.review__body > .tally { margin-bottom: 22px; }
+
+/* Names what is being fetched. A section reading 77 kB of declarations over a
+   slow link is otherwise indistinguishable from one that has stopped. */
+.loadingrow { display: flex; align-items: center; gap: 10px; padding: 18px 0; font-size: 12.5px; color: var(--ink-2); }
+
+.skeleton--tab { height: 34px; border-radius: var(--radius); margin-bottom: 2px; }
+.skeleton--stat { flex: 1; height: 66px; border-radius: var(--radius-lg); }
+.skeleton--block { height: 240px; border-radius: var(--radius-lg); }
+
+/* ── file browser ──
+   The files on the left, one of them on the right. A dozen .atl files stacked
+   in a column means scrolling past the first to reach the second, and the
+   first is thousands of lines for a database of any size. */
+.fbrowse {
+  display: grid; grid-template-columns: 208px 1fr;
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  overflow: hidden; background: var(--canvas-2);
+  min-height: 0;
+}
+
+.fbrowse__list {
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--canvas-1); border-right: 1px solid var(--line);
+  max-height: 460px; overflow-y: auto;
+}
+.fbrowse__listhead {
+  padding: 9px 12px; font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: .05em; color: var(--ink-3);
+  border-bottom: 1px solid var(--line-soft); position: sticky; top: 0;
+  background: var(--canvas-1);
+}
+.fbrowse__item {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 12px; cursor: pointer; text-align: left;
+  font-family: var(--mono); font-feature-settings: var(--feat-mono);
+  font-size: 11.5px; color: var(--ink-2);
+  border-left: 2px solid transparent;
+  transition: background-color var(--med) var(--ease), color var(--med) var(--ease);
+}
+.fbrowse__item svg { flex: none; color: var(--ink-3); }
+@media (hover: hover) {
+  .fbrowse__item:hover { background: color-mix(in srgb, var(--ink-0) 4%, transparent); color: var(--ink-0); }
+}
+.fbrowse__item.is-active {
+  background: var(--canvas-2); color: var(--ink-0);
+  border-left-color: var(--accent);
+}
+.fbrowse__item.is-active svg { color: var(--accent); }
+.fbrowse__item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.fbrowse__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.fbrowse__main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.fbrowse__head {
+  display: flex; align-items: center; gap: 12px; flex: none;
+  padding: 7px 8px 7px 14px; background: var(--canvas-1);
+  border-bottom: 1px solid var(--line-soft);
+}
+.fbrowse__path { font-size: 12px; color: var(--ink-1); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fbrowse__lines { font-size: 11px; color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* Numbered by a counter, so the gutter is not selected with the code beside
+   it: a copied declaration carrying line numbers will not parse. */
+/* Code is dark whatever the page is, and is drawn the same wherever it
+   appears: the explorer's pane and a declaration's disclosure are one
+   component. The token colours are fixed rather than derived from the palette,
+   because they hold against one ground only. */
+.codeview {
+  counter-reset: fline;
+  padding: 10px 0; background: var(--code-bg);
+  font-family: var(--mono); font-feature-settings: var(--feat-mono);
+  font-size: 11.5px; line-height: 1.65;
+}
+.codeview__line {
+  display: block; white-space: pre; color: var(--code-ink);
+  padding-left: 62px; padding-right: 14px; position: relative;
+  min-height: 1lh;
+}
+.codeview__line::before {
+  counter-increment: fline; content: counter(fline);
+  position: absolute; left: 0; width: 46px; text-align: right;
+  color: var(--code-gutter); user-select: none; -webkit-user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+@media (hover: hover) {
+  .codeview__line:hover { background: rgba(255, 255, 255, 0.04); }
+  .codeview__line:hover::before { color: var(--code-gutter-hi); }
+}
+.codeview ::selection { background: rgba(125, 151, 174, 0.32); }
+
+/* The explorer's pane: takes the height left over and scrolls. */
+.fbrowse__code { max-height: 460px; overflow: auto; flex: 1; min-height: 0; }
+
+/* A single declaration, opened from the Declarations tab. Capped, because a
+   disclosure that opens to a thousand lines pushes every row below it off the
+   screen. */
+.decl__code { max-height: 380px; overflow: auto; }
+
+.tok-comment { color: var(--code-comment); font-style: italic; }
+.tok-keyword { color: var(--code-keyword); }
+.tok-type    { color: var(--code-type); }
+.tok-string  { color: var(--code-string); }
+.tok-number  { color: var(--code-number); }
+.tok-entity  { color: var(--code-entity); font-weight: 600; }
+.tok-ref     { color: var(--code-ref); }
+.tok-ident   { color: var(--code-ink); }
+.tok-punct   { color: var(--code-punct); }
+
+@media (max-width: 760px) {
+  .fbrowse { grid-template-columns: 1fr; }
+  .fbrowse__list { max-height: 160px; border-right: none; border-bottom: 1px solid var(--line); }
+}
+
+/* The review fills what the page head leaves. Its panes scroll, not the body:
+   an explorer as tall as its longest file puts the file list off the top of
+   the screen, and a 1407-line declaration is the ordinary case.
+ *
+ * Every level of the chain has to give up its content height for the one at
+ * the bottom to scroll. minmax(0, 1fr) is what does it for the grid rows —
+ * a 1fr row still takes its content's height as a minimum, so the row grows
+ * with the file and the pane inside it never overflows. */
+.page__body--fill { overflow: hidden; display: flex; flex-direction: column; }
+.page__body--fill > .review {
+  flex: 1;
+  min-height: 0;
+  align-items: stretch;
+  grid-template-rows: minmax(0, 1fr);
+}
+.page__body--fill > .review > * { min-height: 0; }
+.review__nav { overflow-y: auto; }
+.review__body { display: flex; flex-direction: column; min-height: 0; }
+.review__body > .tally { flex: none; }
+.review__body > .fbrowse,
+.review__body > .commit,
+.review__body > .guide { flex: 1; min-height: 0; }
+.review__body > .accordion,
+.review__body > .import__suggestions,
+.review__body > .import__notes { overflow-y: auto; min-height: 0; }
+
+/* Full height inside the review; capped when it sits in a dialog. */
+.review__body .fbrowse { height: 100%; grid-template-rows: minmax(0, 1fr); }
+.review__body .fbrowse > * { min-height: 0; }
+.review__body .fbrowse__list,
+.review__body .fbrowse__code { max-height: none; }
+
+.fbrowse__foot {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 8px 7px 12px; background: var(--canvas-1);
+  border-top: 1px solid var(--line-soft); flex: none;
+}
+.fbrowse__foot svg { color: var(--ink-3); flex: none; }
+.fbrowse__cmd { flex: 1; font-size: 11.5px; color: var(--ink-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The explorer, then what to do with it. The bar is pinned below the files so
+   the button is reachable without scrolling a 1407-line declaration. */
+.commit { display: flex; flex-direction: column; gap: 14px; min-height: 0; flex: 1; }
+.commit > .fbrowse { flex: 1; min-height: 0; }
+
+.commit__bar {
+  display: flex; align-items: center; gap: 14px; flex: none;
+  padding: 12px 14px; background: var(--canvas-1);
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+}
+.commit__caller { display: flex; align-items: center; gap: 9px; flex: none; }
+.commit__callerlabel { font-size: 12px; color: var(--ink-2); }
+.commit__caller .input { width: 130px; height: 30px; font-size: 12px; }
+.commit__note { flex: 1; font-size: 11.5px; color: var(--ink-3); line-height: 1.5; }
+
+.commit .alert { flex: none; }
+.commit .import__notes { margin-top: 8px; }
+
+/* The plan, in the frame the file browser vacates. Same shape as the browser
+   so the step reads as a continuation rather than a different screen. */
+.planview {
+  display: flex; flex-direction: column; min-height: 0; flex: 1;
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  overflow: hidden; background: var(--code-bg);
+}
+.planview__head {
+  display: flex; align-items: center; gap: 10px; flex: none;
+  padding: 8px 12px; background: var(--canvas-1);
+  border-bottom: 1px solid var(--line);
+}
+.planview__title { font-size: 12.5px; font-weight: 500; color: var(--ink-0); }
+.planview__note { font-size: 11.5px; color: var(--ink-3); }
+.planview__body { padding: 14px; overflow: auto; background: var(--canvas-2); }
+.planview__sql {
+  flex: 1; min-height: 0; overflow: auto; margin: 0;
+  padding: 12px 14px; background: var(--code-bg);
+  font-family: var(--mono); font-feature-settings: var(--feat-mono);
+  font-size: 11.5px; line-height: 1.65; color: var(--code-ink);
+  white-space: pre;
+}
+.planview__sql ::selection { background: rgba(125, 151, 174, 0.32); }
+
+/* The SQL tokens are the light-theme scale; the plan renders on the code
+   ground, so they take the code palette here. Scoped, because .sql-* is also
+   emitted on light surfaces (History, Operations). */
+.planview__sql .sql-kw   { color: var(--code-keyword); font-weight: 500; }
+.planview__sql .sql-type { color: var(--code-type); }
+.planview__sql .sql-str  { color: var(--code-string); }
+.planview__sql .sql-num  { color: var(--code-number); }
+.planview__sql .sql-cmt  { color: var(--code-comment); font-style: italic; }
+
+/* The drift report. Grouped by kind, because a flat list repeats one sentence
+   per row and buries the only part that differs — which column. */
+.drift { display: flex; flex-direction: column; gap: 14px; margin-top: 10px; }
+.drift__group {
+  border: 1px solid var(--line-soft); border-radius: var(--radius);
+  padding: 11px 12px; background: var(--canvas-2);
+}
+.drift__head { display: flex; align-items: center; gap: 9px; }
+.drift__count { font-size: 11.5px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.drift__detail { margin: 7px 0 0; font-size: 12px; color: var(--ink-2); line-height: 1.55; }
+.drift__rows {
+  list-style: none; margin: 9px 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: 3px;
+  max-height: 210px; overflow-y: auto;
+}
+.drift__rows li { font-size: 11.5px; color: var(--ink-1); }
+.drift__dot { color: var(--ink-4); margin: 0 6px; }
+.drift__field { color: var(--ink-0); }
+.drift__more { margin: 7px 0 0; font-size: 11.5px; color: var(--ink-3); }

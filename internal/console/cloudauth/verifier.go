@@ -227,6 +227,9 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*identity.Claims, 
 		// Carried, and used for nothing but drawing a menu. Claims.Orgs says
 		// why that restriction is the whole reason a stale list is harmless.
 		Orgs: private.Orgs,
+		// The display names beside them, and under the same restriction: it
+		// decides what a switcher renders, never what anybody may reach.
+		OrgNames: private.OrgNames,
 	}
 	if registered.Expiry != nil {
 		claims.Expiry = registered.Expiry.Time()

@@ -710,7 +710,7 @@ func (s *Service) refuseBackfillOnBlockedTables(ctx context.Context, ir *dsl.IR,
 		return nil
 	}
 
-	blockedTables, err := pg.RLSBlockedTables(ctx, poolQuerier{s.pool}, names)
+	blockedTables, err := pg.RLSBlockedTables(ctx, poolQuerier{s.managed}, names)
 	if err != nil {
 		return fmt.Errorf("admin: could not determine whether the backfill would "+
 			"be able to see its rows: %w", err)

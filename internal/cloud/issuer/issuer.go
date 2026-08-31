@@ -178,6 +178,10 @@ type Grant struct {
 	// Orgs names every organisation the subject belongs to, for a console's
 	// organisation switcher. A hint only — see identity.Claims.Orgs.
 	Orgs []string
+
+	// OrgNames maps an organisation's name to its display name, for the ones
+	// that have a different one. A hint, like Orgs.
+	OrgNames map[string]string
 }
 
 // Mint returns a signed assertion for g.
@@ -199,15 +203,16 @@ func (i *Issuer) Mint(g Grant) (string, error) {
 	}
 
 	claims := identity.Claims{
-		ID:      jti,
-		Subject: g.Subject,
-		Org:     g.Org,
-		Role:    g.Role,
-		Email:   g.Email,
-		Name:    g.Name,
-		Expiry:  expiry,
-		StepUp:  g.StepUp,
-		Orgs:    g.Orgs,
+		ID:       jti,
+		Subject:  g.Subject,
+		Org:      g.Org,
+		Role:     g.Role,
+		Email:    g.Email,
+		Name:     g.Name,
+		Expiry:   expiry,
+		StepUp:   g.StepUp,
+		Orgs:     g.Orgs,
+		OrgNames: g.OrgNames,
 	}
 	if err := claims.Validate(); err != nil {
 		return "", fmt.Errorf("refusing to mint an assertion no console would accept: %w", err)
@@ -234,12 +239,13 @@ func (i *Issuer) Mint(g Grant) (string, error) {
 		Expiry:    jwt.NewNumericDate(expiry),
 	}
 	private := identity.Private{
-		Org:    g.Org,
-		Role:   g.Role,
-		Email:  g.Email,
-		Name:   g.Name,
-		StepUp: g.StepUp,
-		Orgs:   g.Orgs,
+		Org:      g.Org,
+		Role:     g.Role,
+		Email:    g.Email,
+		Name:     g.Name,
+		StepUp:   g.StepUp,
+		Orgs:     g.Orgs,
+		OrgNames: g.OrgNames,
 	}
 
 	tok, err := jwt.Signed(signer).Claims(registered).Claims(private).Serialize()

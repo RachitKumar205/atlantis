@@ -98,8 +98,18 @@ func (s *Server) grantFor(w http.ResponseWriter, r *http.Request, user *store.Us
 	if err != nil {
 		s.log.Warn("read memberships for the org list", "user", user.ID, "err", err)
 	}
+	// Display names only where they differ from the name. An organisation that
+	// calls itself what it is called adds nothing to the token, and a console
+	// that finds no entry draws the name it already has.
+	var orgNames map[string]string
 	for _, m := range memberships {
 		orgs = append(orgs, m.Org)
+		if m.DisplayName != "" && m.DisplayName != m.Org {
+			if orgNames == nil {
+				orgNames = make(map[string]string, len(memberships))
+			}
+			orgNames[m.Org] = m.DisplayName
+		}
 	}
 
 	return issuer.Grant{
@@ -113,7 +123,8 @@ func (s *Server) grantFor(w http.ResponseWriter, r *http.Request, user *store.Us
 		Audience: consoleURL,
 		// Names only, no roles: the list draws a menu, and a console has no
 		// use for permissions in an organisation it cannot reach.
-		Orgs: orgs,
+		Orgs:     orgs,
+		OrgNames: orgNames,
 	}, true
 }
 

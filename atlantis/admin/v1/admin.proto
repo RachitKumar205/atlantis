@@ -57,6 +57,17 @@ service AdminService {
   rpc AdoptBaseline(AdoptBaselineRequest) returns (AdoptBaselineResponse) {
     option (required_capability) = CAPABILITY_OPERATOR;
   }
+  // Points this server at the database whose schema it manages.
+  //
+  // An organisation that imported an existing database names it here: atlantis
+  // keeps its own tables where it already does and reads, plans and applies
+  // against that one. The DSN is sealed at rest and never returned.
+  //
+  // OPERATOR, like AdoptBaseline: it decides what every caller's schema is
+  // compared against.
+  rpc SetManagedDatabase(SetManagedDatabaseRequest) returns (SetManagedDatabaseResponse) {
+    option (required_capability) = CAPABILITY_OPERATOR;
+  }
   // Reports how the live database differs from a declaration, and writes
   // nothing. Read-only in the same sense PlanSchema is: it runs in a
   // Postgres READ ONLY transaction, so a write added here later fails at the
@@ -630,6 +641,25 @@ message AdoptDriftItem {
   // One of "addition", "removal", "mismatch".
   string severity = 4;
   string detail = 5;
+}
+
+// SetManagedDatabaseRequest names the database whose schema is managed.
+message SetManagedDatabaseRequest {
+  // The connection string. Sealed on arrival and never read back out; what
+  // reads it opens a pool with it.
+  string dsn = 1;
+  // Host and port, for the console and the logs to name the database without
+  // unsealing the DSN. The column refuses anything holding a credential.
+  string source = 2;
+  // The principal recorded against the change.
+  string set_by = 3;
+}
+
+message SetManagedDatabaseResponse {
+  // Bumped on every write. A server reopens its pool when this moves, so a new
+  // DSN takes effect without a restart.
+  int64 version = 1;
+  string source = 2;
 }
 
 message AdoptBaselineRequest {

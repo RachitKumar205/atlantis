@@ -1,9 +1,18 @@
 /* globals.css — compatibility shim.
-   The Bathysphere design lives in tokens.css + console.css + pages.css
-   (all imported by main.tsx). This file exists only to preserve a few
-   legacy aliases that surviving CSS modules still resolve against. */
+   The design tokens live in @atlantis/shared (tokens.css, then datum.css),
+   both imported by main.tsx. This file exists only to preserve a few legacy
+   aliases that surviving CSS modules still resolve against — 113 uses in
+   Schema.module.css at the last count.
 
-:root {
+   Declared on `.datum` as well as `:root`, and that is load-bearing. Every
+   alias here is `var(--something)`, and a custom property is substituted in the
+   scope it is DECLARED in, not the scope it is used in. Declared only on :root,
+   `--ink-muted: var(--ink-2)` resolves against :root — which carries the old
+   palette, because datum.css declares its tokens on the element with the class.
+   The alias would then hand a dark ink to a light page, in 113 places. */
+
+:root,
+.datum {
   /* Legacy ink aliases used by some module CSS still in the tree. */
   --ink:           var(--ink-0);
   --ink-secondary: var(--ink-1);

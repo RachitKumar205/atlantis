@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { Box, ChevronRight } from 'lucide-react'
+import { CaretRight, Cube } from '@phosphor-icons/react'
 import {
   queries,
   parseRawDiff,
@@ -144,7 +144,7 @@ function DiffSection({ detail }: { detail: SchemaVersionDetail }) {
       {detail.up_sql && (
         <details className="sqlblock">
           <summary>
-            <ChevronRight size={12} /> up migration SQL
+            <CaretRight size={12} /> up migration SQL
           </summary>
           <Sql>{detail.up_sql}</Sql>
         </details>
@@ -171,7 +171,7 @@ function SandboxLaunchButton() {
       onClick={() => navigate({ to: '/sandbox', search: { boot: 'sim' } })}
       title="Open a sandbox booted from the current schema."
     >
-      <Box size={13} />
+      <Cube size={13} />
       <span>Open in sandbox</span>
     </button>
   )

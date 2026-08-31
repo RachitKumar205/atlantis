@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Check, Copy, Key, Link2, Plus, Trash2, X } from 'lucide-react'
+import {
+  Check,
+  Copy,
+  Key,
+  LinkSimpleHorizontal,
+  Plus,
+  Trash,
+  X,
+} from '@phosphor-icons/react'
 import { api, ApiError, queries, type CallerInfo, type EnrollTokenResponse } from '@/api/client'
 import { useIsAdmin } from '@/hooks/useAuth'
 import { enrolControlState, type EnrolControl } from '@/lib/session'
@@ -337,7 +345,7 @@ function CallerCard({
                 onClick={onManageAliases}
                 aria-label="Manage aliases"
               >
-                <Link2 size={13} />
+                <LinkSimpleHorizontal size={13} />
               </button>
             </HoverInfo>
             <HoverInfo
@@ -385,7 +393,7 @@ function CallerCard({
                 onClick={onRevoke}
                 aria-label="Revoke caller"
               >
-                <Trash2 size={13} />
+                <Trash size={13} />
               </button>
             </HoverInfo>
           </>
@@ -709,7 +717,7 @@ function AliasesDialog({
     return (
       <SudoConfirmDialog
         title="Save aliases"
-        icon={<Link2 size={18} />}
+        icon={<LinkSimpleHorizontal size={18} />}
         body={
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <p>
@@ -740,7 +748,7 @@ function AliasesDialog({
       <div className="modal" style={{ width: 520 }} role="dialog" aria-modal>
           <div className="modal__head">
             <div className="row" style={{ gap: 10, alignItems: 'center' }}>
-              <Link2 size={16} />
+              <LinkSimpleHorizontal size={16} />
               <span className="modal__title">Identity aliases</span>
             </div>
             <div className="modal__sub">

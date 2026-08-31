@@ -14,10 +14,12 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pgvector/pgvector-go"
 	pgxvector "github.com/pgvector/pgvector-go/pgx"
 
+	"github.com/rachitkumar205/atlantis/internal/coltype"
 	"github.com/rachitkumar205/atlantis/internal/runtime"
 )
 
@@ -114,6 +116,7 @@ func New(ctx context.Context, cfg Config) (*Pool, error) {
 		if err := pgxvector.RegisterTypes(ctx, conn); err != nil {
 			return fmt.Errorf("register pgvector: %w", err)
 		}
+		registerTextCodecs(conn)
 		return nil
 	}
 
@@ -253,3 +256,25 @@ var _ runtime.Pool = (*Pool)(nil)
 // argument. Generated server code that searches by vector uses this so it
 // never imports pgvector directly.
 func Vector(v []float32) pgvector.Vector { return pgvector.NewVector(v) }
+
+// registerTextCodecs makes the types pgx will not decode into a Go string
+// arrive as Postgres's own text rendering.
+//
+// inet, cidr, bit, varbit, tsvector, the range types and the geometric types
+// have no binary decoding into *string, so a read of one fails at request time
+// with "cannot scan inet (OID 869) in binary format into *string" — clean
+// through parse, plan and apply, and broken on the first SELECT.
+//
+// A type missing from the connection's map is skipped rather than failing the
+// connection: the map is populated from the server, so an older Postgres
+// lacking one of these should not stop the pool coming up.
+func registerTextCodecs(conn *pgx.Conn) {
+	tm := conn.TypeMap()
+	for _, name := range coltype.TextCodecTypes() {
+		t, ok := tm.TypeForName(name)
+		if !ok {
+			continue
+		}
+		tm.RegisterType(&pgtype.Type{Name: name, OID: t.OID, Codec: &pgtype.TextCodec{}})
+	}
+}

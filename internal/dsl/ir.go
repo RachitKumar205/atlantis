@@ -42,7 +42,22 @@ type IR struct {
 	Jobs       []Job             `json:"jobs,omitempty"`
 	Workflows  []Workflow        `json:"workflows,omitempty"`
 	Ephemerals []Ephemeral       `json:"ephemerals,omitempty"`
+	Enums      []Enum            `json:"enums,omitempty"`
 }
+
+// Enum is a resolved `enum Name in ns { ... }` declaration: a Postgres enum
+// type whose labels are the values a column of it may hold.
+//
+// Values are in declaration order, which is the order Postgres sorts them in.
+// Reordering them is not a change Postgres can make to an existing type.
+type Enum struct {
+	Name      string   `json:"name"`
+	Namespace string   `json:"namespace"`
+	Values    []string `json:"values"`
+}
+
+// ID returns the canonical `namespace.Name` identifier.
+func (e *Enum) ID() string { return e.Namespace + "." + e.Name }
 
 // Ephemeral is a resolved `ephemeral Name in ns { ... }` declaration.
 // Memcached-only: no Postgres table, no migration DDL. Codegen emits
@@ -440,7 +455,7 @@ type Field struct {
 
 	Primary  bool   `json:"primary,omitempty"`
 	Identity bool   `json:"identity,omitempty"` // GENERATED ALWAYS AS IDENTITY
-	Serial   bool   `json:"serial,omitempty"`   // BIGSERIAL (legacy form; bigint only)
+	Serial   bool   `json:"serial,omitempty"`   // SMALLSERIAL/SERIAL/BIGSERIAL, by column width
 	NotNull  bool   `json:"not_null,omitempty"`
 	Unique   bool   `json:"unique,omitempty"`
 	Check    string `json:"check,omitempty"` // verbatim CHECK expression
@@ -475,6 +490,10 @@ type FieldType struct {
 	NumP    int        `json:"num_p,omitempty"`   // numeric precision
 	NumS    int        `json:"num_s,omitempty"`   // numeric scale
 	HasNumP bool       `json:"has_num_p,omitempty"`
+
+	// Enum marks a column whose type is a declared enum. Name holds the
+	// enum's ID, and the column carries its label as a string.
+	Enum bool `json:"enum,omitempty"`
 }
 
 // Default captures a column DEFAULT expression, and is reused as the literal
@@ -784,6 +803,31 @@ func Lower(files []*File) (*IR, error) {
 	//
 	// File-source paths are threaded into custom queries/procedures so
 	// pg_query_go error messages can point at the right .atl file.
+	// Pass 0: enums. A field's type may name one, so they are resolvable
+	// before any entity is lowered.
+	enumSeen := map[string]Position{}
+	for _, f := range files {
+		for _, d := range f.Decls {
+			ed, ok := d.(*EnumDecl)
+			if !ok {
+				continue
+			}
+			en, eerrs := lowerEnum(ed)
+			errs = append(errs, eerrs...)
+			if en == nil {
+				continue
+			}
+			if first, ok := enumSeen[en.ID()]; ok {
+				errs = append(errs, fmt.Errorf("%s: duplicate enum %s (first declared at %s)",
+					d.Position(), en.ID(), first))
+				continue
+			}
+			enumSeen[en.ID()] = d.Position()
+			ir.Enums = append(ir.Enums, *en)
+		}
+	}
+	sort.Slice(ir.Enums, func(i, j int) bool { return ir.Enums[i].ID() < ir.Enums[j].ID() })
+
 	seen := map[string]Position{} // canonical id -> position of first decl
 	type queryAST struct {
 		file *File
@@ -795,6 +839,8 @@ func Lower(files []*File) (*IR, error) {
 			switch d.(type) {
 			case *QueryDecl, *ProcedureDecl, *JobDecl, *WorkflowDecl, *EphemeralDecl:
 				deferred = append(deferred, queryAST{file: f, decl: d})
+				continue
+			case *EnumDecl:
 				continue
 			}
 			e, perr := lowerDecl(f.Path, d)
@@ -819,6 +865,8 @@ func Lower(files []*File) (*IR, error) {
 	sort.Slice(ir.Entities, func(i, j int) bool {
 		return ir.Entities[i].ID() < ir.Entities[j].ID()
 	})
+
+	errs = append(errs, resolveEnumFields(ir)...)
 
 	// Build index for pass 2 lookups.
 	byID := make(map[string]*Entity, len(ir.Entities))
@@ -1579,14 +1627,13 @@ func validateEntity(e *Entity, byID map[string]*Entity) []error {
 		}
 	}
 
-	// `serial` is only valid on bigint columns: Postgres's BIGSERIAL is a
-	// bigint+sequence shorthand, and the narrower SERIAL / SMALLSERIAL forms
-	// have no DSL spelling.
+	// `serial` is an integer column plus a sequence: SMALLSERIAL on smallint,
+	// SERIAL on int, BIGSERIAL on bigint. The width comes from the column.
 	//
 	// `identity` and `serial` together is an error; they are alternatives.
 	for _, f := range e.Fields {
-		if f.Serial && f.Type.Name != "bigint" {
-			errs = append(errs, fmt.Errorf("%s.%s: serial is only valid on bigint, got %s",
+		if f.Serial && !SerialWidths[f.Type.Name] {
+			errs = append(errs, fmt.Errorf("%s.%s: serial is only valid on smallint, int or bigint, got %s",
 				e.ID(), f.Name, f.Type.Name))
 		}
 		if f.Serial && f.Identity {
@@ -1628,6 +1675,11 @@ func validateEntity(e *Entity, byID map[string]*Entity) []error {
 
 	return errs
 }
+
+// SerialWidths are the column types a sequence default can sit on. The SQL
+// emitter reads the same table to pick between SMALLSERIAL, SERIAL and
+// BIGSERIAL.
+var SerialWidths = map[string]bool{"smallint": true, "int": true, "bigint": true}
 
 // validateUniqueTableNames enforces that no two entities claim the same
 // physical table via the `table "<schema.table>"` modifier. A duplicate routes
@@ -2605,4 +2657,82 @@ func (p *CustomProcedure) TouchedEntities() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// lowerEnum converts one enum declaration, refusing the shapes Postgres would.
+func lowerEnum(d *EnumDecl) (*Enum, []error) {
+	var errs []error
+	if len(d.Values) == 0 {
+		errs = append(errs, fmt.Errorf("%s: enum %s.%s declares no labels; Postgres has no empty enum type",
+			d.Pos, d.Namespace, d.Name))
+		return nil, errs
+	}
+	seen := map[string]bool{}
+	for _, v := range d.Values {
+		if v == "" {
+			errs = append(errs, fmt.Errorf("%s: enum %s.%s has an empty label", d.Pos, d.Namespace, d.Name))
+			continue
+		}
+		if seen[v] {
+			errs = append(errs, fmt.Errorf("%s: enum %s.%s repeats the label %q", d.Pos, d.Namespace, d.Name, v))
+			continue
+		}
+		seen[v] = true
+	}
+	if len(errs) > 0 {
+		return nil, errs
+	}
+	return &Enum{Name: d.Name, Namespace: d.Namespace, Values: append([]string(nil), d.Values...)}, nil
+}
+
+// resolveEnumFields marks every field whose type names a declared enum and
+// rewrites the type name to the enum's ID.
+//
+// A bare name resolves against the entity's own namespace; a qualified
+// `ns.Name` resolves directly, which is what lets one namespace hold the type
+// and another use it.
+//
+// A name matching no enum is left alone. Scalar type names are checked
+// elsewhere, and treating an unknown name as a failure here would reject every
+// type this package does not enumerate.
+func resolveEnumFields(ir *IR) []error {
+	if len(ir.Enums) == 0 {
+		return nil
+	}
+	byID := make(map[string]bool, len(ir.Enums))
+	for i := range ir.Enums {
+		byID[ir.Enums[i].ID()] = true
+	}
+	var errs []error
+	for i := range ir.Entities {
+		e := &ir.Entities[i]
+		for j := range e.Fields {
+			f := &e.Fields[j]
+			id, ok := enumIDFor(byID, e.Namespace, f.Type.Name)
+			if !ok {
+				continue
+			}
+			if f.Type.Array {
+				// pgx decodes an array with its element's codec and an enum
+				// array arrives as the binary body; the same hazard the
+				// text-carried scalars have.
+				errs = append(errs, fmt.Errorf("%s.%s: arrays of enums are not supported", e.ID(), f.Name))
+				continue
+			}
+			f.Type.Name = id
+			f.Type.Enum = true
+		}
+	}
+	return errs
+}
+
+// enumIDFor resolves a type name written on a field to a declared enum's ID.
+func enumIDFor(byID map[string]bool, ns, name string) (string, bool) {
+	if byID[name] {
+		return name, true
+	}
+	if qualified := ns + "." + name; byID[qualified] {
+		return qualified, true
+	}
+	return "", false
 }

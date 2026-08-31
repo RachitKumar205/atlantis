@@ -7,7 +7,7 @@
 
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from '@tanstack/react-router'
-import { AlertTriangle, ShieldOff, ChevronLeft, Activity } from 'lucide-react'
+import { CaretLeft, Pulse, ShieldSlash, Warning } from '@phosphor-icons/react'
 import { api, ApiError } from '@/api/client'
 import type { WorkerSessionDetail } from '@/api/client'
 import { PageShell } from '@/components/PageShell'
@@ -117,14 +117,14 @@ export function WorkerSession() {
           <div className="card">
             <div className="empty">
               <div className="empty__icon">
-                <Activity size={18} />
+                <Pulse size={18} />
               </div>
               <div className="empty__title">Session not found</div>
               <div className="empty__sub">
                 The session disconnected or never registered.
               </div>
               <Link to="/workers" className="btn btn--ghost btn--sm" style={{ gap: 6 }}>
-                <ChevronLeft size={12} /> Back to workers
+                <CaretLeft size={12} /> Back to workers
               </Link>
             </div>
           </div>
@@ -166,7 +166,7 @@ export function WorkerSession() {
   const title = (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 12 }}>
       <Link to="/workers" className="btn btn--ghost btn--sm btn--icon" title="Back" style={{ width: 28, height: 28 }}>
-        <ChevronLeft size={14} />
+        <CaretLeft size={14} />
       </Link>
       <span className="mono" style={{ fontSize: 19, fontWeight: 450, letterSpacing: '-0.01em' }}>
         <span className="faint">{detail.caller}</span>
@@ -185,7 +185,7 @@ export function WorkerSession() {
           onClick={() => { setActionError(null); setShowDrain(true) }}
           style={{ gap: 6 }}
         >
-          <AlertTriangle size={12} />
+          <Warning size={12} />
           Drain
         </button>
       )}
@@ -194,7 +194,7 @@ export function WorkerSession() {
         onClick={() => { setActionError(null); setShowEvict(true) }}
         style={{ gap: 6, color: 'var(--coral)', borderColor: 'transparent' }}
       >
-        <ShieldOff size={12} />
+        <ShieldSlash size={12} />
         Evict
       </button>
     </>
@@ -367,7 +367,7 @@ export function WorkerSession() {
       {showDrain && (
         <SudoConfirmDialog
           title="Drain worker"
-          icon={<AlertTriangle size={18} className="brass" />}
+          icon={<Warning size={18} className="brass" />}
           body={
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <p>
@@ -392,7 +392,7 @@ export function WorkerSession() {
       {showEvict && (
         <SudoConfirmDialog
           title="Evict worker"
-          icon={<ShieldOff size={18} className="coral" />}
+          icon={<ShieldSlash size={18} className="coral" />}
           body={
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <p>
