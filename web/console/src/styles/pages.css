@@ -133,7 +133,9 @@
 /* field table — the key gutter is column one, so a reader takes the table's
    skeleton off the left edge in one pass down rather than one per row across */
 .ftbl { inline-size: 100%; font-size: var(--size-data); }
-.ftbl .f-key { inline-size: 20px; padding-inline: 0; text-align: center; }
+/* The gutter clears the card's corner. Its radius is --radius-xl, so a mark
+   centred nearer the edge than that sits inside the arc on the first row. */
+.ftbl .f-key { inline-size: 32px; padding-inline: 12px 0; text-align: center; }
 .ftbl .mark { font-size: 11px; line-height: 1; }
 .ftbl .mark--pk { color: var(--accent); }
 .ftbl .mark--fk { color: var(--slate); }
