@@ -92,7 +92,10 @@ a { color: inherit; text-decoration: none; }
   inset-block: 0;
   inset-inline-start: 0;
   width: var(--rail-cur);
-  transition: width var(--rail-dur) var(--rail-ease) var(--rail-delay);
+  box-shadow: none;
+  transition:
+    width var(--rail-dur) var(--rail-ease) var(--rail-delay),
+    box-shadow var(--rail-dur) var(--rail-ease) var(--rail-delay);
   background: var(--canvas-1);
   border-right: 1px solid var(--line-soft);
   display: flex; flex-direction: column;
@@ -101,6 +104,11 @@ a { color: inherit; text-decoration: none; }
   z-index: 30;
   overflow: hidden;
 }
+/* The shadow belongs to the overlap, so it arrives with the width and on the
+   same gate. Collapsed, the rail fills its own gutter with nothing beneath it,
+   and a drop cast on a flush edge reads as a seam rather than depth. */
+.rail:hover { box-shadow: var(--drop-panel); }
+
 .rail__head {
   display: flex; align-items: center;
   margin-bottom: 16px;

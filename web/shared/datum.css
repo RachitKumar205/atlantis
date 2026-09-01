@@ -142,6 +142,15 @@
     0 1px 1px 0 rgba(27, 32, 25, 0.05),
     0 0 1px 0 rgba(27, 32, 25, 0.07);
 
+  /* A panel that overlays the page from the left edge throws its shadow
+     sideways, so these offsets run on x where --drop and --drop-lg run on y.
+     Three layers on the same falloff: a tight line that reads as the edge,
+     a mid drop, and a wide ambient one. */
+  --drop-panel:
+    1px 0 2px 0 rgba(27, 32, 25, 0.05),
+    8px 0 16px 0 rgba(27, 32, 25, 0.07),
+    24px 0 44px 0 rgba(27, 32, 25, 0.06);
+
   /* ---- Filled control surfaces -------------------------------------------- */
   /* One sheen over whatever colour sits beneath it — a lit top edge and a
      shaded bottom at a fixed opacity — plus a ring and two inset edges per
@@ -311,6 +320,10 @@
       0 3px 2px 0 rgba(0, 0, 0, 0.20),
       0 1px 1px 0 rgba(0, 0, 0, 0.30),
       0 0 1px 0 rgba(0, 0, 0, 0.40);
+    --drop-panel:
+      1px 0 2px 0 rgba(0, 0, 0, 0.32),
+      8px 0 16px 0 rgba(0, 0, 0, 0.44),
+      24px 0 44px 0 rgba(0, 0, 0, 0.38);
 
     --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(0, 0, 0, 0.12) 100%);
     --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(0, 0, 0, 0.12) 100%);
@@ -379,6 +392,10 @@
     0 3px 2px 0 rgba(0, 0, 0, 0.20),
     0 1px 1px 0 rgba(0, 0, 0, 0.30),
     0 0 1px 0 rgba(0, 0, 0, 0.40);
+  --drop-panel:
+    1px 0 2px 0 rgba(0, 0, 0, 0.32),
+    8px 0 16px 0 rgba(0, 0, 0, 0.44),
+    24px 0 44px 0 rgba(0, 0, 0, 0.38);
 
   --primary-ring: #4A6176;
   --primary-hi: #A9BAC9;
