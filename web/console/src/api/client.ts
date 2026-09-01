@@ -117,6 +117,8 @@ export interface SchemaVersionSummary {
   change_count: number
   created_at: string
   ir_hash: string
+  actor?: string
+  actor_email?: string
 }
 
 export interface SchemaHistoryResponse {
@@ -283,6 +285,24 @@ export interface DiffVersionsResponse {
   to_ir?: unknown
 }
 
+/**
+ * Who and when, for one lineage event.
+ *
+ * `caller` is the machine identity the change arrived under and the server
+ * verified it. `actor` is the human recorded beside it and nothing verifies
+ * that — empty means none was named, which is what an unattended apply is.
+ *
+ * Optional because protojson omits a nil message even under EmitDefaultValues.
+ */
+export interface Blame {
+  caller: string
+  version: number
+  /** RFC3339. */
+  at: string
+  actor: string
+  actor_email: string
+}
+
 export interface EntityLineageEntry {
   entity_id: string
   field_name: string
@@ -291,6 +311,8 @@ export interface EntityLineageEntry {
   last_modified_by: string
   last_modified_at: number
   removed_at?: number
+  introduced?: Blame
+  last_modified?: Blame
 }
 
 export interface EntityLineageResponse {
@@ -302,6 +324,8 @@ export interface EntityOwnerEntry {
   introduced_by: string
   introduced_at: number
   field_count: number
+  introduced?: Blame
+  last_modified?: Blame
 }
 
 export interface EntityOwnersResponse {
@@ -891,11 +915,12 @@ export const api = {
   },
 
   history: {
-    list: (opts?: { before?: number; caller?: string; limit?: number }): Promise<SchemaHistoryResponse> => {
+    list: (opts?: { before?: number; caller?: string; limit?: number; entityId?: string }): Promise<SchemaHistoryResponse> => {
       const params = new URLSearchParams()
       if (opts?.before) params.set('before', String(opts.before))
       if (opts?.caller) params.set('caller', opts.caller)
       if (opts?.limit) params.set('limit', String(opts.limit))
+      if (opts?.entityId) params.set('entity_id', opts.entityId)
       const qs = params.toString() ? `?${params.toString()}` : ''
       return apiFetch<SchemaHistoryResponse>(`/api/history${qs}`)
     },
@@ -993,9 +1018,6 @@ export const api = {
   owners: {
     all: (): Promise<EntityOwnersResponse> =>
       apiFetch<EntityOwnersResponse>('/api/owners'),
-
-    entity: (entityId: string): Promise<EntityOwnersResponse> =>
-      apiFetch<EntityOwnersResponse>(`/api/owners/${encodeURIComponent(entityId)}`),
   },
 
   health: {
@@ -1369,7 +1391,7 @@ export const queries = {
     staleTime: 30_000,
   }),
 
-  historyList: (opts?: { before?: number; caller?: string; limit?: number }) => ({
+  historyList: (opts?: { before?: number; caller?: string; limit?: number; entityId?: string }) => ({
     queryKey: ['history', 'list', opts] as const,
     queryFn: () => api.history.list(opts),
   }),
@@ -1400,9 +1422,9 @@ export const queries = {
     placeholderData: (prev: ParkedObjectsResponse | undefined) => prev,
   }),
 
-  entityOwners: (entityId?: string) => ({
-    queryKey: ['owners', entityId ?? 'all'] as const,
-    queryFn: () => entityId ? api.owners.entity(entityId) : api.owners.all(),
+  entityOwners: () => ({
+    queryKey: ['owners', 'all'] as const,
+    queryFn: () => api.owners.all(),
   }),
 
   health: () => ({

@@ -4,11 +4,13 @@ import { useSearch, useNavigate } from '@tanstack/react-router'
 // LinkSimple aliased, because @tanstack/react-router's Link is the other thing
 // called that in this codebase and the JSX here reads clearer with the suffix.
 import { ArrowSquareIn, Cube, LinkSimple as LinkIcon, ShieldChevron } from '@phosphor-icons/react'
+import type { Blame, EntityOwnerEntry } from '@/api/client'
 import { api, indexPlansByEntity, planClassBadge, planClassLabel, queries } from '@/api/client'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tabs, TabsList, TabsPanel, TabsTab } from '@/components/ui/tabs'
 import { InputGroup, InputGroupAddon, InputGroupText } from '@/components/ui/input-group'
 import { physicalTable } from '@/lib/physical'
+import { Timestamp } from '@/components/Timestamp'
 import { PageShell } from '@/components/PageShell'
 import { OnboardingDialog } from '@/components/OnboardingDialog'
 import { takeOnboardingPending } from '@/lib/onboarding'
@@ -52,6 +54,8 @@ interface EntityDecl {
   namespace: string
   table: string
   caller: string
+  introduced?: Blame
+  lastModified?: Blame
   fields: FieldRow[]
   fks: { from: string; to: string; via: string }[]
 }
@@ -80,7 +84,7 @@ function flagsFor(f: IRField, indexedFields: Set<string>): { flags: string; ref:
   return { flags: parts.join(', '), ref: f.ref?.entity ? `${ns}${f.ref.entity}` : '' }
 }
 
-function irToEntities(ir: IRRoot | null, owners: Record<string, string>): EntityDecl[] {
+function irToEntities(ir: IRRoot | null, owners: Record<string, EntityOwnerEntry>): EntityDecl[] {
   if (!ir?.entities) return []
   return ir.entities.map(e => {
     const id = `${e.namespace}.${e.name}`
@@ -97,12 +101,42 @@ function irToEntities(ir: IRRoot | null, owners: Record<string, string>): Entity
         to:  `${f.ref!.namespace ?? e.namespace}.${f.ref!.entity}`,
         via: f.name,
       }))
+    const own = owners[id]
     return {
       id, name: e.name, namespace: e.namespace,
       table: physicalTable(e.namespace, e.name, e.table_name),
-      caller: owners[id] ?? 'unknown', fields, fks,
+      // Unattributed, not unknown. After the lineage fix a missing row is an
+      // explicable state — a schema baselined before blame was recorded — and
+      // not a value that went astray.
+      caller: own?.introduced_by || 'unattributed',
+      introduced: own?.introduced,
+      lastModified: own?.last_modified,
+      fields, fks,
     }
   }).sort((a, b) => a.id.localeCompare(b.id))
+}
+
+// Who a change is attributed to, and how to draw them.
+//
+// A person and a service are not the same kind of answer, and the difference
+// has to read without colour: GitHub gives humans a round avatar and services
+// a square one, and the text-only equivalent here is prose against mono. The
+// caller is an identifier, so it keeps the monospace the rest of the page
+// gives identifiers; a person's name is words.
+function actorLabel(b: Blame | undefined, fallbackCaller: string): {
+  text: string
+  human: boolean
+  title: string
+} {
+  const caller = b?.caller || fallbackCaller
+  const email = b?.actor_email ?? ''
+  if (email) {
+    // The local part reads as a name in a line of prose; the address is the
+    // unambiguous value and belongs in the title with it.
+    const local = email.split('@')[0]
+    return { text: local, human: true, title: `${email} · via ${caller}` }
+  }
+  return { text: caller, human: false, title: `${caller} · no person was recorded` }
 }
 
 // The header reads as a sentence rather than a row of labelled numbers.
@@ -128,15 +162,15 @@ function refPhrase(e: EntityDecl): string {
 // ── Schema page — design HTML 1:1 ──────────────────────────────────────────
 export function Schema() {
   const navigate = useNavigate()
-  const search = useSearch({ from: '/schema' }) as { namespace?: string; entity?: string }
+  const search = useSearch({ from: '/schema' }) as { namespace?: string; entity?: string; blame?: boolean }
 
   const { data: canonical, isLoading } = useQuery(queries.schemaCanonical())
   const { data: ownersData } = useQuery(queries.entityOwners())
 
   const entities = useMemo(() => {
     if (!canonical) return []
-    const owners: Record<string, string> = {}
-    for (const o of ownersData?.owners ?? []) owners[o.entity_id] = o.introduced_by
+    const owners: Record<string, EntityOwnerEntry> = {}
+    for (const o of ownersData?.owners ?? []) owners[o.entity_id] = o
     return irToEntities(canonical.ir as IRRoot, owners)
   }, [canonical, ownersData])
 
@@ -152,6 +186,30 @@ export function Schema() {
     [entities, selectedNS],
   )
   const selectedEntity = entities.find(e => e.id === selectedEntityId)
+
+  // Blame is opt-in, the way every tool that has it gates it — GitHub behind a
+  // tab, GitLab behind a panel, Sourcegraph behind a shortcut. None of them
+  // makes it the default view of a file, because the attribution is wider than
+  // the thing it annotates.
+  const blame = search.blame ?? false
+  const { data: lineageData } = useQuery({
+    ...queries.entityLineage(selectedEntityId),
+    enabled: blame && !!selectedEntityId,
+  })
+  // The versions that touched this table. Ten is a section, not a page — the
+  // History screen is where the whole record lives.
+  const { data: entityHistory } = useQuery({
+    ...queries.historyList({ entityId: selectedEntityId, limit: 10 }),
+    enabled: !!selectedEntityId,
+  })
+
+  const blameByField = useMemo(() => {
+    const m = new Map<string, Blame>()
+    for (const e of lineageData?.entries ?? []) {
+      if (e.field_name && e.last_modified) m.set(e.field_name, e.last_modified)
+    }
+    return m
+  }, [lineageData])
 
   // Everything waiting on a human, indexed by the entity it touches.
   //
@@ -178,16 +236,16 @@ export function Schema() {
 
   useEffect(() => {
     if (selectedNS && !selectedEntityId && nsEntities.length > 0) {
-      navigate({ to: '/schema', search: { namespace: selectedNS, entity: nsEntities[0].id } })
+      navigate({ to: '/schema', search: { namespace: selectedNS, entity: nsEntities[0].id, blame } })
     }
   }, [selectedNS, selectedEntityId, nsEntities, navigate])
 
   const handleSelectNS = (ns: string) => {
     const first = entities.find(e => e.namespace === ns)
-    navigate({ to: '/schema', search: { namespace: ns, entity: first?.id ?? '' } })
+    navigate({ to: '/schema', search: { namespace: ns, entity: first?.id ?? '', blame } })
   }
   const handleSelectEntity = (id: string) =>
-    navigate({ to: '/schema', search: { namespace: selectedNS, entity: id } })
+    navigate({ to: '/schema', search: { namespace: selectedNS, entity: id, blame } })
 
   // This page is read-only, and that is the design rather than a gap.
   //
@@ -390,6 +448,19 @@ export function Schema() {
                     <span>{refPhrase(selectedEntity)}</span>
                     <span className="sep">·</span>
                     <span>owned by <span className="mono">{selectedEntity.caller}</span></span>
+                    {selectedEntity.lastModified?.at && (() => {
+                      const a = actorLabel(selectedEntity.lastModified, selectedEntity.caller)
+                      return (
+                        <>
+                          <span className="sep">·</span>
+                          <span title={a.title}>
+                            last modified by{' '}
+                            {a.human ? a.text : <span className="mono">{a.text}</span>}{' '}
+                            <Timestamp at={selectedEntity.lastModified!.at} />
+                          </span>
+                        </>
+                      )
+                    })()}
                   </p>
                   <button
                     className="btn btn--ghost detail__action"
@@ -453,7 +524,20 @@ export function Schema() {
                 )}
 
                 <section className="sec">
-                  <h3 className="sec__label">Fields</h3>
+                  <h3 className="sec__label">
+                    Fields
+                    <button
+                      type="button"
+                      className={`blametoggle ${blame ? 'is-on' : ''}`}
+                      aria-pressed={blame}
+                      onClick={() => navigate({
+                        to: '/schema',
+                        search: { namespace: selectedNS, entity: selectedEntityId, blame: blame ? undefined : true },
+                      })}
+                    >
+                      blame
+                    </button>
+                  </h3>
                   {/* The key gutter is the first column: a primary key and a
                       foreign key are what a reader scans a schema for, and
                       reading them off the left edge is one pass down the
@@ -465,6 +549,8 @@ export function Schema() {
                         <TableHead>Field</TableHead>
                         <TableHead>Type</TableHead>
                         <TableHead>Constraints</TableHead>
+                        {blame && <TableHead>Last modified</TableHead>}
+                        {blame && <TableHead>When</TableHead>}
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -481,6 +567,28 @@ export function Schema() {
                             {f.flags && f.ref ? ' · ' : ''}
                             {f.ref && <span className="f-fk">{f.ref}</span>}
                           </TableCell>
+                          {blame && (() => {
+                            const b = blameByField.get(f.name)
+                            // An em-dash, not "unknown": a field with no row
+                            // predates blame rather than having lost it.
+                            if (!b?.at) {
+                              return (
+                                <>
+                                  <TableCell className="f-blame">—</TableCell>
+                                  <TableCell className="f-when">—</TableCell>
+                                </>
+                              )
+                            }
+                            const a = actorLabel(b, b.caller)
+                            return (
+                              <>
+                                <TableCell className="f-blame" title={a.title}>
+                                  {a.human ? a.text : <span className="mono">{a.text}</span>}
+                                </TableCell>
+                                <TableCell className="f-when"><Timestamp at={b.at} /></TableCell>
+                              </>
+                            )
+                          })()}
                         </TableRow>
                       ))}
                     </TableBody>
@@ -508,7 +616,7 @@ export function Schema() {
                             title={target ? `Open ${f.to}` : `${f.to} is not in this schema`}
                             onClick={() => target && navigate({
                               to: '/schema',
-                              search: { namespace: target.namespace, entity: target.id },
+                              search: { namespace: target.namespace, entity: target.id, blame },
                             })}
                           >
                             <span className="fkrow__via">{f.via}</span>
@@ -520,6 +628,40 @@ export function Schema() {
                     </div>
                   )}
                 </section>
+
+                {(entityHistory?.versions?.length ?? 0) > 0 && (
+                  <section className="sec">
+                    <h3 className="sec__label">History</h3>
+                    <div className="ehist">
+                      {(entityHistory?.versions ?? []).map(v => {
+                        const a = actorLabel(
+                          { caller: v.caller, version: v.version, at: v.created_at,
+                            actor: v.actor ?? '', actor_email: v.actor_email ?? '' },
+                          v.caller,
+                        )
+                        return (
+                          <button
+                            key={v.version}
+                            type="button"
+                            className="ehist__row"
+                            onClick={() => navigate({ to: '/history' })}
+                            title={a.title}
+                          >
+                            <span className="ehist__v">v{String(v.version).padStart(4, '0')}</span>
+                            <span className={`badge badge--${planClassBadge(planClassLabel(v.plan_class))}`}>
+                              {planClassLabel(v.plan_class)}
+                            </span>
+                            <span className="ehist__who">
+                              {a.human ? a.text : <span className="mono">{a.text}</span>}
+                            </span>
+                            <span className="spacer" />
+                            <Timestamp at={v.created_at} className="ehist__when" />
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </section>
+                )}
               </div>
             )}
           </TabsPanel>

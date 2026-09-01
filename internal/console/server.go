@@ -867,6 +867,9 @@ func (s *Server) handleGetSchemaHistory(w http.ResponseWriter, r *http.Request) 
 	if caller := r.URL.Query().Get("caller"); caller != "" {
 		req.Caller = caller
 	}
+	if id := r.URL.Query().Get("entity_id"); id != "" {
+		req.EntityId = id
+	}
 	atl := s.orgATL(w, r)
 	if atl == nil {
 		return

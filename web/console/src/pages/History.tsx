@@ -11,24 +11,10 @@ import {
   type SchemaVersionDetail,
 } from '@/api/client'
 import { PageShell } from '@/components/PageShell'
+import { relativeTime } from '@/lib/time'
 import { Sql } from '@/components/Sql'
 
 // ── helpers ───────────────────────────────────────────────────────────────
-function relativeTime(ts: string): string {
-  const then = new Date(ts).getTime()
-  if (isNaN(then)) return ts
-  const diffMs = Date.now() - then
-  const sec = Math.floor(diffMs / 1000)
-  if (sec < 60) return `${sec}s ago`
-  const min = Math.floor(sec / 60)
-  if (min < 60) return `${min}m ago`
-  const hr = Math.floor(min / 60)
-  if (hr < 24) return `${hr}h ago`
-  const day = Math.floor(hr / 24)
-  if (day < 30) return `${day}d ago`
-  return new Date(ts).toLocaleDateString()
-}
-
 function dayKey(ts: string): string {
   const d = new Date(ts)
   if (isNaN(d.getTime())) return 'unknown'
