@@ -87,14 +87,14 @@
    than from the name it holds. */
 .tablepill {
   inline-size: auto;              /* the component is w-full; this is a chip */
-  margin-block-start: 9px;
-  block-size: 30px;
+  margin-block-start: 8px;
+  block-size: 26px;                /* coss's sm step: sm:h-6.5 */
   font-size: var(--size-data);
   background: var(--canvas-0);
 }
 .tablepill [data-slot="input-group-addon"] {
   align-self: stretch;
-  padding-inline: 11px;
+  padding-inline: 9px;             /* its sm padding: --spacing(2.5) - 1px */
   background: var(--canvas-2);
   border-inline-end: 1px solid var(--line-soft);
   color: var(--ink-2);
@@ -103,7 +103,7 @@
   cursor: default;
 }
 .tablepill__v {
-  padding-inline: 12px;
+  padding-inline: 10px;
   font-family: var(--mono); font-feature-settings: var(--feat-mono);
   letter-spacing: var(--track-mono); color: var(--ink-0);
   white-space: nowrap;
