@@ -101,6 +101,14 @@
   --slate: #516D73;           /* foreign-key references */
   --slate-tint: rgba(81, 109, 115, 0.10);
 
+  /* A column's declared type in the field table. Its own role rather than
+     --slate: that token means "foreign-key reference", and a type list
+     borrowing it changes colour the day that role does.
+
+     Neutral rather than a hue, so --accent and --slate stay the only coloured
+     text in a field table and each still names one thing. 6.6 on --canvas-0. */
+  --ink-type: #545C51;
+
   /* The code ground. Fixed in both themes: a declaration is read against one
      surface, and a token colour that has to hold on two grounds holds well on
      neither.
@@ -264,6 +272,7 @@
     --coral-tint: rgba(199, 97, 88, 0.16);
     --slate: #62858C;
     --slate-tint: rgba(98, 133, 140, 0.16);
+    --ink-type: #A0A69B;
 
     --edge-hi: rgba(255, 255, 255, 0.10);
     --edge-lo: rgba(0, 0, 0, 0.20);
@@ -331,6 +340,7 @@
   --coral-tint: rgba(199, 97, 88, 0.16);
   --slate: #62858C;
   --slate-tint: rgba(98, 133, 140, 0.16);
+  --ink-type: #A0A69B;
 
   --edge-hi: rgba(255, 255, 255, 0.10);
   --edge-lo: rgba(0, 0, 0, 0.20);

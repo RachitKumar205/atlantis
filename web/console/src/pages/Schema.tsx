@@ -38,8 +38,8 @@ interface FieldRow {
   name: string
   type: string
   flags: string
+  ref: string
   pk: boolean
-  fk: boolean
 }
 
 interface EntityDecl {
@@ -61,16 +61,18 @@ function renderType(t: IRFieldType): string {
   }
 }
 
-function flagsFor(f: IRField, indexedFields: Set<string>): string {
+// The reference is returned separately from the other flags: it is the one
+// that names another entity, and the field table draws it in --slate.
+function flagsFor(f: IRField, indexedFields: Set<string>): { flags: string; ref: string } {
   const parts: string[] = []
   if (f.primary) parts.push('pk')
   if (f.identity) parts.push('identity')
   if (f.serial) parts.push('serial')
   if (f.unique) parts.push('unique')
   if (f.not_null) parts.push('not null')
-  if (f.ref?.entity) parts.push(`fk → ${f.ref.namespace ?? ''}${f.ref.namespace ? '.' : ''}${f.ref.entity}`)
   if (indexedFields.has(f.name)) parts.push('indexed')
-  return parts.join(', ')
+  const ns = f.ref?.namespace ? `${f.ref.namespace}.` : ''
+  return { flags: parts.join(', '), ref: f.ref?.entity ? `${ns}${f.ref.entity}` : '' }
 }
 
 function irToEntities(ir: IRRoot | null, owners: Record<string, string>): EntityDecl[] {
@@ -79,13 +81,10 @@ function irToEntities(ir: IRRoot | null, owners: Record<string, string>): Entity
     const id = `${e.namespace}.${e.name}`
     const indexedFields = new Set<string>()
     for (const idx of e.indexes ?? []) for (const f of idx.fields ?? []) indexedFields.add(f)
-    const fields: FieldRow[] = (e.fields ?? []).map(f => ({
-      name: f.name,
-      type: renderType(f.type),
-      flags: flagsFor(f, indexedFields),
-      pk: !!f.primary,
-      fk: !!f.ref?.entity,
-    }))
+    const fields: FieldRow[] = (e.fields ?? []).map(f => {
+      const { flags, ref } = flagsFor(f, indexedFields)
+      return { name: f.name, type: renderType(f.type), flags, ref, pk: !!f.primary }
+    })
     const fks = (e.fields ?? [])
       .filter(f => !!f.ref?.entity)
       .map(f => ({
@@ -227,14 +226,18 @@ export function Schema() {
             namespaces.map(ns => {
               const count = entities.filter(e => e.namespace === ns).length
               return (
-                <div
+                <button
                   key={ns}
-                  className={`nsrow ${ns === selectedNS ? 'is-active' : ''}`}
+                  type="button"
+                  className="nsrow"
+                  aria-current={ns === selectedNS ? 'true' : undefined}
                   onClick={() => handleSelectNS(ns)}
                 >
-                  <span className="nsrow__name">{ns}</span>
-                  <span className="chip chip--count">{count}</span>
-                </div>
+                  <span className="nsrow__name" title={ns}>{ns}</span>
+                  <span className="chip chip--count" title={`${count} ${count === 1 ? 'entity' : 'entities'}`}>
+                    {count}
+                  </span>
+                </button>
               )
             })
           )}
@@ -251,13 +254,13 @@ export function Schema() {
             <SkeletonRows />
           ) : nsEntities.length === 0 ? (
             <div className="empty">
-              <div className="empty__title">No entities</div>
               {/* With no namespaces there is nothing to pick, so the empty
                   pane names the one action that fills it. */}
               {namespaces.length === 0 ? (
                 <>
+                  <div className="empty__title">No schema yet</div>
                   <div className="empty__sub">
-                    Import an existing database to generate declarations for it.
+                    Import a database to generate declarations from its tables.
                   </div>
                   <button
                     className="btn btn--brass"
@@ -269,19 +272,22 @@ export function Schema() {
                   </button>
                 </>
               ) : (
-                <div className="empty__sub">
-                  {selectedNS ? 'This namespace has no entities yet.' : 'Pick a namespace.'}
-                </div>
+                <>
+                  <div className="empty__title">No entities</div>
+                  <div className="empty__sub">The {selectedNS} namespace has no entities.</div>
+                </>
               )}
             </div>
           ) : (
             nsEntities.map(e => (
-              <div
+              <button
                 key={e.id}
-                className={`entrow ${e.id === selectedEntityId ? 'is-active' : ''}`}
+                type="button"
+                className="entrow"
+                aria-current={e.id === selectedEntityId ? 'true' : undefined}
                 onClick={() => handleSelectEntity(e.id)}
               >
-                <span className="entrow__name">{e.name}</span>
+                <span className="entrow__name" title={e.name}>{e.name}</span>
                 {/* Without a marker here the strip is only findable by
                     clicking through every entity in the namespace, which for
                     the operator asking "is anything waiting on me" is the same
@@ -294,8 +300,13 @@ export function Schema() {
                     pending
                   </span>
                 )}
-                <span className="chip chip--count">{e.fields.length}</span>
-              </div>
+                <span
+                  className="chip chip--count"
+                  title={`${e.fields.length} ${e.fields.length === 1 ? 'field' : 'fields'}`}
+                >
+                  {e.fields.length}
+                </span>
+              </button>
             ))
           )}
         </div>
@@ -312,8 +323,10 @@ export function Schema() {
                 ))}
               </svg>
             </div>
-            <div className="empty__title">Select an entity to inspect</div>
-            <div className="empty__sub">Choose a namespace and entity from the panes on the left.</div>
+            <div className="empty__title">No entity selected</div>
+            <div className="empty__sub">
+              Pick an entity to read its fields, owner and foreign-key references.
+            </div>
           </div>
         ) : (
           <div className="detail">
@@ -385,11 +398,7 @@ export function Schema() {
                     <span className="chip chip--count">{pendingHere.length}</span>
                   </div>
                   {pendingHere.map(p => (
-                    <div
-                      key={p.plan_id}
-                      className="row"
-                      style={{ gap: 8, alignItems: 'center', padding: '6px 0' }}
-                    >
+                    <div key={p.plan_id} className="planrow">
                       {/* The PLAN's class, not a per-entity one. A plan is the
                           unit of approval, so its class is the rule that
                           governs — inventing a narrower per-entity class here
@@ -398,10 +407,10 @@ export function Schema() {
                       <span className={`badge badge--${planClassBadge(planClassLabel(p.change_class))}`}>
                         {planClassLabel(p.change_class)}
                       </span>
-                      <span className="mono" style={{ fontSize: 12 }} title={p.plan_id}>
+                      <span className="planrow__id" title={p.plan_id}>
                         {p.plan_id.slice(0, 12)}
                       </span>
-                      <span className="muted" style={{ fontSize: 12 }}>
+                      <span className="planrow__by">
                         by {p.requested_by || 'unknown'}
                         {p.expired ? ' · expired' : ''}
                       </span>
@@ -430,10 +439,15 @@ export function Schema() {
                     {selectedEntity.fields.map(f => (
                       <tr key={f.name}>
                         <td className={`f-name ${f.pk ? 'f-pk' : ''}`}>
-                          {f.name}{f.pk ? ' ◆' : ''}
+                          {f.name}
+                          {f.pk && <span className="pkmark" aria-hidden="true">◆</span>}
                         </td>
                         <td className="f-type">{f.type}</td>
-                        <td className="f-flags">{f.flags}</td>
+                        <td className="f-flags">
+                          {f.flags}
+                          {f.flags && f.ref ? ', ' : ''}
+                          {f.ref && <span className="f-fk">→ {f.ref}</span>}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -465,15 +479,30 @@ export function Schema() {
                     </span>
                   </div>
                   <div className="fklist">
-                    {selectedEntity.fks.map((f, i) => (
-                      <div key={i} className="fkrow">
-                        <span className="fkrow__arrow"><LinkIcon size={14} /></span>
-                        <span className="fkrow__from">{f.from}</span>
-                        <span className="fkrow__arrow">→</span>
-                        <span className="fkrow__to">{f.to}</span>
-                        <span className="fkrow__via">via {f.via}</span>
-                      </div>
-                    ))}
+                    {selectedEntity.fks.map((f, i) => {
+                      // A target outside the loaded schema leaves the row inert
+                      // rather than navigating to a selection that renders empty.
+                      const target = entities.find(x => x.id === f.to)
+                      return (
+                        <button
+                          key={i}
+                          type="button"
+                          className="fkrow"
+                          disabled={!target}
+                          title={target ? `Open ${f.to}` : `${f.to} is not in this schema`}
+                          onClick={() => target && navigate({
+                            to: '/schema',
+                            search: { namespace: target.namespace, entity: target.id },
+                          })}
+                        >
+                          <span className="fkrow__arrow"><LinkIcon size={14} /></span>
+                          <span className="fkrow__from">{f.from}</span>
+                          <span className="fkrow__arrow">→</span>
+                          <span className="fkrow__to">{f.to}</span>
+                          <span className="fkrow__via">via {f.via}</span>
+                        </button>
+                      )
+                    })}
                   </div>
                 </div>
               )}
