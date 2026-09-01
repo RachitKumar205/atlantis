@@ -371,6 +371,9 @@
 /* Git-style short content address — 7 chars of sha256 of the IR
    snapshot. Title attribute holds the full hash for hover/copy. */
 .tlnode__hash { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); white-space: nowrap; letter-spacing: .01em; cursor: help; }
+/* The person, or the caller when none was named. Prose against mono is
+   what tells the two apart without colour. */
+.tlnode__actor { color: var(--ink-1); font-size: var(--size-data); }
 .tlnode__time { font-size: 11.5px; color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .tlnode__badges { margin-left: auto; display: flex; gap: 6px; }
 .tlnode__detail { display: none; padding: 0 16px 16px; }

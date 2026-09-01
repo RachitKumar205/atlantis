@@ -119,6 +119,7 @@ export interface SchemaVersionSummary {
   ir_hash: string
   actor?: string
   actor_email?: string
+  entity_count?: number
 }
 
 export interface SchemaHistoryResponse {

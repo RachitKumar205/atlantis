@@ -997,6 +997,10 @@ message SchemaVersionSummary {
   string ir_hash = 7;
   string actor = 8;
   string actor_email = 9;
+  // Entities in this version's snapshot. What an adopt did is baseline them,
+  // and its diff is empty by definition, so this is the only number that
+  // describes it.
+  int32 entity_count = 10;
 }
 
 message GetSchemaHistoryResponse {

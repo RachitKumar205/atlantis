@@ -11,7 +11,7 @@ import {
   type SchemaVersionDetail,
 } from '@/api/client'
 import { PageShell } from '@/components/PageShell'
-import { relativeTime } from '@/lib/time'
+import { Timestamp } from '@/components/Timestamp'
 import { Sql } from '@/components/Sql'
 
 // ── helpers ───────────────────────────────────────────────────────────────
@@ -31,10 +31,48 @@ function dayKey(ts: string): string {
 // which carries the hyphenated spelling of the class. Indexing the map with it
 // misses — which is why breaking and backfill-required versions have been grey
 // here too, not only destructive ones.
+// Who a version is attributed to.
+//
+// A person and a machine are different answers and have to read apart without
+// colour: a named person is prose, a caller keeps the monospace this page
+// gives every identifier. Same rule the schema browser uses.
+function versionActor(v: SchemaVersionSummary): { text: string; human: boolean; title: string } {
+  const email = v.actor_email ?? ''
+  if (email) {
+    return { text: email.split('@')[0], human: true, title: `${email} · via ${v.caller}` }
+  }
+  return { text: v.caller, human: false, title: `${v.caller} · no person was recorded` }
+}
+
+// What a version did, for the events whose diff is empty by construction.
+//
+// An adopt records a database that already existed, so it has no structural
+// change to list and never will. "No structural changes" is true and tells a
+// reader nothing; the number of tables it took responsibility for is the
+// thing that happened.
+function eventSummary(v: SchemaVersionSummary): string | null {
+  if (v.change_count > 0) return null
+  const n = v.entity_count ?? 0
+  if (v.event_type === 'adopt') {
+    return n > 0 ? `Baselined ${n} ${n === 1 ? 'table' : 'tables'} that already existed.` : null
+  }
+  if (v.event_type === 'seed') {
+    return n > 0 ? `Seeded ${n} ${n === 1 ? 'table' : 'tables'}.` : null
+  }
+  return null
+}
+
 function ChangeBadges({ summary }: { summary: SchemaVersionSummary }) {
   const cls = summary.plan_class
   const count = summary.change_count
-  if (count === 0) return null
+  // An adopt carries no changes and still happened. Falling through to null
+  // left the row with no badge at all, which read as an apply that did nothing.
+  if (count === 0) {
+    if (summary.event_type === 'adopt' || summary.event_type === 'seed') {
+      return <span className="badge badge--back">{summary.event_type}</span>
+    }
+    return null
+  }
   return <span className={`badge badge--${planClassBadge(cls)}`}>{cls} · {count}</span>
 }
 
@@ -55,7 +93,14 @@ function VersionNode({ version }: { version: SchemaVersionSummary }) {
       <div className="tlnode__card">
         <div className="tlnode__bar" onClick={toggle}>
           <span className="tlnode__ver">{versionStr}</span>
-          <span className="tlnode__caller mono">{version.caller}</span>
+          {(() => {
+            const a = versionActor(version)
+            return (
+              <span className="tlnode__actor" title={a.title}>
+                {a.human ? a.text : <span className="mono">{a.text}</span>}
+              </span>
+            )
+          })()}
           {version.ir_hash && (
             <span
               className="tlnode__hash mono"
@@ -64,7 +109,7 @@ function VersionNode({ version }: { version: SchemaVersionSummary }) {
               {version.ir_hash.slice(0, 7)}
             </span>
           )}
-          <span className="tlnode__time">{relativeTime(version.created_at)}</span>
+          <Timestamp at={version.created_at} className="tlnode__time" />
           <span className="tlnode__badges">
             <ChangeBadges summary={version} />
             {version.event_type === 'rollback' && (
@@ -84,14 +129,14 @@ function VersionNode({ version }: { version: SchemaVersionSummary }) {
               {detailQ.error?.message}
             </div>
           )}
-          {detailQ.data && <DiffSection detail={detailQ.data} />}
+          {detailQ.data && <DiffSection detail={detailQ.data} summary={version} />}
         </div>
       </div>
     </div>
   )
 }
 
-function DiffSection({ detail }: { detail: SchemaVersionDetail }) {
+function DiffSection({ detail, summary }: { detail: SchemaVersionDetail; summary?: SchemaVersionSummary }) {
   const diff = parseRawDiff(detail.diff)
   // Built from whichever buckets the payload actually carries. Listing three
   // by name is what hid destructive changes here for a release.
@@ -112,7 +157,10 @@ function DiffSection({ detail }: { detail: SchemaVersionDetail }) {
 
       <div className="diff">
         {rows.length === 0 ? (
-          <div className="diffrow"><span className="diffrow__sign">·</span><span>No structural changes.</span></div>
+          <div className="diffrow">
+            <span className="diffrow__sign">·</span>
+            <span>{summary ? eventSummary(summary) ?? 'No structural changes.' : 'No structural changes.'}</span>
+          </div>
         ) : (
           rows.map(({ glyph, badge, change: c }, i) => (
             <div key={i} className={`diffrow d-${badge}`}>
