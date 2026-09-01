@@ -451,7 +451,7 @@ export function Schema() {
                       foreign key are what a reader scans a schema for, and
                       reading them off the left edge is one pass down the
                       table rather than one per row across it. */}
-                  <Table className="ftbl">
+                  <Table variant="card" className="ftbl">
                     <TableHeader>
                       <TableRow>
                         <TableHead className="f-key"><span className="sr-only">Key</span></TableHead>
