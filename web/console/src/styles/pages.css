@@ -16,11 +16,11 @@
 :root[data-density="compact"] .rail--ent { inline-size: 248px; }
 
 .pane__head { height: 44px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding-inline: 14px; border-block-end: 1px solid var(--line-soft); }
-/* Uppercase at 600, not 500: Manrope carries no opsz axis, so small caps get
-   no automatic weight compensation and 500 reads thin over the data. */
+/* Sentence case. --track-caps opens up capitals and reads loose without them,
+   so the tracking goes with the transform, and weight and colour carry the
+   label apart from the data under it. */
 .pane__head h3 {
-  font-size: var(--size-label); font-weight: 600; text-transform: uppercase;
-  letter-spacing: var(--track-caps); color: var(--ink-2); line-height: 1.3;
+  font-size: var(--size-data); font-weight: 600; color: var(--ink-2); line-height: 1.3;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
@@ -88,8 +88,7 @@
 /* sections */
 .sec + .sec { margin-block-start: 34px; }
 .sec__label {
-  font-size: var(--size-label); font-weight: 600; text-transform: uppercase;
-  letter-spacing: var(--track-caps); color: var(--ink-2);
+  font-size: var(--size-data); font-weight: 600; color: var(--ink-1);
   margin-block-end: 10px; padding-block-end: 8px; border-block-end: 1px solid var(--line-soft);
 }
 .sec__note { font-size: var(--size-data); color: var(--ink-2); line-height: 1.5; max-width: 58ch; text-wrap: pretty; }

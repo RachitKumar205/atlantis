@@ -11,6 +11,24 @@
 /* The console pins itself light on <html data-theme="light">, so a dark:
    utility never matches. Defined against the same attribute datum switches on,
    so the two cannot disagree if the pin is ever lifted. */
+/* Tailwind v4 defaults a border's colour to currentColor, so `border-b` on a
+   coss table row drew the row's own ink: a hairline at text contrast. Every
+   border utility takes the hairline token unless the element names its own,
+   which the hand-written sheets all do.
+   
+   --line-soft rather than --color-border: `@theme inline` resolves its tokens
+   at build time and publishes no custom property, so var(--color-border) is
+   undefined here and takes the whole declaration with it. */
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--line-soft);
+  }
+}
+
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 /* coss's Table reaches for two of these bare, inside color-mix() — a row hover
