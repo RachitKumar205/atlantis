@@ -93,18 +93,21 @@ func DiscoverTables(ctx context.Context, q Querier, declaredIR *dsl.IR, schemas 
 		}
 	}
 
-	// pg_inherits excludes the children of a partitioned table, whichever
-	// mechanism attaches them. They are ordinary relations in pg_class and
-	// would otherwise be discovered as tables in their own right — one per
+	// Partition children are excluded. They are ordinary relations in pg_class
+	// and would otherwise be discovered as tables in their own right — one per
 	// partition, none of them separately declarable, and on a time-partitioned
 	// table there may be hundreds.
 	//
-	// Not relispartition, which Postgres sets only for declarative
-	// partitioning. A child attached with INHERITS has it false and a
-	// pg_inherits row, so the narrower test admits every child of an
-	// inheritance parent: 112 arrived as skipped tables from one public
-	// dataset. A declarative partition has a pg_inherits row too, so this
-	// covers both.
+	// Which test is used depends on a privilege. pg_inherits holds a row for a
+	// child of either mechanism and is the complete answer; relispartition is
+	// set only for declarative partitioning, so it admits every child of an
+	// INHERITS parent — 112 of them from one public dataset.
+	//
+	// pg_inherits is readable by PUBLIC in a default installation and a
+	// hardened database may revoke it. EBI's public mirror does, and reading it
+	// unconditionally failed the whole import with `permission denied for table
+	// pg_inherits`. pg_class carries relispartition and is always readable, so
+	// the narrower test is the fallback rather than the failure.
 	//
 	// The atlantis schema holds this server's own machinery (jobs, the IR
 	// checkpoint, caller registrations). Offering to generate declarations for
@@ -112,18 +115,19 @@ func DiscoverTables(ctx context.Context, q Querier, declaredIR *dsl.IR, schemas 
 	//
 	// The _timescaledb_* schemas hold chunk storage for hypertables. Same
 	// reasoning as partition children, one layer down.
-	const query = `
+	const tablesSQL = `
 SELECT n.nspname, c.relname
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r','p','f')
-  AND NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid)
+  AND __PARTITION_CHILD__
   AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'atlantis')
   AND n.nspname NOT LIKE 'pg\_toast%'
   AND n.nspname NOT LIKE 'pg\_temp%'
   AND n.nspname NOT LIKE '\_timescaledb%'
   AND (cardinality($1::text[]) = 0 OR n.nspname = ANY($1::text[]))
 ORDER BY n.nspname, c.relname`
+	query := strings.Replace(tablesSQL, "__PARTITION_CHILD__", partitionChildTest(ctx, q), 1)
 
 	if schemas == nil {
 		schemas = []string{}
@@ -159,18 +163,19 @@ ORDER BY n.nspname, c.relname`
 // have different remedies. The exclusions match DiscoverTables, so a schema
 // named here is one that would yield tables if it were asked for.
 func SchemasWithTables(ctx context.Context, q Querier) ([]string, error) {
-	const query = `
+	const schemasSQL = `
 SELECT n.nspname
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r','p','f')
-  AND NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid)
+  AND __PARTITION_CHILD__
   AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'atlantis')
   AND n.nspname NOT LIKE 'pg\_toast%'
   AND n.nspname NOT LIKE 'pg\_temp%'
   AND n.nspname NOT LIKE '\_timescaledb%'
 GROUP BY n.nspname
 ORDER BY count(*) DESC, n.nspname`
+	query := strings.Replace(schemasSQL, "__PARTITION_CHILD__", partitionChildTest(ctx, q), 1)
 
 	rows, err := q.Query(ctx, query)
 	if err != nil {
@@ -187,4 +192,42 @@ ORDER BY count(*) DESC, n.nspname`
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+// partitionChildTest returns the SQL that excludes a partition child, using
+// whichever catalogue the connection may actually read.
+//
+// pg_inherits covers both mechanisms and is the answer wherever it is
+// readable. Where it is not, relispartition covers declarative partitioning
+// only, and a child attached with INHERITS is discovered as a table of its
+// own — which is what happened before pg_inherits was consulted at all.
+//
+// InheritsReadable reports which of the two applies, so a caller can say so.
+func partitionChildTest(ctx context.Context, q Querier) string {
+	if InheritsReadable(ctx, q) {
+		return "NOT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid)"
+	}
+	return "NOT c.relispartition"
+}
+
+// InheritsReadable reports whether the connection may read pg_inherits.
+//
+// Readable by PUBLIC in a default installation; a hardened database may revoke
+// it, and reading it anyway fails the statement outright rather than returning
+// fewer rows. Asked with has_table_privilege, which answers without touching
+// the table.
+func InheritsReadable(ctx context.Context, q Querier) bool {
+	rows, err := q.Query(ctx,
+		`SELECT has_table_privilege('pg_catalog.pg_inherits', 'SELECT')`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	var ok bool
+	if rows.Next() {
+		if err := rows.Scan(&ok); err != nil {
+			return false
+		}
+	}
+	return ok && rows.Err() == nil
 }

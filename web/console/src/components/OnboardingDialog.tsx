@@ -84,7 +84,12 @@ export function OnboardingDialog({
       navigate({ to: '/imports/$id', params: { id: started.import_id } })
     },
     onError: err => {
-      if (err instanceof ApiError && err.code === TLS_REQUIRED) setAskInsecure(true)
+      const tls = err instanceof ApiError && err.code === TLS_REQUIRED
+      // Cleared as well as set. The question is only asked while it is the
+      // whole of the answer, and a later attempt failing for its own reason
+      // was hidden behind a question already answered — the dialog went idle
+      // showing nothing at all.
+      setAskInsecure(tls)
     },
   })
 
