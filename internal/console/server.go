@@ -1208,17 +1208,16 @@ func clientIP(r *http.Request) string {
 // HSTS only ships when CookieSecure (i.e. HTTPS), since HSTS on plain
 // HTTP is a foot-gun.
 func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
-	// The SPA fetches Geist + Geist Mono from Google Fonts (index.html +
-	// tokens.css). Allow stylesheet and font origins explicitly; nothing
-	// else is allowed.
+	// Every stylesheet and font is served from this origin, so the policy
+	// carries no third-party origin for either.
 	csp := strings.Join([]string{
 		"default-src 'self'",
 		"script-src 'self'",
 		// 'unsafe-inline' for styles is required because Vite's prod build
 		// inlines a small style block and React style={{...}} props are used.
 		// It is not set for scripts, which is the dangerous one.
-		"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-		"font-src 'self' https://fonts.gstatic.com",
+		"style-src 'self' 'unsafe-inline'",
+		"font-src 'self'",
 		"img-src 'self' data:",
 		"connect-src 'self'",
 		"frame-ancestors 'none'",
