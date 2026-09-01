@@ -48,8 +48,8 @@ a { color: inherit; text-decoration: none; }
    
    240ms is Carbon's moderate-02, whose own description is "Expansion", on its
    standard curve rather than an entrance one: a panel that stays on screen
-   resizes rather than arrives. --rail-delay gates the open on intent, which
-   NN/g reads from a cursor settled 0.3-0.5s. */
+   resizes rather than arrives. --rail-delay carries the grace on the way out;
+   the open takes none. */
 .app {
   --rail-dur: 240ms;
   --rail-ease: cubic-bezier(0.2, 0, 0.38, 0.9);
@@ -66,18 +66,10 @@ a { color: inherit; text-decoration: none; }
 /* :has() is well-supported across modern browsers. When the rail is
    hovered anywhere, the CSS variable swaps and every dependent rule
    (rail width, grid column, label opacity, justify-content) follows. */
-/* 250ms to open, 180ms to close.
-
-   The gate only has to outlast a crossing: a pointer covers the 56px rail in
-   45-70ms at a normal 800-1200px/s, so 250ms clears it about fourfold. That
-   is under NN/g's 0.3-0.5s for a settled cursor, and the difference is what a
-   false positive costs — that figure assumes revealing hidden content
-   disturbs the page, and this rail draws over it without moving anything.
-
-   The close grace is shorter than NN/g's 0.5s because that number covers
-   travel from a trigger to a separate panel, and here the trigger is the
-   panel: leaving it means leaving it. */
-.app:has(.rail:hover) { --rail-cur: var(--rail-w-expanded); --rail-delay: 250ms; }
+/* Opens on contact. The rail draws over the page, so an early open moves
+   nothing and costs nothing to leave; 180ms of grace on the way out keeps a
+   pointer crossing the boundary from flickering it. */
+.app:has(.rail:hover) { --rail-cur: var(--rail-w-expanded); --rail-delay: 0ms; }
 
 /* The gate is a decision, not motion, so it survives; the sweep does not. */
 @media (prefers-reduced-motion: reduce) {
