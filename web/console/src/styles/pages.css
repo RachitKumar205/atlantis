@@ -79,8 +79,19 @@
 }
 .detail__path .ns { color: var(--ink-3); }
 .detail__path .nm { color: var(--ink-0); }
+/* The physical table, directly under the name the API uses for it. Monospaced
+   and in the type ink, because it is the identifier a reader retypes into
+   psql rather than prose about the entity. */
+.detail__table { margin-block-start: 6px; font-size: var(--size-data); }
+.detail__table-l { color: var(--ink-2); margin-inline-end: 8px; }
+.detail__table-v {
+  font-family: var(--mono); font-feature-settings: var(--feat-mono);
+  letter-spacing: var(--track-mono); color: var(--ink-type);
+  overflow-wrap: anywhere;
+}
+
 /* The shape of the table as a sentence. */
-.detail__facts { margin-block-start: 7px; font-size: var(--size-data); color: var(--ink-2); }
+.detail__facts { margin-block-start: 5px; font-size: var(--size-data); color: var(--ink-2); }
 .detail__facts .sep { margin-inline: 7px; color: var(--ink-4); }
 .detail__facts .mono { font-family: var(--mono); font-feature-settings: var(--feat-mono); letter-spacing: var(--track-mono); color: var(--ink-1); }
 .detail__action { position: absolute; inset-block-start: 0; inset-inline-end: 0; }

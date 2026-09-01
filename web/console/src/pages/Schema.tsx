@@ -7,6 +7,7 @@ import { ArrowSquareIn, Cube, LinkSimple as LinkIcon, ShieldChevron } from '@pho
 import { api, indexPlansByEntity, planClassBadge, planClassLabel, queries } from '@/api/client'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tabs, TabsList, TabsPanel, TabsTab } from '@/components/ui/tabs'
+import { physicalTable } from '@/lib/physical'
 import { PageShell } from '@/components/PageShell'
 import { OnboardingDialog } from '@/components/OnboardingDialog'
 import { takeOnboardingPending } from '@/lib/onboarding'
@@ -33,7 +34,7 @@ interface IRField {
   ref?: IRRef
 }
 interface IRIndex { fields?: string[] }
-interface IREntity { name: string; namespace: string; kind?: string; fields: IRField[]; indexes?: IRIndex[] }
+interface IREntity { name: string; namespace: string; kind?: string; table_name?: string; fields: IRField[]; indexes?: IRIndex[] }
 interface IRRoot { version?: number; entities?: IREntity[] }
 
 interface FieldRow {
@@ -48,6 +49,7 @@ interface EntityDecl {
   id: string
   name: string
   namespace: string
+  table: string
   caller: string
   fields: FieldRow[]
   fks: { from: string; to: string; via: string }[]
@@ -94,7 +96,11 @@ function irToEntities(ir: IRRoot | null, owners: Record<string, string>): Entity
         to:  `${f.ref!.namespace ?? e.namespace}.${f.ref!.entity}`,
         via: f.name,
       }))
-    return { id, name: e.name, namespace: e.namespace, caller: owners[id] ?? 'unknown', fields, fks }
+    return {
+      id, name: e.name, namespace: e.namespace,
+      table: physicalTable(e.namespace, e.name, e.table_name),
+      caller: owners[id] ?? 'unknown', fields, fks,
+    }
   }).sort((a, b) => a.id.localeCompare(b.id))
 }
 
@@ -360,6 +366,12 @@ export function Schema() {
                     <span className="ns">{selectedEntity.namespace}.</span>
                     <span className="nm">{selectedEntity.name}</span>
                   </h2>
+                  {/* The entity is what the API calls it; this is what psql
+                      does. A reader moving between the two needs both. */}
+                  <p className="detail__table">
+                    <span className="detail__table-l">table</span>
+                    <span className="detail__table-v">{selectedEntity.table}</span>
+                  </p>
                   <p className="detail__facts">
                     <span>{fieldCount(selectedEntity)}</span>
                     <span className="sep">·</span>
