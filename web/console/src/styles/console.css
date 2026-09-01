@@ -122,7 +122,8 @@ a { color: inherit; text-decoration: none; }
    larger than rail-btn labels so it reads as a brand mark, not a nav
    item. Plain lockup; the natural "i" tittle is the only dot. */
 .rail__brand {
-  font-size: 18px; font-weight: 500; color: var(--ink-0);
+  font-family: var(--display);
+  font-size: var(--size-subject); font-weight: 600; color: var(--ink-0);
   letter-spacing: -.02em;
   line-height: 1;
   white-space: nowrap;
@@ -186,7 +187,7 @@ a { color: inherit; text-decoration: none; }
    identifier, and it is the one that takes the mono face. */
 .rail-org__name {
   font-family: var(--sans);
-  font-size: 13.5px;
+  font-size: var(--size-data);
   font-weight: 500;
   color: var(--ink-0);
   line-height: 1.25;
@@ -282,7 +283,7 @@ a { color: inherit; text-decoration: none; }
   border: 1px solid transparent;
   color: var(--ink-2);
   position: relative;
-  font-size: 12.5px; font-weight: 500;
+  font-size: var(--size-data); font-weight: 400;
   /* The three properties coss names, plus the border the hover draws. */
   transition:
     color var(--fast) var(--ease),
@@ -336,6 +337,7 @@ a { color: inherit; text-decoration: none; }
 
 .rail-btn.is-active {
   color: var(--ink-0);
+  font-weight: 600;
   background: var(--canvas-2);
   box-shadow: inset 0 1px 0 var(--edge-hi), var(--drop);
 }
@@ -366,13 +368,13 @@ a { color: inherit; text-decoration: none; }
 .rail-role__badge {
   width: 28px; height: 28px; border-radius: 50%;
   display: grid; place-items: center;
-  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  font-size: var(--size-label); font-weight: 600;
   color: var(--accent); border: 1px solid var(--accent-tint-2);
   background: var(--accent-tint);
   flex-shrink: 0;
 }
 .rail-role__email {
-  font-family: var(--mono); font-size: 11.5px; color: var(--ink-2);
+  font-family: var(--mono); font-size: var(--size-label); color: var(--ink-2);
   white-space: nowrap; min-width: 0;
   margin-left: 0;
   max-width: 0;
@@ -700,7 +702,7 @@ a { color: inherit; text-decoration: none; }
   background: var(--canvas-1);
   border: 1px solid var(--line-soft);
   font-family: var(--display);
-  font-size: 10px;
+  font-size: var(--size-label);
   font-weight: 600;
   line-height: 1;
   color: var(--ink-2);
@@ -717,7 +719,7 @@ a { color: inherit; text-decoration: none; }
   width: 32px;
   height: 32px;
   border-radius: var(--radius);
-  font-size: 14px;
+  font-size: var(--size-data);
 }
 
 /* Collapses to nothing with the rest of the labels, so the rail keeps its
@@ -747,7 +749,7 @@ a { color: inherit; text-decoration: none; }
 .rail-org__slug {
   font-family: var(--mono);
   font-feature-settings: var(--feat-mono);
-  font-size: 11.5px;
+  font-size: var(--size-label);
   color: var(--ink-3);
   white-space: nowrap;
   overflow: hidden;
