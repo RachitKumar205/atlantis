@@ -1392,6 +1392,17 @@ type versionMeta struct {
 	PlanID    string
 	EventType string // "apply", "rollback", "adopt"
 	ParentVer *int64
+
+	// Actor is the human the event is attributed to, beside the caller that
+	// carried it. Nothing authorizes against it: this server authenticates
+	// callers and cannot authenticate people. Empty is a legitimate value and
+	// says no human was named, which is what an unattended apply is.
+	Actor      string
+	ActorEmail string
+
+	// Lineage replaces Diff as the source of blame rows when set. adopt is
+	// the event that needs it — see seedEntityLineage.
+	Lineage *lineageSeed
 }
 
 func (s *Service) persistCheckpoint(ctx context.Context, tx pgx.Tx, ir *dsl.IR, meta versionMeta) (int64, error) {
@@ -1449,17 +1460,28 @@ ON CONFLICT (id) DO UPDATE SET ir = EXCLUDED.ir, applied_at = now(), applied_by 
 	var version int64
 	err = tx.QueryRow(ctx, `
 INSERT INTO atlantis.schema_versions
-    (caller, plan_class, diff, up_sql, down_sql, ir_snapshot, ir_hash, plan_id, parent_version, event_type)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+    (caller, plan_class, diff, up_sql, down_sql, ir_snapshot, ir_hash, plan_id, parent_version, event_type, actor, actor_email)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 RETURNING version`,
 		meta.Caller, meta.PlanClass, diffJSON, meta.UpSQL, meta.DownSQL,
 		raw, irHash, meta.PlanID, meta.ParentVer, meta.EventType,
+		normalizeActor(meta.Actor), meta.ActorEmail,
 	).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("insert schema_versions: %w", err)
 	}
 
-	if err := updateEntityLineage(ctx, tx, version, meta.Caller, meta.Diff); err != nil {
+	// An event carrying a baseline names its own rows; everything else reads
+	// them off the diff it applied. One or the other, never both: an adopt's
+	// diff describes what the database is missing, so running it here as well
+	// would file blame against tables the checkpoint does not contain.
+	lineageErr := func() error {
+		if meta.Lineage != nil {
+			return seedEntityLineage(ctx, tx, version, meta.Lineage.IR, meta.Lineage.Ownership)
+		}
+		return updateEntityLineage(ctx, tx, version, meta.Caller, meta.Diff)
+	}()
+	if err := lineageErr; err != nil {
 		return 0, fmt.Errorf("update entity lineage: %w", err)
 	}
 

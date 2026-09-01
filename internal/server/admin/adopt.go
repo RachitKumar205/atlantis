@@ -227,6 +227,12 @@ func (s *Service) AdoptBaseline(ctx context.Context, req *adminpb.AdoptBaselineR
 		PlanClass: "adopt",
 		Diff:      d,
 		EventType: "adopt",
+		Actor:     req.GetAdoptedBy(),
+
+		// Blame comes off the baseline, not off Diff. Diff is the drift
+		// report — what the declaration has and the database does not — and
+		// those are the entities filterToExistingEntities has just dropped.
+		Lineage: &lineageSeed{IR: baseline, Ownership: cmp.Ownership},
 	})
 	if err != nil {
 		return nil, err
@@ -373,6 +379,11 @@ type liveComparison struct {
 	Diff           *codegen.Diff
 	Drift          []AdoptDriftItem
 	Warnings       []string
+
+	// Ownership maps an entity to the caller that declared it. The version
+	// row records one caller for the event; this is what says which of them
+	// each table came from.
+	Ownership map[string]string
 }
 
 // compareToLive parses the submissions, lowers them alongside every other
@@ -416,6 +427,9 @@ func (s *Service) compareToLive(ctx context.Context, ctl, live introspect.Querie
 	}
 	codegen.AssignProtoNumbers(introspectedIR, declaredIR)
 	d := codegen.ComputeDiff(introspectedIR, declaredIR)
+	// Empty caller and files: every parsed file's Path already carries its own
+	// `caller:` prefix, which is what the third argument attributes by.
+	ownership := buildEntityOwnership("", nil, append(parsed, others...))
 	return &liveComparison{
 		DeclaredIR:     declaredIR,
 		IntrospectedIR: introspectedIR,
@@ -423,6 +437,7 @@ func (s *Service) compareToLive(ctx context.Context, ctl, live introspect.Querie
 		Diff:           d,
 		Drift:          translateDrift(d),
 		Warnings:       warnings,
+		Ownership:      ownership,
 	}, nil
 }
 
