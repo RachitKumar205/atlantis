@@ -245,22 +245,22 @@ export function Schema() {
       value={selectedNS}
       onValueChange={v => handleSelectNS(String(v))}
     >
-      <div className="rail rail--ns">
+      <div className="srail srail--ns">
         <div className="pane__head">
           <h3>Namespaces</h3>
           <span className="spacer" />
           <span className="chip chip--count">{namespaces.length}</span>
         </div>
-        <div className="rail__scroll">
+        <div className="srail__scroll">
         {isLoading ? (
           <SkeletonRows />
         ) : (
-          <TabsList variant="underline" className="rail__list">
+          <TabsList variant="underline" className="srail__list">
             {namespaces.map(ns => {
               const count = entities.filter(e => e.namespace === ns).length
               return (
-                <TabsTab key={ns} value={ns} className="railtab">
-                  <span className="railtab__name" title={ns}>{ns}</span>
+                <TabsTab key={ns} value={ns} className="srailtab">
+                  <span className="srailtab__name" title={ns}>{ns}</span>
                   <span
                     className="chip chip--count"
                     title={`${count} ${count === 1 ? 'table' : 'tables'}`}
@@ -282,11 +282,11 @@ export function Schema() {
           value={selectedEntityId}
           onValueChange={v => handleSelectEntity(String(v))}
         >
-          <div className="rail rail--ent">
+          <div className="srail srail--ent">
             <div className="pane__head">
               <h3>Tables</h3>
             </div>
-            <div className="rail__scroll">
+            <div className="srail__scroll">
             {isLoading ? (
               <SkeletonRows />
             ) : nsEntities.length === 0 ? (
@@ -314,10 +314,10 @@ export function Schema() {
                 )}
               </div>
             ) : (
-              <TabsList variant="underline" className="rail__list">
+              <TabsList variant="underline" className="srail__list">
                 {nsEntities.map(e => (
-                  <TabsTab key={e.id} value={e.id} className="railtab">
-                    <span className="railtab__name" title={e.name}>{e.name}</span>
+                  <TabsTab key={e.id} value={e.id} className="srailtab">
+                    <span className="srailtab__name" title={e.name}>{e.name}</span>
                     {/* Without a marker the queue is only findable by clicking
                         every table in the namespace, which for the operator
                         asking "is anything waiting on me" is the same as it
