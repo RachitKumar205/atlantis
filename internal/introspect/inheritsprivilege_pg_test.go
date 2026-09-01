@@ -13,17 +13,20 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/introspect"
 )
 
-// Discovery works against a connection that may not read pg_inherits.
+// Discovery is complete against a connection that may not read pg_inherits.
 //
 // It is readable by PUBLIC in a default installation, so a test running as the
 // owner never sees otherwise. EBI's public mirror revokes it, and reading it
 // unconditionally failed the whole import with `permission denied for table
 // pg_inherits` — every table, not just the partitions the read was for.
 //
-// The fallback is narrower, not absent: relispartition lives in pg_class,
-// which is always readable, and covers declarative partitioning. A child
-// attached with INHERITS is discovered as a table of its own, which is what
-// happened before pg_inherits was consulted at all.
+// Answering with relispartition instead was worse than the failure: it covers
+// declarative partitioning only, so 112 INHERITS children came back, and
+// keyless entities meant they were declared rather than skipped. The import
+// went from 84 entities to 209 and the plan over them timed out.
+//
+// So the child test reads pg_attribute, which introspection cannot run without
+// anyway, and both mechanisms are excluded at either privilege level.
 //
 //	ATLANTIS_TEST_PG=postgres://atlantis:atlantis@host:5432/atlantis \
 //	    go test ./internal/introspect -run InheritsPrivilege -count=1
@@ -77,10 +80,6 @@ func TestDiscoveryWithoutInheritsPrivilege(t *testing.T) {
 	}
 	t.Cleanup(rp.Close)
 
-	if introspect.InheritsReadable(ctx, rp) {
-		t.Fatal("the restricted role can still read pg_inherits, so this test proves nothing")
-	}
-
 	// The whole point: discovery returns tables rather than failing.
 	got, err := introspect.DiscoverTables(ctx, rp, &dsl.IR{}, []string{"noinh"})
 	if err != nil {
@@ -97,10 +96,13 @@ func TestDiscoveryWithoutInheritsPrivilege(t *testing.T) {
 		t.Error("a declarative partition child was discovered; relispartition covers those " +
 			"and is readable without pg_inherits")
 	}
-	// Named rather than asserted absent: without pg_inherits there is no way
-	// to know this is a child, and discovering it is the documented cost.
-	if !found["noinh.child"] {
-		t.Log("the INHERITS child was excluded, so the privilege is not actually revoked")
+	// The point of the change: an INHERITS child is excluded even here,
+	// because identifying one reads pg_attribute rather than pg_inherits.
+	// Falling back to relispartition re-admitted 112 of these from one public
+	// dataset, and keyless entities then declared every one of them.
+	if found["noinh.child"] {
+		t.Error("an INHERITS child was discovered by a role that cannot read " +
+			"pg_inherits; the child test must not depend on that privilege")
 	}
 
 	// And the owner still gets the complete answer.
