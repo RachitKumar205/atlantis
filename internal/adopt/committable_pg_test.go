@@ -62,9 +62,15 @@ var hazards = []string{
 	`CREATE TABLE adopt_hz.no_pk (a int NOT NULL, b text)`,
 
 	// A foreign key to the table whose key is taken from a unique constraint.
+	//
+	// Both actions, and neither is the default. ON UPDATE is the one the
+	// emitter could not spell: a declaration that omits it parses back as
+	// unset, which the differ ranks stronger than CASCADE, so the key atlantis
+	// read correctly came back as drift that re-importing could not settle.
 	`CREATE TABLE adopt_hz.points_at_no_pk (
 	    id bigint PRIMARY KEY,
 	    a  int REFERENCES adopt_hz.no_pk_unique(a)
+	        ON DELETE SET NULL ON UPDATE CASCADE
 	 )`,
 
 	// A CHECK whose name Postgres allows and .atl cannot spell.
@@ -221,6 +227,19 @@ func TestAPromotedKeyKeepsItsInboundReference(t *testing.T) {
 	atl := atlOf(t, res, "adopt_hz.points_at_no_pk")
 	if !strings.Contains(atl, "references") {
 		t.Errorf("the reference was dropped although its target is declared:\n%s", atl)
+	}
+	// Both actions survive. Omitting either declares a key the database does
+	// not have, and the next plan reports it as drift.
+	// Both actions survive. Omitting either declares a key the database does
+	// not have, and the next plan reports it as drift no re-import can settle.
+	//
+	// Lowering is asserted over the whole namespace by
+	// TestEveryGeneratedNamespaceLowers; one entity on its own cannot resolve
+	// the reference this test is about.
+	for _, want := range []string{"on delete set null", "on update cascade"} {
+		if !strings.Contains(atl, want) {
+			t.Errorf("the declaration lost %q:\n%s", want, atl)
+		}
 	}
 }
 

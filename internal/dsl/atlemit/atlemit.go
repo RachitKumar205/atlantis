@@ -316,17 +316,33 @@ func quote(s string) string {
 }
 
 // renderRef turns a foreign key into a `references` modifier.
+//
+// Both actions, because introspection reads both and the DDL emits both. An
+// omitted `on update` parses back as unset, which the differ ranks alongside
+// NO ACTION and therefore stronger than the CASCADE the database has — so a
+// key atlantis read correctly was reported as drift it could never resolve.
 func renderRef(r *dsl.Ref) string {
 	out := "references " + r.TargetID + "." + r.TargetField
-	switch r.OnDelete {
-	case dsl.RefActionCascade:
-		out += " on delete cascade"
-	case dsl.RefActionSetNull:
-		out += " on delete set null"
-	case dsl.RefActionRestrict:
-		out += " on delete restrict"
+	if a := refAction(r.OnDelete); a != "" {
+		out += " on delete " + a
+	}
+	if a := refAction(r.OnUpdate); a != "" {
+		out += " on update " + a
 	}
 	return out
+}
+
+// refAction spells one action, or "" for the default the grammar omits.
+func refAction(a dsl.RefAction) string {
+	switch a {
+	case dsl.RefActionCascade:
+		return "cascade"
+	case dsl.RefActionSetNull:
+		return "set null"
+	case dsl.RefActionRestrict:
+		return "restrict"
+	}
+	return ""
 }
 
 // File renders several entities into one .atl file, sorted by name so the

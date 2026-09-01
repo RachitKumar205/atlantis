@@ -334,4 +334,4 @@ declaration, not an entity member. `read_through`, `ttl` and `tag` belong to
 
 ## Known gaps
 
-This reference does not yet cover: the `ivfflat` vector-index method (only `hnsw` is supported), GiST indexes, `on update` foreign-key actions, view declarations, and import statements. Tracked in the project issue tracker.
+This reference does not yet cover: the `ivfflat` vector-index method (only `hnsw` is supported), GiST indexes, view declarations, and import statements. Tracked in the project issue tracker.
