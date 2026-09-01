@@ -118,12 +118,12 @@ a { color: inherit; text-decoration: none; }
   flex-shrink: 0;
 }
 
-/* Wordmark — lowercase atlantis, weight 500, tight tracking. Sized
-   larger than rail-btn labels so it reads as a brand mark, not a nav
-   item. Plain lockup; the natural "i" tittle is the only dot. */
+/* Wordmark. --size-display, the scale's top step, so it reads as a brand mark
+   rather than a nav item; the tracking matches the page titles Outfit also
+   sets. Plain lockup; the natural "i" tittle is the only dot. */
 .rail__brand {
   font-family: var(--display);
-  font-size: var(--size-subject); font-weight: 600; color: var(--ink-0);
+  font-size: var(--size-display); font-weight: 600; color: var(--ink-0);
   letter-spacing: -.02em;
   line-height: 1;
   white-space: nowrap;

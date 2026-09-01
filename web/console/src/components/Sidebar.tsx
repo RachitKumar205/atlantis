@@ -78,7 +78,7 @@ export function Sidebar() {
             <circle cx="13" cy="13" r="1.9" fill="var(--accent)" />
           </svg>
         </span>
-        <span className="rail__brand">atlantis</span>
+        <span className="rail__brand">Atlantis</span>
       </div>
 
       <OrgSwitcher />
