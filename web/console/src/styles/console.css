@@ -38,25 +38,30 @@ a { color: inherit; text-decoration: none; }
 ::-webkit-scrollbar-thumb:hover { background: var(--line-strong); background-clip: content-box; }
 
 /* ---- App layout ----------------------------------------------------------- */
-/* Grid columns animate with rail width, so the content reflows as the rail
-   hover-expands. 240ms is Carbon's moderate-02, the token whose own
-   description is "Expansion"; the curve is its standard rather than an
-   entrance one, because a panel that stays on screen resizes rather than
-   arrives.
+/* The rail expands over the page, not into it: the grid column holds the
+   collapsed width and only the rail's own width animates.
    
-   --rail-delay is the hover-intent gate. Without it the rail expanded the
-   instant a cursor touched it, so crossing it on the way to the pane
-   alongside dragged the whole grid open. NN/g reads intent from a cursor that
-   has settled for 0.3-0.5s. */
+   Widening the column pushed every pane right, which slid the pane under the
+   cursor out from under it, and the widened rail then covered that cursor and
+   held its own hover open. No delay reaches that, because it begins after the
+   expansion.
+   
+   240ms is Carbon's moderate-02, whose own description is "Expansion", on its
+   standard curve rather than an entrance one: a panel that stays on screen
+   resizes rather than arrives. --rail-delay gates the open on intent, which
+   NN/g reads from a cursor settled 0.3-0.5s. */
 .app {
   --rail-dur: 240ms;
   --rail-ease: cubic-bezier(0.2, 0, 0.38, 0.9);
   --rail-delay: 180ms;
+  --rail-cur: var(--rail-w);
   display: grid;
   grid-template-columns: var(--rail-w) 1fr;
   height: 100vh;
-  transition: grid-template-columns var(--rail-dur) var(--rail-ease) var(--rail-delay);
 }
+/* The rail leaves the flow, so the first column is a fixed gutter and .main
+   has to be told which column it is in. */
+.main { grid-column: 2; }
 
 /* :has() is well-supported across modern browsers. When the rail is
    hovered anywhere, the CSS variable swaps and every dependent rule
@@ -64,7 +69,7 @@ a { color: inherit; text-decoration: none; }
 /* 400ms to open, 180ms to close. The close grace is shorter than NN/g's 0.5s
    because that number covers travel from a trigger to a separate panel, and
    here the trigger is the panel — leaving it means leaving it. */
-.app:has(.rail:hover) { --rail-w: var(--rail-w-expanded); --rail-delay: 400ms; }
+.app:has(.rail:hover) { --rail-cur: var(--rail-w-expanded); --rail-delay: 400ms; }
 
 /* The gate is a decision, not motion, so it survives; the sweep does not. */
 @media (prefers-reduced-motion: reduce) {
@@ -72,9 +77,9 @@ a { color: inherit; text-decoration: none; }
 }
 
 /* ====== LEFT RAIL ========================================================== */
-/* Supabase-style hover-to-expand sidebar. Collapsed (56px) by default,
-   expands to 220px while the cursor is over the rail. No click target,
-   no localStorage — purely an ambient affordance.
+/* Hover-to-expand sidebar, 56px collapsed and 220px expanded, drawn over the
+   page rather than inside the grid. No click target, no localStorage —
+   purely an ambient affordance.
 
    Layout invariant: every row's leading glyph (logo, nav icon, role
    badge) is anchored to the SAME horizontal x = 28px (the rail's
@@ -83,6 +88,11 @@ a { color: inherit; text-decoration: none; }
    margin-left: 0 to max-width: 160 with margin-left: 11, so they take
    literally zero space when collapsed and don't displace the icons. */
 .rail {
+  position: fixed;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: var(--rail-cur);
+  transition: width var(--rail-dur) var(--rail-ease) var(--rail-delay);
   background: var(--canvas-1);
   border-right: 1px solid var(--line-soft);
   display: flex; flex-direction: column;
