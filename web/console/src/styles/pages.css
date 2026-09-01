@@ -66,11 +66,13 @@
    hovers to --canvas-3 and raises its current item to white on --drop, but it
    sits in a trough and holds nine items; a drop on the selected row of a list
    of 74 is weight this rail does not need, and the accent bar already names
-   the row. The border carries the shape the shadow would have. */
+   the row. The border carries the shape the shadow would have, at the hairline
+   the nav uses for the same job — --line is a solid #BFBEAE and reads as an
+   outline against a white row rather than an edge on it. */
 .srailtab[data-active] {
   color: var(--ink-0);
   background: var(--canvas-2);
-  border-color: var(--line);
+  border-color: var(--line-soft);
 }
 .srailtab[data-active] .srailtab__name { font-weight: 500; }
 @media (hover: hover) {
