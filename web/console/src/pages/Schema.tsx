@@ -7,6 +7,7 @@ import { ArrowSquareIn, Cube, LinkSimple as LinkIcon, ShieldChevron } from '@pho
 import { api, indexPlansByEntity, planClassBadge, planClassLabel, queries } from '@/api/client'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tabs, TabsList, TabsPanel, TabsTab } from '@/components/ui/tabs'
+import { InputGroup, InputGroupAddon, InputGroupText } from '@/components/ui/input-group'
 import { physicalTable } from '@/lib/physical'
 import { PageShell } from '@/components/PageShell'
 import { OnboardingDialog } from '@/components/OnboardingDialog'
@@ -368,10 +369,12 @@ export function Schema() {
                   </h2>
                   {/* The entity is what the API calls it; this is what psql
                       does. A reader moving between the two needs both. */}
-                  <p className="detail__table">
-                    <span className="detail__table-l">table</span>
-                    <span className="detail__table-v">{selectedEntity.table}</span>
-                  </p>
+                  <InputGroup className="tablepill">
+                    <InputGroupAddon align="inline-start">
+                      <InputGroupText>table</InputGroupText>
+                    </InputGroupAddon>
+                    <span className="tablepill__v">{selectedEntity.table}</span>
+                  </InputGroup>
                   <p className="detail__facts">
                     <span>{fieldCount(selectedEntity)}</span>
                     <span className="sep">·</span>

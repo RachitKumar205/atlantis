@@ -79,15 +79,34 @@
 }
 .detail__path .ns { color: var(--ink-3); }
 .detail__path .nm { color: var(--ink-0); }
-/* The physical table, directly under the name the API uses for it. Monospaced
-   and in the type ink, because it is the identifier a reader retypes into
-   psql rather than prose about the entity. */
-.detail__table { margin-block-start: 6px; font-size: var(--size-data); }
-.detail__table-l { color: var(--ink-2); margin-inline-end: 8px; }
-.detail__table-v {
+/* The physical table, directly under the name the API uses for it, as a coss
+   input group: the label takes the addon segment and the name sits beside it.
+   
+   A span rather than InputGroupInput. The value is read-only, and an input
+   would announce as a textbox and take a width from its size attribute rather
+   than from the name it holds. */
+.tablepill {
+  inline-size: auto;              /* the component is w-full; this is a chip */
+  margin-block-start: 9px;
+  block-size: 30px;
+  font-size: var(--size-data);
+  background: var(--canvas-0);
+}
+.tablepill [data-slot="input-group-addon"] {
+  align-self: stretch;
+  padding-inline: 11px;
+  background: var(--canvas-2);
+  border-inline-end: 1px solid var(--line-soft);
+  color: var(--ink-2);
+  border-start-start-radius: calc(var(--radius-lg) - 1px);
+  border-end-start-radius: calc(var(--radius-lg) - 1px);
+  cursor: default;
+}
+.tablepill__v {
+  padding-inline: 12px;
   font-family: var(--mono); font-feature-settings: var(--feat-mono);
-  letter-spacing: var(--track-mono); color: var(--ink-type);
-  overflow-wrap: anywhere;
+  letter-spacing: var(--track-mono); color: var(--ink-0);
+  white-space: nowrap;
 }
 
 /* The shape of the table as a sentence. */
