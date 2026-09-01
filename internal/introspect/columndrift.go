@@ -79,12 +79,13 @@ func DetectColumnTypeDrift(ctx context.Context, q DBTX, declaredIR *dsl.IR) ([]C
 
 	var drift []ColumnTypeDrift
 	var notes []string
+	declaredAll := renderDeclaredColumnTypes(ctx, q, entities)
 	for ref, e := range entities {
 		liveCols := live[ref]
 		if len(liveCols) == 0 {
 			continue // table not in live DB — the plan emits CREATE TABLE
 		}
-		declared, ok := renderDeclaredColumnTypes(ctx, q, e)
+		declared, ok := declaredAll[e.ID()]
 		if !ok {
 			notes = append(notes, fmt.Sprintf("%s: could not introspect declared column types for comparison", e.ID()))
 			continue
@@ -119,48 +120,95 @@ func DetectColumnTypeDrift(ctx context.Context, q DBTX, declaredIR *dsl.IR) ([]C
 }
 
 // renderDeclaredColumnTypes returns each declared field's type as Postgres
-// stores it (format_type), by creating a throwaway TEMP table with the
-// entity's columns and reading their format_type back. Rolled back; no
-// persistent objects. ok=false on any DB error (the caller emits a note).
-func renderDeclaredColumnTypes(ctx context.Context, db DBTX, e *dsl.Entity) (map[string]string, bool) {
-	if len(e.Fields) == 0 {
-		return nil, false
+// stores it (format_type), for every entity at once, keyed by entity ID then
+// column name.
+//
+// One temp table per entity, all created in a single DO block, then one read
+// covering all of them: four round trips for the whole schema rather than four
+// per entity. Against a database on the other side of the internet that is the
+// difference between a plan that returns and one that looks hung — 97 entities
+// at 165ms to EBI's public mirror is 64 seconds of latency alone.
+//
+// A DO block rather than one wide table because a table is capped at 1600
+// columns and a schema of this size passes that. Rolled back; no persistent
+// objects.
+//
+// A missing entity is absent from the result rather than failing the batch, and
+// the caller emits a note for it.
+func renderDeclaredColumnTypes(ctx context.Context, db DBTX, entities map[physRef]*dsl.Entity) map[string]map[string]string {
+	type target struct {
+		id    string
+		table string
 	}
-	defs := make([]string, 0, len(e.Fields))
-	for i := range e.Fields {
-		f := &e.Fields[i]
-		defs = append(defs, schema.QuoteIdent(f.Name)+" "+schema.SQLType(f.Type))
+	var stmts []string
+	targets := make([]target, 0, len(entities))
+	i := 0
+	for _, e := range entities {
+		if len(e.Fields) == 0 {
+			continue
+		}
+		defs := make([]string, 0, len(e.Fields))
+		for j := range e.Fields {
+			f := &e.Fields[j]
+			defs = append(defs, schema.QuoteIdent(f.Name)+" "+schema.SQLType(f.Type))
+		}
+		name := fmt.Sprintf("_atl_coltype_%d", i)
+		i++
+		stmts = append(stmts, fmt.Sprintf("CREATE TEMP TABLE %s (%s);", name, strings.Join(defs, ", ")))
+		targets = append(targets, target{id: e.ID(), table: name})
+	}
+	if len(stmts) == 0 {
+		return nil
 	}
 
 	tx, err := db.Begin(ctx)
 	if err != nil {
-		return nil, false
+		return nil
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx, "CREATE TEMP TABLE _atl_coltype ("+strings.Join(defs, ", ")+")"); err != nil {
-		return nil, false
+	if _, err := tx.Exec(ctx, "DO $atl$ BEGIN\n"+strings.Join(stmts, "\n")+"\nEND $atl$;"); err != nil {
+		return nil
+	}
+
+	names := make([]string, len(targets))
+	byTable := make(map[string]string, len(targets))
+	for k, t := range targets {
+		names[k] = t.table
+		byTable[t.table] = t.id
 	}
 	rows, err := tx.Query(ctx, `
-SELECT attname, format_type(atttypid, atttypmod)
-FROM pg_attribute
-WHERE attrelid = '_atl_coltype'::regclass AND attnum > 0 AND NOT attisdropped`)
+SELECT c.relname, a.attname, format_type(a.atttypid, a.atttypmod)
+FROM pg_attribute a
+JOIN pg_class c ON c.oid = a.attrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname LIKE 'pg\_temp%'
+  AND c.relname = ANY($1)
+  AND a.attnum > 0 AND NOT a.attisdropped`, names)
 	if err != nil {
-		return nil, false
+		return nil
 	}
 	defer rows.Close()
-	out := make(map[string]string, len(e.Fields))
+
+	out := make(map[string]map[string]string, len(targets))
 	for rows.Next() {
-		var name, ft string
-		if err := rows.Scan(&name, &ft); err != nil {
-			return nil, false
+		var table, col, ft string
+		if err := rows.Scan(&table, &col, &ft); err != nil {
+			return nil
 		}
-		out[name] = ft
+		id, ok := byTable[table]
+		if !ok {
+			continue
+		}
+		if out[id] == nil {
+			out[id] = map[string]string{}
+		}
+		out[id][col] = ft
 	}
 	if rows.Err() != nil {
-		return nil, false
+		return nil
 	}
-	return out, true
+	return out
 }
 
 // loadLiveColumnTypes reads format_type for every column of the given physical
