@@ -38,20 +38,38 @@ a { color: inherit; text-decoration: none; }
 ::-webkit-scrollbar-thumb:hover { background: var(--line-strong); background-clip: content-box; }
 
 /* ---- App layout ----------------------------------------------------------- */
-/* Grid columns animate with rail width, so the content reflows smoothly
-   as the rail hover-expands. cubic-bezier matches the mechanical easing
-   token used across motion transitions. */
+/* Grid columns animate with rail width, so the content reflows as the rail
+   hover-expands. 240ms is Carbon's moderate-02, the token whose own
+   description is "Expansion"; the curve is its standard rather than an
+   entrance one, because a panel that stays on screen resizes rather than
+   arrives.
+   
+   --rail-delay is the hover-intent gate. Without it the rail expanded the
+   instant a cursor touched it, so crossing it on the way to the pane
+   alongside dragged the whole grid open. NN/g reads intent from a cursor that
+   has settled for 0.3-0.5s. */
 .app {
+  --rail-dur: 240ms;
+  --rail-ease: cubic-bezier(0.2, 0, 0.38, 0.9);
+  --rail-delay: 180ms;
   display: grid;
   grid-template-columns: var(--rail-w) 1fr;
   height: 100vh;
-  transition: grid-template-columns 220ms cubic-bezier(0.32, 0.72, 0, 1);
+  transition: grid-template-columns var(--rail-dur) var(--rail-ease) var(--rail-delay);
 }
 
 /* :has() is well-supported across modern browsers. When the rail is
    hovered anywhere, the CSS variable swaps and every dependent rule
    (rail width, grid column, label opacity, justify-content) follows. */
-.app:has(.rail:hover) { --rail-w: var(--rail-w-expanded); }
+/* 400ms to open, 180ms to close. The close grace is shorter than NN/g's 0.5s
+   because that number covers travel from a trigger to a separate panel, and
+   here the trigger is the panel — leaving it means leaving it. */
+.app:has(.rail:hover) { --rail-w: var(--rail-w-expanded); --rail-delay: 400ms; }
+
+/* The gate is a decision, not motion, so it survives; the sweep does not. */
+@media (prefers-reduced-motion: reduce) {
+  .app { --rail-dur: 0ms; }
+}
 
 /* ====== LEFT RAIL ========================================================== */
 /* Supabase-style hover-to-expand sidebar. Collapsed (56px) by default,
@@ -98,9 +116,9 @@ a { color: inherit; text-decoration: none; }
   overflow: hidden;
   opacity: 0;
   transition:
-    margin-left 220ms cubic-bezier(0.32, 0.72, 0, 1),
-    max-width 220ms cubic-bezier(0.32, 0.72, 0, 1),
-    opacity 200ms cubic-bezier(0.32, 0.72, 0, 1);
+    margin-left var(--rail-dur) var(--rail-ease) var(--rail-delay),
+    max-width var(--rail-dur) var(--rail-ease) var(--rail-delay),
+    opacity var(--rail-dur) var(--rail-ease) var(--rail-delay);
 }
 .rail:hover .rail__brand {
   margin-left: 11px;
@@ -168,7 +186,7 @@ a { color: inherit; text-decoration: none; }
   margin-left: auto;
   color: var(--ink-4) !important;
   opacity: 0;
-  transition: opacity 200ms cubic-bezier(0.32, 0.72, 0, 1);
+  transition: opacity var(--rail-dur) var(--rail-ease) var(--rail-delay);
 }
 .rail:hover .rail-org__chev { opacity: 1; }
 
@@ -268,9 +286,9 @@ a { color: inherit; text-decoration: none; }
   overflow: hidden;
   opacity: 0;
   transition:
-    margin-left 220ms cubic-bezier(0.32, 0.72, 0, 1),
-    max-width 220ms cubic-bezier(0.32, 0.72, 0, 1),
-    opacity 200ms cubic-bezier(0.32, 0.72, 0, 1);
+    margin-left var(--rail-dur) var(--rail-ease) var(--rail-delay),
+    max-width var(--rail-dur) var(--rail-ease) var(--rail-delay),
+    opacity var(--rail-dur) var(--rail-ease) var(--rail-delay);
 }
 .rail:hover .rail-btn__label {
   margin-left: 11px;
@@ -334,9 +352,9 @@ a { color: inherit; text-decoration: none; }
   overflow: hidden;
   opacity: 0;
   transition:
-    margin-left 220ms cubic-bezier(0.32, 0.72, 0, 1),
-    max-width 220ms cubic-bezier(0.32, 0.72, 0, 1),
-    opacity 200ms cubic-bezier(0.32, 0.72, 0, 1);
+    margin-left var(--rail-dur) var(--rail-ease) var(--rail-delay),
+    max-width var(--rail-dur) var(--rail-ease) var(--rail-delay),
+    opacity var(--rail-dur) var(--rail-ease) var(--rail-delay);
 }
 .rail:hover .rail-role__email {
   margin-left: 11px;
@@ -687,9 +705,9 @@ a { color: inherit; text-decoration: none; }
   overflow: hidden;
   opacity: 0;
   transition:
-    margin-left 220ms cubic-bezier(0.32, 0.72, 0, 1),
-    max-width 220ms cubic-bezier(0.32, 0.72, 0, 1),
-    opacity 200ms cubic-bezier(0.32, 0.72, 0, 1);
+    margin-left var(--rail-dur) var(--rail-ease) var(--rail-delay),
+    max-width var(--rail-dur) var(--rail-ease) var(--rail-delay),
+    opacity var(--rail-dur) var(--rail-ease) var(--rail-delay);
 }
 
 .rail:hover .rail-org__block {
