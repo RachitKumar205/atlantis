@@ -230,11 +230,18 @@ export function Schema() {
       title="Schema"
       sub={sub}
       flush
+      // Only while there is nothing to browse. The action fills an empty
+      // schema, and once one is loaded it offers to do what has been done.
+      //
+      // Gated on the load as well, so it does not appear and then withdraw
+      // under the pointer on a schema that was there all along.
       action={
-        <button className="btn btn--brass" type="button" onClick={() => setOnboarding('connect')}>
-          <ArrowSquareIn size={14} />
-          Import a database
-        </button>
+        !isLoading && entities.length === 0 ? (
+          <button className="btn btn--brass" type="button" onClick={() => setOnboarding('connect')}>
+            <ArrowSquareIn size={14} />
+            Import a database
+          </button>
+        ) : undefined
       }
     >
     {onboarding && (
