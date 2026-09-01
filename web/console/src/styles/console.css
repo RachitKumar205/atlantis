@@ -10,8 +10,10 @@
   background: #FAFAF8;
 }
 
-*, *::before, *::after { box-sizing: border-box; }
-* { margin: 0; padding: 0; }
+/* The universal reset is Tailwind's preflight, in the base layer. Declared
+   here it would sit outside every layer, and unlayered CSS outranks a layered
+   rule whatever its specificity — so `* { padding: 0 }` would win against
+   every p-* utility a coss component sets. */
 
 html, body { height: 100%; overflow: hidden; }
 body {
@@ -355,9 +357,9 @@ a { color: inherit; text-decoration: none; }
   display: flex; align-items: flex-start; gap: 16px;
   padding-bottom: 18px;
 }
-.page__title { font-size: 22px; font-weight: 500; color: var(--ink-0); letter-spacing: -0.01em; line-height: 1.15; }
-.page__title.is-path { font-family: var(--mono); font-size: 19px; font-weight: 500; }
-.page__sub { font-size: 12.5px; color: var(--ink-2); margin-top: 5px; white-space: nowrap; }
+.page__title { font-size: var(--size-display); font-weight: 600; color: var(--ink-0); letter-spacing: -0.01em; line-height: 1.2; }
+.page__title.is-path { font-family: var(--mono); font-feature-settings: var(--feat-mono); font-size: var(--size-subject); font-weight: 500; }
+.page__sub { font-size: var(--size-data); color: var(--ink-2); margin-top: 5px; white-space: nowrap; font-variant-numeric: tabular-nums; font-feature-settings: var(--feat-sans); }
 .page__head-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .page__body { flex: 1; overflow: auto; padding: var(--pad-page); }
 .page__bodyinner { max-width: var(--maxw); margin: 0 auto; }
@@ -396,7 +398,11 @@ a { color: inherit; text-decoration: none; }
 /* ====== CHIPS / BADGES ===================================================== */
 .chip {
   display: inline-flex; align-items: center; gap: 5px;
-  font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums;
+  /* A count is a number, not an identifier, so it takes the sans and the
+     tabular figures Manrope actually implements. Monospace here bought
+     alignment the font feature already gives. */
+  font-size: var(--size-label); font-variant-numeric: tabular-nums;
+  font-feature-settings: var(--feat-sans);
   color: var(--ink-2); background: var(--canvas-3);
   border: 1px solid var(--line-soft); border-radius: var(--radius-sm);
   padding: 1px 6px; height: 18px; white-space: nowrap;
@@ -415,7 +421,9 @@ a { color: inherit; text-decoration: none; }
 .chip.is-warn { color: var(--accent); background: var(--accent-tint); border-color: var(--accent-tint-2); }
 .badge {
   display: inline-flex; align-items: center; gap: 4px;
-  font-family: var(--mono); font-size: 10.5px; font-weight: 500; letter-spacing: .02em;
+  /* Uppercase at 0.02em closed the caps up; 5-12% is the range, and
+     --track-caps is 6%. 11px is the floor every system surveyed stops at. */
+  font-size: var(--size-label); font-weight: 600; letter-spacing: var(--track-caps);
   text-transform: uppercase; padding: 2px 7px; border-radius: var(--radius-sm);
   height: 18px; white-space: nowrap;
 }
@@ -581,8 +589,8 @@ a { color: inherit; text-decoration: none; }
 /* ====== EMPTY STATE ======================================================== */
 .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 56px 24px; text-align: center; }
 .empty__icon { width: 40px; height: 40px; color: var(--ink-3); display: grid; place-items: center; border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--canvas-1); }
-.empty__title { font-size: 13.5px; color: var(--ink-1); font-weight: 500; }
-.empty__sub { font-size: 12.5px; color: var(--ink-2); max-width: 34ch; line-height: 1.5; text-wrap: pretty; }
+.empty__title { font-size: var(--size-data); color: var(--ink-0); font-weight: 600; }
+.empty__sub { font-size: var(--size-data); color: var(--ink-2); max-width: 44ch; line-height: 1.5; text-wrap: pretty; }
 
 /* ====== SKELETON =========================================================== */
 .sk { background: linear-gradient(90deg, var(--canvas-2) 0%, var(--canvas-3) 50%, var(--canvas-2) 100%); background-size: 200% 100%; border-radius: var(--radius-sm); animation: sk 1.4s var(--ease) infinite; }

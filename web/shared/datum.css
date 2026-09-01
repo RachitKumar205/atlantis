@@ -181,9 +181,39 @@
   --display: 'Outfit', system-ui, -apple-system, sans-serif;
   --sans: 'Manrope', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', 'Menlo', monospace;
-  --feat-mono: "zero" 1, "tnum" 1;   /* slashed zero + tabular */
+  /* "zero" only. IBM Plex Mono ships no tnum feature — every glyph is one
+     advance width by construction, so there is nothing for it to switch — and
+     the tag sat here claiming otherwise. "zero" is real, and aliased to ss03.
+
+     Outfit and Manrope are the opposite pair: proportional figures by default,
+     a working tnum, and no slashed zero at all. Sans digits that have to line
+     up take --feat-sans. */
+  --feat-mono: "zero" 1;
+  --feat-sans: "tnum" 1;
+
   --track-display: -0.025em;
   --track-tight: -0.015em;
+  /* Plex Mono below 14px. Carbon sets 0.32px on both of its code tokens
+     (12px/1.333 and 14px/1.429), which is IBM's own production tracking for
+     this face at this size. Neither Outfit nor Manrope carries an opsz axis,
+     so nothing compensates at small sizes unless it is set here. */
+  --track-mono: 0.32px;
+  /* Uppercase needs 5-12% added; below 5% the caps close up. */
+  --track-caps: 0.06em;
+
+  /* One scale, four steps. A screen that reads at a glance ranks four sizes;
+     it does not rank eight, and the console had eighteen — 10, 10.5, 11, 11.5,
+     12, 12.5, 13, 13.5, 14, 15, 16, 17, 18, 19, 20, 21, 22, 24 — where a half
+     pixel is invisible as rank and visible as drift.
+
+     11px is the floor and carries single-word labels only. Every system
+     surveyed stops there: Material's Label Small and Spectrum's Detail S are
+     11px, Carbon and Atlassian bottom out at 12px, and none sets body text
+     below 12. */
+  --size-display: 20px;   /* page title */
+  --size-subject: 16px;   /* the one thing a pane is about */
+  --size-data: 13px;      /* identifiers, values, prose */
+  --size-label: 11px;     /* uppercase labels, chips, counts */
 
   /* ---- Motion ------------------------------------------------------------- */
   --ease: cubic-bezier(0.32, 0.72, 0, 1);

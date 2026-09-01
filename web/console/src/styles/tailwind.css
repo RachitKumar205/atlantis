@@ -1,0 +1,77 @@
+/* Tailwind's entry, and the bridge from coss ui's token names to datum's.
+
+   coss ui components are written against the shadcn palette — bg-background,
+   text-muted-foreground, border-border. datum.css names the same roles
+   --canvas-N, --ink-N, --line. This file maps one onto the other so the
+   components render in the palette in datum.css rather than the neutral set
+   `shadcn init @coss/style` would have installed. */
+
+@import "tailwindcss";
+
+/* The console pins itself light on <html data-theme="light">, so a dark:
+   utility never matches. Defined against the same attribute datum switches on,
+   so the two cannot disagree if the pin is ever lifted. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* coss's Table reaches for two of these bare, inside color-mix() — a row hover
+   is color-mix(in srgb, var(--card), black 2%) — so --color-card alone does not
+   reach it.
+
+   Declared on .datum as well as :root because a custom property is substituted
+   in the scope it is declared in, not the scope it is used in: on :root alone,
+   var(--canvas-1) would resolve against the pre-datum palette in tokens.css and
+   hand a dark surface to a light page. */
+:root,
+.datum {
+  --background: var(--canvas-0);
+  --card: var(--canvas-1);
+}
+
+/* Mapped at --color-*, not through shadcn's intermediate --background /
+   --accent / --primary layer.
+
+   --accent is the collision that forces this. In datum it is #485F73: links,
+   selection, focus and filled actions — shadcn's --primary. In shadcn it is a
+   quiet hover surface. datum declares --accent on `.datum`, which <body>
+   carries, so an intermediate `--accent: var(--canvas-3)` on :root would lose
+   to it everywhere inside the app and every coss hover would fill solid blue.
+
+   `inline` keeps the var() in the emitted utility rather than resolving it
+   once, so the theme swap in datum.css still reaches these. */
+@theme inline {
+  --color-background: var(--canvas-0);
+  --color-foreground: var(--ink-1);
+
+  --color-card: var(--canvas-1);
+  --color-card-foreground: var(--ink-1);
+  --color-popover: var(--canvas-2);
+  --color-popover-foreground: var(--ink-1);
+
+  --color-primary: var(--accent);
+  --color-primary-foreground: var(--accent-ink);
+  --color-secondary: var(--canvas-3);
+  --color-secondary-foreground: var(--ink-1);
+
+  --color-muted: var(--canvas-2);
+  --color-muted-foreground: var(--ink-2);
+  --color-accent: var(--canvas-3);
+  --color-accent-foreground: var(--ink-0);
+
+  --color-destructive: var(--coral);
+  --color-destructive-foreground: var(--canvas-0);
+
+  --color-border: var(--line-soft);
+  --color-input: var(--line);
+  --color-ring: var(--accent);
+
+  /* Literal, because datum's radii are fixed in both themes and
+     `--radius-sm: var(--radius-sm)` is circular. */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+
+  --font-sans: var(--sans);
+  --font-mono: var(--mono);
+  --font-display: var(--display);
+}

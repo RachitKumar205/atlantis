@@ -9,6 +9,11 @@ import { routeTree } from './routeTree.gen'
 // tokens now live in @atlantis/shared, which deliberately carries no font
 // load. See web/shared/tokens.css for why the palette does not decide that.
 import '@/styles/fonts.css'
+// Tailwind before the hand-written sheets. Its rules land in cascade layers
+// and everything below is unlayered, so console.css and pages.css keep
+// winning a tie; what this ordering fixes is preflight, which has to reach
+// the elements those sheets then style.
+import '@/styles/tailwind.css'
 import '@atlantis/shared/tokens.css'
 import '@atlantis/shared/datum.css'
 import '@/styles/console.css'

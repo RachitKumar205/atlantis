@@ -5,6 +5,8 @@ import { useSearch, useNavigate } from '@tanstack/react-router'
 // called that in this codebase and the JSX here reads clearer with the suffix.
 import { ArrowSquareIn, Cube, LinkSimple as LinkIcon, ShieldChevron } from '@phosphor-icons/react'
 import { api, indexPlansByEntity, planClassBadge, planClassLabel, queries } from '@/api/client'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Tabs, TabsList, TabsPanel, TabsTab } from '@/components/ui/tabs'
 import { PageShell } from '@/components/PageShell'
 import { OnboardingDialog } from '@/components/OnboardingDialog'
 import { takeOnboardingPending } from '@/lib/onboarding'
@@ -33,6 +35,8 @@ interface IRField {
 interface IRIndex { fields?: string[] }
 interface IREntity { name: string; namespace: string; kind?: string; fields: IRField[]; indexes?: IRIndex[] }
 interface IRRoot { version?: number; entities?: IREntity[] }
+
+type Section = 'fields' | 'references' | 'pending'
 
 interface FieldRow {
   name: string
@@ -187,6 +191,11 @@ export function Schema() {
   //
   // Which step it opens at is the difference between the two entry points: an
   // arrival is asked what it wants, and a button press already said.
+  // Which section of the detail pane is showing. Kept across a change of
+  // entity: comparing the references of two entities means switching between
+  // them, and resetting to Fields on each switch undoes the comparison.
+  const [section, setSection] = useState<Section>('fields')
+
   const [onboarding, setOnboarding] = useState<'welcome' | 'connect' | null>(null)
   useEffect(() => {
     if (takeOnboardingPending()) setOnboarding('welcome')
@@ -339,16 +348,16 @@ export function Schema() {
                   </div>
                   <div className="detail__meta">
                     <div className="metaitem">
-                      <span className="metaitem__l">owner caller</span>
-                      <span className="metaitem__v">{selectedEntity.caller}</span>
+                      <span className="metaitem__l">owner</span>
+                      <span className="metaitem__v is-id">{selectedEntity.caller}</span>
                     </div>
                     <div className="metaitem">
                       <span className="metaitem__l">fields</span>
-                      <span className="metaitem__v num">{selectedEntity.fields.length}</span>
+                      <span className="metaitem__v is-num">{selectedEntity.fields.length}</span>
                     </div>
                     <div className="metaitem">
-                      <span className="metaitem__l">schema</span>
-                      <span className="metaitem__v">v0048</span>
+                      <span className="metaitem__l">references</span>
+                      <span className="metaitem__v is-num">{selectedEntity.fks.length}</span>
                     </div>
                   </div>
                 </div>
@@ -371,151 +380,157 @@ export function Schema() {
               </div>
             </div>
 
+            {/* Sections are vertical tabs. The pane held four stacked
+                sections, so the references on a wide entity sat below a
+                60-row field table and were reached by scrolling past it. */}
             <div className="detail__body">
-              {/* Pending changes.
-                  Above Fields on purpose: an operator reading a column list
-                  needs to know it is about to change before they read it. */}
-              {pendingUnavailable ? (
-                // Not silently empty. "No pending changes" and "could not ask"
-                // are different answers, and rendering the second as the first
-                // is how somebody concludes a table is quiet while a
-                // destructive plan sits in the queue against it.
-                <div className="detail__sec">
-                  <div className="detail__seclabel">
-                    <h4>Pending changes</h4>
-                    <div className="line" />
-                  </div>
-                  <div className="muted" style={{ fontSize: 12 }}>
-                    Could not load the approval queue, so anything in flight for this
-                    entity is not shown here. Open Approvals to check.
-                  </div>
-                </div>
-              ) : pendingHere.length > 0 && (
-                <div className="detail__sec">
-                  <div className="detail__seclabel">
-                    <h4>Pending changes</h4>
-                    <div className="line" />
-                    <span className="chip chip--count">{pendingHere.length}</span>
-                  </div>
-                  {pendingHere.map(p => (
-                    <div key={p.plan_id} className="planrow">
-                      {/* The PLAN's class, not a per-entity one. A plan is the
-                          unit of approval, so its class is the rule that
-                          governs — inventing a narrower per-entity class here
-                          would show a gentler badge than the thing an approver
-                          is actually signing off. */}
-                      <span className={`badge badge--${planClassBadge(planClassLabel(p.change_class))}`}>
-                        {planClassLabel(p.change_class)}
-                      </span>
-                      <span className="planrow__id" title={p.plan_id}>
-                        {p.plan_id.slice(0, 12)}
-                      </span>
-                      <span className="planrow__by">
-                        by {p.requested_by || 'unknown'}
-                        {p.expired ? ' · expired' : ''}
-                      </span>
-                      <span className="spacer" />
-                      <button
-                        className="btn btn--ghost"
-                        onClick={() => navigate({ to: '/approvals' })}
-                        title="Review this change on the Approvals page"
-                      >
+              <Tabs
+                className="h-full gap-6"
+                orientation="vertical"
+                value={section}
+                onValueChange={v => setSection(String(v) as Section)}
+              >
+                <TabsList variant="underline" size="sm" className="detail__tabs">
+                  <TabsTab value="fields">
+                    Fields
+                    <span className="chip chip--count">{selectedEntity.fields.length}</span>
+                  </TabsTab>
+                  <TabsTab value="references">
+                    References
+                    <span className="chip chip--count">{selectedEntity.fks.length}</span>
+                  </TabsTab>
+                  <TabsTab value="pending">
+                    Pending
+                    {pendingUnavailable
+                      ? <span className="chip chip--count">?</span>
+                      : pendingHere.length > 0 && (
+                          <span className="badge badge--warn">{pendingHere.length}</span>
+                        )}
+                  </TabsTab>
+                </TabsList>
+
+                <TabsPanel value="fields" className="detail__panel">
+                  <Table className="ftbl">
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Field</TableHead>
+                        <TableHead>Type</TableHead>
+                        <TableHead className="text-end">Constraints</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {selectedEntity.fields.map(f => (
+                        <TableRow key={f.name}>
+                          <TableCell className={`f-name ${f.pk ? 'f-pk' : ''}`}>
+                            {f.name}
+                            {f.pk && <span className="pkmark" aria-hidden="true">◆</span>}
+                          </TableCell>
+                          <TableCell className="f-type">{f.type}</TableCell>
+                          <TableCell className="f-flags">
+                            {f.flags}
+                            {f.flags && f.ref ? ', ' : ''}
+                            {f.ref && <span className="f-fk">→ {f.ref}</span>}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </TabsPanel>
+
+                <TabsPanel value="references" className="detail__panel">
+                  {selectedEntity.fks.length === 0 ? (
+                    <div className="empty">
+                      <div className="empty__title">No foreign keys</div>
+                      <div className="empty__sub">
+                        No field on {selectedEntity.name} references another entity.
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="fklist">
+                      {selectedEntity.fks.map((f, i) => {
+                        // A target outside the loaded schema leaves the row inert
+                        // rather than navigating to a selection that renders empty.
+                        const target = entities.find(x => x.id === f.to)
+                        return (
+                          <button
+                            key={i}
+                            type="button"
+                            className="fkrow"
+                            disabled={!target}
+                            title={target ? `Open ${f.to}` : `${f.to} is not in this schema`}
+                            onClick={() => target && navigate({
+                              to: '/schema',
+                              search: { namespace: target.namespace, entity: target.id },
+                            })}
+                          >
+                            <span className="fkrow__arrow"><LinkIcon size={14} /></span>
+                            <span className="fkrow__from">{f.from}</span>
+                            <span className="fkrow__arrow">→</span>
+                            <span className="fkrow__to">{f.to}</span>
+                            <span className="fkrow__via">via {f.via}</span>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  )}
+                </TabsPanel>
+
+                <TabsPanel value="pending" className="detail__panel">
+                  {pendingUnavailable ? (
+                    // Not silently empty. "No pending changes" and "could not ask"
+                    // are different answers, and rendering the second as the first
+                    // is how somebody concludes a table is quiet while a
+                    // destructive plan sits in the queue against it.
+                    <div className="empty">
+                      <div className="empty__title">Approval queue unavailable</div>
+                      <div className="empty__sub">
+                        Anything in flight for this entity is not shown here. Open
+                        Approvals to check.
+                      </div>
+                      <button className="btn btn--ghost" type="button" onClick={() => navigate({ to: '/approvals' })}>
                         <ShieldChevron size={14} />
-                        <span>Review</span>
+                        <span>Open Approvals</span>
                       </button>
                     </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Fields */}
-              <div className="detail__sec">
-                <div className="detail__seclabel">
-                  <h4>Fields</h4>
-                  <div className="line" />
-                </div>
-                <table className="ftbl">
-                  <tbody>
-                    {selectedEntity.fields.map(f => (
-                      <tr key={f.name}>
-                        <td className={`f-name ${f.pk ? 'f-pk' : ''}`}>
-                          {f.name}
-                          {f.pk && <span className="pkmark" aria-hidden="true">◆</span>}
-                        </td>
-                        <td className="f-type">{f.type}</td>
-                        <td className="f-flags">
-                          {f.flags}
-                          {f.flags && f.ref ? ', ' : ''}
-                          {f.ref && <span className="f-fk">→ {f.ref}</span>}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Owners */}
-              <div className="detail__sec">
-                <div className="detail__seclabel">
-                  <h4>Owners</h4>
-                  <div className="line" />
-                </div>
-                <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
-                  <span className="owner">
-                    <span className="dot" />
-                    {selectedEntity.caller}
-                  </span>
-                </div>
-              </div>
-
-              {/* FK references */}
-              {selectedEntity.fks.length > 0 && (
-                <div className="detail__sec">
-                  <div className="detail__seclabel">
-                    <h4>FK references</h4>
-                    <div className="line" />
-                    <span className="badge badge--fk">
-                      {selectedEntity.fks.length} link{selectedEntity.fks.length > 1 ? 's' : ''}
-                    </span>
-                  </div>
-                  <div className="fklist">
-                    {selectedEntity.fks.map((f, i) => {
-                      // A target outside the loaded schema leaves the row inert
-                      // rather than navigating to a selection that renders empty.
-                      const target = entities.find(x => x.id === f.to)
-                      return (
+                  ) : pendingHere.length === 0 ? (
+                    <div className="empty">
+                      <div className="empty__title">Nothing waiting</div>
+                      <div className="empty__sub">
+                        No change to {selectedEntity.name} is waiting for approval.
+                      </div>
+                    </div>
+                  ) : (
+                    pendingHere.map(p => (
+                      <div key={p.plan_id} className="planrow">
+                        {/* The PLAN's class, not a per-entity one. A plan is the
+                            unit of approval, so its class is the rule that
+                            governs — inventing a narrower per-entity class here
+                            would show a gentler badge than the thing an approver
+                            is actually signing off. */}
+                        <span className={`badge badge--${planClassBadge(planClassLabel(p.change_class))}`}>
+                          {planClassLabel(p.change_class)}
+                        </span>
+                        <span className="planrow__id" title={p.plan_id}>
+                          {p.plan_id.slice(0, 12)}
+                        </span>
+                        <span className="planrow__by">
+                          by {p.requested_by || 'unknown'}
+                          {p.expired ? ' · expired' : ''}
+                        </span>
+                        <span className="spacer" />
                         <button
-                          key={i}
-                          type="button"
-                          className="fkrow"
-                          disabled={!target}
-                          title={target ? `Open ${f.to}` : `${f.to} is not in this schema`}
-                          onClick={() => target && navigate({
-                            to: '/schema',
-                            search: { namespace: target.namespace, entity: target.id },
-                          })}
+                          className="btn btn--ghost"
+                          onClick={() => navigate({ to: '/approvals' })}
+                          title="Review this change on the Approvals page"
                         >
-                          <span className="fkrow__arrow"><LinkIcon size={14} /></span>
-                          <span className="fkrow__from">{f.from}</span>
-                          <span className="fkrow__arrow">→</span>
-                          <span className="fkrow__to">{f.to}</span>
-                          <span className="fkrow__via">via {f.via}</span>
+                          <ShieldChevron size={14} />
+                          <span>Review</span>
                         </button>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* Edit panel removed — schema editing is currently dormant.
-                  Restore alongside the edit button + editOpen state.
-              {editOpen && (
-                <EditPanel
-                  entity={selectedEntity}
-                  onClose={() => setEditOpen(false)}
-                />
-              )}
-              */}
+                      </div>
+                    ))
+                  )}
+                </TabsPanel>
+              </Tabs>
             </div>
           </div>
         )}
