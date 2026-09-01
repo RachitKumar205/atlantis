@@ -38,7 +38,12 @@ func TestBeginBackfillPlanRequestCarriesNoSQL(t *testing.T) {
 
 	// And the positive half: the message carries exactly what recomputation
 	// needs, so a field going missing is caught too.
-	want := map[string]bool{"caller": true, "plan_id": true, "files": true}
+	want := map[string]bool{
+		"caller": true, "plan_id": true, "files": true,
+		// Provenance beside the verified caller; neither is an input to
+		// anything this message authorizes.
+		"actor": true, "actor_email": true,
+	}
 	got := map[string]bool{}
 	for i := 0; i < md.Fields().Len(); i++ {
 		got[string(md.Fields().Get(i).Name())] = true

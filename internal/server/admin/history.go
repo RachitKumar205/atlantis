@@ -32,6 +32,11 @@ type SchemaVersionSummary struct {
 	ChangeCount int    `json:"change_count"`
 	CreatedAt   string `json:"created_at"`
 	IRHash      string `json:"ir_hash"` // sha256 of the IR snapshot; git-style content address
+
+	// The human the event was attributed to, beside the caller that carried
+	// it. Empty means none was named.
+	Actor      string `json:"actor"`
+	ActorEmail string `json:"actor_email"`
 }
 
 // GetSchemaHistoryResponse carries one page of versions plus a flag
@@ -53,36 +58,21 @@ func (s *Service) GetSchemaHistory(ctx context.Context, req *adminpb.GetSchemaHi
 	// limit+1, so the extra row reports whether another page exists.
 	fetchLimit := limit + 1
 
-	var rows pgx.Rows
-	var err error
-	if req.GetCaller() != "" && req.GetBefore() > 0 {
-		rows, err = s.pool.Query(ctx, `
-SELECT version, caller, plan_class, event_type, diff, created_at, ir_hash
+	// One statement with four optional predicates rather than a branch per
+	// combination. A fourth filter would have made eight of them.
+	//
+	// The entity filter walks every bucket rather than naming them, so a
+	// bucket added to codegen.Diff is matched the day it exists — the same
+	// reason countDiffChanges stopped listing them by hand.
+	rows, err := s.pool.Query(ctx, `
+SELECT version, caller, plan_class, event_type, diff, created_at, ir_hash, actor, actor_email
 FROM atlantis.schema_versions
-WHERE version < $1 AND caller = $2
+WHERE ($1::bigint = 0 OR version < $1)
+  AND ($2::text = '' OR caller = $2)
+  AND ($3::text = '' OR jsonb_path_exists(diff,
+        '$.*[*] ? (@.entity_id == $eid)', jsonb_build_object('eid', $3::text)))
 ORDER BY version DESC
-LIMIT $3`, req.GetBefore(), req.GetCaller(), fetchLimit)
-	} else if req.GetCaller() != "" {
-		rows, err = s.pool.Query(ctx, `
-SELECT version, caller, plan_class, event_type, diff, created_at, ir_hash
-FROM atlantis.schema_versions
-WHERE caller = $1
-ORDER BY version DESC
-LIMIT $2`, req.GetCaller(), fetchLimit)
-	} else if req.GetBefore() > 0 {
-		rows, err = s.pool.Query(ctx, `
-SELECT version, caller, plan_class, event_type, diff, created_at, ir_hash
-FROM atlantis.schema_versions
-WHERE version < $1
-ORDER BY version DESC
-LIMIT $2`, req.GetBefore(), fetchLimit)
-	} else {
-		rows, err = s.pool.Query(ctx, `
-SELECT version, caller, plan_class, event_type, diff, created_at, ir_hash
-FROM atlantis.schema_versions
-ORDER BY version DESC
-LIMIT $1`, fetchLimit)
-	}
+LIMIT $4`, req.GetBefore(), req.GetCaller(), req.GetEntityId(), fetchLimit)
 	if err != nil {
 		return nil, fmt.Errorf("query schema_versions: %w", err)
 	}
@@ -93,7 +83,8 @@ LIMIT $1`, fetchLimit)
 		var v SchemaVersionSummary
 		var diffJSON []byte
 		var createdAt interface{}
-		if err := rows.Scan(&v.Version, &v.Caller, &v.PlanClass, &v.EventType, &diffJSON, &createdAt, &v.IRHash); err != nil {
+		if err := rows.Scan(&v.Version, &v.Caller, &v.PlanClass, &v.EventType, &diffJSON, &createdAt,
+			&v.IRHash, &v.Actor, &v.ActorEmail); err != nil {
 			return nil, err
 		}
 		v.CreatedAt = fmt.Sprintf("%v", createdAt)
@@ -245,6 +236,9 @@ type EntityLineageEntry struct {
 	LastModifiedBy string `json:"last_modified_by"`
 	LastModifiedAt int64  `json:"last_modified_at"`
 	RemovedAt      *int64 `json:"removed_at,omitempty"`
+
+	Introduced   Blame `json:"introduced"`
+	LastModified Blame `json:"last_modified"`
 }
 
 type GetEntityLineageResponse struct {
@@ -256,12 +250,18 @@ func (s *Service) GetEntityLineage(ctx context.Context, req *adminpb.GetEntityLi
 		return nil, errors.New("admin: entity_id is required")
 	}
 
+	// LEFT, for the same reason GetEntityOwners joins that way: a field whose
+	// version predates the actor columns keeps its row.
 	rows, err := s.pool.Query(ctx, `
-SELECT entity_id, field_name, introduced_by, introduced_at,
-       last_modified_by, last_modified_at, removed_at
-FROM atlantis.entity_lineage
-WHERE entity_id = $1
-ORDER BY field_name`, req.GetEntityId())
+SELECT e.entity_id, e.field_name, e.introduced_by, e.introduced_at,
+       e.last_modified_by, e.last_modified_at, e.removed_at,
+       COALESCE(iv.created_at::text, ''), COALESCE(iv.actor, ''), COALESCE(iv.actor_email, ''),
+       COALESCE(mv.created_at::text, ''), COALESCE(mv.actor, ''), COALESCE(mv.actor_email, '')
+FROM atlantis.entity_lineage e
+LEFT JOIN atlantis.schema_versions iv ON iv.version = e.introduced_at
+LEFT JOIN atlantis.schema_versions mv ON mv.version = e.last_modified_at
+WHERE e.entity_id = $1
+ORDER BY e.field_name`, req.GetEntityId())
 	if err != nil {
 		return nil, fmt.Errorf("query entity_lineage: %w", err)
 	}
@@ -271,9 +271,13 @@ ORDER BY field_name`, req.GetEntityId())
 	for rows.Next() {
 		var e EntityLineageEntry
 		if err := rows.Scan(&e.EntityID, &e.FieldName, &e.IntroducedBy, &e.IntroducedAt,
-			&e.LastModifiedBy, &e.LastModifiedAt, &e.RemovedAt); err != nil {
+			&e.LastModifiedBy, &e.LastModifiedAt, &e.RemovedAt,
+			&e.Introduced.At, &e.Introduced.Actor, &e.Introduced.ActorEmail,
+			&e.LastModified.At, &e.LastModified.Actor, &e.LastModified.ActorEmail); err != nil {
 			return nil, err
 		}
+		e.Introduced.Caller, e.Introduced.Version = e.IntroducedBy, e.IntroducedAt
+		e.LastModified.Caller, e.LastModified.Version = e.LastModifiedBy, e.LastModifiedAt
 		entries = append(entries, e)
 	}
 	if err := rows.Err(); err != nil {
@@ -286,11 +290,24 @@ ORDER BY field_name`, req.GetEntityId())
 // GetEntityOwnersRequest asks for the entity-to-caller map.
 type GetEntityOwnersRequest struct{}
 
+// Blame is who and when for one lineage event: the verified caller, and the
+// human recorded beside it.
+type Blame struct {
+	Caller     string `json:"caller"`
+	Version    int64  `json:"version"`
+	At         string `json:"at"`
+	Actor      string `json:"actor"`
+	ActorEmail string `json:"actor_email"`
+}
+
 type EntityOwnerEntry struct {
 	EntityID     string `json:"entity_id"`
 	IntroducedBy string `json:"introduced_by"`
 	IntroducedAt int64  `json:"introduced_at"`
 	FieldCount   int    `json:"field_count"`
+
+	Introduced   Blame `json:"introduced"`
+	LastModified Blame `json:"last_modified"`
 }
 
 type GetEntityOwnersResponse struct {
@@ -302,9 +319,15 @@ func (s *Service) GetEntityOwners(ctx context.Context, _ *adminpb.GetEntityOwner
 	if s.pool == nil {
 		return &adminpb.GetEntityOwnersResponse{}, nil
 	}
+	// LEFT on both version joins. A lineage row whose version predates the
+	// actor columns still has to list its entity; an inner join would drop the
+	// table from the schema page because nobody was recorded against it.
 	rows, err := s.pool.Query(ctx, `
 SELECT e.entity_id, e.introduced_by, e.introduced_at,
-       COALESCE(f.cnt, 0) AS field_count
+       COALESCE(f.cnt, 0) AS field_count,
+       e.last_modified_by, e.last_modified_at,
+       COALESCE(iv.created_at::text, ''), COALESCE(iv.actor, ''), COALESCE(iv.actor_email, ''),
+       COALESCE(mv.created_at::text, ''), COALESCE(mv.actor, ''), COALESCE(mv.actor_email, '')
 FROM atlantis.entity_lineage e
 LEFT JOIN (
     SELECT entity_id, COUNT(*) AS cnt
@@ -312,6 +335,8 @@ LEFT JOIN (
     WHERE field_name != '' AND removed_at IS NULL
     GROUP BY entity_id
 ) f ON f.entity_id = e.entity_id
+LEFT JOIN atlantis.schema_versions iv ON iv.version = e.introduced_at
+LEFT JOIN atlantis.schema_versions mv ON mv.version = e.last_modified_at
 WHERE e.field_name = '' AND e.removed_at IS NULL
 ORDER BY e.entity_id`)
 	if err != nil {
@@ -322,9 +347,16 @@ ORDER BY e.entity_id`)
 	var owners []EntityOwnerEntry
 	for rows.Next() {
 		var o EntityOwnerEntry
-		if err := rows.Scan(&o.EntityID, &o.IntroducedBy, &o.IntroducedAt, &o.FieldCount); err != nil {
+		var lastBy string
+		var lastAt int64
+		if err := rows.Scan(&o.EntityID, &o.IntroducedBy, &o.IntroducedAt, &o.FieldCount,
+			&lastBy, &lastAt,
+			&o.Introduced.At, &o.Introduced.Actor, &o.Introduced.ActorEmail,
+			&o.LastModified.At, &o.LastModified.Actor, &o.LastModified.ActorEmail); err != nil {
 			return nil, err
 		}
+		o.Introduced.Caller, o.Introduced.Version = o.IntroducedBy, o.IntroducedAt
+		o.LastModified.Caller, o.LastModified.Version = lastBy, lastAt
 		owners = append(owners, o)
 	}
 	if err := rows.Err(); err != nil {
@@ -528,6 +560,7 @@ func schemaVersionSummariesToPB(in []SchemaVersionSummary) []*adminpb.SchemaVers
 			Version: v.Version, Caller: v.Caller, PlanClass: v.PlanClass,
 			EventType: v.EventType, ChangeCount: int32(v.ChangeCount),
 			CreatedAt: v.CreatedAt, IrHash: v.IRHash,
+			Actor: v.Actor, ActorEmail: v.ActorEmail,
 		})
 	}
 	return out
@@ -558,6 +591,8 @@ func lineageToPB(in []EntityLineageEntry) []*adminpb.EntityLineageEntry {
 			EntityId: e.EntityID, FieldName: e.FieldName,
 			IntroducedBy: e.IntroducedBy, IntroducedAt: e.IntroducedAt,
 			LastModifiedBy: e.LastModifiedBy, LastModifiedAt: e.LastModifiedAt,
+			Introduced:   blameToPB(e.Introduced),
+			LastModified: blameToPB(e.LastModified),
 		}
 		if e.RemovedAt != nil {
 			ra := *e.RemovedAt
@@ -577,7 +612,23 @@ func ownersToPB(in []EntityOwnerEntry) []*adminpb.EntityOwnerEntry {
 		out = append(out, &adminpb.EntityOwnerEntry{
 			EntityId: o.EntityID, IntroducedBy: o.IntroducedBy,
 			IntroducedAt: o.IntroducedAt, FieldCount: int32(o.FieldCount),
+			Introduced:   blameToPB(o.Introduced),
+			LastModified: blameToPB(o.LastModified),
 		})
 	}
 	return out
+}
+
+// blameToPB always returns a message. protojson emits zero-valued scalars
+// under EmitDefaultValues but leaves a nil message absent, so returning nil
+// here would make "nobody recorded" indistinguishable from "field missing" on
+// the far side.
+func blameToPB(b Blame) *adminpb.Blame {
+	return &adminpb.Blame{
+		Caller:     b.Caller,
+		Version:    b.Version,
+		At:         b.At,
+		Actor:      b.Actor,
+		ActorEmail: b.ActorEmail,
+	}
 }

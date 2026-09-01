@@ -443,6 +443,9 @@ message ApplyMigrationRequest {
   // CAS token from PlanSchemaResponse. Empty skips the check, which is what
   // the first apply into an empty database sends.
   string checkpoint_hash = 4;
+  // Provenance, not authorization. See Blame.
+  string actor = 5;
+  string actor_email = 6;
 }
 
 message ApplyMigrationResponse {
@@ -670,6 +673,7 @@ message AdoptBaselineRequest {
   repeated SubmittedFile files = 3;
   bool allow_drift = 4;
   string adopted_by = 5;
+  string adopted_by_email = 6;
 }
 
 message AdoptBaselineResponse {
@@ -795,6 +799,9 @@ message BeginBackfillPlanRequest {
   string caller = 1;
   string plan_id = 2;
   repeated SubmittedFile files = 3;
+  // Provenance, not authorization. See Blame.
+  string actor = 4;
+  string actor_email = 5;
 }
 
 message BeginBackfillPlanResponse {
@@ -975,6 +982,8 @@ message GetSchemaHistoryRequest {
   int32 limit = 1;
   int64 before = 2;
   string caller = 3;
+  // Only versions whose diff touches this entity.
+  string entity_id = 4;
 }
 
 message SchemaVersionSummary {
@@ -986,6 +995,8 @@ message SchemaVersionSummary {
   string created_at = 6;
   // sha256 of the IR snapshot; a git-style content address.
   string ir_hash = 7;
+  string actor = 8;
+  string actor_email = 9;
 }
 
 message GetSchemaHistoryResponse {
@@ -1038,6 +1049,8 @@ message EntityLineageEntry {
   int64 last_modified_at = 6;
   // Absent while the field is still present in the schema.
   optional int64 removed_at = 7;
+  Blame introduced = 8;
+  Blame last_modified = 9;
 }
 
 message GetEntityLineageResponse {
@@ -1046,11 +1059,29 @@ message GetEntityLineageResponse {
 
 message GetEntityOwnersRequest {}
 
+// Blame is who and when, for one lineage event.
+//
+// caller is the mTLS CN the change arrived under, which this server verified.
+// actor is the human named beside it, and nothing verifies that: the server
+// authenticates callers, not people. An empty actor means no human was
+// recorded, which is the honest answer for an unattended apply.
+message Blame {
+  string caller = 1;
+  int64 version = 2;
+  // RFC3339, from that version's created_at.
+  string at = 3;
+  string actor = 4;
+  string actor_email = 5;
+}
+
 message EntityOwnerEntry {
   string entity_id = 1;
+  // Superseded by introduced. Kept because tide and tidectl read them.
   string introduced_by = 2;
   int64 introduced_at = 3;
   int32 field_count = 4;
+  Blame introduced = 5;
+  Blame last_modified = 6;
 }
 
 message GetEntityOwnersResponse {
@@ -1060,6 +1091,8 @@ message GetEntityOwnersResponse {
 message RollbackSchemaRequest {
   int64 to_version = 1;
   string caller = 2;
+  string actor = 3;
+  string actor_email = 4;
 }
 
 message RollbackSchemaResponse {

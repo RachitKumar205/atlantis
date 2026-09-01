@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
@@ -230,5 +231,107 @@ func TestAdoptRecordsTheActorBesideTheCaller(t *testing.T) {
 	}
 	if actor != "console:usr_lineage" {
 		t.Errorf("actor = %q, want \"console:usr_lineage\"", actor)
+	}
+}
+
+// TestEntityOwnersCarriesBlame covers the read side of the version join.
+//
+// The lineage row names a version; the version is where the human and the
+// timestamp live. Without the join the console has an entity and a caller and
+// no answer to when, which is half of what blame is.
+func TestEntityOwnersCarriesBlame(t *testing.T) {
+	svc := depScopeService(t)
+	createLineageTables(t, svc)
+	adoptTwoCallers(t, svc, false, "")
+
+	resp, err := svc.GetEntityOwners(context.Background(), &adminpb.GetEntityOwnersRequest{})
+	if err != nil {
+		t.Fatalf("GetEntityOwners: %v", err)
+	}
+
+	var found bool
+	for _, o := range resp.GetOwners() {
+		if o.GetEntityId() != "lin.Doc" {
+			continue
+		}
+		found = true
+		b := o.GetIntroduced()
+		if b == nil {
+			t.Fatal("introduced blame is nil; protojson omits a nil message " +
+				"entirely, so the console cannot tell it from a missing field")
+		}
+		if b.GetCaller() != "lin" {
+			t.Errorf("introduced.caller = %q, want \"lin\"", b.GetCaller())
+		}
+		if b.GetAt() == "" {
+			t.Error("introduced.at is empty; the version join returned no timestamp")
+		}
+		if b.GetActor() != "console:usr_lineage" {
+			t.Errorf("introduced.actor = %q, want the adopting human", b.GetActor())
+		}
+		if o.GetLastModified() == nil || o.GetLastModified().GetAt() == "" {
+			t.Error("last_modified blame is empty; the query did not project " +
+				"last_modified_by/at at all before this")
+		}
+	}
+	if !found {
+		t.Fatal("lin.Doc absent from GetEntityOwners")
+	}
+}
+
+// TestGetSchemaHistoryFiltersByEntity covers the jsonpath.
+//
+// The filter walks every bucket rather than naming them. A Destructive change
+// is the case that catches a filter written against a hand-listed set, because
+// it is the bucket added last and the one such lists have missed before.
+func TestGetSchemaHistoryFiltersByEntity(t *testing.T) {
+	svc := depScopeService(t)
+	ctx := context.Background()
+
+	// Two versions, each naming a different entity, and each in a bucket a
+	// hand-written filter would have to remember.
+	for _, tc := range []struct{ entity, bucket string }{
+		{"filt.Kept", "additive"},
+		{"filt.Dropped", "destructive"},
+	} {
+		diff := fmt.Sprintf(`{"%s":[{"kind":1,"class":1,"entity_id":%q}]}`, tc.bucket, tc.entity)
+		if _, err := svc.pool.Exec(ctx, `
+INSERT INTO atlantis.schema_versions
+    (caller, plan_class, diff, ir_snapshot, ir_hash, event_type)
+VALUES ('filt', 'additive', $1::jsonb, '{}'::jsonb, 'h', 'apply')`, diff); err != nil {
+			t.Fatalf("seed version for %s: %v", tc.entity, err)
+		}
+	}
+
+	only := func(entityID string) []string {
+		t.Helper()
+		resp, err := svc.GetSchemaHistory(ctx, &adminpb.GetSchemaHistoryRequest{EntityId: entityID})
+		if err != nil {
+			t.Fatalf("GetSchemaHistory(%s): %v", entityID, err)
+		}
+		var callers []string
+		for _, v := range resp.GetVersions() {
+			callers = append(callers, v.GetCaller())
+		}
+		return callers
+	}
+
+	if got := only("filt.Dropped"); len(got) != 1 {
+		t.Errorf("filtering on a destructive change returned %d versions, want 1", len(got))
+	}
+	if got := only("filt.Kept"); len(got) != 1 {
+		t.Errorf("filtering on an additive change returned %d versions, want 1", len(got))
+	}
+	if got := only("filt.Absent"); len(got) != 0 {
+		t.Errorf("filtering on an untouched entity returned %d versions, want 0", len(got))
+	}
+
+	// And unfiltered still returns both, so the predicate is genuinely optional.
+	all, err := svc.GetSchemaHistory(ctx, &adminpb.GetSchemaHistoryRequest{})
+	if err != nil {
+		t.Fatalf("GetSchemaHistory: %v", err)
+	}
+	if len(all.GetVersions()) < 2 {
+		t.Errorf("unfiltered history returned %d versions, want at least 2", len(all.GetVersions()))
 	}
 }
