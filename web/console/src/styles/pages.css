@@ -2,66 +2,76 @@
    pages.css — per-surface styles
    ============================================================================ */
 
-/* ====== SCHEMA BROWSER (3-pane) =========================================== */
-/* Type on this surface uses four sizes and two weights. Rank comes from case,
-   colour and weight; size separates only the four roles in datum.css. */
-.schema { display: grid; grid-template-columns: 208px 272px 1fr; height: 100%; min-height: 0; }
-:root[data-density="compact"] .schema { grid-template-columns: 188px 248px 1fr; }
-.schema__pane { border-inline-end: 1px solid var(--line-soft); display: flex; flex-direction: column; min-height: 0; }
-.schema__pane:last-child { border-inline-end: none; }
-.pane__head { height: 44px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding-inline: 14px; border-block-end: 1px solid var(--line-soft); }
+/* ====== SCHEMA BROWSER ===================================================
+   Two vertical tab rails and a document. Type uses the four sizes in
+   datum.css and two weights; rank comes from case, colour and weight. */
+.schema { display: flex; height: 100%; min-height: 0; align-items: stretch; gap: 0; }
+.schema__rest { display: flex; flex: 1; min-width: 0; min-height: 0; align-items: stretch; }
 
-/* One label style, used by both pane heads and every section label. Uppercase
-   at 600 rather than 500: Manrope has no opsz, so small caps get no automatic
-   weight compensation and 500 reads thin against the data under it. */
+/* rails */
+.rail { display: flex; flex-direction: column; min-height: 0; border-inline-end: 1px solid var(--line-soft); flex-shrink: 0; }
+.rail--ns { inline-size: 208px; }
+.rail--ent { inline-size: 272px; }
+:root[data-density="compact"] .rail--ns { inline-size: 188px; }
+:root[data-density="compact"] .rail--ent { inline-size: 248px; }
+
+.pane__head { height: 44px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding-inline: 14px; border-block-end: 1px solid var(--line-soft); }
+/* Uppercase at 600, not 500: Manrope carries no opsz axis, so small caps get
+   no automatic weight compensation and 500 reads thin over the data. */
 .pane__head h3 {
   font-size: var(--size-label); font-weight: 600; text-transform: uppercase;
   letter-spacing: var(--track-caps); color: var(--ink-2); line-height: 1.3;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.pane__list { overflow: auto; flex: 1; padding: 6px; }
 
-/* A row is a <button>. Both panes are lists of destinations, and a div with an
-   onClick is unreachable by keyboard and announces nothing. */
-.nsrow, .entrow {
-  display: flex; align-items: center; gap: 8px;
-  inline-size: 100%; min-block-size: var(--row-h); padding-inline: 10px;
-  border: 0; background: none; color: inherit; font: inherit; text-align: start;
-  border-radius: var(--radius-sm); position: relative; cursor: pointer;
+/* The scroll sits on a wrapper, not on the tab list. coss puts its indicator
+   at the list's inline start and translates it a pixel further out, which an
+   overflow container on the same element clips away. */
+.rail__scroll { flex: 1; overflow-y: auto; overflow-x: hidden; min-height: 0; padding-block: 6px; }
+/* w-fit and justify-center are for a segmented control of three. A rail is a
+   list of 74 that fills its column and starts at the top. */
+.rail__list { inline-size: 100%; gap: 1px; justify-content: flex-start; align-items: stretch; padding-inline: 6px; }
+/* coss's sliding indicator is positioned from runtime measurements against the
+   list box. Down a scrolling rail of 74 that is a second selection signal
+   beside the row surface, computed where a static rule is exact. */
+.rail__list [data-slot="tab-indicator"] { display: none; }
+
+/* coss gives a tab `grow`, h-8.5 and text-base, and centres it. In a column
+   that `grow` is what spread three tabs down 700px of empty pane. A rail row
+   is a fixed-height destination, so it neither grows nor centres. */
+.railtab {
+  flex: 0 0 auto; position: relative;
+  inline-size: 100%; justify-content: flex-start; gap: 8px;
+  min-block-size: var(--row-h); block-size: var(--row-h); padding-inline: 10px;
+  font-size: var(--size-data); font-weight: 400; border-radius: var(--radius-sm);
 }
-/* Untransitioned. A pointer crossing the pane enters and leaves every row on
-   the way to its target, and a 140ms fade on each leaves a trail still
-   resolving behind the cursor. */
-.nsrow::before, .entrow::before {
+/* The bar sits outside the row surface, in the rail's own padding. */
+.railtab::before {
   content: ""; position: absolute; inset-inline-start: -6px; top: 50%;
   inline-size: 2px; block-size: 18px; background: var(--accent);
   transform: translateY(-50%); opacity: 0; border-radius: 0 1px 1px 0;
 }
-@media (hover: hover) {
-  .nsrow:hover, .entrow:hover { background: var(--canvas-2); }
-  .nsrow:hover::before, .entrow:hover::before { opacity: .5; }
-}
-.nsrow:active, .entrow:active { background: var(--canvas-4); }
-.nsrow:focus-visible, .entrow:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-
-/* Selection reads off aria-current, so what is announced and what is drawn
-   cannot disagree. */
-.nsrow[aria-current="true"], .entrow[aria-current="true"] { background: var(--canvas-3); }
-.nsrow[aria-current="true"]::before, .entrow[aria-current="true"]::before { opacity: 1; }
-/* A namespace and an entity are identifiers, so they stay monospaced and take
-   the tracking Plex Mono needs below 14px. */
-.nsrow__name, .entrow__name {
+.railtab[data-active]::before { opacity: 1; }
+.railtab__name {
   font-family: var(--mono); font-feature-settings: var(--feat-mono);
-  font-size: var(--size-data); letter-spacing: var(--track-mono);
-  color: var(--ink-1); flex: 1; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  letter-spacing: var(--track-mono);
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  text-align: start;
 }
-.nsrow[aria-current="true"] .nsrow__name, .entrow[aria-current="true"] .entrow__name { color: var(--ink-0); font-weight: 500; }
-.entrow__name .ns-mut { color: var(--ink-3); }
+/* coss's underline variant marks the active tab with a 2px bar and a colour
+   step. Down a rail of 74 that is not enough to find the current row without
+   hunting for the bar, so the row takes a surface too. */
+.railtab[data-active] { color: var(--ink-0); background: var(--canvas-3); }
+.railtab[data-active] .railtab__name { font-weight: 500; }
+@media (hover: hover) { .railtab:not([data-active]):hover { background: var(--canvas-2); } }
+/* A table with something in the approval queue. Beside the name, not after the
+   count, so the mark is on the same scan line as what it qualifies. */
+.dot--warn { inline-size: 5px; block-size: 5px; border-radius: 50%; background: var(--warn); flex-shrink: 0; }
 
-/* entity detail */
-.detail { overflow: hidden; flex: 1; display: flex; flex-direction: column; min-height: 0; }
-.detail__head { padding: 20px 28px 0; border-block-end: 1px solid var(--line-soft); flex-shrink: 0; }
+/* detail — a document, capped so a row's last column stays near its first */
+.detail { flex: 1; min-width: 0; min-height: 0; overflow: auto; }
+.detail__doc { max-width: 760px; padding: 26px 32px 56px; }
+.detail__head { position: relative; padding-inline-end: 140px; margin-block-end: 34px; }
 .detail__path {
   font-family: var(--mono); font-feature-settings: var(--feat-mono);
   font-size: var(--size-subject); font-weight: 500; letter-spacing: var(--track-tight);
@@ -69,63 +79,56 @@
 }
 .detail__path .ns { color: var(--ink-3); }
 .detail__path .nm { color: var(--ink-0); }
-.detail__meta { display: flex; align-items: center; gap: 18px; margin-block: 10px 16px; flex-wrap: wrap; }
-.metaitem { display: flex; align-items: baseline; gap: 6px; }
-.metaitem__l {
-  font-size: var(--size-label); text-transform: uppercase;
-  letter-spacing: var(--track-caps); color: var(--ink-2); white-space: nowrap;
-}
-/* Identifiers keep the mono; a count is a number and takes the sans with
-   tabular figures, which is what Outfit and Manrope actually implement. */
-.metaitem__v { font-size: var(--size-data); color: var(--ink-1); white-space: nowrap; }
-.metaitem__v.is-id { font-family: var(--mono); font-feature-settings: var(--feat-mono); letter-spacing: var(--track-mono); }
-.metaitem__v.is-num { font-variant-numeric: tabular-nums; font-feature-settings: var(--feat-sans); }
+/* The shape of the table as a sentence. */
+.detail__facts { margin-block-start: 7px; font-size: var(--size-data); color: var(--ink-2); }
+.detail__facts .sep { margin-inline: 7px; color: var(--ink-4); }
+.detail__facts .mono { font-family: var(--mono); font-feature-settings: var(--feat-mono); letter-spacing: var(--track-mono); color: var(--ink-1); }
+.detail__action { position: absolute; inset-block-start: 0; inset-inline-end: 0; }
 
-/* Sections are vertical tabs, so the pane scrolls inside one panel rather than
-   past every section to reach the last. */
-.detail__body { flex: 1; min-height: 0; padding: 18px 28px 24px; }
-/* coss sets its tab labels text-base sm:text-sm — 16px then 14px. Both sit off
-   the four-step scale, and a tab label is a destination, not a heading. */
-.detail__tabs { flex-shrink: 0; min-inline-size: 128px; }
-.detail__tabs [data-slot="tabs-tab"] {
-  font-size: var(--size-data); font-weight: 500;
-  gap: 8px; justify-content: flex-start; width: 100%;
+/* sections */
+.sec + .sec { margin-block-start: 34px; }
+.sec__label {
+  font-size: var(--size-label); font-weight: 600; text-transform: uppercase;
+  letter-spacing: var(--track-caps); color: var(--ink-2);
+  margin-block-end: 10px; padding-block-end: 8px; border-block-end: 1px solid var(--line-soft);
 }
-.detail__tabs [data-slot="tabs-tab"][data-active] { font-weight: 600; }
-/* The count rides the tab, so it goes quiet until the tab is the active one. */
-.detail__tabs .chip { margin-inline-start: auto; }
-.detail__panel { flex: 1; min-width: 0; overflow: auto; max-width: 780px; }
+.sec__note { font-size: var(--size-data); color: var(--ink-2); line-height: 1.5; max-width: 58ch; text-wrap: pretty; }
+.linkbtn { border: 0; background: none; padding: 0; font: inherit; color: var(--accent); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.linkbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
 
-/* A pending row carries a plan id, an author and one action, and it wraps
-   rather than truncating: the id is what identifies the plan on Approvals. */
 .planrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-block: 8px; border-block-end: 1px solid var(--line-soft); }
 .planrow:last-child { border-block-end: none; }
 .planrow__id { font-family: var(--mono); font-feature-settings: var(--feat-mono); font-size: var(--size-data); letter-spacing: var(--track-mono); color: var(--ink-1); overflow-wrap: anywhere; }
 .planrow__by { font-size: var(--size-data); color: var(--ink-2); }
 
-/* field table — coss Table, with the identifier columns held in mono */
-.ftbl { font-size: var(--size-data); }
+/* field table — the key gutter is column one, so a reader takes the table's
+   skeleton off the left edge in one pass down rather than one per row across */
+.ftbl { inline-size: 100%; font-size: var(--size-data); }
+.ftbl .f-key { inline-size: 20px; padding-inline: 0; text-align: center; }
+.ftbl .mark { font-size: 11px; line-height: 1; }
+.ftbl .mark--pk { color: var(--accent); }
+.ftbl .mark--fk { color: var(--slate); }
 .ftbl .f-name, .ftbl .f-type, .ftbl .f-fk {
   font-family: var(--mono); font-feature-settings: var(--feat-mono);
   letter-spacing: var(--track-mono);
 }
-.ftbl .f-name { color: var(--ink-0); overflow-wrap: anywhere; }
+.ftbl .f-name { color: var(--ink-1); overflow-wrap: anywhere; }
+.ftbl .f-name.is-pk { color: var(--ink-0); font-weight: 500; }
 .ftbl .f-type { color: var(--ink-type); }
-/* Constraints are prose, not identifiers, so they leave the mono. --ink-2 is
-   the token documented as "muted labels"; --ink-3 is the placeholder step and
-   scores 2.5 on --canvas-0. */
-.ftbl .f-flags { color: var(--ink-2); text-align: end; }
-.ftbl .f-pk { color: var(--accent); }
+/* Constraints are prose and sit beside the type, not at the far edge: at full
+   pane width a right-aligned column puts "not null" a thousand pixels from
+   the field it describes. --ink-2 is the muted-label token; --ink-3 is the
+   placeholder step and scores 2.5 on --canvas-0. */
+.ftbl .f-flags { color: var(--ink-2); inline-size: 40%; white-space: normal; }
 .ftbl .f-fk { color: var(--slate); }
-.ftbl .pkmark { margin-inline-start: 5px; }
 
-/* FK references — list variant */
+/* references */
 .fklist { display: flex; flex-direction: column; gap: 1px; }
-/* A button, because it navigates to the entity it names. A row that highlights
+/* A button, because it navigates to the table it names. A row that highlights
    under the pointer and does nothing on click reads as a broken control. */
 .fkrow {
-  display: flex; align-items: center; gap: 10px;
-  inline-size: 100%; min-block-size: 36px; padding-inline: 10px;
+  display: flex; align-items: center; gap: 9px;
+  inline-size: 100%; min-block-size: 34px; padding-inline: 10px;
   border: 0; background: none; text-align: start;
   border-radius: var(--radius-sm); cursor: pointer;
   font-family: var(--mono); font-feature-settings: var(--feat-mono);
@@ -135,12 +138,9 @@
 @media (hover: hover) { .fkrow:enabled:hover { background: var(--canvas-2); } }
 .fkrow:enabled:active { background: var(--canvas-4); }
 .fkrow:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.fkrow__via { color: var(--ink-1); }
 .fkrow__arrow { color: var(--slate); display: inline-flex; flex-shrink: 0; }
-.fkrow__from { color: var(--ink-1); }
 .fkrow__to { color: var(--ink-0); }
-/* "via" is prose and the column name after it is not, but one span cannot be
-   two families; the pair reads as the identifier it ends on. */
-.fkrow__via { color: var(--ink-2); margin-inline-start: auto; }
 
 /* FK references — graph variant */
 .fkgraph { display: none; position: relative; padding: 18px; background: var(--canvas-1); border: 1px solid var(--line-soft); border-radius: var(--radius-lg); min-height: 220px; }

@@ -36,8 +36,6 @@ interface IRIndex { fields?: string[] }
 interface IREntity { name: string; namespace: string; kind?: string; fields: IRField[]; indexes?: IRIndex[] }
 interface IRRoot { version?: number; entities?: IREntity[] }
 
-type Section = 'fields' | 'references' | 'pending'
-
 interface FieldRow {
   name: string
   type: string
@@ -98,6 +96,26 @@ function irToEntities(ir: IRRoot | null, owners: Record<string, string>): Entity
       }))
     return { id, name: e.name, namespace: e.namespace, caller: owners[id] ?? 'unknown', fields, fks }
   }).sort((a, b) => a.id.localeCompare(b.id))
+}
+
+// The header reads as a sentence rather than a row of labelled numbers.
+// "keyed on id" is the table's shape; "KEY 1" is a count of something the
+// reader then has to go and find.
+function fieldCount(e: EntityDecl): string {
+  const n = e.fields.length
+  return `${n} field${n === 1 ? '' : 's'}`
+}
+
+function keyPhrase(e: EntityDecl): string {
+  const keys = e.fields.filter(f => f.pk).map(f => f.name)
+  if (keys.length === 0) return 'no primary key'
+  return `keyed on ${keys.join(', ')}`
+}
+
+function refPhrase(e: EntityDecl): string {
+  const n = e.fks.length
+  if (n === 0) return 'no references'
+  return `${n} reference${n === 1 ? '' : 's'}`
 }
 
 // ── Schema page — design HTML 1:1 ──────────────────────────────────────────
@@ -191,11 +209,6 @@ export function Schema() {
   //
   // Which step it opens at is the difference between the two entry points: an
   // arrival is asked what it wants, and a button press already said.
-  // Which section of the detail pane is showing. Kept across a change of
-  // entity: comparing the references of two entities means switching between
-  // them, and resetting to Fields on each switch undoes the comparison.
-  const [section, setSection] = useState<Section>('fields')
-
   const [onboarding, setOnboarding] = useState<'welcome' | 'connect' | null>(null)
   useEffect(() => {
     if (takeOnboardingPending()) setOnboarding('welcome')
@@ -220,293 +233,179 @@ export function Schema() {
     {onboarding && (
       <OnboardingDialog start={onboarding} onClose={closeOnboarding} />
     )}
-    <div className="schema">
-      {/* ── Namespace pane ── */}
-      <div className="schema__pane">
+    {/* Namespaces and tables are vertical tab rails: each is a mutually
+        exclusive choice that swaps the pane beside it, and Base UI gives the
+        rails arrow-key roving focus.
+
+        One panel per rail, always bound to the current value, rather than one
+        per tab. A panel per tab would mount 97 detail panes to show one. */}
+    <Tabs
+      className="schema"
+      orientation="vertical"
+      value={selectedNS}
+      onValueChange={v => handleSelectNS(String(v))}
+    >
+      <div className="rail rail--ns">
         <div className="pane__head">
           <h3>Namespaces</h3>
           <span className="spacer" />
-          <span className="chip">{namespaces.length}</span>
+          <span className="chip chip--count">{namespaces.length}</span>
         </div>
-        <div className="pane__list">
-          {isLoading ? (
-            <SkeletonRows />
-          ) : (
-            namespaces.map(ns => {
+        <div className="rail__scroll">
+        {isLoading ? (
+          <SkeletonRows />
+        ) : (
+          <TabsList variant="underline" className="rail__list">
+            {namespaces.map(ns => {
               const count = entities.filter(e => e.namespace === ns).length
               return (
-                <button
-                  key={ns}
-                  type="button"
-                  className="nsrow"
-                  aria-current={ns === selectedNS ? 'true' : undefined}
-                  onClick={() => handleSelectNS(ns)}
-                >
-                  <span className="nsrow__name" title={ns}>{ns}</span>
-                  <span className="chip chip--count" title={`${count} ${count === 1 ? 'entity' : 'entities'}`}>
+                <TabsTab key={ns} value={ns} className="railtab">
+                  <span className="railtab__name" title={ns}>{ns}</span>
+                  <span
+                    className="chip chip--count"
+                    title={`${count} ${count === 1 ? 'table' : 'tables'}`}
+                  >
                     {count}
                   </span>
-                </button>
+                </TabsTab>
               )
-            })
-          )}
+            })}
+          </TabsList>
+        )}
         </div>
       </div>
 
-      {/* ── Entity pane ── */}
-      <div className="schema__pane">
-        <div className="pane__head">
-          <h3>{selectedNS || 'Entities'}</h3>
-        </div>
-        <div className="pane__list">
-          {isLoading ? (
-            <SkeletonRows />
-          ) : nsEntities.length === 0 ? (
-            <div className="empty">
-              {/* With no namespaces there is nothing to pick, so the empty
-                  pane names the one action that fills it. */}
-              {namespaces.length === 0 ? (
-                <>
-                  <div className="empty__title">No schema yet</div>
-                  <div className="empty__sub">
-                    Import a database to generate declarations from its tables.
-                  </div>
-                  <button
-                    className="btn btn--brass"
-                    type="button"
-                    onClick={() => setOnboarding('welcome')}
-                  >
-                    <ArrowSquareIn size={14} />
-                    Import a database
-                  </button>
-                </>
-              ) : (
-                <>
-                  <div className="empty__title">No entities</div>
-                  <div className="empty__sub">The {selectedNS} namespace has no entities.</div>
-                </>
-              )}
+      <TabsPanel value={selectedNS} className="schema__rest">
+        <Tabs
+          className="schema__rest"
+          orientation="vertical"
+          value={selectedEntityId}
+          onValueChange={v => handleSelectEntity(String(v))}
+        >
+          <div className="rail rail--ent">
+            <div className="pane__head">
+              <h3>Tables</h3>
             </div>
-          ) : (
-            nsEntities.map(e => (
-              <button
-                key={e.id}
-                type="button"
-                className="entrow"
-                aria-current={e.id === selectedEntityId ? 'true' : undefined}
-                onClick={() => handleSelectEntity(e.id)}
-              >
-                <span className="entrow__name" title={e.name}>{e.name}</span>
-                {/* Without a marker here the strip is only findable by
-                    clicking through every entity in the namespace, which for
-                    the operator asking "is anything waiting on me" is the same
-                    as it not being there. */}
-                {pendingByEntity.has(e.id) && (
-                  <span
-                    className="badge badge--warn"
-                    title="This entity has changes waiting for approval"
-                  >
-                    pending
-                  </span>
+            <div className="rail__scroll">
+            {isLoading ? (
+              <SkeletonRows />
+            ) : nsEntities.length === 0 ? (
+              <div className="empty">
+                {namespaces.length === 0 ? (
+                  <>
+                    <div className="empty__title">No schema yet</div>
+                    <div className="empty__sub">
+                      Import a database to generate declarations from its tables.
+                    </div>
+                    <button
+                      className="btn btn--brass"
+                      type="button"
+                      onClick={() => setOnboarding('welcome')}
+                    >
+                      <ArrowSquareIn size={14} />
+                      Import a database
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <div className="empty__title">No tables</div>
+                    <div className="empty__sub">The {selectedNS} namespace has no tables.</div>
+                  </>
                 )}
-                <span
-                  className="chip chip--count"
-                  title={`${e.fields.length} ${e.fields.length === 1 ? 'field' : 'fields'}`}
-                >
-                  {e.fields.length}
-                </span>
-              </button>
-            ))
-          )}
-        </div>
-      </div>
-
-      {/* ── Detail pane ── */}
-      <div className="schema__pane">
-        {!selectedEntity ? (
-          <div className="empty" style={{ height: '100%' }}>
-            <div className="empty__icon">
-              <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
-                {[8, 14, 20].map(r => (
-                  <circle key={r} cx="20" cy="20" r={r} stroke="var(--ink-3)" strokeWidth="1" opacity={0.4} />
+              </div>
+            ) : (
+              <TabsList variant="underline" className="rail__list">
+                {nsEntities.map(e => (
+                  <TabsTab key={e.id} value={e.id} className="railtab">
+                    <span className="railtab__name" title={e.name}>{e.name}</span>
+                    {/* Without a marker the queue is only findable by clicking
+                        every table in the namespace, which for the operator
+                        asking "is anything waiting on me" is the same as it
+                        not being there. */}
+                    {pendingByEntity.has(e.id) && (
+                      <span className="dot dot--warn" title="Changes waiting for approval" />
+                    )}
+                    <span
+                      className="chip chip--count"
+                      title={`${e.fields.length} ${e.fields.length === 1 ? 'field' : 'fields'}`}
+                    >
+                      {e.fields.length}
+                    </span>
+                  </TabsTab>
                 ))}
-              </svg>
-            </div>
-            <div className="empty__title">No entity selected</div>
-            <div className="empty__sub">
-              Pick an entity to read its fields, owner and foreign-key references.
+              </TabsList>
+            )}
             </div>
           </div>
-        ) : (
-          <div className="detail">
-            <div className="detail__head">
-              <div className="row" style={{ alignItems: 'flex-start' }}>
-                <div>
-                  <div className="detail__path mono">
+
+          <TabsPanel value={selectedEntityId} className="detail">
+            {!selectedEntity ? (
+              <div className="empty" style={{ height: '100%' }}>
+                <div className="empty__icon">
+                  <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+                    {[8, 14, 20].map(r => (
+                      <circle key={r} cx="20" cy="20" r={r} stroke="var(--ink-3)" strokeWidth="1" opacity={0.4} />
+                    ))}
+                  </svg>
+                </div>
+                <div className="empty__title">No table selected</div>
+                <div className="empty__sub">
+                  Pick a table to read its fields and foreign-key references.
+                </div>
+              </div>
+            ) : (
+              <div className="detail__doc">
+                <header className="detail__head">
+                  <h2 className="detail__path">
                     <span className="ns">{selectedEntity.namespace}.</span>
                     <span className="nm">{selectedEntity.name}</span>
-                  </div>
-                  <div className="detail__meta">
-                    <div className="metaitem">
-                      <span className="metaitem__l">owner</span>
-                      <span className="metaitem__v is-id">{selectedEntity.caller}</span>
-                    </div>
-                    <div className="metaitem">
-                      <span className="metaitem__l">fields</span>
-                      <span className="metaitem__v is-num">{selectedEntity.fields.length}</span>
-                    </div>
-                    <div className="metaitem">
-                      <span className="metaitem__l">references</span>
-                      <span className="metaitem__v is-num">{selectedEntity.fks.length}</span>
-                    </div>
-                  </div>
-                </div>
-                <div className="spacer" />
-                {/* Phase 2 contextual entry: jump straight to /sandbox
-                    with this entity focused. /sandbox auto-boots a sim
-                    sandbox via ?boot=sim when the user has none, and
-                    pre-fills the Inspect tab via ?focus. */}
-                <button
-                  className="btn btn--ghost"
-                  onClick={() => navigate({
-                    to: '/sandbox',
-                    search: { focus: `${selectedEntity.namespace}.${selectedEntity.name}`, boot: 'sim' },
-                  })}
-                  title="Open this entity in a sandbox — sub-millisecond boot, fully isolated."
-                >
-                  <Cube size={14} />
-                  <span>Try in sandbox</span>
-                </button>
-              </div>
-            </div>
+                  </h2>
+                  <p className="detail__facts">
+                    <span>{fieldCount(selectedEntity)}</span>
+                    <span className="sep">·</span>
+                    <span>{keyPhrase(selectedEntity)}</span>
+                    <span className="sep">·</span>
+                    <span>{refPhrase(selectedEntity)}</span>
+                    <span className="sep">·</span>
+                    <span>owned by <span className="mono">{selectedEntity.caller}</span></span>
+                  </p>
+                  <button
+                    className="btn btn--ghost detail__action"
+                    onClick={() => navigate({
+                      to: '/sandbox',
+                      search: { focus: `${selectedEntity.namespace}.${selectedEntity.name}`, boot: 'sim' },
+                    })}
+                    title="Open this table in a sandbox — sub-millisecond boot, fully isolated."
+                  >
+                    <Cube size={14} />
+                    <span>Try in sandbox</span>
+                  </button>
+                </header>
 
-            {/* Sections are vertical tabs. The pane held four stacked
-                sections, so the references on a wide entity sat below a
-                60-row field table and were reached by scrolling past it. */}
-            <div className="detail__body">
-              <Tabs
-                className="h-full gap-6"
-                orientation="vertical"
-                value={section}
-                onValueChange={v => setSection(String(v) as Section)}
-              >
-                <TabsList variant="underline" size="sm" className="detail__tabs">
-                  <TabsTab value="fields">
-                    Fields
-                    <span className="chip chip--count">{selectedEntity.fields.length}</span>
-                  </TabsTab>
-                  <TabsTab value="references">
-                    References
-                    <span className="chip chip--count">{selectedEntity.fks.length}</span>
-                  </TabsTab>
-                  <TabsTab value="pending">
-                    Pending
-                    {pendingUnavailable
-                      ? <span className="chip chip--count">?</span>
-                      : pendingHere.length > 0 && (
-                          <span className="badge badge--warn">{pendingHere.length}</span>
-                        )}
-                  </TabsTab>
-                </TabsList>
-
-                <TabsPanel value="fields" className="detail__panel">
-                  <Table className="ftbl">
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Field</TableHead>
-                        <TableHead>Type</TableHead>
-                        <TableHead className="text-end">Constraints</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {selectedEntity.fields.map(f => (
-                        <TableRow key={f.name}>
-                          <TableCell className={`f-name ${f.pk ? 'f-pk' : ''}`}>
-                            {f.name}
-                            {f.pk && <span className="pkmark" aria-hidden="true">◆</span>}
-                          </TableCell>
-                          <TableCell className="f-type">{f.type}</TableCell>
-                          <TableCell className="f-flags">
-                            {f.flags}
-                            {f.flags && f.ref ? ', ' : ''}
-                            {f.ref && <span className="f-fk">→ {f.ref}</span>}
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </TabsPanel>
-
-                <TabsPanel value="references" className="detail__panel">
-                  {selectedEntity.fks.length === 0 ? (
-                    <div className="empty">
-                      <div className="empty__title">No foreign keys</div>
-                      <div className="empty__sub">
-                        No field on {selectedEntity.name} references another entity.
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="fklist">
-                      {selectedEntity.fks.map((f, i) => {
-                        // A target outside the loaded schema leaves the row inert
-                        // rather than navigating to a selection that renders empty.
-                        const target = entities.find(x => x.id === f.to)
-                        return (
-                          <button
-                            key={i}
-                            type="button"
-                            className="fkrow"
-                            disabled={!target}
-                            title={target ? `Open ${f.to}` : `${f.to} is not in this schema`}
-                            onClick={() => target && navigate({
-                              to: '/schema',
-                              search: { namespace: target.namespace, entity: target.id },
-                            })}
-                          >
-                            <span className="fkrow__arrow"><LinkIcon size={14} /></span>
-                            <span className="fkrow__from">{f.from}</span>
-                            <span className="fkrow__arrow">→</span>
-                            <span className="fkrow__to">{f.to}</span>
-                            <span className="fkrow__via">via {f.via}</span>
-                          </button>
-                        )
-                      })}
-                    </div>
-                  )}
-                </TabsPanel>
-
-                <TabsPanel value="pending" className="detail__panel">
-                  {pendingUnavailable ? (
-                    // Not silently empty. "No pending changes" and "could not ask"
-                    // are different answers, and rendering the second as the first
-                    // is how somebody concludes a table is quiet while a
-                    // destructive plan sits in the queue against it.
-                    <div className="empty">
-                      <div className="empty__title">Approval queue unavailable</div>
-                      <div className="empty__sub">
-                        Anything in flight for this entity is not shown here. Open
-                        Approvals to check.
-                      </div>
-                      <button className="btn btn--ghost" type="button" onClick={() => navigate({ to: '/approvals' })}>
-                        <ShieldChevron size={14} />
-                        <span>Open Approvals</span>
-                      </button>
-                    </div>
-                  ) : pendingHere.length === 0 ? (
-                    <div className="empty">
-                      <div className="empty__title">Nothing waiting</div>
-                      <div className="empty__sub">
-                        No change to {selectedEntity.name} is waiting for approval.
-                      </div>
-                    </div>
-                  ) : (
-                    pendingHere.map(p => (
+                {/* Pending sits above Fields: an operator reading a column list
+                    needs to know it is about to change before they read it. */}
+                {pendingUnavailable ? (
+                  // Not silently empty. "Nothing pending" and "could not ask"
+                  // are different answers, and rendering the second as the
+                  // first is how somebody concludes a table is quiet while a
+                  // destructive plan sits in the queue against it.
+                  <section className="sec">
+                    <h3 className="sec__label">Pending changes</h3>
+                    <p className="sec__note">
+                      The approval queue did not load, so anything in flight for this
+                      table is not shown. <button className="linkbtn" type="button" onClick={() => navigate({ to: '/approvals' })}>Open Approvals</button> to check.
+                    </p>
+                  </section>
+                ) : pendingHere.length > 0 && (
+                  <section className="sec">
+                    <h3 className="sec__label">Pending changes</h3>
+                    {pendingHere.map(p => (
                       <div key={p.plan_id} className="planrow">
                         {/* The PLAN's class, not a per-entity one. A plan is the
                             unit of approval, so its class is the rule that
-                            governs — inventing a narrower per-entity class here
-                            would show a gentler badge than the thing an approver
-                            is actually signing off. */}
+                            governs — a narrower per-entity class here would
+                            show a gentler badge than the thing an approver is
+                            actually signing off. */}
                         <span className={`badge badge--${planClassBadge(planClassLabel(p.change_class))}`}>
                           {planClassLabel(p.change_class)}
                         </span>
@@ -527,15 +426,84 @@ export function Schema() {
                           <span>Review</span>
                         </button>
                       </div>
-                    ))
+                    ))}
+                  </section>
+                )}
+
+                <section className="sec">
+                  <h3 className="sec__label">Fields</h3>
+                  {/* The key gutter is the first column: a primary key and a
+                      foreign key are what a reader scans a schema for, and
+                      reading them off the left edge is one pass down the
+                      table rather than one per row across it. */}
+                  <Table className="ftbl">
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="f-key"><span className="sr-only">Key</span></TableHead>
+                        <TableHead>Field</TableHead>
+                        <TableHead>Type</TableHead>
+                        <TableHead>Constraints</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {selectedEntity.fields.map(f => (
+                        <TableRow key={f.name}>
+                          <TableCell className="f-key">
+                            {f.pk && <span className="mark mark--pk" title="Primary key">◆</span>}
+                            {!f.pk && f.ref && <span className="mark mark--fk" title={`References ${f.ref}`}>→</span>}
+                          </TableCell>
+                          <TableCell className={`f-name ${f.pk ? 'is-pk' : ''}`}>{f.name}</TableCell>
+                          <TableCell className="f-type">{f.type}</TableCell>
+                          <TableCell className="f-flags">
+                            {f.flags}
+                            {f.flags && f.ref ? ' · ' : ''}
+                            {f.ref && <span className="f-fk">{f.ref}</span>}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </section>
+
+                <section className="sec">
+                  <h3 className="sec__label">References</h3>
+                  {selectedEntity.fks.length === 0 ? (
+                    <p className="sec__note">
+                      No field on {selectedEntity.name} points at another table.
+                    </p>
+                  ) : (
+                    <div className="fklist">
+                      {selectedEntity.fks.map((f, i) => {
+                        // A target outside the loaded schema leaves the row inert
+                        // rather than navigating to a selection that renders empty.
+                        const target = entities.find(x => x.id === f.to)
+                        return (
+                          <button
+                            key={i}
+                            type="button"
+                            className="fkrow"
+                            disabled={!target}
+                            title={target ? `Open ${f.to}` : `${f.to} is not in this schema`}
+                            onClick={() => target && navigate({
+                              to: '/schema',
+                              search: { namespace: target.namespace, entity: target.id },
+                            })}
+                          >
+                            <span className="fkrow__via">{f.via}</span>
+                            <span className="fkrow__arrow"><LinkIcon size={13} /></span>
+                            <span className="fkrow__to">{f.to}</span>
+                          </button>
+                        )
+                      })}
+                    </div>
                   )}
-                </TabsPanel>
-              </Tabs>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
+                </section>
+              </div>
+            )}
+          </TabsPanel>
+        </Tabs>
+      </TabsPanel>
+    </Tabs>
     </PageShell>
   )
 }
