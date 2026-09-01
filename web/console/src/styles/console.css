@@ -279,10 +279,11 @@ a { color: inherit; text-decoration: none; }
   color: var(--ink-2);
   position: relative;
   font-size: 12.5px; font-weight: 500;
-  /* The three properties coss names, and only those. */
+  /* The three properties coss names, plus the border the hover draws. */
   transition:
     color var(--fast) var(--ease),
     background-color var(--fast) var(--ease),
+    border-color var(--fast) var(--ease),
     box-shadow var(--fast) var(--ease);
 }
 /* Coloured, not grey. --icon-nav is the accent's hue held a step back, so the
@@ -318,6 +319,10 @@ a { color: inherit; text-decoration: none; }
    Hover only tints — lifting an inactive tab would give two raised items. */
 @media (hover: hover) {
   .rail-btn:hover { color: var(--ink-0); background: color-mix(in srgb, var(--ink-0) 4%, transparent); }
+  /* An edge on the tint, not a lift. The border sits on the transparent one
+     the rest state already reserves, so nothing reflows, and it is off the
+     current item, whose drop already draws it an edge. */
+  .rail-btn:not(.is-active):hover { border-color: var(--line-soft); }
   /* Hover shows the colour the icon will hold once the tab is current. */
   .rail-btn:hover svg { color: var(--accent); }
 }
