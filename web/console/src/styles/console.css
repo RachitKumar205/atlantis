@@ -66,10 +66,18 @@ a { color: inherit; text-decoration: none; }
 /* :has() is well-supported across modern browsers. When the rail is
    hovered anywhere, the CSS variable swaps and every dependent rule
    (rail width, grid column, label opacity, justify-content) follows. */
-/* 400ms to open, 180ms to close. The close grace is shorter than NN/g's 0.5s
-   because that number covers travel from a trigger to a separate panel, and
-   here the trigger is the panel — leaving it means leaving it. */
-.app:has(.rail:hover) { --rail-cur: var(--rail-w-expanded); --rail-delay: 400ms; }
+/* 250ms to open, 180ms to close.
+
+   The gate only has to outlast a crossing: a pointer covers the 56px rail in
+   45-70ms at a normal 800-1200px/s, so 250ms clears it about fourfold. That
+   is under NN/g's 0.3-0.5s for a settled cursor, and the difference is what a
+   false positive costs — that figure assumes revealing hidden content
+   disturbs the page, and this rail draws over it without moving anything.
+
+   The close grace is shorter than NN/g's 0.5s because that number covers
+   travel from a trigger to a separate panel, and here the trigger is the
+   panel: leaving it means leaving it. */
+.app:has(.rail:hover) { --rail-cur: var(--rail-w-expanded); --rail-delay: 250ms; }
 
 /* The gate is a decision, not motion, so it survives; the sweep does not. */
 @media (prefers-reduced-motion: reduce) {
