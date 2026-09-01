@@ -260,24 +260,26 @@ a { color: inherit; text-decoration: none; }
   display: flex;
   flex-direction: column;
   gap: 2px;
-  /* 1px of border plus 1px of padding, where the padding alone was 2. The
-     rail's invariant is that the logo, every nav icon and the role badge share
-     one x, and the trough contributes its inset to that sum either way. */
-  padding: 1px;
+  /* 5px of inset: 1 border + 4 padding. The rail's invariant is that the logo,
+     every nav icon and the role badge share one x, so .rail-btn pays the 3 back
+     out of its own padding — 6 rail + 5 trough + 8 button + 9 half-icon = 28. */
+  padding: 4px;
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--ink-0) 4%, transparent);
+  /* Inset, because the trough sits below the rail rather than on it: its fill
+     is --canvas-1 darkened, and a drop would lift a well. */
+  box-shadow: inset 0 1px 2px 0 var(--edge-lo);
 }
 .rail__spacer { flex: 1; }
 
 .rail-btn {
   display: flex; align-items: center;
   width: 100%; height: 36px;
-  /* 11 + 18/2 = 20; +6 rail pad +2 trough pad = 28 (rail centre) ✓
-     Was 13 before the nav gained a trough. The rail's invariant is that the
-     logo, every nav icon and the role badge share one x, and a trough pushes
-     its own padding into that sum. */
-  padding: 0 11px;
+  /* 8 + 18/2 = 17; +6 rail pad +5 trough inset = 28 (rail centre) ✓
+     The rail's invariant is that the logo, every nav icon and the role badge
+     share one x, and the trough pushes its border and padding into that sum. */
+  padding: 0 8px;
   border-radius: var(--radius);
   border: 1px solid transparent;
   color: var(--ink-2);
