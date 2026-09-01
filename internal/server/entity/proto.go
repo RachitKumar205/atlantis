@@ -19,6 +19,16 @@ import (
 //
 // Returns the file descriptor containing all messages and services for this entity.
 func buildProtoDescriptors(e *dsl.Entity) (protoreflect.FileDescriptor, error) {
+	// A field left at 0 collides with every other field left at 0, and
+	// protodesc reports that as "conflicting fields" naming two columns that
+	// do not conflict. The fault is a checkpoint written without
+	// AssignProtoNumbers, so it is named here as that.
+	for i := range e.Fields {
+		if e.Fields[i].ProtoNumber == 0 {
+			return nil, fmt.Errorf("field %q has no proto number: this checkpoint was written without AssignProtoNumbers", e.Fields[i].Name)
+		}
+	}
+
 	ns := goNamespace(e.Namespace)
 	pkg := fmt.Sprintf("atlantis.%s.v1", ns)
 	fileName := fmt.Sprintf("atlantis/%s/v1/%s_dynamic.proto", ns, schema.SnakeCase(e.Name))

@@ -1395,6 +1395,20 @@ type versionMeta struct {
 }
 
 func (s *Service) persistCheckpoint(ctx context.Context, tx pgx.Tx, ir *dsl.IR, meta versionMeta) (int64, error) {
+	// Every IR reaching the checkpoint is numbered here rather than by its
+	// caller. adopt numbers the declaration and persists the introspection,
+	// which arrives with every field at 0; fields sharing a number build no
+	// descriptor, and a server loading that checkpoint serves no entity.
+	//
+	// prior is the row the upsert below replaces, which is the IR the other
+	// callers already number against — so this repeats their result rather
+	// than changing it.
+	prior, err := s.loadCheckpointTx(ctx, tx)
+	if err != nil {
+		return 0, fmt.Errorf("load prior checkpoint: %w", err)
+	}
+	codegen.AssignProtoNumbers(prior, ir)
+
 	raw, err := ir.EncodeJSON()
 	if err != nil {
 		return 0, err
