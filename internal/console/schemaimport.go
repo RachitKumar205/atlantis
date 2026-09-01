@@ -375,6 +375,7 @@ func (s *Server) handleApplyImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u := r.Context().Value(ctxUser).(*User)
+	actor, actorEmail := u.Actor()
 	atl := s.orgATL(w, r)
 	if atl == nil {
 		return
@@ -384,9 +385,10 @@ func (s *Server) handleApplyImport(w http.ResponseWriter, r *http.Request) {
 	// baselining a schema that does not match makes every later plan compare
 	// against a checkpoint describing a database nobody has.
 	resp, err := atl.AdoptBaseline(r.Context(), &adminpb.AdoptBaselineRequest{
-		Caller:    consoleCaller,
-		Files:     importFiles(ents),
-		AdoptedBy: u.Subject,
+		Caller:         consoleCaller,
+		Files:          importFiles(ents),
+		AdoptedBy:      actor,
+		AdoptedByEmail: actorEmail,
 	})
 	s.proxyProto(w, "AdoptBaseline", resp, err)
 }

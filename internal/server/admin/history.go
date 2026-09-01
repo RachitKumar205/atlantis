@@ -441,13 +441,15 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.GetToV
 
 	parentVer := req.GetToVersion()
 	version, err := s.persistCheckpoint(ctx, tx, targetIR, versionMeta{
-		Caller:    req.GetCaller(),
-		PlanClass: d.HighestClass().String(),
-		Diff:      d,
-		UpSQL:     scripts.Up,
-		DownSQL:   scripts.Down,
-		EventType: "rollback",
-		ParentVer: &parentVer,
+		Caller:     req.GetCaller(),
+		PlanClass:  d.HighestClass().String(),
+		Diff:       d,
+		UpSQL:      scripts.Up,
+		DownSQL:    scripts.Down,
+		EventType:  "rollback",
+		ParentVer:  &parentVer,
+		Actor:      req.GetActor(),
+		ActorEmail: req.GetActorEmail(),
 	})
 	if err != nil {
 		return nil, err

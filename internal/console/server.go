@@ -1493,23 +1493,25 @@ func (s *Server) handleRollbackSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// req.Caller on the admin RPC is the actor identity recorded in
-	// schema_versions.caller for audit — not a filter (rollback always
-	// applies globally). Auto-fill from the logged-in operator's email
-	// so the user doesn't have to type their own identity and the audit
-	// row distinguishes operator-driven rollbacks from caller-driven
-	// applies on inspection. Prefixed with "console:" so future
-	// tooling can grep operator events apart from caller events.
+	// The caller is this console, which is what the org server verified on
+	// the connection. The person goes in the actor pair beside it, where a
+	// value the server cannot authenticate belongs.
+	//
+	// A rollback is operator-driven and an apply is caller-driven, and both
+	// still read apart on inspection — by actor now rather than by a person's
+	// address wearing a caller's column.
 	u := r.Context().Value(ctxUser).(*User)
-	caller := "console:" + u.Email
+	actor, actorEmail := u.Actor()
 
 	atl := s.orgATL(w, r)
 	if atl == nil {
 		return
 	}
 	resp, err := atl.RollbackSchema(r.Context(), &adminpb.RollbackSchemaRequest{
-		ToVersion: body.ToVersion,
-		Caller:    caller,
+		ToVersion:  body.ToVersion,
+		Caller:     consoleCaller,
+		Actor:      actor,
+		ActorEmail: actorEmail,
 	})
 	if err != nil {
 		s.log.Error("RollbackSchema", "to_version", body.ToVersion, "err", err)
@@ -1519,7 +1521,7 @@ func (s *Server) handleRollbackSchema(w http.ResponseWriter, r *http.Request) {
 
 	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "rollback_schema", map[string]any{
 		"to_version": body.ToVersion,
-		"caller":     caller,
+		"actor":      actor,
 	})
 
 	s.proxyProto(w, "admin", resp, nil)

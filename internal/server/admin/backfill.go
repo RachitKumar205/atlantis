@@ -405,12 +405,14 @@ VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
 	}
 
 	version, err := s.persistCheckpoint(ctx, tx, newIR, versionMeta{
-		Caller:    req.GetCaller(),
-		PlanClass: backfillDiff.HighestClass().String(),
-		Diff:      backfillDiff,
-		UpSQL:     scripts.PreBackfillUp,
-		PlanID:    req.GetPlanId(),
-		EventType: "apply",
+		Caller:     req.GetCaller(),
+		PlanClass:  backfillDiff.HighestClass().String(),
+		Diff:       backfillDiff,
+		UpSQL:      scripts.PreBackfillUp,
+		PlanID:     req.GetPlanId(),
+		EventType:  "apply",
+		Actor:      req.GetActor(),
+		ActorEmail: req.GetActorEmail(),
 	})
 	if err != nil {
 		return nil, err

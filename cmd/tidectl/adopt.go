@@ -80,6 +80,10 @@ func cmdAdopt(args []string) int {
 	if u, err := user.Current(); err == nil && u.Username != "" {
 		principal = u.Username
 	}
+	// The scheme is what says which identity system the name came from, the
+	// way cmd/tide spells a job's submitter. A bare name is filed under
+	// unknown: by the server rather than refused.
+	principal = "cli:" + principal
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()

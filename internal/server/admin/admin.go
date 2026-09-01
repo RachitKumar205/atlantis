@@ -1054,13 +1054,15 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 	}
 
 	meta := versionMeta{
-		Caller:    req.GetCaller(),
-		PlanClass: d.HighestClass().String(),
-		Diff:      d,
-		UpSQL:     scripts.Up,
-		DownSQL:   scripts.Down,
-		PlanID:    gotPlanID,
-		EventType: "apply",
+		Caller:     req.GetCaller(),
+		PlanClass:  d.HighestClass().String(),
+		Diff:       d,
+		UpSQL:      scripts.Up,
+		DownSQL:    scripts.Down,
+		PlanID:     gotPlanID,
+		EventType:  "apply",
+		Actor:      req.GetActor(),
+		ActorEmail: req.GetActorEmail(),
 	}
 	version, err := s.persistCheckpoint(ctx, tx, newIR, meta)
 	if err != nil {

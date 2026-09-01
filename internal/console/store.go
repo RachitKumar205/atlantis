@@ -51,6 +51,19 @@ var ErrNotFound = errors.New("not found")
 // either a replay or a page that submitted twice.
 var ErrAssertionSpent = errors.New("assertion has already been used")
 
+// Actor returns the provenance pair the org server records beside the caller
+// that carried a change: a stable principal and the address to read it by.
+//
+// Never an authorization input. That server authenticates callers and cannot
+// authenticate a person, so what this returns is evidence of who acted, not
+// proof — the relationship migrations/infra/0036 describes.
+//
+// The pair matches logAction's, so a schema change and the audit row about it
+// name the same person the same way.
+func (u *User) Actor() (principal, email string) {
+	return "console:" + u.Subject, u.Email
+}
+
 // User is who is making the current request.
 //
 // Every field arrives in a signed assertion from Cloud and is copied onto the
