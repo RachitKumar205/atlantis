@@ -42,8 +42,9 @@
 .srailtab {
   flex: 0 0 auto; position: relative;
   inline-size: 100%; justify-content: flex-start; gap: 8px;
-  min-block-size: var(--row-h); block-size: var(--row-h); padding-inline: 10px;
+  min-block-size: var(--row-h); block-size: var(--row-h); padding-inline: 9px;
   font-size: var(--size-data); font-weight: 400; border-radius: var(--radius-sm);
+  border: 1px solid transparent;
 }
 /* The bar sits outside the row surface, in the rail's own padding. */
 .srailtab::before {
@@ -58,12 +59,26 @@
   flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   text-align: start;
 }
-/* coss's underline variant marks the active tab with a 2px bar and a colour
-   step. Down a rail of 74 that is not enough to find the current row without
-   hunting for the bar, so the row takes a surface too. */
-.srailtab[data-active] { color: var(--ink-0); background: var(--canvas-3); }
+/* Three states, reading in order against the pane: the row at the pane's own
+   colour, the hover a step off it, the current row a surface on top.
+   
+   The surfaces are the rail's way round, not the nav's copied over. The nav
+   hovers to --canvas-3 and raises its current item to white on --drop, but it
+   sits in a trough and holds nine items; a drop on the selected row of a list
+   of 74 is weight this rail does not need, and the accent bar already names
+   the row. The border carries the shape the shadow would have. */
+.srailtab[data-active] {
+  color: var(--ink-0);
+  background: var(--canvas-2);
+  border-color: var(--line);
+}
 .srailtab[data-active] .srailtab__name { font-weight: 500; }
-@media (hover: hover) { .srailtab:not([data-active]):hover { background: var(--canvas-2); } }
+@media (hover: hover) {
+  .srailtab:not([data-active]):hover {
+    background: var(--canvas-3);
+    border-color: var(--line-soft);
+  }
+}
 /* A table with something in the approval queue. Beside the name, not after the
    count, so the mark is on the same scan line as what it qualifies. */
 .dot--warn { inline-size: 5px; block-size: 5px; border-radius: 50%; background: var(--warn); flex-shrink: 0; }
