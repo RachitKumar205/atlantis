@@ -36,6 +36,7 @@ type Queue interface {
 	MarkProvisioned(ctx context.Context, org string) error
 	MarkProvisioningFailed(ctx context.Context, org, reason string, retryIn time.Duration) error
 	SetConsoleURL(ctx context.Context, org, consoleURL string) error
+	SetEnrollURL(ctx context.Context, org, enrollURL string) error
 	LogAction(ctx context.Context, org, actor, actorEmail, action string, detail map[string]any)
 	ReadyOrgs(ctx context.Context) ([]string, error)
 	Requeue(ctx context.Context, org, reason string) error
@@ -583,6 +584,13 @@ func (w *Worker) record(ctx context.Context, org string, st provision.Status) er
 	}
 	if err := w.q.SetConsoleURL(ctx, org, w.cfg.ConsoleURL); err != nil {
 		return fmt.Errorf("point Cloud at the console: %w", err)
+	}
+	// Best-effort where unset: an organisation with no enrolment address
+	// refuses `tide login` at the poll, which names exactly what is missing.
+	if w.cfg.EnrollURL != "" {
+		if err := w.q.SetEnrollURL(ctx, org, w.cfg.EnrollURL); err != nil {
+			return fmt.Errorf("point Cloud at the enrolment listener: %w", err)
+		}
 	}
 	return nil
 }

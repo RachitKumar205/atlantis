@@ -13,6 +13,7 @@
 
 export type Screen =
   | 'organisations'
+  | 'cli'
   | 'signin'
   | 'signup'
   | 'check-email'

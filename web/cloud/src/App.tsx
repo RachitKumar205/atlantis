@@ -27,6 +27,7 @@ import { anySettling, type Me } from '@/lib/orgs'
 import { BackupCodes } from '@/screens/BackupCodes'
 import { Enrol } from '@/screens/Enrol'
 import { Message } from '@/screens/Message'
+import { CliApprove } from '@/screens/CliApprove'
 import { Organisations } from '@/screens/Organisations'
 import { ResetRequest } from '@/screens/ResetRequest'
 import { SignIn } from '@/screens/SignIn'
@@ -49,7 +50,9 @@ import { Verify } from '@/screens/Verify'
  * established by the server and discovered, rather than assumed by a client
  * that just watched a request succeed.
  */
-const AFTER_SIGN_IN = '/organisations'
+// Where a finished sign-in lands. /cli is preserved so a person sent there by
+// `tide login` is not detoured to the organisations page mid-approval.
+const AFTER_SIGN_IN = window.location.pathname === '/cli' ? '/cli' : '/organisations'
 
 export function App() {
   const [screen, setScreen] = useState<Screen | null>(null)
@@ -97,7 +100,7 @@ export function App() {
         setProviders(config.providers)
         if (account) {
           setMe(account)
-          setScreen('organisations')
+          setScreen(window.location.pathname === '/cli' ? 'cli' : 'organisations')
           return
         }
         const next = new URLSearchParams(window.location.search).get('next')
@@ -218,6 +221,17 @@ export function App() {
   }
 
   switch (screen) {
+    case 'cli':
+      return me === null ? null : (
+        <CliApprove
+          me={me}
+          onDone={() => {
+            window.history.replaceState(null, '', '/organisations')
+            setScreen('organisations')
+          }}
+        />
+      )
+
     case 'organisations':
       // me is set before the screen is, in boot and in endSession. Guarding
       // rather than asserting: a null here would be a blank page, not a crash.

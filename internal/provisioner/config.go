@@ -83,6 +83,12 @@ type Config struct {
 	// that reason. A second name for one value is two settings that must agree.
 	ConsoleURL string
 
+	// EnrollURL is where a provisioned organisation's machines enrol — the
+	// console's enrolment listener. One value for every organisation in this
+	// deployment, as ConsoleURL is; Cloud hands it to `tide login` in the
+	// poll response and mints it as a cli-enroll assertion's audience.
+	EnrollURL string
+
 	// ClaimedBy names this process in the queue. Correctness rests on the
 	// lease; this is what traces a wedged row back to a process.
 	ClaimedBy string
@@ -139,6 +145,7 @@ func ConfigFromEnv() (Config, error) {
 		ConsolePGURL:   os.Getenv("CONSOLE_PG_URL"),
 		ConsoleDataKey: os.Getenv("CONSOLE_DATA_KEY"),
 		ConsoleURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("CLOUD_AUDIENCE")), "/"),
+		EnrollURL:      strings.TrimRight(strings.TrimSpace(os.Getenv("PROVISIONER_ENROLL_URL")), "/"),
 		// Trimmed, so validate's empty check is a guard that can actually fire.
 		// envOr only rejects the empty string, so " " would otherwise sail
 		// through and put a blank-looking claimant on every row.

@@ -169,6 +169,16 @@ func (f *fakeQueue) SetConsoleURL(ctx context.Context, org, consoleURL string) e
 	return nil
 }
 
+func (f *fakeQueue) SetEnrollURL(ctx context.Context, org, enrollURL string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	f.events = append(f.events, "set-enroll-url")
+	return nil
+}
+
 func (f *fakeQueue) LogAction(ctx context.Context, org, actor, actorEmail, action string, _ map[string]any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

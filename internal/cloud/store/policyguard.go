@@ -34,6 +34,7 @@ var unpolicedTables = map[string]string{
 	"email_tokens":   "a reset link is spent by token hash with nobody signed in, so a policy keyed to the current user matches nothing and every reset reports an invalid token",
 	"sessions":       "the bootstrap table: the session lookup is what discovers which user a request is",
 	"pending_logins": "the same, one step earlier — a half-finished login is resolved by token before anybody is identified",
+	"cli_grants":     "opened and polled by an unauthenticated CLI and resolved by code hash; the user is written at approval and read back at the poll, so a policy keyed to the current user would hide the row from the machine that owns it",
 
 	// The two below are written by the provisioner, which claims work from a
 	// queue rather than serving a request. A policy keyed to current_user_id

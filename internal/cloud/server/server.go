@@ -36,6 +36,9 @@ type Server struct {
 	iss    *issuer.Issuer
 	log    *slog.Logger
 	lim    *limiter
+	// cliPollLim throttles `tide login` polls per device code, not per
+	// address; see handleCLIPoll.
+	cliPollLim *limiter
 
 	// keys seals each account's TOTP secret. See internal/secrets for what that
 	// does and does not defend.
@@ -81,12 +84,13 @@ func New(cfg Config, db *store.Store, iss *issuer.Issuer, spaFS fs.FS, log *slog
 
 	s := &Server{
 		cfg: cfg, db: db, iss: iss, log: log,
-		keys:      keys,
-		spaFS:     spaFS,
-		providers: configuredProviders(cfg, log),
-		lim:       newLimiter(),
-		mux:       http.NewServeMux(),
-		sleep:     realSleep,
+		keys:       keys,
+		spaFS:      spaFS,
+		providers:  configuredProviders(cfg, log),
+		lim:        newLimiter(),
+		cliPollLim: newLimiterWithMax(cliPollLimit),
+		mux:        http.NewServeMux(),
+		sleep:      realSleep,
 	}
 
 	// Which transport sends the two messages that gate account recovery.
@@ -142,6 +146,14 @@ func (s *Server) routes() {
 	s.mux.Handle("GET "+issuer.JWKSPath, s.iss.Handler())
 
 	s.mux.HandleFunc("POST /api/auth/signup", s.handleSignup)
+
+	// `tide login`, the device-code shape. start and poll are unauthenticated
+	// by design — see cligrant.go for what each is limited by — and lookup
+	// and decide run on the session like the org routes below.
+	s.mux.HandleFunc("POST /api/cli/start", s.handleCLIStart)
+	s.mux.HandleFunc("POST /api/cli/poll", s.handleCLIPoll)
+	s.mux.HandleFunc("POST /api/cli/lookup", s.handleCLILookup)
+	s.mux.HandleFunc("POST /api/cli/decide", s.handleCLIDecide)
 	s.mux.HandleFunc("POST /api/auth/reset/request", s.handleResetRequest)
 	s.mux.HandleFunc("POST /api/auth/reset/complete", s.handleResetComplete)
 	s.mux.HandleFunc("POST /api/auth/verify/resend", s.handleResendVerification)

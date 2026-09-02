@@ -235,3 +235,30 @@ async function request(
   }
   return parsed
 }
+
+/**
+ * Looks up a `tide login` code for the approval page. A miss costs the grant
+ * one of its five attempts, which is what makes the short code unguessable in
+ * practice.
+ */
+export async function cliLookup(userCode: string): Promise<{
+  caller: string
+  hostname: string
+  address: string
+  agent: string
+  expires_at: string
+}> {
+  const res = await request('POST', '/api/cli/lookup', { user_code: userCode })
+  return {
+    caller: typeof res.caller === 'string' ? res.caller : '',
+    hostname: typeof res.hostname === 'string' ? res.hostname : '',
+    address: typeof res.address === 'string' ? res.address : '',
+    agent: typeof res.agent === 'string' ? res.agent : '',
+    expires_at: typeof res.expires_at === 'string' ? res.expires_at : '',
+  }
+}
+
+/** Records the decision on a `tide login` code. */
+export async function cliDecide(userCode: string, org: string, approve: boolean): Promise<void> {
+  await request('POST', '/api/cli/decide', { user_code: userCode, org, approve })
+}

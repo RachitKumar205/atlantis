@@ -230,6 +230,11 @@ func (v *Verifier) Verify(ctx context.Context, token string) (*identity.Claims, 
 		// The display names beside them, and under the same restriction: it
 		// decides what a switcher renders, never what anybody may reach.
 		OrgNames: private.OrgNames,
+		// Carried so each consumer can enforce its own purpose rule: the
+		// session exchange refuses a non-empty one, the enrolment arm requires
+		// its own value. See identity.Private.Purpose.
+		Purpose: private.Purpose,
+		Caller:  private.Caller,
 	}
 	if registered.Expiry != nil {
 		claims.Expiry = registered.Expiry.Time()

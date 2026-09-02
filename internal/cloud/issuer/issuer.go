@@ -175,6 +175,11 @@ type Grant struct {
 	// the reauth path; see identity.Claims.StepUp for what rests on it.
 	StepUp bool
 
+	// Purpose and Caller travel into the claims of the same names. Both empty
+	// for a session assertion; see identity.Private for what each binds.
+	Purpose string
+	Caller  string
+
 	// Orgs names every organisation the subject belongs to, for a console's
 	// organisation switcher. A hint only — see identity.Claims.Orgs.
 	Orgs []string
@@ -213,6 +218,8 @@ func (i *Issuer) Mint(g Grant) (string, error) {
 		StepUp:   g.StepUp,
 		Orgs:     g.Orgs,
 		OrgNames: g.OrgNames,
+		Purpose:  g.Purpose,
+		Caller:   g.Caller,
 	}
 	if err := claims.Validate(); err != nil {
 		return "", fmt.Errorf("refusing to mint an assertion no console would accept: %w", err)
@@ -246,6 +253,8 @@ func (i *Issuer) Mint(g Grant) (string, error) {
 		StepUp:   g.StepUp,
 		Orgs:     g.Orgs,
 		OrgNames: g.OrgNames,
+		Purpose:  g.Purpose,
+		Caller:   g.Caller,
 	}
 
 	tok, err := jwt.Signed(signer).Claims(registered).Claims(private).Serialize()

@@ -64,6 +64,18 @@ type Private struct {
 	// A hint, exactly as Orgs is: it decides what a switcher renders and never
 	// what anybody may reach.
 	OrgNames map[string]string `json:"org_names,omitempty"`
+
+	// Purpose scopes an assertion to one exchange. Empty on a session
+	// assertion; "cli-enroll" on one minted for certificate enrolment. The
+	// session exchange refuses any non-empty value, and the enrolment listener
+	// requires its own, so neither audience accepts the other's token even
+	// where the two URLs are misconfigured to coincide.
+	Purpose string `json:"purpose,omitempty"`
+
+	// Caller names the caller identity a cli-enroll assertion may enrol as,
+	// bound at approval so the machine cannot ask for a different one than the
+	// person saw. Empty on every other assertion.
+	Caller string `json:"caller,omitempty"`
 }
 
 // Claims is a verified assertion. A value of this type means the signature
@@ -125,6 +137,11 @@ type Claims struct {
 	// OrgNames maps organisation name to display name, for those that differ.
 	// A hint, like Orgs; see the field in Private.
 	OrgNames map[string]string
+
+	// Purpose and Caller mirror the fields in Private. Both empty on a session
+	// assertion; see there for what each binds.
+	Purpose string
+	Caller  string
 }
 
 // ErrMissingClaim reports an assertion that verified cryptographically but did

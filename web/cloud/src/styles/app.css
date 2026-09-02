@@ -808,6 +808,28 @@ body {
   margin: 0;
 }
 
+/* What a `tide login` code is asking for: a definition list the approval
+   decision is read from, so the terms sit beside their values rather than
+   above them. */
+.datum .cli-details {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  margin: 0 0 18px;
+  font-size: 12.5px;
+}
+
+.datum .cli-details dt {
+  color: var(--ink-2);
+}
+
+.datum .cli-details dd {
+  margin: 0;
+  color: var(--ink-0);
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
 /* Two fields on one line hold the vertical rhythm of the single field they
    replaced: the pair carries the 18px, and neither half carries its own. */
 .datum .namepair {

@@ -29,10 +29,19 @@ type limiter struct {
 	hits    map[string][]time.Time
 	lastSwp time.Time
 	now     func() time.Time
+
+	// max requests per window per key. limiterMax for the auth routes; the
+	// CLI poll limiter keys on a device-code hash rather than an address and
+	// carries a budget sized to its polling interval.
+	max int
 }
 
 func newLimiter() *limiter {
-	return &limiter{hits: make(map[string][]time.Time), lastSwp: time.Now(), now: time.Now}
+	return newLimiterWithMax(limiterMax)
+}
+
+func newLimiterWithMax(max int) *limiter {
+	return &limiter{hits: make(map[string][]time.Time), lastSwp: time.Now(), now: time.Now, max: max}
 }
 
 // allow reports whether this address may make another request, and how many
@@ -72,7 +81,7 @@ func (l *limiter) allow(ip string) (bool, int) {
 	}
 	hits = hits[idx:]
 
-	if len(hits) >= limiterMax {
+	if len(hits) >= l.max {
 		l.hits[ip] = hits
 		retry := int(limiterWindow.Seconds() - now.Sub(hits[0]).Seconds())
 		if retry < 1 {
