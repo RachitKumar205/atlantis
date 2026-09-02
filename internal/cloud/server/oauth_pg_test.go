@@ -941,3 +941,74 @@ func TestTheCallbackReturnsToTheSignInApp(t *testing.T) {
 		t.Errorf("the redirect does not say what is next: %s", loc)
 	}
 }
+
+// The callback base defaults to PublicURL, which is what every deployment that
+// sets no override gets. Pinned because the override exists only to let local
+// development differ: a default that drifted from PublicURL would change the
+// redirect URI of every deployment already registered at a provider.
+func TestTheRedirectBaseDefaultsToPublicURL(t *testing.T) {
+	cfg := Config{PublicURL: "https://cloud.test"}
+	if got := cfg.OAuthRedirect(); got != "https://cloud.test" {
+		t.Errorf("OAuthRedirect() = %q, want the PublicURL", got)
+	}
+}
+
+func TestTheRedirectBaseOverrideIsUsed(t *testing.T) {
+	f := newFixtureWith(t, func(c *Config) {
+		c.OAuthRedirectBase = "http://localhost:30500"
+	})
+	p := f.fakeFor("github", "gh-redirect", "base@example.com", "Base")
+
+	r := httptest.NewRequest(http.MethodGet, "/auth/github", nil)
+	r.RemoteAddr = f.nextIP() + ":1234"
+	rec := httptest.NewRecorder()
+	f.srv.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("start: %d", rec.Code)
+	}
+	want := "http://localhost:30500/auth/github/callback"
+	if p.lastRedirect != want {
+		t.Errorf("redirect_uri = %q, want %q", p.lastRedirect, want)
+	}
+}
+
+// A base no provider accepts is refused at boot rather than at consent, where
+// it surfaces as redirect_uri_mismatch against a URI the operator cannot see.
+func TestAnUnusableRedirectBaseIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name, base string
+		wantErr    bool
+	}{
+		{"plain http on a named host", "http://atl-dev.test:30500", true},
+		{"loopback over http", "http://localhost:30500", false},
+		{"loopback by address", "http://127.0.0.1:30500", false},
+		{"https anywhere", "https://cloud.atlantis.dev", false},
+		{"not absolute", "atl-dev.test:30500", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{
+				PublicURL:         "https://cloud.test",
+				OAuthRedirectBase: tc.base,
+				GoogleClientID:    "id",
+			}
+			err := cfg.validateOAuthRedirectBase()
+			if tc.wantErr && err == nil {
+				t.Errorf("base %q was accepted", tc.base)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("base %q was refused: %v", tc.base, err)
+			}
+		})
+	}
+}
+
+// The same base, with no provider configured. Nothing reads it, so nothing is
+// held to a rule about it — and the development deployment, whose PublicURL is
+// http://atl-dev.test:30500, still starts.
+func TestAnUnusableRedirectBaseIsIgnoredWithoutAProvider(t *testing.T) {
+	cfg := Config{PublicURL: "http://atl-dev.test:30500"}
+	if err := cfg.validateOAuthRedirectBase(); err != nil {
+		t.Errorf("refused with no provider configured: %v", err)
+	}
+}

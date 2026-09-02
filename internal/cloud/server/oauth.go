@@ -82,11 +82,13 @@ func decodeOAuthState(v string, now time.Time) (oauthState, bool) {
 }
 
 // redirectURI is where the provider sends the browser back. Built from
-// CLOUD_PUBLIC_URL and never from the request: a redirect_uri taken from a
+// configuration and never from the request: a redirect_uri taken from a
 // parameter has the provider deliver the authorization code to whatever host
 // was asked for.
+//
+// The base is OAuthRedirectBase, which defaults to CLOUD_PUBLIC_URL.
 func (s *Server) redirectURI(provider string) string {
-	return fmt.Sprintf("%s/auth/%s/callback", s.cfg.PublicURL, provider)
+	return fmt.Sprintf("%s/auth/%s/callback", s.cfg.OAuthRedirect(), provider)
 }
 
 // handleOAuthStart sends the browser to a provider. Closed over the provider's

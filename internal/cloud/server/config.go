@@ -35,6 +35,18 @@ type Config struct {
 	// wrong host. Not derived from the Host header, which is caller-controlled.
 	PublicURL string // CLOUD_PUBLIC_URL — required
 
+	// OAuthRedirectBase is the base the provider callback is built from,
+	// defaulting to PublicURL. Set only where the two must differ.
+	//
+	// Google refuses a redirect URI that is not HTTPS unless its host is a
+	// loopback address, and refuses any host whose TLD is absent from the
+	// public suffix list. The development host, atl-dev.test, fails both.
+	//
+	// Read from configuration and never from the request, for the reason on
+	// redirectURI. Validated only when a provider is configured, so a
+	// deployment with no OAuth is not held to a rule that cannot affect it.
+	OAuthRedirectBase string // CLOUD_OAUTH_REDIRECT_BASE — defaults to CLOUD_PUBLIC_URL
+
 	// ExtraOrigins are additional origins accepted on state-changing /api/*
 	// routes, beyond PublicURL and the request's own Host.
 	//
@@ -105,13 +117,15 @@ type Config struct {
 
 func ConfigFromEnv() (Config, error) {
 	c := Config{
-		Listen:       envOr("CLOUD_LISTEN", ":9500"),
-		PGURL:        os.Getenv("CLOUD_PG_URL"),
-		Issuer:       os.Getenv("CLOUD_ISSUER"),
-		SigningKey:   envOr("CLOUD_SIGNING_KEY", "./certs/cloud-signing-key.pem"),
-		PublicURL:    strings.TrimRight(os.Getenv("CLOUD_PUBLIC_URL"), "/"),
-		ExtraOrigins: splitOrigins(os.Getenv("CLOUD_EXTRA_ORIGINS")),
-		ResendAPIKey: os.Getenv("CLOUD_RESEND_API_KEY"),
+		Listen:     envOr("CLOUD_LISTEN", ":9500"),
+		PGURL:      os.Getenv("CLOUD_PG_URL"),
+		Issuer:     os.Getenv("CLOUD_ISSUER"),
+		SigningKey: envOr("CLOUD_SIGNING_KEY", "./certs/cloud-signing-key.pem"),
+		PublicURL:  strings.TrimRight(os.Getenv("CLOUD_PUBLIC_URL"), "/"),
+
+		OAuthRedirectBase: strings.TrimRight(os.Getenv("CLOUD_OAUTH_REDIRECT_BASE"), "/"),
+		ExtraOrigins:      splitOrigins(os.Getenv("CLOUD_EXTRA_ORIGINS")),
+		ResendAPIKey:      os.Getenv("CLOUD_RESEND_API_KEY"),
 		// CLOUD_SMTP_FROM is the fallback.
 		MailFrom:      envOr("CLOUD_MAIL_FROM", os.Getenv("CLOUD_SMTP_FROM")),
 		MailDev:       os.Getenv("CLOUD_MAIL_DEV") == "true",
@@ -181,7 +195,55 @@ func ConfigFromEnv() (Config, error) {
 		}
 	}
 
+	if err := c.validateOAuthRedirectBase(); err != nil {
+		return Config{}, err
+	}
+
 	return c, nil
+}
+
+// OAuthRedirect is the base the provider callback is built from: the override
+// when set, and PublicURL otherwise.
+//
+// A method rather than a value fixed during parsing, so a Config built
+// directly resolves the same way as one read from the environment.
+func (c Config) OAuthRedirect() string {
+	if c.OAuthRedirectBase != "" {
+		return c.OAuthRedirectBase
+	}
+	return c.PublicURL
+}
+
+// validateOAuthRedirectBase refuses a base a provider will not accept.
+//
+// Checked at boot rather than left to the provider, which reports it as
+// redirect_uri_mismatch after consent has been granted, against a URI that
+// does not appear in the request the operator can see.
+//
+// Only when a provider is configured: the value is inherited from PublicURL,
+// and a deployment with no OAuth has no reason to satisfy a rule about it.
+func (c Config) validateOAuthRedirectBase() error {
+	if c.GitHubClientID == "" && c.GoogleClientID == "" {
+		return nil
+	}
+	base := c.OAuthRedirect()
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("CLOUD_OAUTH_REDIRECT_BASE must be an absolute URL "+
+			"like https://cloud.atlantis.dev, got %q", base)
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	switch u.Hostname() {
+	case "localhost", "127.0.0.1", "::1":
+		return nil
+	}
+	return fmt.Errorf("the OAuth callback base is %q, which no provider will "+
+		"accept: a redirect URI must be https unless its host is a loopback "+
+		"address. It defaults to CLOUD_PUBLIC_URL; set CLOUD_OAUTH_REDIRECT_BASE "+
+		"to override it for local development, e.g. http://localhost:30500",
+		base)
 }
 
 func envOr(key, fallback string) string {
