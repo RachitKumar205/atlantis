@@ -71,7 +71,13 @@ func isUniqueViolation(err error) bool {
 type User struct {
 	ID    string
 	Email string
-	Name  string
+
+	// Name is what to call this person, derived by the database from the two
+	// fields below. Empty when neither was given, which every caller renders
+	// by falling back to Email.
+	Name      string
+	FirstName string
+	LastName  string
 
 	// PasswordHash is nil for an account created by OAuth that has never set
 	// one. Such an account may not skip the second factor.
@@ -203,7 +209,7 @@ func Migrate(pgURL string, log *slog.Logger) error {
 func NormalizeEmail(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
 // CreateUser inserts an account. passwordHash may be nil for an OAuth account.
-func (s *Store) CreateUser(ctx context.Context, email, name string, passwordHash *string) (*User, error) {
+func (s *Store) CreateUser(ctx context.Context, email, firstName, lastName string, passwordHash *string) (*User, error) {
 	email = NormalizeEmail(email)
 	if email == "" {
 		return nil, errors.New("email is required")
@@ -212,12 +218,19 @@ func (s *Store) CreateUser(ctx context.Context, email, name string, passwordHash
 	if err != nil {
 		return nil, err
 	}
-	u := &User{ID: id, Email: email, Name: name, PasswordHash: passwordHash}
+	firstName, lastName = strings.TrimSpace(firstName), strings.TrimSpace(lastName)
+	u := &User{
+		ID: id, Email: email,
+		FirstName: firstName, LastName: lastName,
+		PasswordHash: passwordHash,
+	}
+	// name is generated from the two columns, so it is returned rather than
+	// written.
 	err = s.pool.QueryRow(ctx, `
-		INSERT INTO cloud.users (id, email, name, password_hash)
-		VALUES ($1, $2, $3, $4)
-		RETURNING created_at
-	`, id, email, name, passwordHash).Scan(&u.CreatedAt)
+		INSERT INTO cloud.users (id, email, first_name, last_name, password_hash)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING created_at, name
+	`, id, email, firstName, lastName, passwordHash).Scan(&u.CreatedAt, &u.Name)
 	if isUniqueViolation(err) {
 		return nil, fmt.Errorf("%s %w", email, ErrAlreadyExists)
 	}
@@ -233,7 +246,8 @@ func (s *Store) CreateUser(ctx context.Context, email, name string, passwordHash
 // there is nothing to bind yet. See the package comment.
 func (s *Store) UserByEmail(ctx context.Context, email string) (*User, error) {
 	return s.scanUser(ctx, `
-		SELECT id, email, name, password_hash, email_verified_at, created_at
+		SELECT id, email, name, first_name, last_name,
+		       password_hash, email_verified_at, created_at
 		FROM cloud.users WHERE email = $1
 	`, NormalizeEmail(email))
 }
@@ -241,7 +255,8 @@ func (s *Store) UserByEmail(ctx context.Context, email string) (*User, error) {
 // UserByID looks an account up once it is known.
 func (s *Store) UserByID(ctx context.Context, id string) (*User, error) {
 	return s.scanUser(ctx, `
-		SELECT id, email, name, password_hash, email_verified_at, created_at
+		SELECT id, email, name, first_name, last_name,
+		       password_hash, email_verified_at, created_at
 		FROM cloud.users WHERE id = $1
 	`, id)
 }
@@ -249,7 +264,8 @@ func (s *Store) UserByID(ctx context.Context, id string) (*User, error) {
 func (s *Store) scanUser(ctx context.Context, sql string, arg any) (*User, error) {
 	var u User
 	err := s.pool.QueryRow(ctx, sql, arg).Scan(
-		&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.EmailVerifiedAt, &u.CreatedAt)
+		&u.ID, &u.Email, &u.Name, &u.FirstName, &u.LastName,
+		&u.PasswordHash, &u.EmailVerifiedAt, &u.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -417,7 +433,8 @@ func (s *Store) MembershipsOf(ctx context.Context, userID string) ([]Membership,
 // comment.
 func (s *Store) MembersOf(ctx context.Context, org string) ([]User, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT u.id, u.email, u.name, u.password_hash, u.email_verified_at, u.created_at
+		SELECT u.id, u.email, u.name, u.first_name, u.last_name,
+		       u.password_hash, u.email_verified_at, u.created_at
 		FROM cloud.memberships m
 		JOIN cloud.users u ON u.id = m.user_id
 		WHERE m.org = $1
@@ -431,8 +448,8 @@ func (s *Store) MembersOf(ctx context.Context, org string) ([]User, error) {
 	var out []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash,
-			&u.EmailVerifiedAt, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Email, &u.Name, &u.FirstName, &u.LastName,
+			&u.PasswordHash, &u.EmailVerifiedAt, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -547,14 +564,17 @@ func (s *Store) CreateUserWithIdentity(
 	if err != nil {
 		return nil, err
 	}
-	u := &User{ID: id, Email: email, Name: name}
+	// A provider sends one display string and no division of it. It goes in
+	// first_name whole, which renders identically, and splitting it on a space
+	// would invent a family name for anyone whose name does not work that way.
+	u := &User{ID: id, Email: email, FirstName: strings.TrimSpace(name)}
 
 	err = s.tx(ctx, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `
-			INSERT INTO cloud.users (id, email, name, email_verified_at)
+			INSERT INTO cloud.users (id, email, first_name, email_verified_at)
 			VALUES ($1, $2, $3, NOW())
-			RETURNING created_at, email_verified_at
-		`, u.ID, u.Email, u.Name).Scan(&u.CreatedAt, &u.EmailVerifiedAt)
+			RETURNING created_at, email_verified_at, name
+		`, u.ID, u.Email, u.FirstName).Scan(&u.CreatedAt, &u.EmailVerifiedAt, &u.Name)
 		if err != nil {
 			if isUniqueViolation(err) {
 				return fmt.Errorf("%s %w", email, ErrAlreadyExists)

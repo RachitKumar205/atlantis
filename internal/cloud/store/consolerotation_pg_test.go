@@ -20,7 +20,7 @@ import (
 func rotatable(t *testing.T, db *Store, org string) {
 	t.Helper()
 	ctx := context.Background()
-	u, err := db.CreateUser(ctx, org+"@example.test", "Owner", nil)
+	u, err := db.CreateUser(ctx, org+"@example.test", "Owner", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

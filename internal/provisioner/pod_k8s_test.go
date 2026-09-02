@@ -100,7 +100,7 @@ func TestK8sTheProvisionerPodProvisionsAnOrganisation(t *testing.T) {
 		}
 	})
 
-	owner, err := db.CreateUser(ctx, ownerEmail, "Deployed Probe", nil)
+	owner, err := db.CreateUser(ctx, ownerEmail, "Deployed Probe", "", nil)
 	if err != nil {
 		t.Fatalf("create the owner: %v", err)
 	}

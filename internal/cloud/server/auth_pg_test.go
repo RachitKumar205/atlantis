@@ -242,7 +242,7 @@ func TestSignupCreatesAnUnverifiedAccount(t *testing.T) {
 	f := newFixture(t)
 
 	rec := f.post(t, "/api/auth/signup",
-		`{"email":"ada@example.com","password":"`+goodPassword+`","name":"Ada"}`)
+		`{"email":"ada@example.com","password":"`+goodPassword+`","first_name":"Ada","last_name":"Lovelace"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -253,6 +253,15 @@ func TestSignupCreatesAnUnverifiedAccount(t *testing.T) {
 	}
 	if !u.HasPassword() {
 		t.Error("the account has no password")
+	}
+	if u.FirstName != "Ada" || u.LastName != "Lovelace" {
+		t.Errorf("names %q %q, want Ada Lovelace", u.FirstName, u.LastName)
+	}
+	// Derived by the database from the two columns. This is the string that
+	// leaves Cloud in the identity assertion and is recorded against a schema
+	// event, so a blank one would put the address on the schema page instead.
+	if u.Name != "Ada Lovelace" {
+		t.Errorf("display name %q, want %q", u.Name, "Ada Lovelace")
 	}
 	// Unverified until the link is followed. An account that arrives verified
 	// makes the email pointless.
@@ -286,9 +295,9 @@ func TestSignupDoesNotRevealAnExistingAccount(t *testing.T) {
 	f := newFixture(t)
 
 	first := f.post(t, "/api/auth/signup",
-		`{"email":"taken@example.com","password":"`+goodPassword+`","name":""}`)
+		`{"email":"taken@example.com","password":"`+goodPassword+`","first_name":"","last_name":""}`)
 	second := f.post(t, "/api/auth/signup",
-		`{"email":"taken@example.com","password":"`+goodPassword+`","name":""}`)
+		`{"email":"taken@example.com","password":"`+goodPassword+`","first_name":"","last_name":""}`)
 
 	if first.Code != second.Code {
 		t.Errorf("status differs: %d then %d", first.Code, second.Code)
@@ -332,7 +341,7 @@ func TestSignupDoesNotRevealAnExistingAccount(t *testing.T) {
 func TestSignupAndResetAreHeldToALatencyFloor(t *testing.T) {
 	f := newFixture(t)
 
-	f.post(t, "/api/auth/signup", `{"email":"known@example.com","password":"`+goodPassword+`","name":""}`)
+	f.post(t, "/api/auth/signup", `{"email":"known@example.com","password":"`+goodPassword+`","first_name":"","last_name":""}`)
 	f.post(t, "/api/auth/reset/request", `{"email":"known@example.com"}`)
 	f.post(t, "/api/auth/reset/request", `{"email":"unknown@example.com"}`)
 
@@ -360,7 +369,7 @@ func TestSignupAndResetAreHeldToALatencyFloor(t *testing.T) {
 func TestSignupRefusesAWeakPassword(t *testing.T) {
 	f := newFixture(t)
 
-	rec := f.post(t, "/api/auth/signup", `{"email":"weak@example.com","password":"Passw0rd!","name":""}`)
+	rec := f.post(t, "/api/auth/signup", `{"email":"weak@example.com","password":"Passw0rd!","first_name":"","last_name":""}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status %d, want 400: %s", rec.Code, rec.Body.String())
 	}
@@ -384,7 +393,7 @@ func TestSignupHandlesTheBreachCorpus(t *testing.T) {
 		f.srv.breach = stubBreach{breached: true}
 
 		rec := f.post(t, "/api/auth/signup",
-			`{"email":"pwned@example.com","password":"`+goodPassword+`","name":""}`)
+			`{"email":"pwned@example.com","password":"`+goodPassword+`","first_name":"","last_name":""}`)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("status %d, want 400", rec.Code)
 		}
@@ -398,7 +407,7 @@ func TestSignupHandlesTheBreachCorpus(t *testing.T) {
 		f.srv.breach = stubBreach{err: errors.New("corpus unreachable")}
 
 		rec := f.post(t, "/api/auth/signup",
-			`{"email":"open@example.com","password":"`+goodPassword+`","name":""}`)
+			`{"email":"open@example.com","password":"`+goodPassword+`","first_name":"","last_name":""}`)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("a sign-up failed because the breach corpus was down: %d %s",
 				rec.Code, rec.Body.String())
@@ -421,7 +430,7 @@ func TestSignupRefusesAMalformedAddress(t *testing.T) {
 	} {
 		ip := "198.51.100." + itoa(i+1)
 		rec := f.postFrom(t, ip, "/api/auth/signup",
-			`{"email":`+jsonString(addr)+`,"password":"`+goodPassword+`","name":""}`)
+			`{"email":`+jsonString(addr)+`,"password":"`+goodPassword+`","first_name":"","last_name":""}`)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("accepted %q with status %d", addr, rec.Code)
 		}
@@ -434,7 +443,7 @@ func TestSignupRefusesAMalformedAddress(t *testing.T) {
 // The verification link works, once.
 func TestVerifyingAnAddress(t *testing.T) {
 	f := newFixture(t)
-	f.post(t, "/api/auth/signup", `{"email":"v@example.com","password":"`+goodPassword+`","name":""}`)
+	f.post(t, "/api/auth/signup", `{"email":"v@example.com","password":"`+goodPassword+`","first_name":"","last_name":""}`)
 	token := f.mailer.lastToken(t)
 
 	rec := f.get(t, "/verify?token="+url.QueryEscape(token))
@@ -461,7 +470,7 @@ func TestVerifyingAnAddress(t *testing.T) {
 // Requesting a reset answers the same for a known and an unknown address.
 func TestResetRequestDoesNotRevealWhoHasAnAccount(t *testing.T) {
 	f := newFixture(t)
-	f.post(t, "/api/auth/signup", `{"email":"real@example.com","password":"`+goodPassword+`","name":""}`)
+	f.post(t, "/api/auth/signup", `{"email":"real@example.com","password":"`+goodPassword+`","first_name":"","last_name":""}`)
 
 	known := f.post(t, "/api/auth/reset/request", `{"email":"real@example.com"}`)
 	unknown := f.post(t, "/api/auth/reset/request", `{"email":"ghost@example.com"}`)
@@ -491,7 +500,7 @@ func TestResetRequestDoesNotRevealWhoHasAnAccount(t *testing.T) {
 // A reset sets the password and does not sign anybody in.
 func TestCompletingAReset(t *testing.T) {
 	f := newFixture(t)
-	f.post(t, "/api/auth/signup", `{"email":"r@example.com","password":"`+goodPassword+`","name":""}`)
+	f.post(t, "/api/auth/signup", `{"email":"r@example.com","password":"`+goodPassword+`","first_name":"","last_name":""}`)
 	before, _ := f.db.UserByEmail(context.Background(), "r@example.com")
 
 	f.post(t, "/api/auth/reset/request", `{"email":"r@example.com"}`)
@@ -529,7 +538,7 @@ func TestCompletingAReset(t *testing.T) {
 // candidate passwords until one is accepted, learning the rules for free.
 func TestARejectedPasswordStillSpendsTheLink(t *testing.T) {
 	f := newFixture(t)
-	f.post(t, "/api/auth/signup", `{"email":"grind@example.com","password":"`+goodPassword+`","name":""}`)
+	f.post(t, "/api/auth/signup", `{"email":"grind@example.com","password":"`+goodPassword+`","first_name":"","last_name":""}`)
 	f.post(t, "/api/auth/reset/request", `{"email":"grind@example.com"}`)
 	token := f.mailer.lastToken(t)
 
@@ -559,7 +568,7 @@ func TestARejectedPasswordStillSpendsTheLink(t *testing.T) {
 // caught it once already.
 func TestTheEmailedResetFormWorks(t *testing.T) {
 	f := newFixture(t)
-	f.post(t, "/api/auth/signup", `{"email":"form@example.com","password":"`+goodPassword+`","name":""}`)
+	f.post(t, "/api/auth/signup", `{"email":"form@example.com","password":"`+goodPassword+`","first_name":"","last_name":""}`)
 	f.post(t, "/api/auth/reset/request", `{"email":"form@example.com"}`)
 	token := f.mailer.lastToken(t)
 

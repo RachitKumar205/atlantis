@@ -287,7 +287,7 @@ func TestAnUnverifiedAccountIsPointedAtVerification(t *testing.T) {
 	f := newFixture(t)
 	// Signed up, never followed the link.
 	if rec := f.post(t, "/api/auth/signup",
-		`{"email":"pending@example.com","password":"`+goodPassword+`","name":""}`); rec.Code != http.StatusOK {
+		`{"email":"pending@example.com","password":"`+goodPassword+`","first_name":"","last_name":""}`); rec.Code != http.StatusOK {
 		t.Fatalf("signup: %d %s", rec.Code, rec.Body.String())
 	}
 	f.fakeFor("google", "goog-5", "pending@example.com", "Pending")

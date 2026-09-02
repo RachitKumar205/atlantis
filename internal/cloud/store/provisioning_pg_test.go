@@ -16,7 +16,7 @@ import (
 
 func ownerFor(t *testing.T, db *Store, email string) string {
 	t.Helper()
-	u, err := db.CreateUser(context.Background(), email, "Owner", nil)
+	u, err := db.CreateUser(context.Background(), email, "Owner", "", nil)
 	if err != nil {
 		t.Fatalf("create owner: %v", err)
 	}

@@ -808,6 +808,38 @@ body {
   margin: 0;
 }
 
+/* Two fields on one line hold the vertical rhythm of the single field they
+   replaced: the pair carries the 18px, and neither half carries its own. */
+.datum .namepair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin: 0 0 6px;
+}
+
+.datum .namepair .field {
+  margin: 0;
+}
+
+.datum .hint-row {
+  margin: 0 0 18px;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
+
+/* One column below the width where two 34px inputs and their labels stop
+   fitting side by side. */
+@media (max-width: 420px) {
+  .datum .namepair {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  .datum .namepair .field {
+    margin: 0 0 14px;
+  }
+}
+
 /* In a row it already claims a line of its own; see .orglist__item .hint. */
 .datum .orglist__item .hint {
   margin: 0;

@@ -18,11 +18,11 @@ func deletable(t *testing.T, db *Store, org string) (adminID, viewerID string) {
 	t.Helper()
 	ctx := context.Background()
 
-	admin, err := db.CreateUser(ctx, org+"-admin@example.test", "Admin", nil)
+	admin, err := db.CreateUser(ctx, org+"-admin@example.test", "Admin", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	viewer, err := db.CreateUser(ctx, org+"-viewer@example.test", "Viewer", nil)
+	viewer, err := db.CreateUser(ctx, org+"-viewer@example.test", "Viewer", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestSoftDeleteNeedsAnAdminAndLeavesTheOrgIntact(t *testing.T) {
 		t.Errorf("state is %q after a refused delete, want ready", got)
 	}
 
-	outsider, err := db.CreateUser(ctx, "outsider@example.test", "Out", nil)
+	outsider, err := db.CreateUser(ctx, "outsider@example.test", "Out", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

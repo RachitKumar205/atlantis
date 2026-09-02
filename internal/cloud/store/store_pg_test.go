@@ -71,7 +71,7 @@ func TestCreateAndReadAUser(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, err := db.CreateUser(ctx, "Ada@Example.COM", "Ada", nil)
+	u, err := db.CreateUser(ctx, "Ada@Example.COM", "Ada", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestTheDatabaseRefusesAnUnfoldedEmail(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	if _, err := db.CreateUser(ctx, "grace@example.com", "Grace", nil); err != nil {
+	if _, err := db.CreateUser(ctx, "grace@example.com", "Grace", "", nil); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
@@ -127,7 +127,7 @@ func TestTheDatabaseRefusesAnUnfoldedEmail(t *testing.T) {
 
 	// And the plain duplicate is refused too, which is the ordinary case the
 	// constraint above would mask if it were the only one.
-	_, err = db.CreateUser(ctx, "grace@example.com", "Grace Again", nil)
+	_, err = db.CreateUser(ctx, "grace@example.com", "Grace Again", "", nil)
 	if err == nil {
 		t.Fatal("a duplicate address was accepted")
 	}
@@ -148,7 +148,7 @@ func TestMembershipIsTheGate(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, err := db.CreateUser(ctx, "alan@example.com", "Alan", nil)
+	u, err := db.CreateUser(ctx, "alan@example.com", "Alan", "", nil)
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestEveryRoleTheProductUnderstandsIsStorable(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, err := db.CreateUser(ctx, "roles@example.com", "", nil)
+	u, err := db.CreateUser(ctx, "roles@example.com", "", "", nil)
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestMembershipRequiresARealOrganisation(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, err := db.CreateUser(ctx, "fk@example.com", "", nil)
+	u, err := db.CreateUser(ctx, "fk@example.com", "", "", nil)
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestAnOAuthLinkResolvesToItsAccount(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, err := db.CreateUser(ctx, "linked@example.com", "Linked", nil)
+	u, err := db.CreateUser(ctx, "linked@example.com", "Linked", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -314,11 +314,11 @@ func TestOneProviderAccountBelongsToOneUser(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	first, err := db.CreateUser(ctx, "first@example.com", "", nil)
+	first, err := db.CreateUser(ctx, "first@example.com", "", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	second, err := db.CreateUser(ctx, "second@example.com", "", nil)
+	second, err := db.CreateUser(ctx, "second@example.com", "", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestDeletingAnAccountRemovesWhatHangsOffIt(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, err := db.CreateUser(ctx, "gone@example.com", "", nil)
+	u, err := db.CreateUser(ctx, "gone@example.com", "", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -396,8 +396,8 @@ func TestMembershipsListPerUserAndPerOrg(t *testing.T) {
 			t.Fatalf("create org: %v", err)
 		}
 	}
-	one, _ := db.CreateUser(ctx, "one@example.com", "", nil)
-	two, _ := db.CreateUser(ctx, "two@example.com", "", nil)
+	one, _ := db.CreateUser(ctx, "one@example.com", "", "", nil)
+	two, _ := db.CreateUser(ctx, "two@example.com", "", "", nil)
 
 	must := func(err error) {
 		t.Helper()

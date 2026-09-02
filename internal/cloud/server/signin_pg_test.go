@@ -20,7 +20,7 @@ import (
 func (f *fixture) verifiedAccount(t *testing.T, email string) *store.User {
 	t.Helper()
 	rec := f.post(t, "/api/auth/signup",
-		`{"email":`+jsonString(email)+`,"password":"`+goodPassword+`","name":""}`)
+		`{"email":`+jsonString(email)+`,"password":"`+goodPassword+`","first_name":"","last_name":""}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("signup: %d %s", rec.Code, rec.Body.String())
 	}
@@ -198,7 +198,7 @@ func TestSignInRefusalsAreIndistinguishable(t *testing.T) {
 // An unverified address cannot sign in, and can ask for another link.
 func TestAnUnverifiedAddressCannotSignIn(t *testing.T) {
 	f := newFixture(t)
-	f.post(t, "/api/auth/signup", `{"email":"unv@example.com","password":"`+goodPassword+`","name":""}`)
+	f.post(t, "/api/auth/signup", `{"email":"unv@example.com","password":"`+goodPassword+`","first_name":"","last_name":""}`)
 
 	rec := f.post(t, "/api/auth/login", `{"email":"unv@example.com","password":"`+goodPassword+`"}`)
 	if rec.Code != http.StatusForbidden {

@@ -56,7 +56,7 @@ func seedReadyOrg(t *testing.T, dsn, org string) *store.Store {
 	}
 	t.Cleanup(db.Close)
 
-	u, err := db.CreateUser(ctx, org+"@example.test", "Owner", nil)
+	u, err := db.CreateUser(ctx, org+"@example.test", "Owner", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

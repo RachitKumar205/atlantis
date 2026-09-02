@@ -404,7 +404,8 @@ func userCreate(args []string, log *slog.Logger) error {
 	}
 	defer db.Close()
 
-	u, err := db.CreateUser(ctx, *email, *name, nil)
+	// One flag, so it goes in the given-name field whole and renders unchanged.
+	u, err := db.CreateUser(ctx, *email, *name, "", nil)
 	if errors.Is(err, store.ErrAlreadyExists) {
 		// Reported and successful, so re-running a seeding script is not an
 		// error — matching `org create`, which upserts for the same reason. The

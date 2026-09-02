@@ -18,7 +18,7 @@ func TestSpendingABackupCodeTwiceFails(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, err := db.CreateUser(ctx, "codes@example.com", "Codes", nil)
+	u, err := db.CreateUser(ctx, "codes@example.com", "Codes", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -84,11 +84,11 @@ func TestABackupCodeCannotBeSpentByAnotherAccount(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	mine, err := db.CreateUser(ctx, "mine@example.com", "Mine", nil)
+	mine, err := db.CreateUser(ctx, "mine@example.com", "Mine", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	theirs, err := db.CreateUser(ctx, "theirs@example.com", "Theirs", nil)
+	theirs, err := db.CreateUser(ctx, "theirs@example.com", "Theirs", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestSpendingATOTPStepTwiceFails(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, err := db.CreateUser(ctx, "steps@example.com", "Steps", nil)
+	u, err := db.CreateUser(ctx, "steps@example.com", "Steps", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestReEnrollingResetsTheStepMarker(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, err := db.CreateUser(ctx, "again@example.com", "Again", nil)
+	u, err := db.CreateUser(ctx, "again@example.com", "Again", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

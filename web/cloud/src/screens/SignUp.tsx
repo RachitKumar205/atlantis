@@ -5,16 +5,17 @@ import { Button, Card, Field, LinkButton, Notice } from '@/components/ui'
 export function SignUp({ error, busy, onSubmit, onBack }: {
   error: string | null
   busy: boolean
-  onSubmit: (email: string, password: string, name: string) => void
+  onSubmit: (email: string, password: string, firstName: string, lastName: string) => void
   onBack: () => void
 }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [name, setName] = useState('')
+  const [firstName, setFirstName] = useState('')
+  const [lastName, setLastName] = useState('')
 
   function submit(e: FormEvent) {
     e.preventDefault()
-    onSubmit(email, password, name)
+    onSubmit(email, password, firstName, lastName)
   }
 
   return (
@@ -35,14 +36,26 @@ export function SignUp({ error, busy, onSubmit, onBack }: {
           required
           autoFocus
         />
-        <Field
-          label="Name"
-          name="name"
-          autoComplete="name"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          hint="Optional."
-        />
+        <div className="namepair">
+          <Field
+            label="First name"
+            name="first_name"
+            autoComplete="given-name"
+            value={firstName}
+            onChange={(e) => setFirstName(e.target.value)}
+          />
+          <Field
+            label="Last name"
+            name="last_name"
+            autoComplete="family-name"
+            value={lastName}
+            onChange={(e) => setLastName(e.target.value)}
+          />
+        </div>
+        <p className="hint-row">
+          Optional. Used to sign your changes; your email address is shown when
+          it is blank.
+        </p>
         {/*
           No strength meter here. The server checks with zxcvbn and against the
           breach corpus, and refuses below score 3 with a message written to be

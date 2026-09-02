@@ -5,6 +5,7 @@ import (
 	"errors"
 	"html"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/rachitkumar205/atlantis/internal/cloud/authn"
@@ -20,9 +21,17 @@ import (
 const checkYourEmail = "If that address can receive mail, a message is on its way."
 
 type signupRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	Name     string `json:"name"`
+	Email     string `json:"email"`
+	Password  string `json:"password"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+}
+
+// displayName is the two fields as one string, for the places that take a
+// person's name whole: the password-strength check, which refuses a password
+// containing it, and the identity assertion.
+func (r signupRequest) displayName() string {
+	return strings.TrimSpace(strings.TrimSpace(r.FirstName) + " " + strings.TrimSpace(r.LastName))
 }
 
 // handleSignup creates an account and sends a verification link.
@@ -49,7 +58,7 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "that does not look like an email address", http.StatusBadRequest)
 		return
 	}
-	if err := authn.Strength(req.Password, email, req.Name); err != nil {
+	if err := authn.Strength(req.Password, email, req.displayName()); err != nil {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -66,7 +75,7 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := s.db.CreateUser(r.Context(), email, req.Name, &hash)
+	user, err := s.db.CreateUser(r.Context(), email, req.FirstName, req.LastName, &hash)
 	switch {
 	case errors.Is(err, store.ErrAlreadyExists):
 		// Tell the owner of the address, not the requester.

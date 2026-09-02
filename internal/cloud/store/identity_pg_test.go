@@ -21,11 +21,11 @@ func TestLinkingAClaimedProviderAccountIsRefused(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	mine, err := db.CreateUser(ctx, "mine@example.com", "Mine", nil)
+	mine, err := db.CreateUser(ctx, "mine@example.com", "Mine", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	theirs, err := db.CreateUser(ctx, "theirs@example.com", "Theirs", nil)
+	theirs, err := db.CreateUser(ctx, "theirs@example.com", "Theirs", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestRelinkingYourOwnAccountSucceeds(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, err := db.CreateUser(ctx, "again@example.com", "Again", nil)
+	u, err := db.CreateUser(ctx, "again@example.com", "Again", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestUnlinkingTheOnlyWayInIsRefused(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, err := db.CreateUser(ctx, "only@example.com", "Only", nil)
+	u, err := db.CreateUser(ctx, "only@example.com", "Only", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestTwoLinksFromOneProviderAreStillOneWayIn(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, err := db.CreateUser(ctx, "twins@example.com", "Twins", nil)
+	u, err := db.CreateUser(ctx, "twins@example.com", "Twins", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestUnlinkingIsAllowedWhenAnotherWayInRemains(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, err := db.CreateUser(ctx, "both@example.com", "Both", nil)
+	u, err := db.CreateUser(ctx, "both@example.com", "Both", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestAPasswordMakesALinkRemovable(t *testing.T) {
 	ctx := context.Background()
 
 	hash := somePasswordHash
-	u, err := db.CreateUser(ctx, "haspw@example.com", "Has", &hash)
+	u, err := db.CreateUser(ctx, "haspw@example.com", "Has", "", &hash)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestAnEmptyPasswordHashIsNotAWayIn(t *testing.T) {
 	ctx := context.Background()
 
 	empty := ""
-	u, err := db.CreateUser(ctx, "blank@example.com", "Blank", &empty)
+	u, err := db.CreateUser(ctx, "blank@example.com", "Blank", "", &empty)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestUnlinkingWhatIsNotLinkedIsNotFound(t *testing.T) {
 	ctx := context.Background()
 
 	hash := somePasswordHash
-	u, err := db.CreateUser(ctx, "none@example.com", "None", &hash)
+	u, err := db.CreateUser(ctx, "none@example.com", "None", "", &hash)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -241,11 +241,11 @@ func TestUnlinkingIsScopedToTheAccount(t *testing.T) {
 	ctx := context.Background()
 
 	hash := somePasswordHash
-	mine, err := db.CreateUser(ctx, "a@example.com", "A", &hash)
+	mine, err := db.CreateUser(ctx, "a@example.com", "A", "", &hash)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	theirs, err := db.CreateUser(ctx, "b@example.com", "B", &hash)
+	theirs, err := db.CreateUser(ctx, "b@example.com", "B", "", &hash)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestAFailedProviderSignUpLeavesNoAccount(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	first, err := db.CreateUser(ctx, "holder@example.com", "Holder", nil)
+	first, err := db.CreateUser(ctx, "holder@example.com", "Holder", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestAProviderCannotTakeAnOccupiedAddress(t *testing.T) {
 	ctx := context.Background()
 
 	hash := somePasswordHash
-	if _, err := db.CreateUser(ctx, "taken@example.com", "Taken", &hash); err != nil {
+	if _, err := db.CreateUser(ctx, "taken@example.com", "Taken", "", &hash); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 

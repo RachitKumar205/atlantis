@@ -82,8 +82,18 @@ export async function fetchPending(): Promise<PendingState> {
 }
 
 /** Creates an account. Answers the same way whether or not the address is new. */
-export async function signUp(email: string, password: string, name: string): Promise<string> {
-  const res = await request('POST', '/api/auth/signup', { email, password, name })
+export async function signUp(
+  email: string,
+  password: string,
+  firstName: string,
+  lastName: string,
+): Promise<string> {
+  const res = await request('POST', '/api/auth/signup', {
+    email,
+    password,
+    first_name: firstName,
+    last_name: lastName,
+  })
   return typeof res.message === 'string' ? res.message : 'Check your email.'
 }
 

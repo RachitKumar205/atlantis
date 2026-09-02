@@ -13,7 +13,7 @@ func TestIssueAndSpendAToken(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, err := db.CreateUser(ctx, "ada@example.com", "Ada", nil)
+	u, err := db.CreateUser(ctx, "ada@example.com", "Ada", "", nil)
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestTheTokenItselfIsNotStored(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, _ := db.CreateUser(ctx, "stored@example.com", "", nil)
+	u, _ := db.CreateUser(ctx, "stored@example.com", "", "", nil)
 	token, err := db.IssueEmailToken(ctx, u.ID, u.Email, PurposeResetPassword, ResetTokenTTL)
 	if err != nil {
 		t.Fatalf("issue: %v", err)
@@ -70,7 +70,7 @@ func TestATokenCannotBeSpentTwice(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, _ := db.CreateUser(ctx, "once@example.com", "", nil)
+	u, _ := db.CreateUser(ctx, "once@example.com", "", "", nil)
 	token, _ := db.IssueEmailToken(ctx, u.ID, u.Email, PurposeResetPassword, ResetTokenTTL)
 
 	if _, err := db.SpendEmailToken(ctx, token, PurposeResetPassword); err != nil {
@@ -89,7 +89,7 @@ func TestATokenIsBoundToItsPurpose(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, _ := db.CreateUser(ctx, "purpose@example.com", "", nil)
+	u, _ := db.CreateUser(ctx, "purpose@example.com", "", "", nil)
 	verify, _ := db.IssueEmailToken(ctx, u.ID, u.Email, PurposeVerifyEmail, VerifyTokenTTL)
 
 	if _, err := db.SpendEmailToken(ctx, verify, PurposeResetPassword); !errors.Is(err, ErrTokenInvalid) {
@@ -106,7 +106,7 @@ func TestAnExpiredTokenIsRefused(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, _ := db.CreateUser(ctx, "expired@example.com", "", nil)
+	u, _ := db.CreateUser(ctx, "expired@example.com", "", "", nil)
 	token, err := db.IssueEmailToken(ctx, u.ID, u.Email, PurposeResetPassword, -time.Minute)
 	if err != nil {
 		t.Fatalf("issue: %v", err)
@@ -134,7 +134,7 @@ func TestATokenDiesWithTheAddressItWasSentTo(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, _ := db.CreateUser(ctx, "old@example.com", "", nil)
+	u, _ := db.CreateUser(ctx, "old@example.com", "", "", nil)
 	token, _ := db.IssueEmailToken(ctx, u.ID, u.Email, PurposeResetPassword, ResetTokenTTL)
 
 	if _, err := db.pool.Exec(ctx,
@@ -153,7 +153,7 @@ func TestSettingAPasswordInvalidatesOtherResets(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, _ := db.CreateUser(ctx, "many@example.com", "", nil)
+	u, _ := db.CreateUser(ctx, "many@example.com", "", "", nil)
 	first, _ := db.IssueEmailToken(ctx, u.ID, u.Email, PurposeResetPassword, ResetTokenTTL)
 	second, _ := db.IssueEmailToken(ctx, u.ID, u.Email, PurposeResetPassword, ResetTokenTTL)
 
@@ -176,7 +176,7 @@ func TestInvalidationIsScopedToItsPurpose(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, _ := db.CreateUser(ctx, "scoped@example.com", "", nil)
+	u, _ := db.CreateUser(ctx, "scoped@example.com", "", "", nil)
 	verify, _ := db.IssueEmailToken(ctx, u.ID, u.Email, PurposeVerifyEmail, VerifyTokenTTL)
 
 	if err := db.InvalidateEmailTokens(ctx, u.ID, PurposeResetPassword); err != nil {
@@ -191,7 +191,7 @@ func TestExpiredTokensAreSwept(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, _ := db.CreateUser(ctx, "sweep@example.com", "", nil)
+	u, _ := db.CreateUser(ctx, "sweep@example.com", "", "", nil)
 	live, _ := db.IssueEmailToken(ctx, u.ID, u.Email, PurposeVerifyEmail, VerifyTokenTTL)
 	if _, err := db.IssueEmailToken(ctx, u.ID, u.Email, PurposeResetPassword, -time.Minute); err != nil {
 		t.Fatalf("issue expired: %v", err)
@@ -215,7 +215,7 @@ func TestSetPassword(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, _ := db.CreateUser(ctx, "pw@example.com", "", nil)
+	u, _ := db.CreateUser(ctx, "pw@example.com", "", "", nil)
 	if u.HasPassword() {
 		t.Fatal("a new account already has a password")
 	}
@@ -243,7 +243,7 @@ func TestMarkEmailVerified(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, _ := db.CreateUser(ctx, "verify@example.com", "", nil)
+	u, _ := db.CreateUser(ctx, "verify@example.com", "", "", nil)
 	if u.EmailVerifiedAt != nil {
 		t.Fatal("a new account is already verified")
 	}

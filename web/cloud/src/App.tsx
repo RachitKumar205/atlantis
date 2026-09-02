@@ -270,9 +270,9 @@ export function App() {
         <SignUp
           error={error}
           busy={busy}
-          onSubmit={(email, password, name) =>
+          onSubmit={(email, password, firstName, lastName) =>
             run(async () => {
-              await signUp(email, password, name)
+              await signUp(email, password, firstName, lastName)
               setScreen('check-email')
             })
           }
