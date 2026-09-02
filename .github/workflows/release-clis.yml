@@ -65,13 +65,53 @@ jobs:
         # Pure-Go cross-compile: no CC, no matrix, no cross-toolchain.
         run: make release-tide VERSION=${{ github.ref_name }}
 
+      - name: Sign the checksums (keyless)
+        # Provenance for install-tide.sh's integrity check: the checksum file
+        # is what gets signed, and it names every tarball. Keyless, so there
+        # is no signing key to hold anywhere.
+        uses: sigstore/cosign-installer@v3
+      - run: cosign sign-blob --yes --output-signature dist/checksums.txt.sig --output-certificate dist/checksums.txt.pem dist/checksums.txt
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
       - name: Upload tarballs
         uses: actions/upload-artifact@v4
         with:
           name: tide-all-platforms
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/checksums.txt
+            dist/checksums.txt.sig
+            dist/checksums.txt.pem
           if-no-files-found: error
           retention-days: 1
+
+      - name: Authenticate to GCP
+        # The atlantis repository is private, so its release assets are too.
+        # tide is distributed from a GCS bucket behind the releases host
+        # instead — self-operated, on the platform the product already runs
+        # on. Workload identity federation, so no service-account key sits in
+        # a repository secret: the same exchange tide's own --oidc performs,
+        # pointed at GCP. Skipped where the provider is not configured, so a
+        # fork or a dry run still builds everything above.
+        if: ${{ vars.GCP_WIF_PROVIDER != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_RELEASES_SA }}
+
+      - name: Publish to the releases bucket
+        if: ${{ vars.GCP_WIF_PROVIDER != '' }}
+        env:
+          BUCKET: ${{ vars.GCP_RELEASES_BUCKET || 'atlantis-releases' }}
+        run: |
+          gcloud storage cp dist/*.tar.gz dist/checksums.txt dist/checksums.txt.sig dist/checksums.txt.pem "gs://$BUCKET/${{ github.ref_name }}/"
+          gcloud storage cp scripts/install-tide.sh "gs://$BUCKET/install.sh"
+          # latest.txt last, once everything it names is in place: a reader
+          # that sees the new version can already download it.
+          printf '%s\n' "${{ github.ref_name }}" > latest.txt
+          gcloud storage cp latest.txt "gs://$BUCKET/latest.txt"
+        shell: bash
 
   build-tidectl:
     name: build tidectl ${{ matrix.os }}/${{ matrix.arch }}

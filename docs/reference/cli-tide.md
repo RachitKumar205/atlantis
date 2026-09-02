@@ -44,6 +44,8 @@ Each path is walked recursively; every file with extension `.atl` is included. O
 | `ATL_ORG` | `org` | Which organisation this repository's caller belongs to. Needed only when more than one is enrolled. |
 | `ATL_GENERATE` | `generate` | Comma-separated namespace list; replaces the `generate:` field for `tide generate`. |
 | `ATLANTIS_HOME` | — | Where the credential store lives. Defaults to `~/.atlantis`. |
+| `ATL_CLOUD_URL` | — | Where Atlantis Cloud is, for `tide login`'s browser flow. Release builds carry the address; a development build needs this. |
+| `ATL_ENROLL_URL` | — | The organisation's enrolment listener, for `tide login --oidc` in CI. The browser flow discovers it and never needs this. |
 
 `TIDE_CALLER` is not consulted; use `ATL_CALLER`.
 
@@ -196,7 +198,37 @@ Requirements:
 
 The generated tree lives in the caller's module (e.g. `internal/gen/pcclient/{pb,client}/...`) and is imported with the caller's own import path. Commit it like any other generated code — it is the caller's source, not a shared artifact. There is no dependency on a central `atlantis-go` SDK for the generated types; only the hand-written `atlantis-go/jobs` runtime remains a normal library dependency for callers that run job workers.
 
-Re-run `tide generate` after any `tide apply` that changes a namespace the caller consumes.
+Generate rewrites `atlantis/`, `pb/` and `client/` under `output_dir` and leaves anything else there alone, so an entity dropped from the schema does not leave its client behind. `output_dir` must name a directory inside the repository; `.`, an absolute path, and anything reaching upward through `..` are refused, because that value decides what is removed.
+
+Beside the code it writes `tide.manifest.json`, recording the caller, the namespaces, the module prefix and a hash per generated file. Commit it with them — it is what `--check` compares against.
+
+### `tide generate --check`
+
+Verifies the committed client against its manifest and writes nothing.
+
+```
+tide generate --check
+```
+
+Offline: it needs no credentials, no network and no `buf`, so it runs in a pipeline that has no enrolled identity. It catches a hand-edited file, a missing one, and anything left in the generated tree that the manifest does not record.
+
+What it cannot see is the schema moving. For that:
+
+```
+tide generate --check --against-server
+```
+
+which additionally fetches the canonical IR, re-runs the emitters in memory and compares them against the manifest. It never invokes `buf`: a `.pb.go` is a function of its `.proto` and the plugin versions pinned in `buf.gen.yaml`, so comparing the protos settles it. This form dials the server and therefore needs credentials.
+
+| Exit | Meaning |
+|---|---|
+| 0 | the client matches |
+| 1 | it does not, or there is no manifest — run `tide generate` |
+| 3 | the question could not be answered: unreadable manifest, bad config, or the server was unreachable under `--against-server` |
+
+Stale and unusable are separate codes on purpose. A pipeline that cannot tell a network fault from an out-of-date client ends up treating both as noise.
+
+Re-run `tide generate` after any `tide apply` that changes a namespace the caller consumes. `tide apply` says so when it has changed one.
 
 ### `tide list`
 
@@ -316,6 +348,40 @@ tide caller alias add  <caller> <alias>
 tide caller alias rm   <caller> <alias>
 ```
 
+### `tide login`
+
+```
+tide login
+```
+
+Opens the browser: sign in at Atlantis Cloud, type the code the terminal is
+showing, approve. The caller comes from `tide.yaml`'s `caller:`, or
+`--caller`. The credential lands in `~/.atlantis/<org>/<caller>/` and renews
+on its own.
+
+The code is typed at the approval page, never carried in a link — a link with
+the code embedded would let a mailed click approve someone else's machine.
+Approving requires being a member of the organisation; enrolling as a caller
+requires the admin role, or the caller's "developers may enrol" flag for
+viewers.
+
+```
+tide login --oidc [--audience AUD]
+```
+
+CI: exchanges the runner's workload identity (GitHub Actions' OIDC token) for
+a one-hour certificate, under a federation rule configured on the console's
+Callers page. Needs `permissions: id-token: write` in the workflow and
+`ATL_ENROLL_URL` in the environment. See `docs/examples/`.
+
+```
+tide login --url URL --org ORG --token TOKEN [--ca FILE]
+```
+
+The alternate method: a single-use token an admin minted on the Callers page,
+for enrolling a machine on someone's behalf. `--ca` is local development
+only, and also stores the authority so renewal keeps verifying against it.
+
 ### `tide version`
 
 Prints the tide logo banner followed by the version. Does not contact the server (there is no `pc` prefix).
@@ -329,7 +395,7 @@ tide version
 | Code | Meaning |
 |---|---|
 | 0 | Success, or no-op (e.g., `tide pull` with the local cache already current) |
-| 1 | Backfill required — `tide apply` or `tide plan` returned a backfill-required class; **or** `inspect` found outstanding work (additions/removals) |
+| 1 | Backfill required — `tide apply` or `tide plan` returned a backfill-required class; `inspect` found outstanding work (additions/removals); **or** `generate --check` found the committed client out of date |
 | 2 | Unknown subcommand passed to `tide` itself; cross-caller breaking change from `plan`; `apply` blocked on an approval that has not been given; **or** `inspect` found a mismatch |
 | 3 | Operational error: parse/validation failure, network error, config error, or unknown plan class |
 | 4 | Destructive change — the plan drops something that may hold data |
@@ -364,8 +430,11 @@ Dropped objects are parked rather than deleted, and reaped after the retention w
 ├── schema/
 │   └── <namespace>/
 │       └── <entity>.atl
-└── version.json
+├── version.json
+└── generate.json
 ```
+
+`generate.json` records the checkpoint content hash the last `tide generate` ran against, with a timestamp. Provenance for a person asking "what was this built from" — nothing reads it back, and it is not the value `--check` compares.
 
 `tide list` and `tide show` fetch from the server on every invocation; they do not read the cache. Deleting `.tide-cache/` only affects the next `tide pull` (and the automatic pre-pull inside `tide apply`/`plan`).
 

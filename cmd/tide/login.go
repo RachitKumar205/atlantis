@@ -1,15 +1,21 @@
 // tide login — enrol this machine as a caller.
 //
-//	tide login --url https://console.example:3443 --org acme --token <token>
+//	tide login
 //
-// Generates a P-256 key HERE, sends only a certificate signing request, and
-// writes what comes back to ~/.atlantis/<org>/<caller>/. The private key is
-// created on the machine that will use it and never leaves.
+// opens the browser: sign in at Atlantis Cloud, type the code, approve. The
+// caller comes from tide.yaml, or --caller. The alternate method takes an
+// admin-minted token from the console's Callers page:
 //
-// There is no --caller flag. The console determines the caller from the row the
-// token spends, and the signer names the certificate from that value and takes
-// only the public key from the request, so a name supplied here would decide
-// nothing.
+//	tide login --url <enrol URL> --org <org> --token <token>
+//
+// Both generate a P-256 key HERE, send only a certificate signing request,
+// and write what comes back to ~/.atlantis/<org>/<caller>/. The private key
+// is created on the machine that will use it and never leaves.
+//
+// On the token arm the caller comes from the row the token spends; on the
+// browser arm from the approval, which bound the name the person saw. Either
+// way the signer names the certificate from what the console resolved and
+// takes only the public key from the request.
 
 package main
 
@@ -39,9 +45,12 @@ const enrolTimeout = 30 * time.Second
 
 func cmdLogin(args []string) int {
 	fs := flag.NewFlagSet("login", flag.ExitOnError)
-	url := fs.String("url", "", "enrolment listener URL, from the console's enrol dialog")
-	org := fs.String("org", "", "organisation to enrol into")
-	token := fs.String("token", "", "single-use enrolment token")
+	caller := fs.String("caller", "", "caller to enrol as (read from tide.yaml when run in a caller repository)")
+	oidc := fs.Bool("oidc", false, "CI: exchange the runner's workload identity for a certificate")
+	audience := fs.String("audience", "atlantis-enroll", "with --oidc: the audience the workload token is minted for; must match the federation rule")
+	url := fs.String("url", "", "alternate method: enrolment listener URL, from the console's enrol dialog")
+	org := fs.String("org", "", "alternate method: organisation to enrol into")
+	token := fs.String("token", "", "alternate method: single-use enrolment token")
 	// Local development only. A deployment's enrolment endpoint carries a
 	// publicly-trusted certificate, so the system roots verify it and this flag
 	// has nothing to do. It exists because the certificates deploy/init-certs.sh
@@ -52,16 +61,42 @@ func cmdLogin(args []string) int {
 		return 2
 	}
 
-	// Named individually. Three required flags is enough that "which one" is the
-	// question somebody actually has.
+	if *oidc {
+		name, err := deviceCaller(*caller)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "tide login:", err)
+			return 2
+		}
+		org2 := *org
+		if org2 == "" {
+			if cfg, err := parseTideConfig("tide.yaml"); err == nil {
+				org2 = cfg.Org
+			}
+		}
+		return oidcLogin(name, *url, org2, *audience, *caFile)
+	}
+
+	// No token and no URL is the ordinary case: the browser flow against
+	// Cloud, no configuration.
+	if *token == "" && *url == "" {
+		name, err := deviceCaller(*caller)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "tide login:", err)
+			return 2
+		}
+		return deviceLogin(name, *caFile)
+	}
+
+	// The token arm. Named individually: three required flags is enough that
+	// "which one" is the question somebody actually has.
 	for _, r := range []struct{ flag, val string }{
 		{"--url", *url},
 		{"--org", *org},
 		{"--token", *token},
 	} {
 		if r.val == "" {
-			fmt.Fprintf(os.Stderr, "tide login: %s is required\n\n", r.flag)
-			fmt.Fprintln(os.Stderr, "The console's Callers page prints the whole command.")
+			fmt.Fprintf(os.Stderr, "tide login: %s is required with the token method\n\n", r.flag)
+			fmt.Fprintln(os.Stderr, "The console's Callers page prints the whole command. With no flags at all, `tide login` signs in through the browser.")
 			return 2
 		}
 	}
@@ -70,12 +105,17 @@ func cmdLogin(args []string) int {
 		return 2
 	}
 
-	bundle, err := enrol(*url, *org, *token, *caFile)
+	bundle, err := enrol(*url, *org, *caFile, map[string]string{"token": *token})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tide login: %v\n", err)
 		return 1
 	}
+	return storeAndReport(bundle)
+}
 
+// storeAndReport writes the bundle and says what happened. Shared by the
+// token and device arms: past the credential, the two are one flow.
+func storeAndReport(bundle *storedCredentials) int {
 	dir, err := credDir(bundle.Org, bundle.Caller)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tide login: %v\n", err)
@@ -117,7 +157,10 @@ type enrolResponse struct {
 //
 // The key exists only in this process until writeNewCredentials puts it on
 // disk. Nothing sends it anywhere; the CSR carries the public half.
-func enrol(baseURL, org, token, caFile string) (*storedCredentials, error) {
+// enrol trades a credential for a certificate bundle. credential carries
+// either "token" (the paste flow) or "assertion" and "caller" (`tide login`
+// with no flags); the listener branches on which is present.
+func enrol(baseURL, org, caFile string, credential map[string]string) (*storedCredentials, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generate a key: %w", err)
@@ -137,14 +180,21 @@ func enrol(baseURL, org, token, caFile string) (*storedCredentials, error) {
 	if err != nil {
 		return nil, err
 	}
-	body, err := json.Marshal(map[string]string{
-		"org": org, "token": token, "csr_pem": string(csrPEM),
-	})
+	req := map[string]string{"org": org, "csr_pem": string(csrPEM)}
+	for k, v := range credential {
+		req[k] = v
+	}
+	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := client.Post(baseURL+"/enroll", "application/json", bytes.NewReader(body))
+	// The workload arm has its own route; everything else shares /enroll.
+	path := "/enroll"
+	if _, ok := credential["id_token"]; ok {
+		path = "/enroll/oidc"
+	}
+	resp, err := client.Post(baseURL+path, "application/json", bytes.NewReader(body))
 	if err != nil {
 		// A trust failure is worth naming, because the raw error does not
 		// describe the situation to anybody who has to act on it. On macOS it
@@ -214,14 +264,25 @@ func enrol(baseURL, org, token, caFile string) (*storedCredentials, error) {
 	}
 	clientPEM.WriteString(out.CertPEM)
 
-	return &storedCredentials{
+	creds := &storedCredentials{
 		Org:       out.Org,
 		Caller:    out.Caller,
 		ClientPEM: clientPEM.Bytes(),
 		CAPEM:     []byte(out.CAPEM),
 		Endpoint:  out.Endpoint,
 		EnrollURL: out.EnrollURL,
-	}, nil
+	}
+	// The private authority that verified this listener travels into the
+	// store, so renewal can keep verifying it. Everywhere else the listener is
+	// publicly trusted and renewal uses the system roots.
+	if caFile != "" {
+		caPEM, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read --ca: %w", err)
+		}
+		creds.EnrollCAPEM = caPEM
+	}
+	return creds, nil
 }
 
 // enrolClient dials the enrolment listener.

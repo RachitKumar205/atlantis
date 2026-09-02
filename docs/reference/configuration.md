@@ -527,10 +527,11 @@ around day five of seven. A failed renewal is a warning rather than an error:
 the certificate is not expired yet, and refusing to run because a refresh failed
 would turn a console outage into a caller outage.
 
-**Ephemeral CI runners cannot use any of this.** A runner with no state between
-runs cannot hold a key, so it can neither enrol nor renew — and the variables
-that used to carry a key into CI are gone. There is no supported way to run
-`tide` from CI today; see `docs/examples/README.md`.
+**Ephemeral CI runners enrol per job** rather than holding anything between
+runs: `tide login --oidc` trades the runner's workload identity for a
+one-hour certificate under a federation rule configured on the console's
+Callers page. The variables that used to carry a private key into CI are gone
+and stay gone; see `docs/examples/README.md` for the workflow shape.
 
 #### The signer
 
@@ -575,6 +576,7 @@ factor and the assertion signing key.
 | `PROVISIONER_SERVER_IMAGE` | (unset; **required**) | The atlantis image. |
 | `PROVISIONER_SIGNER_IMAGE` | (unset; **required**) | The signer image. |
 | `PROVISIONER_POSTGRES_IMAGE` | (unset; **required**) | The Postgres image. Its tag must read as a Postgres version — see `Dockerfile.pg`. |
+| `PROVISIONER_ENROLL_URL` | (unset) | The enrolment listener's public address, written into `cloud.orgs.enroll_url` per organisation so `tide login` needs no configuration. An organisation registered without one refuses the browser login at the poll, naming what is missing. |
 | `PROVISIONER_MEMCACHED_ADDR` | (unset; **required**) | The shared cache. Not defaulted deliberately; see below. |
 | `PROVISIONER_HEALTH_LISTEN` | `:8082` | Plaintext `/healthz` and `/readyz`. Binds every interface, because the orchestrator probes it. |
 | `PROVISIONER_METRICS_LISTEN` | `127.0.0.1:9102` | Plaintext `/metrics`, on its own listener. Loopback by default: it shared the health port until the per-organisation counts turned out to be readable by any pod in the cluster. Move it to a reachable address when something scrapes it, and put a credential in front at the same time. |

@@ -1,30 +1,52 @@
 # Examples
 
-## Caller CI is not currently supported
+## Caller CI, through workload identity
 
-This directory held two GitHub Actions workflows: one running `tide plan` on
-every pull request, one running `tide apply` on merge. Both are gone, along with
-`guides/set-up-caller-ci.md`, because the mechanism they depended on no longer
-exists.
+A CI job authenticates with the identity its runner already has. On GitHub
+Actions that is the job's OIDC token: the enrolment listener verifies it
+against GitHub's published keys under a **federation rule** an admin
+configured on the console's Callers page — issuer, audience, and a subject
+pattern such as `repo:acme/api:*` — and issues a one-hour certificate. No
+repository secrets, no key pasted anywhere, nothing stored between runs.
 
-They worked by putting a client certificate and **its private key** into
-repository secrets, as `TIDE_TLS_CERT_PEM` / `TIDE_TLS_KEY_PEM` / `TIDE_TLS_CA_PEM`,
-and the server address into `ATL_ENDPOINT`. Certificate enrolment replaced that:
-a machine generates its own key, sends only a certificate signing request, and
-`tide login` writes the result to `~/.atlantis`. Nothing pastes a private key
-anywhere, which was the point.
+An earlier generation of these examples put a client certificate and **its
+private key** into repository secrets. Enrolment replaced that: a machine
+generates its own key and only a certificate signing request travels. The
+workload path keeps that property — the runner's key is generated in the job
+and dies with it.
 
-An ephemeral CI runner cannot use that store. It has no state between runs, so
-it cannot hold a key, and a certificate it enrolled would be discarded when the
-job ended.
+```yaml
+name: schema
+on: [pull_request]
 
-**So there is no supported way to run `tide` from CI today.** That is a real
-gap, recorded rather than papered over. Designing the replacement — a reusable
-enrolment credential, workload identity, something else — is its own piece of
-work.
+permissions:
+  id-token: write     # the workload identity tide exchanges
+  contents: read
 
-What still holds from the old workflows, and will hold in whatever replaces
-them:
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    env:
+      ATL_ENROLL_URL: https://enroll.example.com   # the organisation's enrolment listener
+    steps:
+      - uses: actions/checkout@v4
+      - run: curl -fsSL https://releases.tryatlantis.dev/install.sh | sh
+      - run: tide login --oidc
+      - run: tide plan
+      - run: tide generate --check --against-server
+```
+
+The rule's audience defaults to `atlantis-enroll` on both sides; pass
+`--audience` where the rule says otherwise. The certificate renews within the
+budget the rule sets — once, by default — and then refuses, so a token stolen
+off a runner is worth at most that many further hours.
+
+`tide generate --check` with no flags needs no credentials at all, so it can
+gate a pull request before any identity exists; `--against-server` adds "did
+the schema move since this client was generated" and rides the same one-hour
+certificate.
+
+Exit codes, unchanged from the beginning:
 
 | Exit code | Meaning | What CI should do |
 |---|---|---|

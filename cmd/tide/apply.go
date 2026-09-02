@@ -342,7 +342,9 @@ func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan *ad
 	if h := applyResp.GetContentHash(); h != "" {
 		cliout.Field(os.Stdout, "content", h[:12])
 	}
-	if cfg.OutputDir != "" {
+	// Both, because `tide generate` refuses without a namespace list: advising
+	// a command that cannot run is worse than saying nothing.
+	if cfg.OutputDir != "" && len(cfg.Generate) > 0 {
 		cliout.Infof("regenerate the typed client under %s with `tide generate`", cfg.OutputDir)
 	}
 	return 0

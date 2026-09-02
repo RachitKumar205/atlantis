@@ -45,8 +45,7 @@ const renewalFraction = 2.0 / 3.0
 //
 // Only credentials tide itself wrote. tide cannot write back to an environment
 // variable, so renewing material supplied that way rotates the identity and
-// discards the replacement, locking the caller out on its next run. That is the
-// CI case.
+// discards the replacement, locking the caller out on its next run.
 func renewIfDue(c *tideConfig) {
 	renewOnce.Do(func() {
 		if c.storeDir == "" || c.storeEnrollURL == "" {
@@ -103,17 +102,26 @@ func renewNow(c *tideConfig, _ *x509.Certificate) error {
 	if err != nil {
 		return fmt.Errorf("load the current certificate: %w", err)
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM([]byte(c.TLS.CAPEM)) {
-		return fmt.Errorf("the stored CA holds no certificate")
+	// The listener is publicly trusted, so the system roots verify it — the
+	// same trust login uses. The stored organisation CA verifies atlantis's
+	// gRPC endpoint and says nothing about this listener; pooling it here made
+	// renewal fail against every deployment whose listener certificate did not
+	// happen to chain to it. enroll_ca.crt exists only where login needed
+	// --ca, and carries that private authority forward.
+	tlsCfg := &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{pair},
+	}
+	if c.storeEnrollCA != "" {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM([]byte(c.storeEnrollCA)) {
+			return fmt.Errorf("%s holds no certificate", enrollCAName)
+		}
+		tlsCfg.RootCAs = pool
 	}
 	client := &http.Client{
-		Timeout: enrolTimeout,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{
-			MinVersion:   tls.VersionTLS12,
-			Certificates: []tls.Certificate{pair},
-			RootCAs:      pool,
-		}},
+		Timeout:   enrolTimeout,
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
 	}
 
 	body, err := json.Marshal(map[string]string{"csr_pem": string(csrPEM)})
@@ -154,10 +162,34 @@ func renewNow(c *tideConfig, _ *x509.Certificate) error {
 		return err
 	}
 
+	// The response repeats the CA, the endpoint and the renewal address so a
+	// machine picks up a moved address or a rotated root without being
+	// re-enrolled by hand. Storing them is what makes that promise real; a
+	// field the response left empty keeps its stored value.
+	refreshed := &storedCredentials{
+		CAPEM:     []byte(c.TLS.CAPEM),
+		Endpoint:  c.Endpoint,
+		EnrollURL: c.storeEnrollURL,
+	}
+	if out.CAPEM != "" {
+		refreshed.CAPEM = []byte(out.CAPEM)
+	}
+	if out.Endpoint != "" {
+		refreshed.Endpoint = out.Endpoint
+	}
+	if out.EnrollURL != "" {
+		refreshed.EnrollURL = out.EnrollURL
+	}
+	if err := writeSidecars(c.storeDir, refreshed); err != nil {
+		return err
+	}
+
 	// Use the new material for this run too. Without this the command that
 	// triggered the renewal would still dial with the certificate it just
 	// replaced — correct, since both are valid, but confusing to debug.
 	c.TLS.CertPEM = clientPEM.String()
 	c.TLS.KeyPEM = clientPEM.String()
+	c.TLS.CAPEM = string(refreshed.CAPEM)
+	c.Endpoint = refreshed.Endpoint
 	return nil
 }

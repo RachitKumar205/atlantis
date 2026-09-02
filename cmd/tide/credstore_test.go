@@ -7,9 +7,12 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -365,5 +368,134 @@ func TestRenewalIgnoresCredentialsTideDidNotWrite(t *testing.T) {
 
 	if c.TLS.CertPEM != "whatever came from the environment" {
 		t.Error("renewal touched credentials it does not own")
+	}
+}
+
+// The enroll CA sidecar exists only where login needed --ca, and renewal
+// selects its roots from its presence: absent means the listener is publicly
+// trusted and the system roots verify it.
+func TestEnrollCASidecarRoundTrips(t *testing.T) {
+	storeFixture(t)
+
+	plain := fakeCredentials(t, "acme", "api")
+	if err := writeNewCredentials(plain); err != nil {
+		t.Fatal(err)
+	}
+	back, err := loadCredentials("acme", "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(back.EnrollCAPEM) != 0 {
+		t.Errorf("a store written without --ca grew an enroll CA: %q", back.EnrollCAPEM)
+	}
+
+	private := fakeCredentials(t, "acme", "worker")
+	private.EnrollCAPEM = []byte("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n")
+	if err := writeNewCredentials(private); err != nil {
+		t.Fatal(err)
+	}
+	back, err = loadCredentials("acme", "worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(back.EnrollCAPEM) != string(private.EnrollCAPEM) {
+		t.Errorf("enroll CA did not round-trip: %q", back.EnrollCAPEM)
+	}
+
+	// Rewriting the sidecars without an enroll CA must not erase the one on
+	// disk: renewal refreshes ca.crt and endpoint, and knows nothing about how
+	// the listener was verified at login.
+	if err := writeSidecars(back.Dir, &storedCredentials{
+		CAPEM: back.CAPEM, Endpoint: "moved.example:9090", EnrollURL: back.EnrollURL,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	back, err = loadCredentials("acme", "worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(back.EnrollCAPEM) == 0 {
+		t.Error("refreshing the sidecars erased enroll_ca.crt")
+	}
+	if back.Endpoint != "moved.example:9090" {
+		t.Errorf("endpoint = %q, want the refreshed value", back.Endpoint)
+	}
+}
+
+// Renewal verifies the enrolment listener the way login did: system roots for
+// the publicly-trusted case, enroll_ca.crt where login needed --ca. The stored
+// organisation CA says nothing about the listener — it verifies atlantis's
+// gRPC endpoint — and pooling it here made renewal fail against every
+// deployment whose listener certificate did not happen to chain to it.
+func TestRenewalTrustsTheListenerNotTheOrgCA(t *testing.T) {
+	storeFixture(t)
+	creds := fakeCredentials(t, "acme", "backend")
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/renew" {
+			http.NotFound(w, r)
+			return
+		}
+		fresh := fakeCredentials(t, "acme", "backend")
+		leafPEM := ""
+		rest := fresh.ClientPEM
+		for {
+			var block *pem.Block
+			block, rest = pem.Decode(rest)
+			if block == nil {
+				break
+			}
+			if block.Type == "CERTIFICATE" {
+				leafPEM = string(pem.EncodeToMemory(block))
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"cert_pem": leafPEM,
+			"endpoint": "moved.example:9090",
+		})
+	}))
+	defer srv.Close()
+
+	// The listener's authority, as login --ca would have stored it. It shares
+	// nothing with the org CA in creds.CAPEM.
+	listenerCA := pem.EncodeToMemory(&pem.Block{
+		Type: "CERTIFICATE", Bytes: srv.Certificate().Raw,
+	})
+	creds.EnrollURL = srv.URL
+	creds.EnrollCAPEM = listenerCA
+	if err := writeNewCredentials(creds); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadCredentials("acme", "backend")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &tideConfig{Caller: "backend", Org: "acme"}
+	cfg.TLS.CertPEM = string(loaded.ClientPEM)
+	cfg.TLS.KeyPEM = string(loaded.ClientPEM)
+	cfg.TLS.CAPEM = string(loaded.CAPEM)
+	cfg.Endpoint = loaded.Endpoint
+	cfg.storeDir = loaded.Dir
+	cfg.storeEnrollURL = loaded.EnrollURL
+	cfg.storeEnrollCA = string(loaded.EnrollCAPEM)
+
+	leaf, err := leafOf(loaded.ClientPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := renewNow(cfg, leaf); err != nil {
+		t.Fatalf("renewal failed against a listener outside the org CA: %v", err)
+	}
+	// The refreshed endpoint from the response reached the sidecars.
+	after, err := loadCredentials("acme", "backend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Endpoint != "moved.example:9090" {
+		t.Errorf("endpoint = %q, want the refreshed value", after.Endpoint)
+	}
+	if len(after.EnrollCAPEM) == 0 {
+		t.Error("renewal erased enroll_ca.crt")
 	}
 }

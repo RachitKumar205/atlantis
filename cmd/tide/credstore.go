@@ -99,6 +99,13 @@ type storedCredentials struct {
 	Endpoint  string
 	EnrollURL string
 
+	// EnrollCAPEM verifies the enrolment listener itself, and is present only
+	// where `tide login --ca` was used. The listener is publicly trusted in
+	// every real deployment, so renewal uses the system roots when this is
+	// empty; a local stack's private authority is carried here so renewal
+	// keeps working where login needed the flag.
+	EnrollCAPEM []byte
+
 	// NotAfter comes from the certificate rather than from a file beside it.
 	// A stored copy is a second source that can disagree with the thing it
 	// describes, and renewal decides what to do from exactly this value.
@@ -110,6 +117,7 @@ const (
 	caPEMName     = "ca.crt"
 	endpointName  = "endpoint"
 	enrollURLName = "enroll_url"
+	enrollCAName  = "enroll_ca.crt"
 )
 
 // ErrNoCredentials reports that nothing has been enrolled for this pair.
@@ -133,11 +141,15 @@ func loadCredentials(org, caller string) (*storedCredentials, error) {
 		return nil, fmt.Errorf("read %s: %w", filepath.Join(dir, caPEMName), err)
 	}
 
+	// Optional: absent everywhere the listener is publicly trusted.
+	enrollCA, _ := os.ReadFile(filepath.Join(dir, enrollCAName))
+
 	c := &storedCredentials{
 		Org: org, Caller: caller, Dir: dir,
 		ClientPEM: clientPEM, CAPEM: caPEM,
-		Endpoint:  readTrimmed(dir, endpointName),
-		EnrollURL: readTrimmed(dir, enrollURLName),
+		Endpoint:    readTrimmed(dir, endpointName),
+		EnrollURL:   readTrimmed(dir, enrollURLName),
+		EnrollCAPEM: enrollCA,
 	}
 	leaf, err := leafOf(clientPEM)
 	if err != nil {
@@ -221,11 +233,18 @@ func writeNewCredentials(c *storedCredentials) error {
 // 0644: a CA certificate and two addresses are public by construction. Only
 // client.pem is a secret, and it is the one file written 0600.
 func writeSidecars(dir string, c *storedCredentials) error {
-	for name, body := range map[string][]byte{
+	files := map[string][]byte{
 		caPEMName:     c.CAPEM,
 		endpointName:  []byte(c.Endpoint + "\n"),
 		enrollURLName: []byte(c.EnrollURL + "\n"),
-	} {
+	}
+	// Only when present: writing an empty file would erase the record that a
+	// private authority verifies this store's listener, and renewal would then
+	// ask the system roots about it.
+	if len(c.EnrollCAPEM) > 0 {
+		files[enrollCAName] = c.EnrollCAPEM
+	}
+	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), body, 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", filepath.Join(dir, name), err)
 		}

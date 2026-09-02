@@ -1,23 +1,22 @@
 # atlantis-go
 
-Typed Go SDK for [atlantis](https://github.com/rachitkumar205/atlantis). The module ships protobuf message types and the typed gRPC clients (one per namespace) that caller applications import to talk to an atlantis server. The server lives in the parent directory and is licensed separately.
+Runtime library for [atlantis](https://github.com/rachitkumar205/atlantis) callers: the gRPC transport, the job worker runtime, and the admin JSON helpers. The server lives in the parent directory and is licensed separately.
+
+**This module is not where your typed client comes from.** Entity types and the per-namespace gRPC clients are generated into your own repository by `tide generate`, scoped to the namespaces you consume, and committed there. See [schema flow](../../docs/architecture/schema-flow.md#caller-local-sdk-generation).
 
 ## Install
 
-```go
-import (
-    consumerpb "github.com/rachitkumar205/atlantis-go/pb/atlantis/consumer/v1"
-    "github.com/rachitkumar205/atlantis-go/client/consumer"
-)
+```
+go get github.com/rachitkumar205/atlantis/clients/go
 ```
 
-The module is not yet published to `proxy.golang.org`. Until it is, depend on it via a `replace` directive pointing at a local checkout of the parent monorepo:
+The module is not yet published to `proxy.golang.org`. Until it is, depend on it via a `replace` directive pointing at a local checkout:
 
 ```
-replace github.com/rachitkumar205/atlantis-go => ../atlantis/clients/go
+replace github.com/rachitkumar205/atlantis/clients/go => ../atlantis/clients/go
 ```
 
-A versioned release is on the roadmap.
+A versioned release is on the roadmap. Only callers running job workers need this module at all; a caller that just reads and writes entities needs nothing beyond the generated code and `grpc`.
 
 ## Dependencies
 
@@ -27,17 +26,9 @@ Runtime: an endpoint that speaks the atlantis gRPC protocol — typically a depl
 
 ## Regeneration
 
-The SDK is regenerated from `.atl` schema files:
+Callers run `tide generate`, which reads the canonical schema from the server and writes proto sources, wire types and typed clients into the caller's own module. Nothing in this directory is involved.
 
-1. `.atl` files (in caller repos or `atlantis/testdata/schema/`)
-2. `tidectl codegen` → `.proto` files under `atlantis/<namespace>/v1/`
-3. `buf generate` → Go pb types in `clients/go/pb/` and typed clients in `clients/go/client/`
-
-`tidectl codegen` runs offline. `buf generate` fetches plugins from the Buf Schema Registry on first run, then uses the local cache; subsequent regenerations don't need network.
-
-Versioned files in `clients/go/`: `go.mod`, `LICENSE`, and this README. The `pb/` and `client/` subtrees are gitignored — produced by `make codegen` against whatever `.atl` files are present.
-
-For cross-caller `references` (a backend entity referencing a vendor entity defined by another caller), the merged schema view comes from `tide pull` against a running atlantis server. Codegen still runs locally against the pulled files.
+The `pb/` and `client/` subtrees here are gitignored and exist only for atlantis's own integration tests, built by `make codegen` from whatever `.atl` files are present. Versioned files in `clients/go/`: `go.mod`, `LICENSE`, this README, and the hand-written packages beside them.
 
 ## License
 

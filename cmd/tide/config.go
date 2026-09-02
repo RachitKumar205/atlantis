@@ -36,9 +36,11 @@ type tideConfig struct {
 	// dial() fills these from the credential store. Nothing outside this file
 	// writes them.
 	//
-	// A CI runner that cannot keep a key between runs therefore has no path:
-	// pasting a private key into a repository secret is what enrolment replaced,
-	// and nothing has taken its place.
+	// A CI runner that cannot keep a key between runs enrols per job instead:
+	// `tide login --oidc` trades the runner's workload identity for a
+	// short-lived certificate under a federation rule the organisation
+	// configured. Pasting a private key into a repository secret is what
+	// enrolment replaced, and it stays replaced.
 	TLS struct {
 		CertPEM string `yaml:"-"`
 		KeyPEM  string `yaml:"-"`
@@ -65,9 +67,16 @@ type tideConfig struct {
 	// directory it does not own.
 	storeDir       string `yaml:"-"`
 	storeEnrollURL string `yaml:"-"`
+	storeEnrollCA  string `yaml:"-"`
 }
 
-func loadPCConfig(path string) (*tideConfig, error) {
+// parseTideConfig reads tide.yaml and applies the environment, without
+// consulting the credential store or the network.
+//
+// Split out for `tide generate --check`, which verifies files already on disk
+// against the manifest beside them. Every other command reaches the server and
+// goes through loadPCConfig.
+func parseTideConfig(path string) (*tideConfig, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -80,16 +89,24 @@ func loadPCConfig(path string) (*tideConfig, error) {
 	if c.Caller == "" {
 		return nil, fmt.Errorf("%s: `caller` is required", path)
 	}
+	return &c, nil
+}
+
+func loadPCConfig(path string) (*tideConfig, error) {
+	c, err := parseTideConfig(path)
+	if err != nil {
+		return nil, err
+	}
 	// Fall back to the credential store for anything tide.yaml and the
 	// environment did not supply.
 	//
 	// The only source. `tide login` is what puts material there.
-	if err := applyStoreCredentials(&c); err != nil {
+	if err := applyStoreCredentials(c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	// Replace the certificate if it is close to expiry. Best-effort and once
 	// per process; see renewIfDue.
-	renewIfDue(&c)
+	renewIfDue(c)
 	if c.Endpoint == "" {
 		return nil, fmt.Errorf("%s: this repository has no credentials.\n\n"+
 			"Run `tide login` — the console's Callers page prints the command. "+
@@ -99,7 +116,7 @@ func loadPCConfig(path string) (*tideConfig, error) {
 	if len(c.SchemaPaths) == 0 {
 		return nil, fmt.Errorf("%s: `schema_paths` must list at least one directory", path)
 	}
-	return &c, nil
+	return c, nil
 }
 
 func applyEnvOverrides(c *tideConfig) {
@@ -199,6 +216,7 @@ func applyStoreCredentials(c *tideConfig) error {
 		// only because nothing else supplied a certificate.
 		c.storeDir = creds.Dir
 		c.storeEnrollURL = creds.EnrollURL
+		c.storeEnrollCA = string(creds.EnrollCAPEM)
 	}
 	if c.TLS.CAPEM == "" {
 		c.TLS.CAPEM = string(creds.CAPEM)

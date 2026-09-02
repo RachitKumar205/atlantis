@@ -43,7 +43,10 @@ tide login --url https://127.0.0.1:3443 --org acme --token <token> \
            --ca ./certs/ca.crt
 ```
 
-Without it you get `could not verify the server's certificate`. **`--ca` is a
+Without it you get `could not verify the server's certificate`. The flag also
+writes `enroll_ca.crt` into the credential store, so automatic renewal keeps
+verifying the listener against the same private authority login did.
+**`--ca` is a
 local-development flag and nothing else** — if it is ever needed against a real
 deployment, that deployment's certificate is wrong and passing a CA would be
 working around a genuine failure rather than fixing it.

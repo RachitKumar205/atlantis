@@ -44,7 +44,23 @@ Common errors:
 - `tide plan` exits 1 (backfill required): you've added a `not null` column without a `default` to an existing entity, or added a composite `unique by a, b` to an existing entity (it can fail on existing duplicate tuples — verify none exist). Add a `default` / dedupe, or supply backfill SQL.
 - `tide plan` exits 2 (cross-caller breaking): another caller's schema depends on a field you removed or renamed. The output names the conflict.
 
-## 4. Verify
+## 4. Regenerate the client
+
+```
+tide generate
+```
+
+The entity exists on the server now, and your typed client does not know about
+it yet. This rewrites the client under `output_dir` from the server's canonical
+schema, scoped to the namespaces in `generate:`. Commit the result with the
+`.atl` change: the two describe the same thing, and reviewing them together is
+how the API change is visible.
+
+Skipping this is not an outage. An old client keeps sending a shape the server
+understands — it just cannot see the new entity, so the code that uses it will
+not compile until you run this.
+
+## 5. Verify
 
 ```
 tide show Order

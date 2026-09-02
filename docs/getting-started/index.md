@@ -104,7 +104,9 @@ In the console at <http://localhost:3000>, open **Callers**:
 If you register a caller through the API rather than the page, note that
 `can_mutate` defaults to **false** there — the opposite of the checkbox.
 
-Then, on the machine that will run `tide`:
+Then, on the machine that will run `tide`. A released `tide` installs from
+the install script or Homebrew; this walkthrough builds it from the checkout
+you are already standing in, because the local stack is what you are running:
 
 ```
 go install ./cmd/tide
@@ -115,6 +117,12 @@ tide login \
   --token <the token> \
   --ca ./certs/ca.crt
 ```
+
+Against a hosted Atlantis this whole block is `tide login` with no flags —
+the browser flow discovers everything the four flags carry here. The token
+method remains for enrolling a machine on someone's behalf; `--ca` exists
+because the local stack's certificates chain to an authority in no system
+store.
 
 `tide` generates a private key locally, sends only a certificate signing
 request, and stores the result under `~/.atlantis/acme/backend/`. The key never

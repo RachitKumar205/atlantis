@@ -190,6 +190,10 @@ NATIVE_ARCH := $(shell $(GO) env GOARCH)
 # so this is a pure-Go build matrix a single runner completes in
 # seconds. This is the artifact end users install.
 .PHONY: release-tide
+# The Cloud address release builds carry. A development build has none and
+# reads ATL_CLOUD_URL instead.
+TIDE_CLOUD_URL ?= https://cloud.tryatlantis.dev
+
 release-tide: ## Cross-compile tide tarballs for every platform: make release-tide VERSION=v0.4.0
 	@case "$(VERSION)" in v[0-9]*) : ;; *) \
 	  echo "Usage: make release-tide VERSION=v0.4.0"; \
@@ -203,14 +207,15 @@ release-tide: ## Cross-compile tide tarballs for every platform: make release-ti
 	  echo "==> building $$out"; \
 	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
 	    $(GO) build -trimpath \
-	      -ldflags "-s -w -X main.version=$(VERSION)" \
+	      -ldflags "-s -w -X main.version=$(VERSION) -X main.defaultCloudURL=$(TIDE_CLOUD_URL)" \
 	      -o $$out/tide$$ext ./cmd/tide || exit 1; \
 	  cp LICENSE $$out/LICENSE 2>/dev/null || true; \
 	  tar -czf $$out.tar.gz -C $(RELEASE_DIR) $$(basename $$out); \
 	  rm -rf $$out; \
 	done
+	@cd $(RELEASE_DIR) && shasum -a 256 tide-$(VERSION)-*.tar.gz > checksums.txt
 	@echo ""
-	@echo "==> $(RELEASE_DIR)/ (tide, all platforms)"
+	@echo "==> $(RELEASE_DIR)/ (tide, all platforms; checksums.txt beside them)"
 	@ls -la $(RELEASE_DIR)/
 
 # `make release-clis-native VERSION=v0.4.0` builds the cgo-requiring
