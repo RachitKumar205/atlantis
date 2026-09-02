@@ -58,10 +58,15 @@ var ErrAssertionSpent = errors.New("assertion has already been used")
 // authenticate a person, so what this returns is evidence of who acted, not
 // proof — the relationship migrations/infra/0036 describes.
 //
-// The pair matches logAction's, so a schema change and the audit row about it
-// name the same person the same way.
-func (u *User) Actor() (principal, email string) {
-	return "console:" + u.Subject, u.Email
+// The principal and address match logAction's, so a schema change and the
+// audit row about it name the same person the same way.
+//
+// name is what the org server stores to render the event later. It is sent
+// because that server cannot look it up: console identity lives in Cloud, and
+// it holds no user table to join. Empty when the account gave no name, which
+// the console renders by falling back to the address.
+func (u *User) Actor() (principal, email, name string) {
+	return "console:" + u.Subject, u.Email, u.Name
 }
 
 // User is who is making the current request.

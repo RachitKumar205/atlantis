@@ -1063,6 +1063,7 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 		EventType:  "apply",
 		Actor:      req.GetActor(),
 		ActorEmail: req.GetActorEmail(),
+		ActorName:  req.GetActorName(),
 	}
 	version, err := s.persistCheckpoint(ctx, tx, newIR, meta)
 	if err != nil {
@@ -1401,6 +1402,7 @@ type versionMeta struct {
 	// says no human was named, which is what an unattended apply is.
 	Actor      string
 	ActorEmail string
+	ActorName  string
 
 	// Lineage replaces Diff as the source of blame rows when set. adopt is
 	// the event that needs it — see seedEntityLineage.
@@ -1462,12 +1464,12 @@ ON CONFLICT (id) DO UPDATE SET ir = EXCLUDED.ir, applied_at = now(), applied_by 
 	var version int64
 	err = tx.QueryRow(ctx, `
 INSERT INTO atlantis.schema_versions
-    (caller, plan_class, diff, up_sql, down_sql, ir_snapshot, ir_hash, plan_id, parent_version, event_type, actor, actor_email)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    (caller, plan_class, diff, up_sql, down_sql, ir_snapshot, ir_hash, plan_id, parent_version, event_type, actor, actor_email, actor_name)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 RETURNING version`,
 		meta.Caller, meta.PlanClass, diffJSON, meta.UpSQL, meta.DownSQL,
 		raw, irHash, meta.PlanID, meta.ParentVer, meta.EventType,
-		normalizeActor(meta.Actor), meta.ActorEmail,
+		normalizeActor(meta.Actor), meta.ActorEmail, meta.ActorName,
 	).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("insert schema_versions: %w", err)

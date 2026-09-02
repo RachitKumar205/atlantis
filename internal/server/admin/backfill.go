@@ -413,6 +413,7 @@ VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
 		EventType:  "apply",
 		Actor:      req.GetActor(),
 		ActorEmail: req.GetActorEmail(),
+		ActorName:  req.GetActorName(),
 	})
 	if err != nil {
 		return nil, err

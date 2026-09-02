@@ -119,6 +119,7 @@ export interface SchemaVersionSummary {
   ir_hash: string
   actor?: string
   actor_email?: string
+  actor_name?: string
   entity_count?: number
 }
 
@@ -302,6 +303,8 @@ export interface Blame {
   at: string
   actor: string
   actor_email: string
+  /** The name as it stood when the event was recorded. */
+  actor_name: string
 }
 
 export interface EntityLineageEntry {

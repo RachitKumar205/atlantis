@@ -446,6 +446,7 @@ message ApplyMigrationRequest {
   // Provenance, not authorization. See Blame.
   string actor = 5;
   string actor_email = 6;
+  string actor_name = 7;
 }
 
 message ApplyMigrationResponse {
@@ -674,6 +675,7 @@ message AdoptBaselineRequest {
   bool allow_drift = 4;
   string adopted_by = 5;
   string adopted_by_email = 6;
+  string adopted_by_name = 7;
 }
 
 message AdoptBaselineResponse {
@@ -802,6 +804,7 @@ message BeginBackfillPlanRequest {
   // Provenance, not authorization. See Blame.
   string actor = 4;
   string actor_email = 5;
+  string actor_name = 6;
 }
 
 message BeginBackfillPlanResponse {
@@ -997,6 +1000,7 @@ message SchemaVersionSummary {
   string ir_hash = 7;
   string actor = 8;
   string actor_email = 9;
+  string actor_name = 11;
   // Entities in this version's snapshot. What an adopt did is baseline them,
   // and its diff is empty by definition, so this is the only number that
   // describes it.
@@ -1076,6 +1080,8 @@ message Blame {
   string at = 3;
   string actor = 4;
   string actor_email = 5;
+  // The name as it stood when the event was recorded, not as it is now.
+  string actor_name = 6;
 }
 
 message EntityOwnerEntry {
@@ -1097,6 +1103,7 @@ message RollbackSchemaRequest {
   string caller = 2;
   string actor = 3;
   string actor_email = 4;
+  string actor_name = 5;
 }
 
 message RollbackSchemaResponse {

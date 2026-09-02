@@ -12,6 +12,7 @@ import {
 } from '@/api/client'
 import { PageShell } from '@/components/PageShell'
 import { Timestamp } from '@/components/Timestamp'
+import { Actor } from '@/components/Actor'
 import { Sql } from '@/components/Sql'
 
 // ── helpers ───────────────────────────────────────────────────────────────
@@ -36,14 +37,6 @@ function dayKey(ts: string): string {
 // A person and a machine are different answers and have to read apart without
 // colour: a named person is prose, a caller keeps the monospace this page
 // gives every identifier. Same rule the schema browser uses.
-function versionActor(v: SchemaVersionSummary): { text: string; human: boolean; title: string } {
-  const email = v.actor_email ?? ''
-  if (email) {
-    return { text: email.split('@')[0], human: true, title: `${email} · via ${v.caller}` }
-  }
-  return { text: v.caller, human: false, title: `${v.caller} · no person was recorded` }
-}
-
 // What a version did, for the events whose diff is empty by construction.
 //
 // An adopt records a database that already existed, so it has no structural
@@ -94,10 +87,17 @@ function VersionNode({ version }: { version: SchemaVersionSummary }) {
         <div className="tlnode__bar" onClick={toggle}>
           <span className="tlnode__ver">{versionStr}</span>
           {(() => {
-            const a = versionActor(version)
             return (
-              <span className="tlnode__actor" title={a.title}>
-                {a.human ? a.text : <span className="mono">{a.text}</span>}
+              <span className="tlnode__actor">
+                <Actor
+                  of={{
+                    caller: version.caller,
+                    actor: version.actor ?? '',
+                    actor_email: version.actor_email ?? '',
+                    actor_name: version.actor_name ?? '',
+                  }}
+                  fallbackCaller={version.caller}
+                />
               </span>
             )
           })()}

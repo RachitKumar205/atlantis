@@ -1504,7 +1504,7 @@ func (s *Server) handleRollbackSchema(w http.ResponseWriter, r *http.Request) {
 	// still read apart on inspection — by actor now rather than by a person's
 	// address wearing a caller's column.
 	u := r.Context().Value(ctxUser).(*User)
-	actor, actorEmail := u.Actor()
+	actor, actorEmail, actorName := u.Actor()
 
 	atl := s.orgATL(w, r)
 	if atl == nil {
@@ -1515,6 +1515,7 @@ func (s *Server) handleRollbackSchema(w http.ResponseWriter, r *http.Request) {
 		Caller:     consoleCaller,
 		Actor:      actor,
 		ActorEmail: actorEmail,
+		ActorName:  actorName,
 	})
 	if err != nil {
 		s.log.Error("RollbackSchema", "to_version", body.ToVersion, "err", err)

@@ -73,8 +73,10 @@ func adoptTwoCallers(t *testing.T, svc *Service, allowDrift bool, extra string) 
 			{Caller: "lin", Files: docFiles},
 			{Caller: "lin2", Files: depScopeFiles("tag.atl", lineageOtherSchema)},
 		},
-		AllowDrift: allowDrift,
-		AdoptedBy:  "console:usr_lineage",
+		AllowDrift:     allowDrift,
+		AdoptedBy:      "console:usr_lineage",
+		AdoptedByEmail: "ada@example.com",
+		AdoptedByName:  "Ada Lovelace",
 	})
 	if err != nil {
 		t.Fatalf("AdoptBaseline: %v", err)
@@ -219,10 +221,11 @@ func TestAdoptRecordsTheActorBesideTheCaller(t *testing.T) {
 	createLineageTables(t, svc)
 	adoptTwoCallers(t, svc, false, "")
 
-	var caller, actor string
+	var caller, actor, email, name string
 	err := svc.pool.QueryRow(context.Background(),
-		`SELECT caller, actor FROM atlantis.schema_versions
-		 WHERE event_type = 'adopt' ORDER BY version DESC LIMIT 1`).Scan(&caller, &actor)
+		`SELECT caller, actor, actor_email, actor_name FROM atlantis.schema_versions
+		 WHERE event_type = 'adopt' ORDER BY version DESC LIMIT 1`).
+		Scan(&caller, &actor, &email, &name)
 	if err != nil {
 		t.Fatalf("read version row: %v", err)
 	}
@@ -231,6 +234,15 @@ func TestAdoptRecordsTheActorBesideTheCaller(t *testing.T) {
 	}
 	if actor != "console:usr_lineage" {
 		t.Errorf("actor = %q, want \"console:usr_lineage\"", actor)
+	}
+	// All three, because the principal alone renders as the caller. An adopt
+	// that stored the id and dropped the address and the name put
+	// "atlantis-console" on the schema page under "last modified by".
+	if email != "ada@example.com" {
+		t.Errorf("actor_email = %q, want \"ada@example.com\"", email)
+	}
+	if name != "Ada Lovelace" {
+		t.Errorf("actor_name = %q, want \"Ada Lovelace\"", name)
 	}
 }
 

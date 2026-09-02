@@ -223,11 +223,13 @@ func (s *Service) AdoptBaseline(ctx context.Context, req *adminpb.AdoptBaselineR
 	// time in the wrong package.
 	baseline := filterToExistingEntities(introspectedIR, existingIDs)
 	_, err = s.persistCheckpoint(ctx, tx, baseline, versionMeta{
-		Caller:    "adopt",
-		PlanClass: "adopt",
-		Diff:      d,
-		EventType: "adopt",
-		Actor:     req.GetAdoptedBy(),
+		Caller:     "adopt",
+		PlanClass:  "adopt",
+		Diff:       d,
+		EventType:  "adopt",
+		Actor:      req.GetAdoptedBy(),
+		ActorEmail: req.GetAdoptedByEmail(),
+		ActorName:  req.GetAdoptedByName(),
 
 		// Blame comes off the baseline, not off Diff. Diff is the drift
 		// report — what the declaration has and the database does not — and

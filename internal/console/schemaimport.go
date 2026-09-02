@@ -375,7 +375,7 @@ func (s *Server) handleApplyImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u := r.Context().Value(ctxUser).(*User)
-	actor, actorEmail := u.Actor()
+	actor, actorEmail, actorName := u.Actor()
 	atl := s.orgATL(w, r)
 	if atl == nil {
 		return
@@ -389,6 +389,7 @@ func (s *Server) handleApplyImport(w http.ResponseWriter, r *http.Request) {
 		Files:          importFiles(ents),
 		AdoptedBy:      actor,
 		AdoptedByEmail: actorEmail,
+		AdoptedByName:  actorName,
 	})
 	s.proxyProto(w, "AdoptBaseline", resp, err)
 }

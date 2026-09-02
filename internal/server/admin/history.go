@@ -37,6 +37,7 @@ type SchemaVersionSummary struct {
 	// it. Empty means none was named.
 	Actor      string `json:"actor"`
 	ActorEmail string `json:"actor_email"`
+	ActorName  string `json:"actor_name"`
 
 	// Entities in this version's snapshot. An adopt's diff is empty by
 	// definition — it records what the database already had — so this is the
@@ -70,7 +71,7 @@ func (s *Service) GetSchemaHistory(ctx context.Context, req *adminpb.GetSchemaHi
 	// bucket added to codegen.Diff is matched the day it exists — the same
 	// reason countDiffChanges stopped listing them by hand.
 	rows, err := s.pool.Query(ctx, `
-SELECT version, caller, plan_class, event_type, diff, created_at, ir_hash, actor, actor_email,
+SELECT version, caller, plan_class, event_type, diff, created_at, ir_hash, actor, actor_email, actor_name,
        COALESCE(jsonb_array_length(ir_snapshot->'entities'), 0)
 FROM atlantis.schema_versions
 WHERE ($1::bigint = 0 OR version < $1)
@@ -90,7 +91,7 @@ LIMIT $4`, req.GetBefore(), req.GetCaller(), req.GetEntityId(), fetchLimit)
 		var diffJSON []byte
 		var createdAt interface{}
 		if err := rows.Scan(&v.Version, &v.Caller, &v.PlanClass, &v.EventType, &diffJSON, &createdAt,
-			&v.IRHash, &v.Actor, &v.ActorEmail, &v.EntityCount); err != nil {
+			&v.IRHash, &v.Actor, &v.ActorEmail, &v.ActorName, &v.EntityCount); err != nil {
 			return nil, err
 		}
 		v.CreatedAt = fmt.Sprintf("%v", createdAt)
@@ -261,8 +262,8 @@ func (s *Service) GetEntityLineage(ctx context.Context, req *adminpb.GetEntityLi
 	rows, err := s.pool.Query(ctx, `
 SELECT e.entity_id, e.field_name, e.introduced_by, e.introduced_at,
        e.last_modified_by, e.last_modified_at, e.removed_at,
-       COALESCE(iv.created_at::text, ''), COALESCE(iv.actor, ''), COALESCE(iv.actor_email, ''),
-       COALESCE(mv.created_at::text, ''), COALESCE(mv.actor, ''), COALESCE(mv.actor_email, '')
+       COALESCE(iv.created_at::text, ''), COALESCE(iv.actor, ''), COALESCE(iv.actor_email, ''), COALESCE(iv.actor_name, ''),
+       COALESCE(mv.created_at::text, ''), COALESCE(mv.actor, ''), COALESCE(mv.actor_email, ''), COALESCE(mv.actor_name, '')
 FROM atlantis.entity_lineage e
 LEFT JOIN atlantis.schema_versions iv ON iv.version = e.introduced_at
 LEFT JOIN atlantis.schema_versions mv ON mv.version = e.last_modified_at
@@ -278,8 +279,8 @@ ORDER BY e.field_name`, req.GetEntityId())
 		var e EntityLineageEntry
 		if err := rows.Scan(&e.EntityID, &e.FieldName, &e.IntroducedBy, &e.IntroducedAt,
 			&e.LastModifiedBy, &e.LastModifiedAt, &e.RemovedAt,
-			&e.Introduced.At, &e.Introduced.Actor, &e.Introduced.ActorEmail,
-			&e.LastModified.At, &e.LastModified.Actor, &e.LastModified.ActorEmail); err != nil {
+			&e.Introduced.At, &e.Introduced.Actor, &e.Introduced.ActorEmail, &e.Introduced.ActorName,
+			&e.LastModified.At, &e.LastModified.Actor, &e.LastModified.ActorEmail, &e.LastModified.ActorName); err != nil {
 			return nil, err
 		}
 		e.Introduced.Caller, e.Introduced.Version = e.IntroducedBy, e.IntroducedAt
@@ -304,6 +305,7 @@ type Blame struct {
 	At         string `json:"at"`
 	Actor      string `json:"actor"`
 	ActorEmail string `json:"actor_email"`
+	ActorName  string `json:"actor_name"`
 }
 
 type EntityOwnerEntry struct {
@@ -332,8 +334,8 @@ func (s *Service) GetEntityOwners(ctx context.Context, _ *adminpb.GetEntityOwner
 SELECT e.entity_id, e.introduced_by, e.introduced_at,
        COALESCE(f.cnt, 0) AS field_count,
        e.last_modified_by, e.last_modified_at,
-       COALESCE(iv.created_at::text, ''), COALESCE(iv.actor, ''), COALESCE(iv.actor_email, ''),
-       COALESCE(mv.created_at::text, ''), COALESCE(mv.actor, ''), COALESCE(mv.actor_email, '')
+       COALESCE(iv.created_at::text, ''), COALESCE(iv.actor, ''), COALESCE(iv.actor_email, ''), COALESCE(iv.actor_name, ''),
+       COALESCE(mv.created_at::text, ''), COALESCE(mv.actor, ''), COALESCE(mv.actor_email, ''), COALESCE(mv.actor_name, '')
 FROM atlantis.entity_lineage e
 LEFT JOIN (
     SELECT entity_id, COUNT(*) AS cnt
@@ -357,8 +359,8 @@ ORDER BY e.entity_id`)
 		var lastAt int64
 		if err := rows.Scan(&o.EntityID, &o.IntroducedBy, &o.IntroducedAt, &o.FieldCount,
 			&lastBy, &lastAt,
-			&o.Introduced.At, &o.Introduced.Actor, &o.Introduced.ActorEmail,
-			&o.LastModified.At, &o.LastModified.Actor, &o.LastModified.ActorEmail); err != nil {
+			&o.Introduced.At, &o.Introduced.Actor, &o.Introduced.ActorEmail, &o.Introduced.ActorName,
+			&o.LastModified.At, &o.LastModified.Actor, &o.LastModified.ActorEmail, &o.LastModified.ActorName); err != nil {
 			return nil, err
 		}
 		o.Introduced.Caller, o.Introduced.Version = o.IntroducedBy, o.IntroducedAt
@@ -456,6 +458,7 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.GetToV
 		ParentVer:  &parentVer,
 		Actor:      req.GetActor(),
 		ActorEmail: req.GetActorEmail(),
+		ActorName:  req.GetActorName(),
 	})
 	if err != nil {
 		return nil, err
@@ -568,7 +571,7 @@ func schemaVersionSummariesToPB(in []SchemaVersionSummary) []*adminpb.SchemaVers
 			Version: v.Version, Caller: v.Caller, PlanClass: v.PlanClass,
 			EventType: v.EventType, ChangeCount: int32(v.ChangeCount),
 			CreatedAt: v.CreatedAt, IrHash: v.IRHash,
-			Actor: v.Actor, ActorEmail: v.ActorEmail,
+			Actor: v.Actor, ActorEmail: v.ActorEmail, ActorName: v.ActorName,
 			EntityCount: int32(v.EntityCount),
 		})
 	}
@@ -639,5 +642,6 @@ func blameToPB(b Blame) *adminpb.Blame {
 		At:         b.At,
 		Actor:      b.Actor,
 		ActorEmail: b.ActorEmail,
+		ActorName:  b.ActorName,
 	}
 }

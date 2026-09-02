@@ -11,6 +11,7 @@ import { Tabs, TabsList, TabsPanel, TabsTab } from '@/components/ui/tabs'
 import { InputGroup, InputGroupAddon, InputGroupText } from '@/components/ui/input-group'
 import { physicalTable } from '@/lib/physical'
 import { Timestamp } from '@/components/Timestamp'
+import { Actor } from '@/components/Actor'
 import { PageShell } from '@/components/PageShell'
 import { OnboardingDialog } from '@/components/OnboardingDialog'
 import { takeOnboardingPending } from '@/lib/onboarding'
@@ -114,29 +115,6 @@ function irToEntities(ir: IRRoot | null, owners: Record<string, EntityOwnerEntry
       fields, fks,
     }
   }).sort((a, b) => a.id.localeCompare(b.id))
-}
-
-// Who a change is attributed to, and how to draw them.
-//
-// A person and a service are not the same kind of answer, and the difference
-// has to read without colour: GitHub gives humans a round avatar and services
-// a square one, and the text-only equivalent here is prose against mono. The
-// caller is an identifier, so it keeps the monospace the rest of the page
-// gives identifiers; a person's name is words.
-function actorLabel(b: Blame | undefined, fallbackCaller: string): {
-  text: string
-  human: boolean
-  title: string
-} {
-  const caller = b?.caller || fallbackCaller
-  const email = b?.actor_email ?? ''
-  if (email) {
-    // The local part reads as a name in a line of prose; the address is the
-    // unambiguous value and belongs in the title with it.
-    const local = email.split('@')[0]
-    return { text: local, human: true, title: `${email} · via ${caller}` }
-  }
-  return { text: caller, human: false, title: `${caller} · no person was recorded` }
 }
 
 // The header reads as a sentence rather than a row of labelled numbers.
@@ -449,13 +427,16 @@ export function Schema() {
                     <span className="sep">·</span>
                     <span>owned by <span className="mono">{selectedEntity.caller}</span></span>
                     {selectedEntity.lastModified?.at && (() => {
-                      const a = actorLabel(selectedEntity.lastModified, selectedEntity.caller)
                       return (
                         <>
                           <span className="sep">·</span>
-                          <span title={a.title}>
+                          <span>
                             last modified by{' '}
-                            {a.human ? a.text : <span className="mono">{a.text}</span>}{' '}
+                            <Actor
+                              of={selectedEntity.lastModified}
+                              fallbackCaller={selectedEntity.caller}
+                              suppressCaller={selectedEntity.caller}
+                            />{' '}
                             <Timestamp at={selectedEntity.lastModified!.at} />
                           </span>
                         </>
@@ -579,11 +560,10 @@ export function Schema() {
                                 </>
                               )
                             }
-                            const a = actorLabel(b, b.caller)
                             return (
                               <>
-                                <TableCell className="f-blame" title={a.title}>
-                                  {a.human ? a.text : <span className="mono">{a.text}</span>}
+                                <TableCell className="f-blame">
+                                  <Actor of={b} fallbackCaller={b.caller} />
                                 </TableCell>
                                 <TableCell className="f-when"><Timestamp at={b.at} /></TableCell>
                               </>
@@ -634,25 +614,25 @@ export function Schema() {
                     <h3 className="sec__label">History</h3>
                     <div className="ehist">
                       {(entityHistory?.versions ?? []).map(v => {
-                        const a = actorLabel(
-                          { caller: v.caller, version: v.version, at: v.created_at,
-                            actor: v.actor ?? '', actor_email: v.actor_email ?? '' },
-                          v.caller,
-                        )
+                        const who = {
+                          caller: v.caller,
+                          actor: v.actor ?? '',
+                          actor_email: v.actor_email ?? '',
+                          actor_name: v.actor_name ?? '',
+                        }
                         return (
                           <button
                             key={v.version}
                             type="button"
                             className="ehist__row"
                             onClick={() => navigate({ to: '/history' })}
-                            title={a.title}
                           >
                             <span className="ehist__v">v{String(v.version).padStart(4, '0')}</span>
                             <span className={`badge badge--${planClassBadge(planClassLabel(v.plan_class))}`}>
                               {planClassLabel(v.plan_class)}
                             </span>
                             <span className="ehist__who">
-                              {a.human ? a.text : <span className="mono">{a.text}</span>}
+                              <Actor of={who} fallbackCaller={v.caller} />
                             </span>
                             <span className="spacer" />
                             <Timestamp at={v.created_at} className="ehist__when" />
