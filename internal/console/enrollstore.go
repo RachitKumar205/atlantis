@@ -151,6 +151,11 @@ type callerCert struct {
 	IssuedAt     time.Time
 	ExpiresAt    time.Time
 	SupersededAt *time.Time
+
+	// RenewalsRemaining is nil for an unlimited certificate — every human
+	// enrolment — and a countdown for one issued to a CI workload. Renewal
+	// copies value-1 onto the successor row and refuses at zero.
+	RenewalsRemaining *int
 }
 
 // recordCallerCert writes the fingerprint→(org, caller) mapping and marks any
@@ -180,10 +185,10 @@ func (s *store) recordCallerCert(ctx context.Context, c callerCert) error {
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO console.caller_certs
-		    (fingerprint, org, caller, expires_at)
-		VALUES ($1, $2, $3, $4)
+		    (fingerprint, org, caller, expires_at, renewals_remaining)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (fingerprint) DO NOTHING
-	`, c.Fingerprint, c.Org, c.Caller, c.ExpiresAt); err != nil {
+	`, c.Fingerprint, c.Org, c.Caller, c.ExpiresAt, c.RenewalsRemaining); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -241,11 +246,11 @@ func (o *orgStore) listCallerCerts(ctx context.Context) ([]callerCert, error) {
 func (s *store) callerCertByFingerprint(ctx context.Context, fingerprint []byte) (*callerCert, error) {
 	c := callerCert{Fingerprint: fingerprint}
 	err := s.pool.QueryRow(ctx, `
-		SELECT org, caller, issued_at, expires_at
+		SELECT org, caller, issued_at, expires_at, renewals_remaining
 		  FROM console.caller_certs
 		 WHERE fingerprint = $1
 	`, fingerprint).
-		Scan(&c.Org, &c.Caller, &c.IssuedAt, &c.ExpiresAt)
+		Scan(&c.Org, &c.Caller, &c.IssuedAt, &c.ExpiresAt, &c.RenewalsRemaining)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -278,4 +283,112 @@ func (o *orgStore) currentCallerCert(ctx context.Context, caller string) (*calle
 		return nil, err
 	}
 	return &c, nil
+}
+
+// developersMayEnroll reports whether a viewer may self-enrol as this caller.
+//
+// Absent row and false are one answer — admins only — which is the posture
+// token minting has always had. The organisation is not a WHERE clause: the
+// transaction is bound and the RESTRICTIVE policy on
+// console.caller_enrollment compares it.
+func (o *orgStore) developersMayEnroll(ctx context.Context, caller string) (bool, error) {
+	var allowed bool
+	err := o.tx(ctx, func(tx pgx.Tx) error {
+		scanErr := tx.QueryRow(ctx, `
+			SELECT developers_may_enroll FROM console.caller_enrollment
+			WHERE caller = $1`, caller).Scan(&allowed)
+		if errors.Is(scanErr, pgx.ErrNoRows) {
+			return nil
+		}
+		return scanErr
+	})
+	if err != nil {
+		return false, err
+	}
+	return allowed, nil
+}
+
+// setDevelopersMayEnroll records the flag for one caller.
+func (o *orgStore) setDevelopersMayEnroll(ctx context.Context, caller string, allowed bool, updatedBy string) error {
+	return o.tx(ctx, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO console.caller_enrollment (org, caller, developers_may_enroll, updated_by)
+			VALUES (console.current_org(), $1, $2, $3)
+			ON CONFLICT (org, caller) DO UPDATE
+			   SET developers_may_enroll = EXCLUDED.developers_may_enroll,
+			       updated_by            = EXCLUDED.updated_by,
+			       updated_at            = NOW()`,
+			caller, allowed, updatedBy)
+		return err
+	})
+}
+
+// federationRule is one workload-identity binding; see migrations 0017.
+type federationRule struct {
+	ID             int64
+	Caller         string
+	IssuerURL      string
+	Audience       string
+	SubjectPattern string
+	RenewalBudget  int
+	CreatedBy      string
+	CreatedAt      time.Time
+	RevokedAt      *time.Time
+}
+
+// federationRulesFor returns the unrevoked rules for one caller.
+func (o *orgStore) federationRulesFor(ctx context.Context, caller string) ([]federationRule, error) {
+	var out []federationRule
+	err := o.tx(ctx, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT id, caller, issuer_url, audience, subject_pattern, renewal_budget, created_by, created_at
+			FROM console.federation_rules
+			WHERE caller = $1 AND revoked_at IS NULL
+			ORDER BY id`, caller)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r federationRule
+			if err := rows.Scan(&r.ID, &r.Caller, &r.IssuerURL, &r.Audience,
+				&r.SubjectPattern, &r.RenewalBudget, &r.CreatedBy, &r.CreatedAt); err != nil {
+				return err
+			}
+			out = append(out, r)
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
+// addFederationRule records one binding and returns its id.
+func (o *orgStore) addFederationRule(ctx context.Context, r federationRule) (int64, error) {
+	var id int64
+	err := o.tx(ctx, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			INSERT INTO console.federation_rules
+			    (org, caller, issuer_url, audience, subject_pattern, renewal_budget, created_by)
+			VALUES (console.current_org(), $1, $2, $3, $4, $5, $6)
+			RETURNING id`,
+			r.Caller, r.IssuerURL, r.Audience, r.SubjectPattern, r.RenewalBudget, r.CreatedBy).Scan(&id)
+	})
+	return id, err
+}
+
+// revokeFederationRule ends one binding. Revoked rather than deleted: the
+// audit rows that name this rule id keep something to point at.
+func (o *orgStore) revokeFederationRule(ctx context.Context, id int64) error {
+	return o.tx(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE console.federation_rules SET revoked_at = NOW()
+			WHERE id = $1 AND revoked_at IS NULL`, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
 }

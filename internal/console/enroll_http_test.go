@@ -16,6 +16,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
+	"github.com/rachitkumar205/atlantis/internal/cloud/issuer"
 )
 
 // Enrolment through the handlers, with a real signer behind real mTLS.
@@ -474,5 +477,163 @@ func TestTheCallerEndpointFallsBackToTheConsolesOwn(t *testing.T) {
 	}
 	if creds.Endpoint == "callers.example:9090" {
 		t.Error("the override moved the console's own endpoint too")
+	}
+}
+
+// The assertion arm: `tide login`'s path through the same handler.
+
+// cliEnrolAssertion mints what Cloud's poll would hand tide: audience set to
+// the enrolment listener, purpose and caller bound.
+func (f *consoleFixture) cliEnrolAssertion(t *testing.T, org, email, role, caller string) string {
+	t.Helper()
+	tok, err := f.iss.Mint(issuer.Grant{
+		Subject:  "usr_" + strings.ReplaceAll(email, "@", "_"),
+		Org:      org,
+		Role:     identity.Role(role),
+		Email:    email,
+		Name:     "Test User",
+		Audience: f.srv.cfg.EnrollPublicURL,
+		Purpose:  "cli-enroll",
+		Caller:   caller,
+	})
+	if err != nil {
+		t.Fatalf("mint cli assertion: %v", err)
+	}
+	return tok
+}
+
+func assertionBody(org, caller, assertion, csrPEM string) string {
+	b, _ := json.Marshal(enrollRequest{Org: org, Caller: caller, Assertion: assertion, CSRPEM: csrPEM})
+	return string(b)
+}
+
+// registerCaller registers a caller without minting a token.
+func (f *consoleFixture) registerCaller(t *testing.T, caller string) {
+	t.Helper()
+	token := f.signIn(t, "admin@example.com", "admin")
+	f.elevate(t, token)
+	reg := f.post(t, "/api/callers", fmt.Sprintf(`{"caller":%q,"can_mutate":true}`, caller), token)
+	if reg.Code != http.StatusOK {
+		t.Fatalf("register caller: %d %s", reg.Code, reg.Body.String())
+	}
+}
+
+func TestAnAssertionEnrolsACaller(t *testing.T) {
+	f := newEnrolmentFixture(t)
+	f.registerCaller(t, "backend")
+
+	a := f.cliEnrolAssertion(t, defaultOrg, "dev@example.com", "admin", "backend")
+	w := f.enrol(t, assertionBody(defaultOrg, "backend", a, newCSR(t, "")))
+	if w.Code != http.StatusOK {
+		t.Fatalf("enrol: %d %s", w.Code, w.Body.String())
+	}
+	var out struct {
+		CertPEM string `json:"cert_pem"`
+		Caller  string `json:"caller"`
+		Org     string `json:"org"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.CertPEM == "" || out.Caller != "backend" || out.Org != defaultOrg {
+		t.Errorf("bundle = %+v", out)
+	}
+
+	// Spent. The same assertion presented again buys nothing.
+	again := f.enrol(t, assertionBody(defaultOrg, "backend", a, newCSR(t, "")))
+	if again.Code != http.StatusUnauthorized {
+		t.Errorf("a replayed assertion answered %d", again.Code)
+	}
+}
+
+// A session assertion carries the console's audience and no purpose. Both
+// properties refuse it here, and each is load-bearing on its own: the two
+// URLs are only different by configuration.
+func TestASessionAssertionCannotEnrol(t *testing.T) {
+	f := newEnrolmentFixture(t)
+	f.registerCaller(t, "backend")
+
+	session := f.assertionForOrg(t, defaultOrg, "dev@example.com", "admin")
+	w := f.enrol(t, assertionBody(defaultOrg, "backend", session, newCSR(t, "")))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("a session assertion enrolled: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// And the inverse: a cli-enroll assertion cannot open a console session, even
+// though the same issuer signed it.
+func TestACLIEnrolAssertionCannotOpenASession(t *testing.T) {
+	f := newEnrolmentFixture(t)
+
+	a := f.cliEnrolAssertion(t, defaultOrg, "dev@example.com", "admin", "backend")
+	body := fmt.Sprintf(`{"assertion":%q}`, a)
+	req := f.request(t, http.MethodPost, "/api/auth/exchange", body, "")
+	rec := httptest.NewRecorder()
+	f.srv.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("a purposed assertion opened a session: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestViewerEnrolmentIsAPerCallerOptIn(t *testing.T) {
+	f := newEnrolmentFixture(t)
+	f.registerCaller(t, "backend")
+	f.registerCaller(t, "worker")
+
+	viewer := func(caller string) *httptest.ResponseRecorder {
+		a := f.cliEnrolAssertion(t, defaultOrg, "viewer@example.com", "viewer", caller)
+		return f.enrol(t, assertionBody(defaultOrg, caller, a, newCSR(t, "")))
+	}
+
+	if w := viewer("backend"); w.Code != http.StatusForbidden {
+		t.Fatalf("with the flag off a viewer enrolled: %d %s", w.Code, w.Body.String())
+	}
+
+	admin := f.signIn(t, "admin@example.com", "admin")
+	f.elevate(t, admin)
+	set := f.post(t, "/api/callers/backend/enrollment", `{"developers_may_enroll":true}`, admin)
+	if set.Code != http.StatusOK {
+		t.Fatalf("set flag: %d %s", set.Code, set.Body.String())
+	}
+
+	if w := viewer("backend"); w.Code != http.StatusOK {
+		t.Errorf("with the flag on a viewer was refused: %d %s", w.Code, w.Body.String())
+	}
+	// The flag is per caller, not per organisation.
+	if w := viewer("worker"); w.Code != http.StatusForbidden {
+		t.Errorf("the flag on backend opened worker: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAssertionEnrolmentComparesEveryBinding(t *testing.T) {
+	f := newEnrolmentFixture(t)
+	f.registerCaller(t, "backend")
+
+	// The assertion names one organisation; the request claims another.
+	a := f.cliEnrolAssertion(t, defaultOrg, "dev@example.com", "admin", "backend")
+	if w := f.enrol(t, assertionBody("globex", "backend", a, newCSR(t, ""))); w.Code != http.StatusForbidden {
+		t.Errorf("an org mismatch enrolled: %d", w.Code)
+	}
+
+	// The assertion was approved for one caller; the request asks another.
+	a = f.cliEnrolAssertion(t, defaultOrg, "dev@example.com", "admin", "backend")
+	if w := f.enrol(t, assertionBody(defaultOrg, "worker", a, newCSR(t, ""))); w.Code != http.StatusForbidden {
+		t.Errorf("a caller mismatch enrolled: %d", w.Code)
+	}
+
+	// A caller atlantis has never heard of.
+	a = f.cliEnrolAssertion(t, defaultOrg, "dev@example.com", "admin", "never-registered")
+	if w := f.enrol(t, assertionBody(defaultOrg, "never-registered", a, newCSR(t, ""))); w.Code != http.StatusNotFound {
+		t.Errorf("an unknown caller answered %d", w.Code)
+	}
+
+	// A failed binding must not spend the assertion: the org-mismatch token
+	// from above still enrols its own org.
+	a = f.cliEnrolAssertion(t, defaultOrg, "dev@example.com", "admin", "backend")
+	if w := f.enrol(t, assertionBody("globex", "backend", a, newCSR(t, ""))); w.Code != http.StatusForbidden {
+		t.Fatalf("setup: %d", w.Code)
+	}
+	if w := f.enrol(t, assertionBody(defaultOrg, "backend", a, newCSR(t, ""))); w.Code != http.StatusOK {
+		t.Errorf("a refused binding spent the assertion: %d %s", w.Code, w.Body.String())
 	}
 }

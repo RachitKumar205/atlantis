@@ -23,6 +23,7 @@ import (
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 	"github.com/rachitkumar205/atlantis/internal/console/cloudauth"
+	"github.com/rachitkumar205/atlantis/internal/console/oidcfed"
 	"github.com/rachitkumar205/atlantis/internal/migrate"
 	"github.com/rachitkumar205/atlantis/internal/secrets"
 	"github.com/rachitkumar205/atlantis/internal/spafs"
@@ -57,6 +58,14 @@ type Server struct {
 	// cloud verifies the assertions this console accepts as identity. It is
 	// the console's only source of one — there are no local accounts.
 	cloud *cloudauth.Verifier
+
+	// enrollCloud verifies cli-enroll assertions against the enrolment
+	// listener's own audience. Nil where enrolment is disabled.
+	enrollCloud *cloudauth.Verifier
+
+	// oidc verifies CI workload tokens against whatever issuer a federation
+	// rule names.
+	oidc *oidcfed.Verifier
 
 	// sandboxes owns the in-process sandbox runtime + per-user meta.
 	// See internal/console/sandbox.go for the layer's design.
@@ -149,14 +158,32 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 		return nil, err
 	}
 
+	// A second verifier for the enrolment listener, whose audience is its own
+	// public address rather than the console's. Built only where enrolment is
+	// enabled, from configuration that is already required — no new variable.
+	var enrollCloud *cloudauth.Verifier
+	if cfg.EnrollPublicURL != "" {
+		enrollCloud, err = cloudauth.New(cloudauth.Config{
+			Issuer:   cfg.CloudIssuer,
+			Audience: cfg.EnrollPublicURL,
+			JWKSURL:  cfg.CloudJWKSURL,
+		})
+		if err != nil {
+			db.close()
+			return nil, err
+		}
+	}
+
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	s := &Server{
 		cfg: cfg, db: db, log: log, spaFS: spaFS,
-		loginLim:  newLoginLimiter(),
-		orgs:      newOrgClients(db),
-		cloud:     cloud,
-		sandboxes: newSandboxLayer(cfg.SandboxPerUserLimit, cfg.SandboxTTL),
-		bgCtx:     bgCtx, bgCancel: bgCancel,
+		loginLim:    newLoginLimiter(),
+		orgs:        newOrgClients(db),
+		cloud:       cloud,
+		enrollCloud: enrollCloud,
+		oidc:        oidcfed.New(),
+		sandboxes:   newSandboxLayer(cfg.SandboxPerUserLimit, cfg.SandboxTTL),
+		bgCtx:       bgCtx, bgCancel: bgCancel,
 	}
 	// The fallback signer and the enrolment listener, built independently.
 	//
@@ -384,6 +411,18 @@ func (s *Server) buildMux() {
 	// as setting the change policy or revoking every caller.
 	mux.HandleFunc("POST /api/callers/{caller}/enroll",
 		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleMintEnrollToken)))))
+	// The self-enrolment flag decides who can obtain this caller's identity
+	// through `tide login`, so it is gated as minting is.
+	mux.HandleFunc("GET /api/callers/{caller}/enrollment", s.auth(s.handleGetCallerEnrollment))
+	mux.HandleFunc("POST /api/callers/{caller}/enrollment",
+		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleSetCallerEnrollment)))))
+	// Federation rules decide which CI workloads can obtain this caller's
+	// certificate; mutating one is gated as minting is.
+	mux.HandleFunc("GET /api/callers/{caller}/federation", s.auth(s.handleListFederationRules))
+	mux.HandleFunc("POST /api/callers/{caller}/federation",
+		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleAddFederationRule)))))
+	mux.HandleFunc("DELETE /api/callers/{caller}/federation/{id}",
+		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleRevokeFederationRule)))))
 	// Readable by any signed-in user, like the change policy: knowing which
 	// callers have been enrolled is how somebody works out why a deploy is
 	// failing, and hiding it from non-admins makes that an escalation.
@@ -606,6 +645,16 @@ func (s *Server) acceptAssertion(w http.ResponseWriter, r *http.Request) *identi
 		// "wrong audience" from "bad signature" tells whoever is holding a
 		// token which part to work on next.
 		s.log.Warn("assertion rejected", "ip", clientIP(r), "err", err)
+		jsonError(w, "invalid assertion", http.StatusUnauthorized)
+		return nil
+	}
+
+	// A purposed assertion is scoped to some other exchange — cli-enroll goes
+	// to the enrolment listener — and must not open a session even where the
+	// two audiences are misconfigured to coincide.
+	if claims.Purpose != "" {
+		s.log.Warn("assertion with a purpose offered for a session",
+			"ip", clientIP(r), "purpose", claims.Purpose)
 		jsonError(w, "invalid assertion", http.StatusUnauthorized)
 		return nil
 	}

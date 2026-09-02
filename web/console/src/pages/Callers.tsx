@@ -7,6 +7,7 @@ import {
   LinkSimpleHorizontal,
   Plus,
   Trash,
+  UsersThree,
   X,
 } from '@phosphor-icons/react'
 import { api, ApiError, queries, type CallerInfo, type EnrollTokenResponse } from '@/api/client'
@@ -49,6 +50,13 @@ export function Callers() {
   const [enrollingCaller, setEnrollingCaller] = useState<string | null>(null)
   const { data: certs } = useQuery(queries.callerCerts())
   const [aliasEditing, setAliasEditing] = useState<string | null>(null)
+  // The enrolment-policy dialog and its sudo gate. Elevation happens once at
+  // the gate; the dialog's writes then run inside the sudo window, the same
+  // shape minting uses.
+  const [policySudoFor, setPolicySudoFor] = useState<string | null>(null)
+  const [policyFor, setPolicyFor] = useState<string | null>(null)
+  const [policyError, setPolicyError] = useState<string | null>(null)
+  const [policyPending, setPolicyPending] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
 
   // The design's pages.css gates .callergrid and .callertable behind a
@@ -188,6 +196,7 @@ export function Callers() {
                   enrolledAt={certs?.certs.find(x => x.caller === c.caller)?.issued_at}
                   onRevoke={() => setRevoking(c.caller)}
                   onManageAliases={() => setAliasEditing(c.caller)}
+                  onManageAccess={() => setPolicySudoFor(c.caller)}
                 />
               ))}
             </div>
@@ -252,6 +261,47 @@ export function Callers() {
         />
       )}
 
+      {policySudoFor && (
+        <SudoConfirmDialog
+          title="Edit enrolment access"
+          icon={<Key size={18} />}
+          body={
+            <div className="col">
+              <p>
+                Who may obtain <span className="mono">{policySudoFor}</span>&rsquo;s
+                certificate: developers through <span className="mono">tide login</span>,
+                and CI workloads under federation rules.
+              </p>
+            </div>
+          }
+          confirmLabel="Continue"
+          pending={policyPending}
+          error={policyError}
+          onCancel={() => { setPolicySudoFor(null); setPolicyError(null) }}
+          onConfirm={async (assertion) => {
+            setPolicyPending(true)
+            setPolicyError(null)
+            try {
+              await api.auth.sudo(assertion)
+              setPolicyFor(policySudoFor)
+              setPolicySudoFor(null)
+            } catch (e) {
+              setPolicyError(e instanceof Error ? e.message : 'Could not elevate')
+            } finally {
+              setPolicyPending(false)
+            }
+          }}
+        />
+      )}
+
+      {policyFor && (
+        <EnrolmentPolicyDialog
+          caller={policyFor}
+          onClose={() => setPolicyFor(null)}
+          showToast={showToast}
+        />
+      )}
+
       {aliasEditing && (
         <AliasesDialog
           caller={aliasEditing}
@@ -279,6 +329,7 @@ function CallerCard({
   caller,
   canAdmin,
   onEnrol,
+  onManageAccess,
   isEnrolling,
   enrolState,
   enrolledAt,
@@ -288,6 +339,7 @@ function CallerCard({
   caller: CallerInfo
   canAdmin: boolean
   onEnrol: () => void
+  onManageAccess: () => void
   isEnrolling: boolean
   enrolState: EnrolControl
   /** When this console last enrolled this caller, if it ever did. Absent is the
@@ -346,6 +398,23 @@ function CallerCard({
                 aria-label="Manage aliases"
               >
                 <LinkSimpleHorizontal size={13} />
+              </button>
+            </HoverInfo>
+            <HoverInfo
+              side="bottom"
+              inline
+              content={
+                <>
+                  <p>Enrolment access — whether developers may run <code className="mono">tide login</code> as this caller, and which CI workloads may.</p>
+                </>
+              }
+            >
+              <button
+                className="btn btn--sm btn--ghost btn--icon"
+                onClick={onManageAccess}
+                aria-label="Enrolment access"
+              >
+                <UsersThree size={13} />
               </button>
             </HoverInfo>
             <HoverInfo
@@ -591,8 +660,9 @@ function EnrolDialog({
         <div className="modal__head">
           <div className="modal__title">Enrol a machine — {token.caller}</div>
           <div className="modal__sub">
-            Run this on the machine that will hold the certificate. It generates its own
-            key, which never leaves it. The token works once and expires at {expStr}.
+            A person on their own machine can just run <span className="mono">tide login</span> and
+            approve in the browser. This token is the alternate method, for a machine
+            enrolled on someone's behalf: it works once and expires at {expStr}.
           </div>
         </div>
         <div className="modal__body">
@@ -869,4 +939,168 @@ function arraysEqual(a: string[], b: string[]): boolean {
     if (as[i] !== bs[i]) return false
   }
   return true
+}
+
+// ── Enrolment access dialog ─────────────────────────────────────────────
+//
+// Two decisions per caller: whether developers may self-enrol through
+// `tide login`, and which CI workloads may obtain a certificate under a
+// federation rule. Both writes run behind admin + sudo; the gate that opened
+// this dialog elevated the session.
+function EnrolmentPolicyDialog({
+  caller,
+  onClose,
+  showToast,
+}: {
+  caller: string
+  onClose: () => void
+  showToast: (msg: string) => void
+}) {
+  const qc = useQueryClient()
+  const policyQ = useQuery({
+    queryKey: ['caller-enrollment', caller],
+    queryFn: () => api.callers.enrollmentPolicy(caller),
+  })
+  const rulesQ = useQuery({
+    queryKey: ['caller-federation', caller],
+    queryFn: () => api.callers.federationRules(caller),
+  })
+
+  const [err, setErr] = useState<string | null>(null)
+  const [issuer, setIssuer] = useState('https://token.actions.githubusercontent.com')
+  const [audience, setAudience] = useState('atlantis-enroll')
+  const [pattern, setPattern] = useState('')
+
+  const toggleM = useMutation({
+    mutationFn: (allowed: boolean) => api.callers.setEnrollmentPolicy(caller, allowed),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['caller-enrollment', caller] }),
+    onError: (e) => setErr(e instanceof Error ? e.message : 'Could not save'),
+  })
+  const addM = useMutation({
+    mutationFn: () =>
+      api.callers.addFederationRule(caller, {
+        issuer_url: issuer,
+        audience,
+        subject_pattern: pattern,
+      }),
+    onSuccess: () => {
+      setPattern('')
+      setErr(null)
+      qc.invalidateQueries({ queryKey: ['caller-federation', caller] })
+      showToast('Federation rule added')
+    },
+    onError: (e) => setErr(e instanceof Error ? e.message : 'Could not add the rule'),
+  })
+  const revokeRuleM = useMutation({
+    mutationFn: (id: number) => api.callers.revokeFederationRule(caller, id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['caller-federation', caller] }),
+    onError: (e) => setErr(e instanceof Error ? e.message : 'Could not revoke the rule'),
+  })
+
+  const allowed = policyQ.data?.developers_may_enroll ?? false
+  const rules = rulesQ.data?.rules ?? []
+
+  return (
+    <div className="overlay is-open" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="modal" role="dialog" aria-modal style={{ width: 560 }}>
+        <div className="modal__head">
+          <div className="modal__title">Enrolment access — {caller}</div>
+          <div className="modal__sub">
+            Who can obtain this caller's certificate. Admins always can; these two open it further.
+          </div>
+        </div>
+        <div className="modal__body">
+          {err && <div className="notice notice--error" style={{ marginBottom: 12 }}>{err}</div>}
+
+          <label className="check" style={{ marginBottom: 16 }}>
+            <input
+              type="checkbox"
+              checked={allowed}
+              disabled={policyQ.isLoading || toggleM.isPending}
+              onChange={e => toggleM.mutate(e.target.checked)}
+            />
+            <span>
+              Developers may enrol — a viewer's <span className="mono">tide login</span> can
+              take this caller's identity
+            </span>
+          </label>
+
+          <div className="section-label" style={{ marginBottom: 8 }}>CI workloads</div>
+          {rules.length === 0 ? (
+            <p className="faint" style={{ fontSize: 12, margin: '0 0 10px' }}>
+              No federation rules. A CI job cannot enrol as this caller.
+            </p>
+          ) : (
+            <ul style={{ listStyle: 'none', margin: '0 0 10px', padding: 0 }}>
+              {rules.map(r => (
+                <li key={r.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '6px 0', borderBottom: '1px solid var(--line-soft)',
+                }}>
+                  <span className="mono" style={{ fontSize: 12, flex: 1, overflowWrap: 'anywhere' }}>
+                    {r.subject_pattern}
+                  </span>
+                  <span className="faint" style={{ fontSize: 11 }}>
+                    renews ×{r.renewal_budget}
+                  </span>
+                  <button
+                    className="btn btn--sm btn--ghost btn--icon"
+                    onClick={() => revokeRuleM.mutate(r.id)}
+                    aria-label="Revoke this rule"
+                  >
+                    <Trash size={13} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className="col" style={{ gap: 8 }}>
+            <input
+              className="input"
+              value={issuer}
+              onChange={e => setIssuer(e.target.value)}
+              placeholder="Issuer URL"
+              aria-label="Issuer URL"
+            />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                className="input"
+                value={audience}
+                onChange={e => setAudience(e.target.value)}
+                placeholder="Audience"
+                aria-label="Audience"
+                style={{ width: 160 }}
+              />
+              <input
+                className="input"
+                value={pattern}
+                onChange={e => setPattern(e.target.value)}
+                placeholder="Subject pattern, e.g. repo:acme/api:*"
+                aria-label="Subject pattern"
+                style={{ flex: 1 }}
+              />
+            </div>
+            <button
+              className="btn btn--sm btn--brass"
+              disabled={pattern === '' || addM.isPending}
+              onClick={() => addM.mutate()}
+              style={{ alignSelf: 'flex-start' }}
+            >
+              <Plus size={13} /> Add rule
+            </button>
+          </div>
+
+          <p className="faint" style={{ fontSize: 12, marginTop: 12, lineHeight: 1.6 }}>
+            The job runs <span className="mono">tide login --oidc</span> with{' '}
+            <span className="mono">id-token: write</span> permission and{' '}
+            <span className="mono">ATL_ENROLL_URL</span> set. Its certificate lives an hour.
+          </p>
+        </div>
+        <div className="modal__foot">
+          <button className="btn btn--brass" onClick={onClose}>Done</button>
+        </div>
+      </div>
+    </div>
+  )
 }

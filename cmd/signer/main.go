@@ -364,6 +364,11 @@ func handleIssue(w http.ResponseWriter, r *http.Request, log *slog.Logger) {
 	var req struct {
 		Caller string `json:"caller"`
 		CSRPEM string `json:"csr_pem"`
+		// TTLSeconds may shorten the certificate's life and can never lengthen
+		// it: the value is clamped to [minTTL, certTTL], and absent means the
+		// full term. The console passes an hour for a CI workload's
+		// certificate; the ceiling stays with the key.
+		TTLSeconds int `json:"ttl_seconds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -415,7 +420,7 @@ func handleIssue(w http.ResponseWriter, r *http.Request, log *slog.Logger) {
 	// `caller` is the console's, from the row it spent the enrolment token
 	// against. It has already been checked against the reserved names and
 	// against caller_identities above.
-	certPEM, expiresAt, err := signCSR(csr, caller)
+	certPEM, expiresAt, err := signCSR(csr, caller, clampTTL(req.TTLSeconds))
 	if err != nil {
 		log.Error("sign CSR", "caller", caller, "err", err)
 		jsonError(w, "signing failed", http.StatusInternalServerError)
@@ -445,14 +450,34 @@ func handleIssue(w http.ResponseWriter, r *http.Request, log *slog.Logger) {
 // `caller` comes from the token row the console spent, so the CSR's common name
 // decides nothing. A CSR asking for another name is ignored rather than
 // refused, which needs no comparison to stay true.
-func signCSR(csr *x509.CertificateRequest, caller string) (string, time.Time, error) {
+// clampTTL bounds a requested lifetime to [minTTL, certTTL]. Zero and
+// negative mean the full term.
+func clampTTL(seconds int) time.Duration {
+	if seconds <= 0 {
+		return certTTL
+	}
+	ttl := time.Duration(seconds) * time.Second
+	if ttl < minTTL {
+		return minTTL
+	}
+	if ttl > certTTL {
+		return certTTL
+	}
+	return ttl
+}
+
+// minTTL is the floor a requested lifetime is raised to. Below it a
+// certificate can expire between issuance and first use.
+const minTTL = 5 * time.Minute
+
+func signCSR(csr *x509.CertificateRequest, caller string, ttl time.Duration) (string, time.Time, error) {
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("generate serial: %w", err)
 	}
 
 	now := time.Now()
-	expiresAt := now.Add(certTTL)
+	expiresAt := now.Add(ttl)
 
 	template := &x509.Certificate{
 		SerialNumber: serial,

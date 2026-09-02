@@ -14,9 +14,15 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+
+	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
+	"github.com/rachitkumar205/atlantis/internal/console/cloudauth"
+	"github.com/rachitkumar205/atlantis/internal/console/oidcfed"
 )
 
 // Enrolment: how a machine gets a client certificate for a caller.
@@ -51,6 +57,7 @@ import (
 func (s *Server) buildEnrollListener() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /enroll", s.handleEnroll)
+	mux.HandleFunc("POST /enroll/oidc", s.handleEnrollOIDC)
 	mux.HandleFunc("POST /renew", s.handleRenew)
 
 	// RequestClientCert, and the certificate is verified in handleRenew.
@@ -297,7 +304,17 @@ type enrollRequest struct {
 	Org    string `json:"org"`
 	Token  string `json:"token"`
 	CSRPEM string `json:"csr_pem"`
+
+	// The assertion arm, `tide login`'s path: a cli-enroll assertion from
+	// Cloud in place of an admin-minted token, naming the caller it was
+	// approved for. Exactly one of Token and Assertion is present.
+	Assertion string `json:"assertion"`
+	Caller    string `json:"caller"`
 }
+
+// cliEnrollPurpose is the purpose claim a cli-enroll assertion carries.
+// One string with internal/cloud/server.cliEnrollPurpose.
+const cliEnrollPurpose = "cli-enroll"
 
 // handleEnroll trades a token and a CSR for a signed certificate.
 //
@@ -317,8 +334,12 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if req.Org == "" || req.Token == "" || req.CSRPEM == "" {
-		jsonError(w, "org, token and csr_pem are required", http.StatusBadRequest)
+	if req.Token != "" && req.Assertion != "" {
+		jsonError(w, "send a token or an assertion, not both", http.StatusBadRequest)
+		return
+	}
+	if req.Org == "" || req.CSRPEM == "" || (req.Token == "" && req.Assertion == "") {
+		jsonError(w, "org, csr_pem and one of token or assertion are required", http.StatusBadRequest)
 		return
 	}
 
@@ -349,6 +370,10 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	// token does not cross organisations" would have no field in which to name
 	// the other one.
 	org := req.Org
+	if req.Assertion != "" {
+		s.enrollWithAssertion(w, r, req, csr)
+		return
+	}
 	caller, err := s.db.forOrg(org).spendEnrollToken(r.Context(), req.Token)
 	if err != nil { //nolint:nestif // the branches are one refusal and one 500
 		if !errors.Is(err, ErrEnrollTokenUnusable) {
@@ -364,7 +389,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	// From here the token is spent whatever happens. Every later failure costs
 	// the operator a new token, which is the right trade: the alternative is a
 	// token that survives a partial enrolment and can be replayed against it.
-	bundle, err := s.issueForCaller(r.Context(), org, caller, csr, req.CSRPEM)
+	bundle, err := s.issueForCaller(r.Context(), org, caller, csr, req.CSRPEM, issueOptions{})
 	if err != nil {
 		s.log.Error("enrolment failed after the token was spent",
 			"org", org, "caller", caller, "err", err)
@@ -511,7 +536,26 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bundle, err := s.issueForCaller(r.Context(), rec.Org, rec.Caller, csr, req.CSRPEM)
+	// A bounded certificate spends its budget here. The successor inherits
+	// the presented leaf's own lifetime rather than the signer's default, so
+	// a one-hour CI certificate renews into another hour, not into a week.
+	var opts issueOptions
+	if rec.RenewalsRemaining != nil {
+		if *rec.RenewalsRemaining <= 0 {
+			s.log.Info("renewal refused: budget exhausted",
+				"org", rec.Org, "caller", rec.Caller)
+			jsonError(w, "renewal budget exhausted — obtain a fresh OIDC token instead",
+				http.StatusForbidden)
+			return
+		}
+		left := *rec.RenewalsRemaining - 1
+		opts.renewalsRemaining = &left
+		if life := int(peerLeaf.NotAfter.Sub(peerLeaf.NotBefore).Seconds()); life > 0 {
+			opts.ttlSeconds = life
+		}
+	}
+
+	bundle, err := s.issueForCaller(r.Context(), rec.Org, rec.Caller, csr, req.CSRPEM, opts)
 	if err != nil {
 		s.log.Error("renewal failed", "org", rec.Org, "caller", rec.Caller, "err", err)
 		jsonError(w, err.Error(), http.StatusBadGateway)
@@ -587,8 +631,16 @@ type issuedBundle struct {
 //
 // Shared so K7b's renewal cannot drift from enrolment. Everything that makes
 // the result safe lives here exactly once.
+// issueOptions is how an issuance differs from the default: a bounded
+// lifetime, a renewal countdown. The zero value is a human enrolment — the
+// signer's full TTL, unlimited renewals.
+type issueOptions struct {
+	ttlSeconds        int
+	renewalsRemaining *int
+}
+
 func (s *Server) issueForCaller(
-	ctx context.Context, org, caller string, csr *x509.CertificateRequest, csrPEM string,
+	ctx context.Context, org, caller string, csr *x509.CertificateRequest, csrPEM string, opts issueOptions,
 ) (*issuedBundle, error) {
 	// No comparison against the CSR's common name.
 	//
@@ -602,7 +654,7 @@ func (s *Server) issueForCaller(
 	// row and nowhere else. Forwarding a name out of the request hands the
 	// requester whatever identity it asked for, with nothing in the response
 	// looking wrong.
-	signed, err := s.callSigner(ctx, org, caller, csrPEM)
+	signed, err := s.callSigner(ctx, org, caller, csrPEM, opts.ttlSeconds)
 	if err != nil {
 		return nil, err
 	}
@@ -663,10 +715,11 @@ func (s *Server) issueForCaller(
 	}
 
 	if err := s.db.recordCallerCert(ctx, callerCert{
-		Fingerprint: fingerprint,
-		Org:         org,
-		Caller:      caller,
-		ExpiresAt:   leaf.NotAfter,
+		Fingerprint:       fingerprint,
+		Org:               org,
+		Caller:            caller,
+		ExpiresAt:         leaf.NotAfter,
+		RenewalsRemaining: opts.renewalsRemaining,
 	}); err != nil {
 		// Not fatal. The certificate works; what is lost is the console's
 		// record of it, which renewal needs. Loud, because renewal will then
@@ -737,12 +790,19 @@ func (s *Server) signerFor(ctx context.Context, org string) (*http.Client, strin
 }
 
 // callSigner posts a CSR over mTLS and returns what came back.
-func (s *Server) callSigner(ctx context.Context, org, caller, csrPEM string) (*signerResponse, error) {
+func (s *Server) callSigner(ctx context.Context, org, caller, csrPEM string, ttlSeconds int) (*signerResponse, error) {
 	client, addr, err := s.signerFor(ctx, org)
 	if err != nil {
 		return nil, err
 	}
-	body, err := json.Marshal(map[string]string{"caller": caller, "csr_pem": csrPEM})
+	req0 := map[string]any{"caller": caller, "csr_pem": csrPEM}
+	// Only when it shortens something. The signer owns the default and the
+	// ceiling; absent means its full term, as every request before this field
+	// existed meant.
+	if ttlSeconds > 0 {
+		req0["ttl_seconds"] = ttlSeconds
+	}
+	body, err := json.Marshal(req0)
 	if err != nil {
 		return nil, err
 	}
@@ -787,4 +847,390 @@ func parseCSRPEM(pemStr string) (*x509.CertificateRequest, error) {
 		return nil, fmt.Errorf("the CSR's signature does not verify: %w", err)
 	}
 	return csr, nil
+}
+
+// enrollWithAssertion is `tide login`'s arm: a cli-enroll assertion in place
+// of an admin-minted token.
+//
+// The checks run in the order the failures cost least: verification and the
+// static claim comparisons first, the jti spend last before issuance, so a
+// request refused for its role or its caller does not burn the assertion.
+func (s *Server) enrollWithAssertion(w http.ResponseWriter, r *http.Request, req enrollRequest, csr *x509.CertificateRequest) {
+	if s.enrollCloud == nil {
+		jsonError(w, "enrolment is not enabled here", http.StatusServiceUnavailable)
+		return
+	}
+	if req.Caller == "" {
+		jsonError(w, "caller is required with an assertion", http.StatusBadRequest)
+		return
+	}
+
+	claims, err := s.enrollCloud.Verify(r.Context(), req.Assertion)
+	if errors.Is(err, cloudauth.ErrKeysUnavailable) {
+		jsonError(w, "cannot reach the identity provider; try again shortly", http.StatusServiceUnavailable)
+		return
+	}
+	if err != nil {
+		s.log.Warn("enrolment assertion rejected", "ip", clientIP(r), "err", err)
+		jsonError(w, "invalid assertion", http.StatusUnauthorized)
+		return
+	}
+
+	// Scoped to this exchange. A session assertion that reached this listener
+	// carries no purpose and is refused, whatever its audience says.
+	if claims.Purpose != cliEnrollPurpose {
+		s.log.Warn("assertion without the enrolment purpose", "ip", clientIP(r))
+		jsonError(w, "invalid assertion", http.StatusUnauthorized)
+		return
+	}
+	// The token arm's RESTRICTIVE row comparison has no analogue here, so the
+	// organisations are compared outright.
+	if req.Org != claims.Org {
+		jsonError(w, "the assertion names a different organisation", http.StatusForbidden)
+		return
+	}
+	// Bound at approval: the person saw this caller name on the approval page.
+	if claims.Caller != req.Caller {
+		jsonError(w, "the assertion names a different caller", http.StatusForbidden)
+		return
+	}
+
+	// Admins always; viewers where the organisation opted this caller in. A
+	// caller certificate authenticates as the caller, not the person, so
+	// viewer self-enrolment is a per-caller decision.
+	if claims.Role != identity.RoleAdmin {
+		allowed, err := s.db.forOrg(claims.Org).developersMayEnroll(r.Context(), req.Caller)
+		if err != nil {
+			s.log.Error("read enrolment policy", "org", claims.Org, "caller", req.Caller, "err", err)
+			jsonError(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if !allowed {
+			jsonError(w, "developers may not enrol as this caller; ask an administrator", http.StatusForbidden)
+			return
+		}
+	}
+
+	// The caller must exist in this organisation's atlantis, the same check
+	// token minting makes before a token exists.
+	atl, err := s.atlFor(r.Context(), claims.Org)
+	if err != nil {
+		s.log.Error("reach atlantis", "org", claims.Org, "err", err)
+		jsonError(w, "cannot reach the organisation", http.StatusBadGateway)
+		return
+	}
+	callers, err := atl.GetCallers(r.Context(), &adminpb.GetCallersRequest{})
+	if err != nil {
+		s.log.Error("list callers", "org", claims.Org, "err", err)
+		jsonError(w, "cannot reach the organisation", http.StatusBadGateway)
+		return
+	}
+	known := false
+	for _, c := range callers.GetCallers() {
+		if c.GetCaller() == req.Caller {
+			known = true
+			break
+		}
+	}
+	if !known {
+		jsonError(w, "no such caller in this organisation", http.StatusNotFound)
+		return
+	}
+
+	// Spent last: everything after this costs the person a fresh login.
+	if err := s.db.spendAssertion(r.Context(), claims.ID, claims.Expiry); errors.Is(err, ErrAssertionSpent) {
+		s.log.Warn("enrolment assertion replayed", "ip", clientIP(r), "subject", claims.Subject)
+		jsonError(w, "invalid assertion", http.StatusUnauthorized)
+		return
+	} else if err != nil {
+		s.log.Error("record spent assertion", "err", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	bundle, err := s.issueForCaller(r.Context(), claims.Org, req.Caller, csr, req.CSRPEM, issueOptions{})
+	if err != nil {
+		s.log.Error("enrolment failed after the assertion was spent",
+			"org", claims.Org, "caller", req.Caller, "err", err)
+		jsonError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// The actor is the person the assertion names, which the token arm never
+	// has: a spent token knows who minted it, not who redeemed it.
+	s.db.forOrg(claims.Org).logAction(r.Context(), "cloud:"+claims.Subject, claims.Email,
+		"enroll_assertion_spent",
+		map[string]any{
+			"caller":      req.Caller,
+			"role":        string(claims.Role),
+			"fingerprint": hex.EncodeToString(bundle.fingerprint),
+			"expires_at":  bundle.expiresAt,
+			"remote":      r.RemoteAddr,
+		})
+
+	jsonOK(w, map[string]any{
+		"cert_pem":   bundle.certPEM,
+		"ca_pem":     bundle.caPEM,
+		"caller":     req.Caller,
+		"org":        claims.Org,
+		"endpoint":   bundle.endpoint,
+		"enroll_url": bundle.enrollURL,
+		"expires_at": bundle.expiresAt,
+	})
+}
+
+// handleGetCallerEnrollment reports the self-enrolment flag for one caller.
+// Readable by any signed-in user, as the issued-certificates list is.
+func (s *Server) handleGetCallerEnrollment(w http.ResponseWriter, r *http.Request) {
+	caller := r.PathValue("caller")
+	if caller == "" {
+		jsonError(w, "caller is required", http.StatusBadRequest)
+		return
+	}
+	u := r.Context().Value(ctxUser).(*User)
+	allowed, err := s.db.forOrg(u.Org).developersMayEnroll(r.Context(), caller)
+	if err != nil {
+		s.log.Error("read enrolment policy", "org", u.Org, "caller", caller, "err", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]any{"caller": caller, "developers_may_enroll": allowed})
+}
+
+// handleSetCallerEnrollment records the flag. Admin, CSRF and sudo, as
+// minting is: the flag decides who can obtain the caller's identity.
+func (s *Server) handleSetCallerEnrollment(w http.ResponseWriter, r *http.Request) {
+	caller := r.PathValue("caller")
+	if caller == "" {
+		jsonError(w, "caller is required", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		DevelopersMayEnroll bool `json:"developers_may_enroll"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	u := r.Context().Value(ctxUser).(*User)
+	actor, actorEmail, _ := u.Actor()
+	if err := s.db.forOrg(u.Org).setDevelopersMayEnroll(r.Context(), caller, body.DevelopersMayEnroll, actor); err != nil {
+		s.log.Error("set enrolment policy", "org", u.Org, "caller", caller, "err", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	s.db.forOrg(u.Org).logAction(r.Context(), actor, actorEmail, "caller_enrollment_set",
+		map[string]any{"caller": caller, "developers_may_enroll": body.DevelopersMayEnroll})
+	jsonOK(w, map[string]any{"caller": caller, "developers_may_enroll": body.DevelopersMayEnroll})
+}
+
+// oidcCertTTLSeconds is the lifetime a workload's certificate is issued
+// with. An hour: longer than any ordinary CI job, and short enough that
+// expiry is the revocation.
+const oidcCertTTLSeconds = 3600
+
+type oidcEnrollRequest struct {
+	Org     string `json:"org"`
+	Caller  string `json:"caller"`
+	IDToken string `json:"id_token"`
+	CSRPEM  string `json:"csr_pem"`
+}
+
+// handleEnrollOIDC trades a CI workload's OIDC id_token for a short-lived
+// certificate, under a federation rule the organisation configured.
+//
+// Unauthenticated in the same sense /enroll is: the token is the whole of
+// what authorises it, verified against the rule's issuer rather than minted
+// by anybody here.
+func (s *Server) handleEnrollOIDC(w http.ResponseWriter, r *http.Request) {
+	if ok, retry := s.loginLim.allow(clientIP(r)); !ok {
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", retry))
+		jsonError(w, "too many attempts, try again shortly", http.StatusTooManyRequests)
+		return
+	}
+	var req oidcEnrollRequest
+	if err := readJSON(r, &req); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Org == "" || req.Caller == "" || req.IDToken == "" || req.CSRPEM == "" {
+		jsonError(w, "org, caller, id_token and csr_pem are required", http.StatusBadRequest)
+		return
+	}
+	csr, err := parseCSRPEM(req.CSRPEM)
+	if err != nil {
+		jsonError(w, "invalid CSR: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	rules, err := s.db.forOrg(req.Org).federationRulesFor(r.Context(), req.Caller)
+	if err != nil {
+		s.log.Error("read federation rules", "org", req.Org, "caller", req.Caller, "err", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// First rule the token satisfies wins. One refusal for every way to fail —
+	// no rules, no match, bad token — so a probe cannot map which rules exist.
+	var matched *federationRule
+	var workload *oidcfed.Identity
+	for i := range rules {
+		id, verr := s.oidc.Verify(r.Context(), req.IDToken,
+			rules[i].IssuerURL, rules[i].Audience, rules[i].SubjectPattern)
+		if verr == nil {
+			matched, workload = &rules[i], id
+			break
+		}
+	}
+	if matched == nil {
+		s.log.Info("oidc enrolment refused", "org", req.Org, "caller", req.Caller,
+			"rules", len(rules), "remote", r.RemoteAddr)
+		jsonError(w, "no federation rule admits this token", http.StatusForbidden)
+		return
+	}
+
+	budget := matched.RenewalBudget
+	bundle, err := s.issueForCaller(r.Context(), req.Org, req.Caller, csr, req.CSRPEM, issueOptions{
+		ttlSeconds:        oidcCertTTLSeconds,
+		renewalsRemaining: &budget,
+	})
+	if err != nil {
+		s.log.Error("oidc enrolment failed", "org", req.Org, "caller", req.Caller, "err", err)
+		jsonError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	s.db.forOrg(req.Org).logAction(r.Context(), "oidc:"+workload.Subject, "", "oidc_enrolled",
+		map[string]any{
+			"caller":      req.Caller,
+			"rule_id":     matched.ID,
+			"issuer":      workload.Issuer,
+			"subject":     workload.Subject,
+			"fingerprint": hex.EncodeToString(bundle.fingerprint),
+			"expires_at":  bundle.expiresAt,
+			"remote":      r.RemoteAddr,
+		})
+
+	jsonOK(w, map[string]any{
+		"cert_pem":   bundle.certPEM,
+		"ca_pem":     bundle.caPEM,
+		"caller":     req.Caller,
+		"org":        req.Org,
+		"endpoint":   bundle.endpoint,
+		"enroll_url": bundle.enrollURL,
+		"expires_at": bundle.expiresAt,
+	})
+}
+
+// handleListFederationRules returns the unrevoked rules for one caller.
+func (s *Server) handleListFederationRules(w http.ResponseWriter, r *http.Request) {
+	caller := r.PathValue("caller")
+	if caller == "" {
+		jsonError(w, "caller is required", http.StatusBadRequest)
+		return
+	}
+	u := r.Context().Value(ctxUser).(*User)
+	rules, err := s.db.forOrg(u.Org).federationRulesFor(r.Context(), caller)
+	if err != nil {
+		s.log.Error("list federation rules", "org", u.Org, "caller", caller, "err", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	type wire struct {
+		ID             int64  `json:"id"`
+		IssuerURL      string `json:"issuer_url"`
+		Audience       string `json:"audience"`
+		SubjectPattern string `json:"subject_pattern"`
+		RenewalBudget  int    `json:"renewal_budget"`
+		CreatedBy      string `json:"created_by"`
+		CreatedAt      string `json:"created_at"`
+	}
+	out := make([]wire, 0, len(rules))
+	for _, ru := range rules {
+		out = append(out, wire{
+			ID: ru.ID, IssuerURL: ru.IssuerURL, Audience: ru.Audience,
+			SubjectPattern: ru.SubjectPattern, RenewalBudget: ru.RenewalBudget,
+			CreatedBy: ru.CreatedBy, CreatedAt: ru.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	jsonOK(w, map[string]any{"rules": out})
+}
+
+// handleAddFederationRule records one binding.
+func (s *Server) handleAddFederationRule(w http.ResponseWriter, r *http.Request) {
+	caller := r.PathValue("caller")
+	if caller == "" {
+		jsonError(w, "caller is required", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		IssuerURL      string `json:"issuer_url"`
+		Audience       string `json:"audience"`
+		SubjectPattern string `json:"subject_pattern"`
+		RenewalBudget  *int   `json:"renewal_budget"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if !strings.HasPrefix(body.IssuerURL, "https://") {
+		jsonError(w, "issuer_url must be https", http.StatusBadRequest)
+		return
+	}
+	if body.Audience == "" {
+		jsonError(w, "audience is required", http.StatusBadRequest)
+		return
+	}
+	if err := oidcfed.ValidatePattern(body.SubjectPattern); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	budget := 1
+	if body.RenewalBudget != nil {
+		if *body.RenewalBudget < 0 {
+			jsonError(w, "renewal_budget must be zero or more", http.StatusBadRequest)
+			return
+		}
+		budget = *body.RenewalBudget
+	}
+
+	u := r.Context().Value(ctxUser).(*User)
+	actor, actorEmail, _ := u.Actor()
+	id, err := s.db.forOrg(u.Org).addFederationRule(r.Context(), federationRule{
+		Caller: caller, IssuerURL: strings.TrimRight(body.IssuerURL, "/"),
+		Audience: body.Audience, SubjectPattern: body.SubjectPattern,
+		RenewalBudget: budget, CreatedBy: actor,
+	})
+	if err != nil {
+		s.log.Error("add federation rule", "org", u.Org, "caller", caller, "err", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	s.db.forOrg(u.Org).logAction(r.Context(), actor, actorEmail, "federation_rule_created",
+		map[string]any{"caller": caller, "rule_id": id,
+			"issuer": body.IssuerURL, "subject_pattern": body.SubjectPattern})
+	jsonOK(w, map[string]any{"id": id})
+}
+
+// handleRevokeFederationRule ends one binding.
+func (s *Server) handleRevokeFederationRule(w http.ResponseWriter, r *http.Request) {
+	caller := r.PathValue("caller")
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if caller == "" || err != nil {
+		jsonError(w, "caller and rule id are required", http.StatusBadRequest)
+		return
+	}
+	u := r.Context().Value(ctxUser).(*User)
+	if err := s.db.forOrg(u.Org).revokeFederationRule(r.Context(), id); errors.Is(err, ErrNotFound) {
+		jsonError(w, "no such rule", http.StatusNotFound)
+		return
+	} else if err != nil {
+		s.log.Error("revoke federation rule", "org", u.Org, "err", err)
+		jsonError(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	actor, actorEmail, _ := u.Actor()
+	s.db.forOrg(u.Org).logAction(r.Context(), actor, actorEmail, "federation_rule_revoked",
+		map[string]any{"caller": caller, "rule_id": id})
+	jsonOK(w, map[string]any{"revoked": id})
 }

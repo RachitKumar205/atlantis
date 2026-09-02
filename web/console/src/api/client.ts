@@ -626,6 +626,18 @@ export interface RevokeCallerResponse {
  * no reason: the signer has only ever wanted a CSR. The machine generates its
  * own key now and this token is the only thing that travels.
  */
+/** One workload-identity binding: which CI runs may obtain this caller's
+ * certificate. */
+export interface FederationRule {
+  id: number
+  issuer_url: string
+  audience: string
+  subject_pattern: string
+  renewal_budget: number
+  created_by: string
+  created_at: string
+}
+
 export interface EnrollTokenResponse {
   token: string
   caller: string
@@ -1105,6 +1117,36 @@ export const api = {
     enroll: (caller: string): Promise<EnrollTokenResponse> =>
       apiFetch<EnrollTokenResponse>(`/api/callers/${encodeURIComponent(caller)}/enroll`, {
         method: 'POST',
+      }),
+
+    /** Whether viewers may self-enrol as this caller through `tide login`. */
+    enrollmentPolicy: (caller: string): Promise<{ developers_may_enroll: boolean }> =>
+      apiFetch<{ developers_may_enroll: boolean }>(
+        `/api/callers/${encodeURIComponent(caller)}/enrollment`),
+
+    /** Admin + sudo: the flag decides who can obtain the caller's identity. */
+    setEnrollmentPolicy: (caller: string, allowed: boolean): Promise<void> =>
+      apiFetch<void>(`/api/callers/${encodeURIComponent(caller)}/enrollment`, {
+        method: 'POST',
+        body: JSON.stringify({ developers_may_enroll: allowed }),
+      }),
+
+    federationRules: (caller: string): Promise<{ rules: FederationRule[] }> =>
+      apiFetch<{ rules: FederationRule[] }>(
+        `/api/callers/${encodeURIComponent(caller)}/federation`),
+
+    addFederationRule: (
+      caller: string,
+      rule: { issuer_url: string; audience: string; subject_pattern: string; renewal_budget?: number },
+    ): Promise<{ id: number }> =>
+      apiFetch<{ id: number }>(`/api/callers/${encodeURIComponent(caller)}/federation`, {
+        method: 'POST',
+        body: JSON.stringify(rule),
+      }),
+
+    revokeFederationRule: (caller: string, id: number): Promise<void> =>
+      apiFetch<void>(`/api/callers/${encodeURIComponent(caller)}/federation/${id}`, {
+        method: 'DELETE',
       }),
 
     certs: (): Promise<CallerCertsResponse> =>

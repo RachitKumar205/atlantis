@@ -64,9 +64,11 @@ function renderPage() {
 
 /** Presses Enrol on the one caller the fixture has. */
 async function pressEnrol() {
-  // The card's control is icon-only with aria-label "Enrol a machine". Take
-  // the first match: once the gate is open the dialog contributes its own.
-  const buttons = await screen.findAllByRole('button', { name: /enrol/i })
+  // The card's control is icon-only with aria-label "Enrol a machine". The
+  // exact name, because the card also carries "Enrolment access" — a loose
+  // /enrol/i matched that one first and pressed the wrong gate. Take the
+  // first match: once the gate is open the dialog contributes its own.
+  const buttons = await screen.findAllByRole('button', { name: /enrol a machine/i })
   await act(async () => {
     buttons[0].click()
   })

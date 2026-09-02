@@ -53,6 +53,10 @@ type fakeSigner struct {
 type signerRequest struct {
 	Caller string `json:"caller"`
 	CSRPEM string `json:"csr_pem"`
+	// Recorded so a test can assert what the console asked for; the fake
+	// issues with its own TTL either way, and cmd/signer's clamp has its own
+	// tests.
+	TTLSeconds int `json:"ttl_seconds"`
 }
 
 // newFakeSigner starts one. issuing is the authority it signs with.
