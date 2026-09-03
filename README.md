@@ -1,107 +1,46 @@
 # atlantis
 
-atlantis generates Postgres migrations, a typed Go client, and a cached gRPC server from a single `.atl` schema file. The same declaration produces the migration SQL, the runtime-served per-entity API, the read-through cache, and the cache-invalidation logic. These are normally hand-written and kept in sync by convention.
+This repository builds Atlantis Cloud: the hosted platform, the `tide` CLI,
+and the `.atl` schema DSL. One `.atl` declaration produces the Postgres
+schema, a typed Go client, a gRPC data plane with per-entity opt-in
+caching, and the cache-invalidation logic. Schema changes are planned,
+approved, and applied through the platform.
 
-```
-$ tide apply
-tide: ✓ applied at 2026-05-21T15:30:00Z
-```
+This repository is private: the source is not published, and no outside
+contributions are accepted. Release artifacts for the `tide` CLI are
+published to the public releases bucket.
 
-## How it works
+## Documentation
 
-A `.atl` file declares an entity:
+- [`docs/`](docs/index.md) — customer documentation: getting started,
+  guides, concepts, and the DSL/CLI/API references. Written to
+  [`docs/STYLE.md`](docs/STYLE.md).
+- [`ops/`](ops/README.md) — operator and internal documentation: server
+  configuration, the admin CLI, local development, architecture notes.
 
-```
-entity Order in shop {
-  id          bigint primary serial
-  customer_id bigint not null references shop.Customer.id
-  status      varchar(20) not null default "pending"
-  total       numeric(10, 2) not null
-  created_at  timestamptz not null default now()
+## Layout
 
-  index by customer_id
-  cache { read_through ttl=5m tag="customer:{customer_id}" }
-}
-```
+| Path | Contents |
+|---|---|
+| `cmd/` | Binaries: the data-plane `server`, the `console` BFF, `cloud` (control plane), `tide` (customer CLI), and internal tools |
+| `internal/` | Server, console, and cloud implementation |
+| `jobs/` | The job runtime: scheduler, cron, workflow engine, built-in sweeper and reaper |
+| `clients/go/` | Hand-written runtime libraries callers link (`jobs`, admin JSON, transport) — `tide generate` writes typed clients into caller repos, not here |
+| `web/` | The console and cloud frontends |
+| `migrations/` | The platform's own SQL migration histories |
+| `atlantis/` | Protobuf definitions for the admin and common APIs |
+| `scripts/` | Release packaging, including the `tide` install script |
+| `docs/`, `ops/` | Documentation (see above) |
 
-Running `tide apply` from a service repo submits the file to the atlantis server. The server generates SQL migrations and proto definitions, then applies the migration after the planner classifies it as additive, backfill-required, or breaking. Apply also refuses if the live database carries a bare unique index the schema doesn't declare — a `CREATE UNIQUE INDEX` with no backing constraint (drift) — unless `ATLANTIS_ALLOW_INDEX_DRIFT=1` is set. The server serves `Order` over gRPC by dispatching from the schema at runtime — no per-entity handlers are compiled — with a memcached read-through cache in front of every read. The typed Go client is generated separately, caller-local, with `tide generate`.
+## Development
 
-Cache invalidation rides the write transaction. Every Create / Update / Delete commits the data change and an outbox row in one Postgres txn, and a worker drains the outbox to invalidate memcached. Application code never writes the invalidation directly.
-
-Custom SQL is typed too:
-
-```
-query OrdersForCustomer for Order {
-  input  { customer_id: bigint, limit: int }
-  output as Order
-  sql touches(Order) {
-    SELECT * FROM shop.order
-    WHERE customer_id = $customer_id
-    ORDER BY created_at DESC
-    LIMIT $limit
-  }
-}
-```
-
-The `touches(Order)` clause tells the cache invalidator which entities the SQL reads. Custom queries are cached and invalidated the same way generated CRUD is.
-
-When multiple services share the database, `tide plan` cross-checks proposed migrations against every caller's registered schema. Schema changes that would break another service's reads are rejected before the migration runs.
-
-## Compared to sqlc, Prisma, Hasura
-
-sqlc is the closest equivalent in Go: it generates typed query methods from hand-written SQL. The migrations, the server, and any caching stay on you. Prisma covers similar ground in TypeScript without including a server; Hasura runs a server but exposes GraphQL and is administered outside the application codebase.
-
-atlantis produces migrations, a Go SDK, a server, and the cache-invalidation logic from one source file. It runs as a single Go binary in front of Postgres; Go services call it over gRPC.
-
-The DSL maps to Postgres directly. Types and constraints are 1:1, and pgvector (HNSW indexes) and TimescaleDB (hypertables, chunk intervals) are supported in the DSL. Generated code uses pgx types without a mapping layer.
-
-## Install
-
-To run the server locally with Postgres and memcached in containers:
-
-```
-git clone https://github.com/rachitkumar205/atlantis
-cd atlantis
-# Add at least one .atl file under testdata/schema/ (see docs/getting-started/)
-make codegen       # generates gen/, clients/go/, atlantis/ from your .atl files
-make dev-isolated
-```
-
-The generated tree (`gen/`, `clients/go/client/`, `clients/go/pb/`, `atlantis/<ns>/v1/`) is gitignored. `make codegen` produces it from `testdata/schema/`; with no `.atl` files there, the codegen exits with no work to do and `cmd/server` won't compile. Add an entity first.
-
-To use atlantis from a service repo:
-
-```
-go install github.com/rachitkumar205/atlantis/cmd/tide@latest
-tide apply
-```
-
-Walkthrough: [docs/getting-started/](docs/getting-started/). Production deployment: [docs/guides/deploy-to-production.md](docs/guides/deploy-to-production.md).
-
-## Status
-
-Supported:
-
-- PostgreSQL 15 or later, single server
-- Go SDK
-- Migrations via `tidectl migrate-up`, or `AUTO_MIGRATE=true` for development
-- Memcached read-through cache with outbox-driven invalidation
-- pgvector with HNSW indexes
-- TimescaleDB hypertables
-- Custom queries and multi-step procedures
-- Unique-index drift detection — `tide apply` refuses over a bare unique index the schema doesn't declare (escape hatch: `ATLANTIS_ALLOW_INDEX_DRIFT=1`); `tide plan` surfaces it as a warning
-- In-process sandbox runtime with checkpoints, fork, diff, seed, and snapshot (sim backend) plus an embedded Postgres backend for full SQL fidelity
-- mTLS between client and server
-
-Not yet supported: MySQL, non-Go client SDKs, multi-region deployments.
-
-## License
-
-- **Server** (this repository, except `clients/go/`) — [BSL 1.1](LICENSE). Production use is permitted except offering atlantis on a hosted or embedded basis in competition with the licensor's paid versions. Converts to Apache 2.0 on 2030-05-21.
-- **SDK** (`clients/go/`) — [Apache 2.0](clients/go/LICENSE). Apps that link this SDK are unrestricted; only the atlantis server itself is under BSL.
-
-See [`clients/go/README.md`](clients/go/README.md) for how the SDK is generated and how it connects to a server.
+Local setup, the test matrix, and the codegen loop are covered in
+[`ops/local-development.md`](ops/local-development.md). CI runs lint and
+tests on every pull request, plus an offline link check over the Markdown
+tree when Markdown changes; run lint and tests locally before pushing.
 
 ## Naming
 
-Not to be confused with the Terraform tool at [runatlantis/atlantis](https://github.com/runatlantis/atlantis). This project lives at [`rachitkumar205/atlantis`](https://github.com/rachitkumar205/atlantis).
+Not related to the Terraform tool at
+[runatlantis/atlantis](https://github.com/runatlantis/atlantis). The public
+brand is Atlantis; the code and prose in this tree spell it `atlantis`.
