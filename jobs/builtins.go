@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -116,8 +117,9 @@ func ensureSchedule(ctx context.Context, pool *pgxpool.Pool, b Builtin) error {
 		return err
 	}
 	_, err = pool.Exec(ctx, `
-INSERT INTO atlantis.job_schedules (job_name, cron_spec, default_args)
-VALUES ($1, $2, $3)
-ON CONFLICT (job_name) DO NOTHING`, b.Name, b.CronSpec, args)
+INSERT INTO atlantis.job_schedules (job_name, cron_spec, default_args, queue, timeout_ms)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (job_name) DO NOTHING`,
+		b.Name, b.CronSpec, args, BuiltinQueue, int(scheduledJobTimeout/time.Millisecond))
 	return err
 }

@@ -732,7 +732,8 @@ type JobDecl struct {
 
 	// Runtime modifiers, nil when undeclared. A nil Timeout leaves the handler
 	// with no per-attempt deadline; a nil Queue puts the job on 'default'
-	// (migration 0006); a nil Heartbeat takes the runner's HeartbeatBudget, 2m.
+	// (migration 0006); a nil Heartbeat takes the dispatcher's
+	// HeartbeatBudget, 5m (the direct-PG SDK Worker defaults to 2m).
 	Retries   *JobRetries
 	Timeout   *JobTimeout
 	Heartbeat *JobHeartbeat
@@ -795,10 +796,10 @@ type JobQueue struct {
 }
 
 // JobSchedule: `schedule "0 */15 * * *"` — cron spec (standard 5-field
-// form) that fires this job periodically. The atlantis scheduler
-// component evaluates the spec and INSERTs job rows when due. Empty
-// schedule = non-scheduled, submission via SDK / CLI / procedure
-// enqueue only.
+// form) that fires this job periodically. The clause is synced into
+// atlantis.job_schedules when the server loads a checkpoint, and the
+// scheduler enqueues a run when the spec is due. Empty schedule =
+// non-scheduled, submission via SDK / CLI / procedure enqueue only.
 type JobSchedule struct {
 	Pos      Position
 	CronSpec string

@@ -107,8 +107,9 @@ CREATE INDEX IF NOT EXISTS jobs_dead_moved_at_idx
 
 
 -- Cron-driven jobs. One row per (job_name) — a job can have at most
--- one schedule; the DSL `schedule "..."` modifier emits this row at
--- apply time. The scheduler component evaluates cron_spec on a
+-- one schedule. Built-ins seed their rows at boot; the DSL
+-- `schedule "..."` modifier's rows sync from the checkpoint when the
+-- server loads it. The scheduler component evaluates cron_spec on a
 -- ticker and INSERTs into atlantis.jobs when last_fired_at +
 -- (next-fire-from-spec) <= now().
 CREATE TABLE IF NOT EXISTS atlantis.job_schedules (

@@ -373,7 +373,7 @@ type Entity struct {
 
 	// TtlField is the timestamptz column that anchors row-level expiry.
 	// When non-empty, the built-in SweepExpired scheduled job DELETEs
-	// rows where `<TtlField> < now()` on a 1-minute cron. Empty means
+	// rows where `<TtlField> < now()` on a five-minute cron. Empty means
 	// no automatic cleanup.
 	TtlField string `json:"ttl_field,omitempty"`
 

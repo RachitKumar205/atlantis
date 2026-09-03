@@ -182,6 +182,17 @@ func (d *Dispatcher) WorkerSession(stream grpc.ServerStream) error {
 			"caller", caller, "aliases", aliases, "queue", open.Queue, "err", err)
 		return err
 	}
+	// The queue must be one the schema declares. register starts a drain
+	// loop per announced queue, and a drain loop holds a pool connection
+	// for the life of the process — an unbounded queue namespace would let
+	// any authenticated worker pin one connection per invented name until
+	// the pool is gone.
+	if !queueDeclared(ir, open.Queue) {
+		d.cfg.Logger.Info("dispatcher: unknown queue at Open",
+			"caller", caller, "queue", open.Queue)
+		return status.Errorf(codes.InvalidArgument,
+			"queue %q is not declared by any job in the schema", open.Queue)
+	}
 
 	// 4. Build the per-job heartbeat override map from the IR. Only
 	// populated for jobs the worker declared they handle — saves a

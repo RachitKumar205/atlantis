@@ -346,6 +346,12 @@ func (k *Kube) atlantisEnv() []corev1.EnvVar {
 		// appears to work and tenants can read each other.
 		{Name: "ATL_REQUIRE_TENANT_ISOLATION", Value: "true"},
 
+		// Dispatched job workers are the only worker path a hosted caller
+		// has — no customer holds direct database access. The dispatcher
+		// drains any queue a connecting worker announces, so no queue list
+		// is configured here.
+		{Name: "ATL_JOBS_DISPATCHER_ENABLED", Value: "true"},
+
 		{Name: "LOG_LEVEL", Value: "info"},
 	}
 }

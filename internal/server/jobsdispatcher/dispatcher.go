@@ -115,6 +115,13 @@ type Config struct {
 	// Logger is the dispatcher's structured log. Inherits from the
 	// server's slog.
 	Logger *slog.Logger
+
+	// BaseContext bounds the drain loops that register starts for a
+	// queue whose first worker just connected. A session's own stream
+	// context ends with that one worker; the drain loop must outlive
+	// it. Nil means no lazy drain loops: only the queues the caller
+	// passes to RunQueue are drained.
+	BaseContext context.Context
 }
 
 // DefaultConfig returns conservative defaults aligned with the SDK
@@ -469,13 +476,59 @@ func (d *Dispatcher) pickSession(queue, jobName string, budget map[*session]int)
 type routeKey struct{ queue, jobName string }
 
 // register inserts a session into the dispatcher's registry. Called
-// from handleWorkerSession after authz passes.
+// from handleWorkerSession after authz passes — including the queue
+// check, which bounds the drain loops this can start to the queues the
+// schema declares.
+//
+// It also starts the queue's drain loop when BaseContext is set, so a
+// worker announcing a queue no static wiring named still receives work.
+// queueRunning is peeked here to skip a start for a queue already
+// draining; RunQueue's own guard settles the race between two peeks.
 func (d *Dispatcher) register(s *session) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.sessions[s.id] = s
-	d.sessionsByQueue[s.queue] = append(d.sessionsByQueue[s.queue], s)
-	sessionsActive.WithLabelValues(s.queue, s.caller).Inc()
+	func() {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		d.sessions[s.id] = s
+		d.sessionsByQueue[s.queue] = append(d.sessionsByQueue[s.queue], s)
+		sessionsActive.WithLabelValues(s.queue, s.caller).Inc()
+	}()
+
+	if d.cfg.BaseContext == nil {
+		return
+	}
+	queue := s.queue
+	if _, running := d.queueRunning.Load(queue); running {
+		return
+	}
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				d.cfg.Logger.Error("jobs dispatcher panic", "queue", queue, "panic", rec)
+			}
+		}()
+		d.RunQueue(d.cfg.BaseContext, queue)
+	}()
+}
+
+// queueDeclared reports whether queue is one a schema-declared job runs
+// on. An undeclared `queue` modifier means "default".
+func queueDeclared(ir *dsl.IR, queue string) bool {
+	if queue == "default" {
+		return true
+	}
+	if ir == nil {
+		return false
+	}
+	for i := range ir.Jobs {
+		q := ir.Jobs[i].Queue
+		if q == "" {
+			q = "default"
+		}
+		if q == queue {
+			return true
+		}
+	}
+	return false
 }
 
 // unregister removes a session and releases all its in-flight rows

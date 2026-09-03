@@ -685,6 +685,10 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 			AliasLoader:       adminSvc.LookupCallerAliases,
 			CallerFromContext: callerFromContext,
 			Logger:            log.With("component", "jobs-dispatcher"),
+			// A worker's OpenSession names its queue, and register
+			// starts that queue's drain loop against this context —
+			// declared jobs land on queues no static list names.
+			BaseContext: workerCtx,
 		})
 		jobsdispatcher.Register(srv, dispatcher)
 		adminSvc.SetDispatcher(newDispatcherAdapter(dispatcher))
@@ -721,6 +725,15 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	}
 	if irHash != "" {
 		log.Info("loaded IR checkpoint", "hash", irHash[:min(12, len(irHash))], "entities", len(ir.Entities))
+	}
+
+	// Declared `schedule` clauses fire through atlantis.job_schedules, the
+	// same table the built-ins use; the checkpoint is their source, so the
+	// rows sync whenever a checkpoint loads — here at boot, and again on
+	// every reload below. Best-effort: the schema must serve even when the
+	// schedule table cannot be written.
+	if err := jobs.SyncDeclaredSchedules(ctx, pool.Raw(), ir, log); err != nil {
+		log.Error("could not sync declared job schedules", "err", err)
 	}
 
 	// Audit the checkpoint for SQL that would defeat tenant isolation.
@@ -827,6 +840,13 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 			// Not "refusing to start" — this server is already running. A
 			// failed reload leaves the PREVIOUS schema serving.
 			return fmt.Errorf("refusing to serve the reloaded schema: %w", gateErr)
+		}
+		// The reloaded checkpoint's declared schedules, mirrored the way
+		// boot mirrors them. Best-effort for the same reason: a schedule
+		// write failing must not hold the schema on its old version.
+		if syncErr := jobs.SyncDeclaredSchedules(context.WithoutCancel(ctx),
+			pool.Raw(), newIR, log); syncErr != nil {
+			log.Error("could not sync declared job schedules on reload", "err", syncErr)
 		}
 		return nil
 	})

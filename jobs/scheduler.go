@@ -107,24 +107,19 @@ func (s *Scheduler) tick(ctx context.Context) error {
 	}()
 
 	rows, err := conn.Query(ctx, `
-SELECT id, job_name, cron_spec, default_args, last_fired_at
+SELECT id, job_name, cron_spec, default_args, last_fired_at,
+       queue, max_retries, timeout_ms, owner_caller
   FROM atlantis.job_schedules
  WHERE enabled
  ORDER BY id`)
 	if err != nil {
 		return fmt.Errorf("list schedules: %w", err)
 	}
-	type row struct {
-		id        int64
-		jobName   string
-		spec      string
-		args      []byte
-		lastFired *time.Time
-	}
-	var schedules []row
+	var schedules []scheduleRow
 	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.id, &r.jobName, &r.spec, &r.args, &r.lastFired); err != nil {
+		var r scheduleRow
+		if err := rows.Scan(&r.id, &r.jobName, &r.spec, &r.args, &r.lastFired,
+			&r.queue, &r.maxRetries, &r.timeoutMS, &r.owner); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan schedule: %w", err)
 		}
@@ -168,18 +163,32 @@ SELECT id, job_name, cron_spec, default_args, last_fired_at
 		if due.After(now) {
 			continue
 		}
-		if err := s.fire(ctx, conn, r.id, r.jobName, r.args); err != nil {
+		if err := s.fire(ctx, conn, r); err != nil {
 			s.log().Warn("could not enqueue scheduled job", "job", r.jobName, "err", err)
 		}
 	}
 	return nil
 }
 
+// scheduleRow is one enabled atlantis.job_schedules row: the cadence plus
+// everything a fire writes into atlantis.jobs.
+type scheduleRow struct {
+	id         int64
+	jobName    string
+	spec       string
+	args       []byte
+	lastFired  *time.Time
+	queue      string
+	maxRetries int
+	timeoutMS  *int
+	owner      string
+}
+
 // fire enqueues one run and records it, in one transaction.
 //
 // Together, so that a crash between the two cannot either drop the run or
 // replay it on every tick forever.
-func (s *Scheduler) fire(ctx context.Context, conn *pgxpool.Conn, id int64, jobName string, args []byte) error {
+func (s *Scheduler) fire(ctx context.Context, conn *pgxpool.Conn, r scheduleRow) error {
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return err
@@ -192,40 +201,47 @@ func (s *Scheduler) fire(ctx context.Context, conn *pgxpool.Conn, id int64, jobN
 	var pending int
 	if err := tx.QueryRow(ctx, `
 SELECT count(*) FROM atlantis.jobs
- WHERE job_name = $1 AND status IN ('pending', 'running')`, jobName).Scan(&pending); err != nil {
+ WHERE job_name = $1 AND status IN ('pending', 'running')`, r.jobName).Scan(&pending); err != nil {
 		return fmt.Errorf("check pending: %w", err)
 	}
 	if pending > 0 {
 		// Still record the fire: otherwise `next` keeps resolving to the same
 		// overdue instant and every tick re-checks it.
 		if _, err := tx.Exec(ctx,
-			`UPDATE atlantis.job_schedules SET last_fired_at = now() WHERE id = $1`, id); err != nil {
+			`UPDATE atlantis.job_schedules SET last_fired_at = now() WHERE id = $1`, r.id); err != nil {
 			return err
 		}
-		scheduleFiresTotal.WithLabelValues(jobName, "skipped").Inc()
+		scheduleFiresTotal.WithLabelValues(r.jobName, "skipped").Inc()
 		s.log().Info("scheduled job skipped: a previous run is still outstanding",
-			"job", jobName, "outstanding", pending)
+			"job", r.jobName, "outstanding", pending)
 		return tx.Commit(ctx)
 	}
 
+	args := r.args
 	if len(args) == 0 {
 		args = []byte("{}")
 	}
+	// timeout_ms NULL on the schedule row means no per-attempt deadline,
+	// matching atlantis.jobs.timeout_ms.
+	var timeoutArg any
+	if r.timeoutMS != nil {
+		timeoutArg = *r.timeoutMS
+	}
 	if _, err := tx.Exec(ctx, `
-INSERT INTO atlantis.jobs (job_name, queue, args, max_retries, timeout_ms, submitted_by)
-VALUES ($1, $2, $3, 0, $4, 'atlantis.scheduler')`,
-		jobName, BuiltinQueue, args, int(scheduledJobTimeout/time.Millisecond)); err != nil {
+INSERT INTO atlantis.jobs (job_name, queue, args, max_retries, timeout_ms, submitted_by, owner_caller)
+VALUES ($1, $2, $3, $4, $5, 'atlantis.scheduler', $6)`,
+		r.jobName, r.queue, args, r.maxRetries, timeoutArg, r.owner); err != nil {
 		return fmt.Errorf("enqueue: %w", err)
 	}
 	if _, err := tx.Exec(ctx,
-		`UPDATE atlantis.job_schedules SET last_fired_at = now() WHERE id = $1`, id); err != nil {
+		`UPDATE atlantis.job_schedules SET last_fired_at = now() WHERE id = $1`, r.id); err != nil {
 		return fmt.Errorf("record fire: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	scheduleFiresTotal.WithLabelValues(jobName, "fired").Inc()
-	s.log().Info("scheduled job enqueued", "job", jobName, "queue", BuiltinQueue)
+	scheduleFiresTotal.WithLabelValues(r.jobName, "fired").Inc()
+	s.log().Info("scheduled job enqueued", "job", r.jobName, "queue", r.queue)
 	return nil
 }
 
