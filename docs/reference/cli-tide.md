@@ -6,35 +6,37 @@ tide <command> [flags]
 
 The caller-side CLI. Run from a service repo containing one or more `.atl` files and a `tide.yaml`.
 
-`-h` and `--help` are accepted by `tide` and every subcommand.
+`-h` and `--help` are accepted by leaf commands — those that take flags.
+Bare `tide`, and a group name (`job`, `workflow`, `caller`, `backfill`,
+`sandbox`) without a subcommand, print usage and exit 2.
 
 ## Configuration file
 
-`tide` reads `./tide.yaml` from the current directory (overridable per command with `--config <path>`). The file must contain at minimum:
+`tide` reads `./tide.yaml` from the current directory (overridable per command with `--config <path>`). The file carries:
 
 ```yaml
 caller: <name>                # required
-endpoint: <host:port>         # required
+org: <organisation>           # only when more than one organisation is enrolled
 schema_paths:                 # required — at least one directory
   - internal/foo
   - internal/bar
-output_dir: internal/gen/pcclient   # required for `tide generate`
+output_dir: internal/atlantis # required for `tide generate`
 generate:                     # required for `tide generate` — namespaces to emit
   - consumer
   - vendor
-tls:                          # optional
-  cert: <file>
-  key:  <file>
-  ca:   <file>
 ```
 
 `output_dir` is the directory inside the caller's own Go module where `tide generate` writes the typed client. `generate` lists the namespaces the caller consumes (its own plus any it reads cross-namespace). Both are only required for `tide generate`; the other commands ignore them.
 
-YAML does not expand `${VAR}` placeholders. The config loader rejects literal `${VAR}` strings in the three TLS fields specifically (other fields are passed through verbatim).
+The server address and the TLS material are not configuration: `tide login`
+collects both into the credential store at `~/.atlantis/<org>/<caller>/`,
+and `tide` renews the certificate on its own at two thirds of its life.
+When `org:` is unset and exactly one organisation is enrolled, that one is
+used; with several enrolled, an unset `org:` is refused rather than guessed.
 
 ### `schema_paths` semantics
 
-Each path is walked recursively; every file with extension `.atl` is included. Order does not affect schema resolution. Paths are recorded relative to the caller's repo root so server-side error messages stay useful in the caller's context.
+Each path is walked recursively; every file with extension `.atl` is included, and dot-directories are skipped — `.tide-cache/` and `.git/` are never submitted. Order does not affect schema resolution. Paths are recorded relative to the caller's repo root so server-side error messages stay useful in the caller's context.
 
 ## Environment variables
 
@@ -49,32 +51,41 @@ Each path is walked recursively; every file with extension `.atl` is included. O
 
 `TIDE_CALLER` is not consulted; use `ATL_CALLER`.
 
-### What is no longer configurable
-
-`ATL_ENDPOINT`, `tls:` in `tide.yaml`, and `TIDE_TLS_CERT` / `TIDE_TLS_KEY` /
-`TIDE_TLS_CA` — along with the three `_PEM` variants — have been removed. So has
-`tide plan --against`.
-
-They existed because a caller used to decide which atlantis it talked to and how
-it proved itself, which made sense when a customer ran their own. The
-organisation owns the address now and issues the credential; `tide login`
-collects both into `~/.atlantis/<org>/<caller>/`, and `tide` renews the
-certificate on its own at two thirds of its life.
-
-The `_PEM` variants were how CI carried a private key into a job. Enrolment
-exists to end exactly that, and nothing replaces it yet — see
-`docs/examples/README.md`.
-
 `tide job` and `tide workflow` read `$USER` to stamp the submitting principal on jobs and workflow runs.
 
 ## Commands
 
-Every command accepts `--config <path>` (default `tide.yaml`) and `--timeout <duration>`. Duration uses Go's `time.ParseDuration` format (e.g. `30s`, `1m`, `500ms`). Default `30s`.
+| Command | Purpose | `--timeout` default |
+|---|---|---|
+| `tide init` | Write `tide.yaml` | — |
+| `tide login` | Enrol this machine | — |
+| `tide apply` | Submit `.atl` files and run the migration | `30s` |
+| `tide plan` | Report what an apply would do | `30s` |
+| `tide rehearse` | Execute the migration against a clone of the real database | `20m` |
+| `tide inspect` | Report drift between the database and the declarations | `2m` |
+| `tide pull` | Refresh the local `.tide-cache/` mirror | `30s` |
+| `tide generate` | Write the typed Go client (`--check` verifies it) | `30s` |
+| `tide list` / `tide show` | Print the merged schema's files | `30s` |
+| `tide history` / `tide diff` / `tide blame` / `tide owners` | Version registry reads | `10s` |
+| `tide rollback` | Preview a rollback (`--dry-run`) | `30s` |
+| `tide parked` | List parked objects | `10s` |
+| `tide backfill status` | Report backfill progress | `10s` |
+| `tide job …` / `tide workflow …` | Submit and inspect background work | `10s` |
+| `tide caller alias …` | Manage caller aliases (operator) | `10s` |
+| `tide sandbox …` | Local sandbox (source builds only) | — |
+| `tide version` | Print the version banner | — |
+
+Commands that dial the server accept `--config <path>` (default
+`tide.yaml`) and `--timeout <duration>`, with the defaults above. Duration
+uses Go's `time.ParseDuration` format (e.g. `30s`, `1m`, `500ms`).
+`tide init`, `tide login`, `tide sandbox`, and `tide version` take
+neither flag.
 
 ### `tide init`
 
 ```
-tide init --caller NAME [--org ORG] [--output-dir DIR] [--generate ns1,ns2]
+tide init --caller NAME [--org ORG] [--schema-path DIR]
+          [--output-dir DIR] [--generate ns1,ns2]
 ```
 
 Writes `tide.yaml` — the caller name, where the `.atl` files live, and
@@ -86,23 +97,23 @@ The first command in a new repository; `tide login` is the second.
 
 ### `tide apply`
 
-Submits the local `.atl` files to the server, runs the migration, and prints a hint for the caller to regenerate the typed Go client. No endpoint override flag — `apply` always targets the configured `endpoint`.
+Submits the local `.atl` files to the server, runs the migration, and prints a hint for the caller to regenerate the typed Go client. There is no endpoint override — `apply` targets the address the credential store holds for this caller.
 
 ```
-tide apply [--backfill] [--dry-run] [--no-pull] [--wait-for-approval=30m]
+tide apply [--backfill] [--dry-run] [--no-pull] [--wait-for-approval <duration>]
 ```
 
 | Flag | Description |
 |---|---|
 | `--backfill` | Boolean. Kick off the declarative backfill flow for a `backfill_required` plan (calls `BeginBackfillPlan`). Monitor progress with `tide backfill status`. |
-| `--dry-run` | Plan only; do not apply. Same exit codes as a real apply. Overrides `--backfill`: with both set, the backfill that *would* run is listed and nothing is started. |
-| `--no-pull` | Skip the automatic `tide pull` before the apply. Use when offline or when the local cache is known-current. |
+| `--dry-run` | Plan only; do not apply. Exits with `tide plan`'s code map — a destructive class exits 4. Overrides `--backfill`: with both set, the backfill that *would* run is listed and nothing is started. |
+| `--no-pull` | Skip the automatic `tide pull` before the apply, for an offline run or a known-current cache. |
 | `--timeout` | Bounds a single RPC. Default 30s. |
-| `--wait-for-approval` | Hold the process open this long, retrying the apply until a human decides. Off by default, because a polling default holds a CI runner for as long as a review takes. Independent of `--timeout`: the command's overall budget becomes the wait plus one `--timeout`, and each retry still gets its own `--timeout`. |
+| `--wait-for-approval` | Default `0` (off). Hold the process open this long, retrying the apply every 15 seconds until a person decides. Independent of `--timeout`: each retry gets its own `--timeout`. |
 
 The default flow runs `tide pull` first so cross-caller references resolve against the freshest merged schema.
 
-If the database carries a bare unique index the schema doesn't declare — a `CREATE UNIQUE INDEX` with no backing constraint — `apply` refuses with a `DROP INDEX` remediation. Set [`ATLANTIS_ALLOW_INDEX_DRIFT=1`](configuration.md#schema-drift) to apply anyway. This doesn't change the plan class or exit code.
+`apply` also checks the live database for drift inside its locked transaction, and refuses when it finds any of three kinds: a bare unique index the schema doesn't declare (the refusal carries a `DROP INDEX` remediation), a `check` constraint that diverges from the declaration, or a column whose type or width has moved. The refusal names the object and the fix, and also a server-side override — on Atlantis Cloud, set by platform operators, not by callers. Drift refusals don't change the plan class or exit code.
 
 ### `tide plan`
 
@@ -117,7 +128,56 @@ tide plan [--format {table|json}] [--no-pull]
 | `--format {table|json}` | Default `table`. `json` emits the raw planning response for downstream tools. |
 | `--no-pull` | Skip the pre-plan refresh of `.tide-cache/`. |
 
-A bare unique index the schema doesn't declare surfaces as an index-drift warning, but only under `--format=json` — in the `index_drift`, `index_drift_notes`, and `index_drift_error` fields. The `table` output does not render it. Drift never blocks `plan` or changes its exit code; `tide apply` is where it refuses unless [`ATLANTIS_ALLOW_INDEX_DRIFT=1`](configuration.md#schema-drift).
+A bare unique index the schema doesn't declare surfaces as an index-drift warning, but only under `--format=json` — in the `index_drift`, `index_drift_notes`, and `index_drift_error` fields. The `table` output does not render it. Drift never blocks `plan` or changes its exit code; `tide apply` is where it refuses.
+
+### `tide rehearse`
+
+Executes the working tree's migration against a disposable clone of the
+managed database — schema and real rows, copied under one snapshot — and
+reports what Postgres did. The clone is destroyed when the rehearsal ends;
+nothing it runs can touch production data.
+
+```
+tide rehearse [--format {table|json}] [--timeout <duration>]
+```
+
+| Flag | Description |
+|---|---|
+| `--format {table|json}` | Default `table`. `json` carries verdict, SQLSTATE, redacted error, per-constraint violation counts, remediation, and timings. |
+| `--timeout <duration>` | Default `20m`. A rehearsal clones the database before executing, so its budget is minutes, not seconds. |
+
+Verdicts, and the exit code each maps to:
+
+| Verdict | Exit | Meaning |
+|---|---|---|
+| `pass` | 0 | The migration completed against the cloned rows. |
+| `pass_with_warnings` | 0 | Completed, with something worth reading in the output. |
+| `fail_data` | 2 | Existing rows violate the change — the real apply would fail the same way. The output carries violation counts and, where the server knows a template, a suggested fix. |
+| `fail_structural` | 2 | The SQL itself does not run. |
+| `unverified` | 4 | The rehearsal could not answer — one of the limits below was hit. |
+
+Rehearsal limits:
+
+| Limit | Value |
+|---|---|
+| Database size the clone accepts | 25 GiB |
+| Clone timeout | 15 minutes |
+| Execution timeout | 5 minutes |
+| Concurrent rehearsals per deployment | 2 |
+
+Errors are redacted before they are stored or returned: SQLSTATE, message,
+and the constraint, table, and column names are kept; the detail lines that
+embed row values are not.
+
+A verdict binds to the exact content it rehearsed — the same identity an
+approval binds to — and the apply gate consumes it only within an hour, so
+the `auto_verified` and `auto_all` tiers act on fresh passes and nothing
+else. `unverified` never satisfies a tier. See
+[change approval](../concepts/change-approval.md).
+
+Rehearsing needs the caller rehearsal-enabled — an admin's per-caller grant
+on the console's Callers page, made there because a clone holds every
+caller's rows.
 
 ### `tide inspect`
 
@@ -125,12 +185,13 @@ Reports how the live database differs from your `.atl` files. Writes nothing.
 
 ```
 tide inspect [--format {table|json}] [--timeout <duration>]
+             [--generate <dir>] [--schemas <list>]
 ```
 
 | Flag | Description |
 |---|---|
 | `--format {table|json}` | Default `table`. `json` emits the raw drift report. |
-| `--timeout <duration>` | Default `2m`. Introspecting a large schema takes a while. |
+| `--timeout <duration>` | Default `2m`. |
 | `--generate <dir>` | Write `.atl` for tables no declaration mentions into `<dir>`, one file per entity. Never overwrites an existing file. |
 | `--schemas <list>` | With `--generate`: comma-separated Postgres schemas to search. Default is every non-system schema. |
 
@@ -144,9 +205,9 @@ Findings are grouped by severity:
 | removal | In the database, no longer declared | 1 |
 | mismatch | Both exist and disagree | 2 |
 
-Exit 2 is the one to act on. An addition is usually an apply away; a mismatch means the database was changed outside atlantis, and no apply will reconcile it.
+An addition is resolved by `tide apply`; a mismatch means the database was changed outside atlantis, and no apply reconciles it.
 
-The report ends with a **not checked** section. Introspection does not read indexes, uniques or `check` predicates back from the catalogue, so `inspect` cannot tell you whether those match. Treat a clean run as "the columns, types, keys and tenant isolation agree", not as "everything agrees".
+The report ends with a **not checked** section. Introspection does not read indexes, uniques or `check` predicates back from the catalogue, so a clean run means the columns, types, keys and tenant isolation agree — not that everything agrees.
 
 The server runs this inside a read-only transaction, so it is safe to point at production from CI.
 
@@ -156,23 +217,23 @@ The server runs this inside a read-only transaction, so it is safe to point at p
 tide inspect --generate=schema/
 ```
 
-Discovers tables nothing declares, reads their columns, types, keys, defaults and foreign keys from the catalogue, and writes a `.atl` file per table. This is how you adopt a database without hand-writing a declaration for every table in it first.
+Discovers tables nothing declares, reads their columns, types, keys, defaults and foreign keys from the catalogue, and writes a `.atl` file per table — the route into [adopting a database](../guides/adopt-an-existing-database.md) without hand-writing every declaration.
 
-Run it in a repo with no `.atl` files at all — that is the case it exists for. `--generate` is the one form of `inspect` that does not require an existing declaration, and it tolerates a `schema_paths` directory that has not been created yet. Every other form still refuses, because there is nothing to compare the database against.
+`--generate` is the one form of `inspect` that does not require an existing declaration — it runs in a repository with no `.atl` files and tolerates a `schema_paths` directory that does not exist yet. Every other form refuses, because there is nothing to compare the database against.
 
-Entities are named from the table — `user_accounts` becomes `UserAccounts`, with no attempt to singularise. **That name is a proposal.** It becomes a generated Go type, a proto message, and part of the entity ID other callers reference, so renaming it after you have adopted is a breaking change. Edit the files before committing them.
+Entities are named from the table — `user_accounts` becomes `UserAccounts`, with no attempt to singularise. That name becomes a generated Go type, a proto message, and part of the entity ID other callers reference, so renaming it after adoption is a breaking change.
 
 Skipped tables are reported with a reason rather than dropped silently. Three cases produce a skip:
 
 - the entity name is already declared in this namespace — rename one, or declare the table by hand;
 - two discovered tables in different Postgres schemas want the same entity name — generate one of them into its own namespace;
-- the name is not usable as a filename. Atlantis will not write a file whose name it derived from a table name without checking it, because a Postgres identifier can contain `/` and `..`.
+- the name is not usable as a filename: atlantis does not write a filename derived from a table name unchecked, because a Postgres identifier can contain `/` and `..`.
 
-Existing files are never overwritten — delete one to regenerate it.
+Existing files are never overwritten — deleting one regenerates it on the next run.
 
-Partition children, views, `atlantis`'s own tables and TimescaleDB chunk storage are not offered.
+Partition children, views, the platform's own tables and TimescaleDB chunk storage are not offered.
 
-The generated files carry a header saying what introspection could not verify. Read it — the same limits described above apply, and a generated file **understates** your schema.
+Warnings about what introspection could not verify print with the run. The same limits described above apply, and a generated file **understates** your schema.
 
 ### `tide pull`
 
@@ -186,7 +247,7 @@ tide pull [--force]
 |---|---|
 | `--force` | Pull even if the local cache version equals the server's. |
 
-`.tide-cache/` mirrors every caller's currently-registered `.atl` files. It is not the generated Go client. Add it to `.gitignore`.
+`.tide-cache/` mirrors every caller's currently-registered `.atl` files. It is not the generated Go client, and it belongs in `.gitignore`.
 
 ### `tide generate`
 
@@ -201,7 +262,7 @@ The flow:
 1. Fetch the canonical IR from the server (the `GetCanonicalIR` admin RPC). The canonical IR is the server's persisted schema checkpoint, with proto field numbers already assigned. Pulling those numbers from the server means the generated wire format matches it exactly — the caller never re-derives numbers locally.
 2. Filter the IR to the `generate:` namespaces. The caller gets typed clients only for what it consumes, not every caller's entities.
 3. Read the caller's `go.mod` to compute the package prefix `<module>/<output_dir>`.
-4. Emit proto sources (the scoped namespaces plus the embedded `atlantis/common/v1` protos) and the typed Go wrappers into `output_dir`, then shell out to `buf generate` for the `.pb.go` wire types and `gofmt` the result.
+4. Emit proto sources (the scoped namespaces plus the embedded `atlantis/common/v1` protos) and the typed Go wrappers into `output_dir`, then shell out to `buf generate` for the `.pb.go` wire types and format the Go sources.
 
 Requirements:
 
@@ -209,11 +270,11 @@ Requirements:
 - [`buf`](https://buf.build/docs/installation) on `PATH`.
 - Run from the caller repo root (so `go.mod` is readable).
 
-The generated tree lives in the caller's module (e.g. `internal/gen/pcclient/{pb,client}/...`) and is imported with the caller's own import path. Commit it like any other generated code — it is the caller's source, not a shared artifact. There is no dependency on a central `atlantis-go` SDK for the generated types; only the hand-written `atlantis-go/jobs` runtime remains a normal library dependency for callers that run job workers.
+The generated tree lives in the caller's module and is imported with the caller's own import path — the caller's source, committed like any other generated code, not a shared artifact. There is no dependency on a shared SDK for the generated types; the hand-written `clients/go/jobs` runtime is a normal library dependency for callers that run job workers.
 
-Generate rewrites `atlantis/`, `pb/` and `client/` under `output_dir` and leaves anything else there alone, so an entity dropped from the schema does not leave its client behind. `output_dir` must name a directory inside the repository; `.`, an absolute path, and anything reaching upward through `..` are refused, because that value decides what is removed.
+Generate rewrites `atlantis/`, `pb/` and `client/` under `output_dir`, plus `buf.gen.yaml` and `buf.yaml` at its top, and leaves anything else there alone, so an entity dropped from the schema does not leave its client behind. `output_dir` must name a directory inside the repository; `.`, an absolute path, and anything reaching upward through `..` are refused, because that value decides what is removed.
 
-Beside the code it writes `tide.manifest.json`, recording the caller, the namespaces, the module prefix and a hash per generated file. Commit it with them — it is what `--check` compares against.
+Beside the code it writes `tide.manifest.json`, recording the caller, the namespaces, the module prefix and a hash per generated file. It is committed with them; `--check` compares against it.
 
 ### `tide generate --check`
 
@@ -239,9 +300,7 @@ which additionally fetches the canonical IR, re-runs the emitters in memory and 
 | 1 | it does not, or there is no manifest — run `tide generate` |
 | 3 | the question could not be answered: unreadable manifest, bad config, or the server was unreachable under `--against-server` |
 
-Stale and unusable are separate codes on purpose. A pipeline that cannot tell a network fault from an out-of-date client ends up treating both as noise.
-
-Re-run `tide generate` after any `tide apply` that changes a namespace the caller consumes. `tide apply` says so when it has changed one.
+`tide apply` prints a regeneration reminder when it changes a namespace the caller consumes.
 
 ### `tide list`
 
@@ -266,7 +325,7 @@ Exits non-zero if no file matches.
 Reports the progress of a declarative backfill started by `tide apply --backfill`. With no argument, shows the latest backfill plan for the configured caller; pass a plan hash to inspect a specific one.
 
 ```
-tide backfill status [<plan-hash>]
+tide backfill status [<plan-hash>] [--format {table|json}]
 ```
 
 ### `tide job submit|status|dead|retry`
@@ -275,8 +334,8 @@ Submits and inspects background jobs.
 
 ```
 tide job submit <job-name> [--args=JSON] [--scheduled-at=RFC3339]
-tide job status <job-id>
-tide job dead   [--job-name=...] [--limit=N]
+tide job status <job-id> [--format {table|json}]
+tide job dead   [--job-name=...] [--limit=N] [--format {table|json}]
 tide job retry  <dead-job-id>
 ```
 
@@ -288,7 +347,7 @@ Starts and inspects multi-step workflows.
 
 ```
 tide workflow start  <workflow-name> [--state=JSON]
-tide workflow status <workflow-id>
+tide workflow status <workflow-id> [--format {table|json}]
 ```
 
 The submitting principal is stamped from `$USER`.
@@ -306,7 +365,7 @@ tide history [--limit N] [--caller X] [--format json]
 Computes the structural diff between two historical schema versions. The server loads both IR snapshots and runs the diff.
 
 ```
-tide diff <from-version> <to-version>
+tide diff <from-version> <to-version> [--format {table|json}]
 ```
 
 ### `tide blame <entity-id>`
@@ -314,7 +373,7 @@ tide diff <from-version> <to-version>
 Shows per-field provenance for an entity: who introduced each field, who last modified it, and the schema versions those events map to.
 
 ```
-tide blame <entity-id>
+tide blame <entity-id> [--format {table|json}]
 ```
 
 ### `tide owners`
@@ -322,7 +381,7 @@ tide blame <entity-id>
 Prints every active entity and the caller that introduced it — answers "who owns this table?" without reading version history.
 
 ```
-tide owners
+tide owners [--format {table|json}]
 ```
 
 ### `tide rollback`
@@ -339,27 +398,66 @@ tide rollback --to=<version> [--dry-run] [--yes]
 | `--dry-run` | Emit the rollback plan without applying it. |
 | `--yes` | Skip the interactive confirmation. |
 
+Without `--yes`, the command prints `Continue? [y/N]` and aborts with exit
+1 on anything but `y`. Executing a rollback needs an operator capability
+callers do not hold, so from a caller enrolment only `--dry-run` succeeds;
+the console's Operations page performs rollbacks (`admin` role).
+
+### `tide parked`
+
+Lists the objects destructive migrations kept instead of dropping, and how
+long each remains recoverable.
+
+```
+tide parked [--all] [--limit N] [--format {table|json}]
+```
+
+| Flag | Description |
+|---|---|
+| `--all` | Include objects already reaped. Default shows only recoverable ones. |
+| `--limit N` | Default `100`. |
+| `--format {table|json}` | Default `table`. |
+
+Columns: kind, object, recoverable-for, state. An object under 7 days from
+reaping renders highlighted; one whose reap has failed twice or more shows
+as stuck. Restoring is a schema change: revert the `.atl` that dropped the
+object and apply — see [Recover a dropped table](../guides/recover-a-dropped-table.md).
+
 ### `tide sandbox boot|shell|spawn`
 
-Drives the schema-true in-memory simulator bound to a local IR.
+Drives a local, schema-true sandbox bound to a compiled `.atl` tree.
 
 ```
-tide sandbox boot  <path> [--addr ADDR]   # start the HTTP control plane
-tide sandbox shell <path>                 # interactive SQL REPL
-tide sandbox spawn <path> -n N            # fork N children, time it, exit
+tide sandbox boot  <path> [--addr ADDR] [--seed N] [--strict] [--backend {sim|embedded|auto}]
+tide sandbox shell <path>
+tide sandbox spawn <path> [-n N] [--seed N] [--strict]
 ```
 
-`boot` defaults to `127.0.0.1:0` (kernel-chosen port) unless `--addr` pins one. See the [Sandbox HTTP API](sandbox-api.md).
+`boot` starts the sandbox HTTP control plane on `127.0.0.1:0` (kernel-chosen
+port) unless `--addr` pins one, and prints the URL and route list. `shell`
+is an interactive SQL REPL (`.tables`, `.describe`, `.sample`, `.quit`).
+`spawn` forks N children from one parent (default 100) and prints timings;
+it runs on the `sim` backend only.
+
+The prebuilt `tide` binaries do not include this command: it needs cgo, and
+the released binaries are cgo-free so they run without a C toolchain.
+Running it means building `tide` from source with `CGO_ENABLED=1`. The
+hosted product's sandbox is the console's Sandbox page, which needs no local
+build — see [Use the sandbox](../guides/use-the-sandbox.md) and the
+[sandbox HTTP API](sandbox-api.md).
 
 ### `tide caller alias list|add|rm`
 
-Manages caller identity aliases.
+Manages caller identity aliases. Requires `CAPABILITY_OPERATOR`.
 
 ```
 tide caller alias list <caller>
 tide caller alias add  <caller> <alias>
 tide caller alias rm   <caller> <alias>
 ```
+
+Exit codes here differ from the rest of `tide`: `1` covers config, dial,
+and RPC failures (elsewhere `3`); `2` is a usage error.
 
 ### `tide login`
 
@@ -376,16 +474,18 @@ The code is typed at the approval page, never carried in a link — a link with
 the code embedded would let a mailed click approve someone else's machine.
 Approving requires being a member of the organisation; enrolling as a caller
 requires the admin role, or the caller's "developers may enrol" flag for
-viewers.
+every role below admin — developers included.
 
 ```
-tide login --oidc [--audience AUD]
+tide login --oidc [--url URL] [--audience AUD]
 ```
 
 CI: exchanges the runner's workload identity (GitHub Actions' OIDC token) for
 a one-hour certificate, under a federation rule configured on the console's
-Callers page. Needs `permissions: id-token: write` in the workflow and
-`ATL_ENROLL_URL` in the environment. See `docs/examples/`.
+Callers page. Needs `permissions: id-token: write` in the workflow, the
+enrolment address via `--url` or `ATL_ENROLL_URL`, and the organisation via
+`tide.yaml`'s `org:` or `--org`. A complete workflow is in
+[Set up CI](../guides/set-up-ci.md).
 
 ```
 tide login --url URL --org ORG --token TOKEN [--ca FILE]
@@ -397,7 +497,7 @@ only, and also stores the authority so renewal keeps verifying against it.
 
 ### `tide version`
 
-Prints the tide logo banner followed by the version. Does not contact the server (there is no `pc` prefix).
+Prints the tide logo banner followed by the version. Does not contact the server.
 
 ```
 tide version
@@ -407,30 +507,17 @@ tide version
 
 | Code | Meaning |
 |---|---|
-| 0 | Success, or no-op (e.g., `tide pull` with the local cache already current) |
-| 1 | Backfill required — `tide apply` or `tide plan` returned a backfill-required class; `inspect` found outstanding work (additions/removals); **or** `generate --check` found the committed client out of date |
-| 2 | Unknown subcommand passed to `tide` itself; cross-caller breaking change from `plan`; `apply` blocked on an approval that has not been given; **or** `inspect` found a mismatch |
+| 0 | Success, or no-op (e.g., `tide pull` with the local cache already current); `rehearse` verdict `pass` or `pass_with_warnings` |
+| 1 | Backfill required — `tide apply` or `tide plan` returned a backfill-required class; `inspect` found outstanding work (additions/removals); `generate --check` found the committed client out of date; **or** `caller alias` hit any failure (its one exception to the map) |
+| 2 | Unknown subcommand passed to `tide` itself; cross-caller breaking change from `plan`; `apply` blocked on an approval that has not been given; `inspect` found a mismatch; **or** `rehearse` verdict `fail_data` / `fail_structural` |
 | 3 | Operational error: parse/validation failure, network error, config error, or unknown plan class |
-| 4 | Destructive change — the plan drops something that may hold data |
+| 4 | Destructive change from `plan`; **or** `rehearse` verdict `unverified` |
 
-`tide apply` and `tide plan` no longer share a code map, and the difference is worth knowing before writing CI.
+`tide plan` and `tide apply` answer different questions, and their codes differ accordingly.
 
-`tide plan` classifies: it reports what the change is and exits on the class. `tide apply` submits: it reports what the server decided. A destructive change exits 4 from `plan`, but from `apply` it exits 0 if the deployment's change policy permits it unattended, and 2 if a human has to approve first. Code 2 from `apply` is not a failure — the gate did its job, and the pipeline should be re-run once somebody has decided, or started with `--wait-for-approval`.
+`tide plan` classifies: it reports what the change is and exits on the class. `tide apply` submits: it reports what the server decided. A destructive change exits 4 from `plan`, but from `apply` it exits 0 when the policies permit it unattended, and 2 when a human has to approve first. Code 2 from `apply` means the gate held the change for a decision; re-run the pipeline once somebody decides, or start with `--wait-for-approval`.
 
-Code 2 covers two unrelated conditions: an unknown subcommand passed to `tide`, and a cross-caller breaking change. CI scripts that need to distinguish them must parse stderr.
-
-Destructive plans exit 4 rather than joining code 2, because the two call for different responses. A breaking change is resolved by shipping the other callers' updates first; a destructive change is resolved by deciding whether losing those rows is intended. A CI script can gate on them separately:
-
-```bash
-tide plan
-case $? in
-  0) echo "additive — safe to merge" ;;
-  1) echo "needs --backfill" ;;
-  2) echo "blocked: breaks another caller" ;;
-  4) echo "blocked: destroys data" ;;
-  *) echo "tide failed"; exit 1 ;;
-esac
-```
+Code 2 also covers usage errors — an unknown subcommand, a group name without a subcommand, `tide init` over an existing `tide.yaml`, or a missing required flag — alongside the plan classes above; a CI script that needs to tell them apart parses stderr. [Set up CI](../guides/set-up-ci.md) carries a full exit-code branch table.
 
 Dropped objects are parked rather than deleted, and reaped after the retention window. `tide parked` lists what is held and until when.
 
@@ -441,39 +528,33 @@ Dropped objects are parked rather than deleted, and reaped after the retention w
 ```
 .tide-cache/
 ├── schema/
-│   └── <namespace>/
-│       └── <entity>.atl
+│   └── <submitted path>.atl   # every caller's files, at their registered paths
 ├── version.json
 └── generate.json
 ```
 
-`generate.json` records the checkpoint content hash the last `tide generate` ran against, with a timestamp. Provenance for a person asking "what was this built from" — nothing reads it back, and it is not the value `--check` compares.
+`generate.json` records the checkpoint content hash the last `tide generate` ran against, with a timestamp. Nothing reads it back, and it is not the value `--check` compares.
 
 `tide list` and `tide show` fetch from the server on every invocation; they do not read the cache. Deleting `.tide-cache/` only affects the next `tide pull` (and the automatic pre-pull inside `tide apply`/`plan`).
 
 ## Output
 
-Diagnostic and progress messages are prefixed `tide:` on stderr and stdout.
+Errors print to stderr prefixed `tide:`. Success, progress, and
+informational lines print with glyph prefixes (`✔`, `✖`, `ℹ`); table
+output prints bare rows.
 
 ### `--format=json`
 
-JSON output is the [proto3 canonical JSON mapping](https://protobuf.dev/programming-guides/json/) of the admin API messages defined in `atlantis/admin/v1/admin.proto`. `tidectl` uses the same encoding.
+JSON output is the [proto3 canonical JSON mapping](https://protobuf.dev/programming-guides/json/) of the admin API messages defined in `atlantis/admin/v1/admin.proto`.
 
-Four properties are worth knowing before you parse it:
+Four properties of the encoding:
 
 - **64-bit integers are strings.** `"version": "7"`, not `"version": 7`. JSON numbers are IEEE-754 doubles and lose precision above 2^53; every 64-bit field here — schema versions, timestamps, row counts — is one you may compare for equality, so the mapping quotes them.
 - **Enums are their full names.** A plan class is `"PLAN_CLASS_ADDITIVE"`, not `"additive"`; a check-drift kind is `"CHECK_DRIFT_KIND_LIVE_NOT_DECLARED"`. The human-readable table output still prints the short form.
 - **Empty lists and maps are `[]` and `{}`**, never `null` or an absent key, so a consumer can iterate without a nil check. Fields declared `optional` in the proto are still omitted when unset, which is how "not set" stays distinguishable from "set to empty".
 - **Field names are `snake_case`** — the proto field names, matching the `.atl` grammar and the SQL columns rather than protojson's default `lowerCamelCase`.
 
-Whitespace is not stable. The encoder varies it between builds on purpose; compare parsed values, never bytes.
+Whitespace is not stable between builds; parsed values are the comparable form, not bytes.
 
 Fields that carry a JSON document — `args`, `state`, `diff`, `from_ir`, `to_ir`, `ir_snapshot` — are inlined as JSON, not base64. They are `bytes` on the wire because they are content-hash inputs and must stay byte-exact, but rendering them base64 in a terminal would make `tide diff --format=json | jq '.diff.additive'` useless. A payload that is not valid JSON is left as the base64 string rather than silently nulled.
 
-> **Changed.** Before the admin API was defined in protobuf, each command marshalled a hand-written struct. Three things moved:
->
-> - 64-bit integers were bare numbers; a script reading `version` as a number needs updating.
-> - Plan classes were bare words; `"class": "additive"` is now `"class": "PLAN_CLASS_ADDITIVE"`, and `check_drift[].kind` changed the same way.
-> - `tide backfill status`, `tide job status`, `tide job dead`, `tide workflow status`, and `tidectl adopt` used **PascalCase** keys (`PlanHash`, `JobID`, `Jobs`, `WorkflowID`, `CheckpointWritten`). They are now snake_case like every other command. A `jq '.PlanHash'` returns null; use `.plan_hash`.
->
-> `tide plan --format=json` keeps its key names — it was already snake_case — and gains `entity_id` on each `index_drift` entry.

@@ -1,6 +1,6 @@
 # Long-running handlers
 
-After this guide you'll know the idempotency contract that keeps re-dispatched handlers safe, when to call `jobs.Checkpoint`, and when to override the lease window with the `heartbeat` modifier. Skip section 1 only if your handler runs in well under a minute.
+The idempotency contract that keeps re-dispatched handlers safe, when to call `jobs.Checkpoint`, and when to override the lease window with the `heartbeat` modifier. Skip section 1 only if your handler runs in well under a minute.
 
 ## 1. Idempotency
 
@@ -28,7 +28,7 @@ err := tx.QueryRow(ctx, `
     INSERT INTO contact_import_state (account_id, status)
     VALUES ($1, 'running')
     ON CONFLICT (account_id) DO UPDATE SET status = 'running'
-    RETURNING next_cursor`, args.AccountId).Scan(&cursor)
+    RETURNING next_cursor`, args.AccountID).Scan(&cursor)
 ```
 
 The second invocation reads `next_cursor` and resumes; the work it re-does is overwriting the same destination rows, not duplicating them.
@@ -37,7 +37,7 @@ The second invocation reads `next_cursor` and resumes; the work it re-does is ov
 
 When a worker claims a row, atlantis sets `claimed_until = now() + heartbeat_budget`. The SDK auto-heartbeats at one third of that budget; each heartbeat re-extends `claimed_until`. As long as heartbeats keep landing, the lease never expires. The SDK installs the heartbeat goroutine automatically — handlers don't touch it.
 
-The default budget is **2 minutes**. Most handlers complete inside that window and need no configuration.
+The default budget is **5 minutes**. Most handlers complete inside that window and need no configuration.
 
 Override per-job with the `heartbeat` modifier when a handler blocks on a single external call longer than the default — an upstream API page that takes 8 minutes, an ML training step that takes 20 minutes. Without the override the dispatcher will revoke and re-dispatch mid-call even though the worker is alive.
 
@@ -51,7 +51,7 @@ job ImportContacts in directory {
 }
 ```
 
-The override is symmetric: `heartbeat 30s` narrows the window so a dead worker is reclaimed in 30 seconds instead of 2 minutes. `heartbeat` is independent of `timeout` — `timeout` is the handler's wall-clock budget per attempt; `heartbeat` is the dispatcher's grace window before declaring the worker dead.
+The override is symmetric: `heartbeat 30s` narrows the window so a dead worker is reclaimed in 30 seconds instead of 5 minutes. `heartbeat` is independent of `timeout` — `timeout` is the handler's wall-clock budget per attempt; `heartbeat` is the dispatcher's grace window before declaring the worker dead.
 
 ## 3. Checkpointing progress
 
@@ -76,8 +76,8 @@ For resume, store the cursor in your state table from section 1 — that's the s
 ## 4. Forking goroutines
 
 ```go
-func (h *handler) Handle(ctx context.Context, args Args) error {
-    go h.expensiveBackground(ctx, args)  // lost work
+func (h *handler) handle(ctx context.Context, argsJSON []byte) error {
+    go h.expensiveBackground(ctx, argsJSON)  // lost work
     return nil
 }
 ```
@@ -118,8 +118,19 @@ CREATE TABLE contact_import_state (
 
 ### Handler
 
+Registered with `registry.Register("directory.ImportContacts",
+jobs.HandlerFunc(h.handle))` — see
+[Declare a background job](declarative-jobs.md).
+
 ```go
-func (h *importContactsHandler) Handle(ctx context.Context, args directory.ImportContactsArgs) error {
+func (h *importContactsHandler) handle(ctx context.Context, argsJSON []byte) error {
+    var args struct {
+        AccountID string `json:"account_id"`
+    }
+    if err := json.Unmarshal(argsJSON, &args); err != nil {
+        return fmt.Errorf("decode args: %w", err)
+    }
+
     // 1. Idempotent open: resume cursor + counters from the state table.
     var state importState
     err := h.db.QueryRow(ctx, `
@@ -127,7 +138,7 @@ func (h *importContactsHandler) Handle(ctx context.Context, args directory.Impor
         VALUES ($1, 'running')
         ON CONFLICT (account_id) DO UPDATE SET status = 'running', updated_at = now()
         RETURNING next_cursor, pages_done, contacts_done`,
-        args.AccountId,
+        args.AccountID,
     ).Scan(&state.cursor, &state.pages, &state.contacts)
     if err != nil {
         return fmt.Errorf("open import state: %w", err)
@@ -136,11 +147,11 @@ func (h *importContactsHandler) Handle(ctx context.Context, args directory.Impor
 
     // 2. Paginated fetch + write. Each iteration is one upstream page.
     for {
-        page, err := h.crm.FetchContacts(ctx, args.AccountId, state.cursor)
+        page, err := h.crm.FetchContacts(ctx, args.AccountID, state.cursor)
         if err != nil {
             return fmt.Errorf("fetch page after cursor=%q: %w", state.cursor, err)
         }
-        if err := h.writeContacts(ctx, args.AccountId, page.Contacts); err != nil {
+        if err := h.writeContacts(ctx, args.AccountID, page.Contacts); err != nil {
             return fmt.Errorf("write contacts: %w", err)
         }
 
@@ -152,7 +163,7 @@ func (h *importContactsHandler) Handle(ctx context.Context, args directory.Impor
             UPDATE contact_import_state
                SET next_cursor = $1, pages_done = $2, contacts_done = $3, updated_at = now()
              WHERE account_id = $4`,
-            state.cursor, state.pages, state.contacts, args.AccountId)
+            state.cursor, state.pages, state.contacts, args.AccountID)
         if err != nil {
             return fmt.Errorf("checkpoint state: %w", err)
         }
@@ -171,7 +182,7 @@ func (h *importContactsHandler) Handle(ctx context.Context, args directory.Impor
     _, err = h.db.Exec(ctx, `
         UPDATE contact_import_state
            SET status = 'complete', updated_at = now()
-         WHERE account_id = $1`, args.AccountId)
+         WHERE account_id = $1`, args.AccountID)
     return err
 }
 ```

@@ -1,57 +1,86 @@
 # Schema as code
 
-In atlantis, the `.atl` files in your service's git repo define your schema. The migrations, the generated client, the SQL the server emits, and the tables in PostgreSQL all derive from them.
+The `.atl` files in your service's git repository define your schema. The
+migrations, the generated client, the SQL the server emits, and the tables
+in PostgreSQL all derive from them; the database is a function of the files,
+not the other way around.
 
-Hasura, Supabase, and most schema-via-UI tools treat the live database as authoritative; the repo, if present, is documentation. atlantis inverts that: the `.atl` files in git are authoritative and the database is derived from them.
+## Editing a schema
 
-## What it means in practice
+You add a column by editing an `.atl` file and running `tide apply`. The
+apply changes the database; the commit makes the declaration reproducible
+across rebuilds, redeploys, and other engineers' machines.
 
-You add a column by editing an `.atl` file and running `tide apply`. The commit that ships the change is what makes it durable across rebuilds, redeploys, and other engineers' machines.
-
-Every change to your schema is in git history. `git blame` on an `.atl` file shows when and by whom a column changed.
+Every change to your schema is in git history. `git blame` on an `.atl`
+file shows when and by whom a column changed — and the platform's own
+[schema versioning](schema-versioning.md) records the same provenance on
+the applied side.
 
 ## The server is a mirror
 
-The atlantis server holds the applied state of every schema it has received. That state mirrors what's in git but isn't authoritative on its own. If the server's state ever drifts from what the files say, the next `tide apply` brings the server back into alignment with the files.
+The server holds the applied state of every schema it has received. That
+state mirrors what's in git but isn't authoritative on its own: if the two
+ever disagree, the next `tide apply` brings the server back into alignment
+with the files. Delete an entity from a `.atl` file and `tide apply`
+prepares a migration to drop the table — parked for 30 days, not destroyed.
 
-A traditional migration tool leaves the database in whatever state the last migration produced; atlantis treats the database as a deterministic function of the input schema files. Delete an entity from a `.atl` file and `tide apply` prepares a migration to drop the table.
-
-One case breaks the reconcile-on-apply rule. If the live database carries a bare unique index the schema doesn't declare — a `CREATE UNIQUE INDEX` with no backing constraint — `tide apply` refuses rather than reconciling — applying over it would leave a hidden constraint silently rejecting legitimate writes. Drop the index, declare the uniqueness in the `.atl`, or set `ATLANTIS_ALLOW_INDEX_DRIFT=1` to apply anyway.
+One case is refused instead of reconciled. A live object that conflicts
+with the declaration — a bare unique index the schema doesn't declare, a
+diverged `check`, a column whose type moved — is **drift**, and applying
+over it would hide a constraint or discard an intentional change.
+`tide apply` names the object and the remediation;
+[`tide inspect`](../reference/cli-tide.md#tide-inspect) reports all drift
+in one pass.
 
 ## What lives where
 
-A typical service repo:
+A typical service repository:
 
 ```
 my-service/
 ├── internal/
 │   ├── notes/
 │   │   └── schema.atl
-│   └── users/
-│       └── schema.atl
-├── pb/                       # generated client code (Go shown), gitignored
-│   └── app/
-│       ├── note.pb.go
-│       └── user.pb.go
+│   ├── users/
+│   │   └── schema.atl
+│   └── atlantis/             # generated client — committed
+│       ├── atlantis/
+│       ├── pb/
+│       ├── client/
+│       ├── buf.gen.yaml
+│       ├── buf.yaml
+│       └── tide.manifest.json
 ├── tide.yaml
 └── main.go
 ```
 
-The `.atl` files are checked into git. The `pb/` directory is regenerated on every `tide apply` and typically `.gitignored`.
+Both the `.atl` files and the generated client are committed: a schema
+change and the API change it causes review together. See
+[The generated client](the-generated-client.md).
 
 ## No schema editor
 
-There is no UI to drag-and-drop a column, and no API endpoint that adds a field outside the `tide apply` path. This is a permanent design choice.
+The console does not edit schema. There is no UI to drag-and-drop a
+column; day-to-day changes enter through `tide apply` from a repository,
+and the console shows the current schema, what changed and when, who
+applied it, and what waits on approval. Two admin-gated console actions do
+write schema state, both recorded in the history: rolling back to an
+earlier version, and baselining an imported database during
+[adoption](../guides/adopt-an-existing-database.md). Neither invents a
+shape that was not already declared.
 
-A schema editor would let the server and the repo diverge: your pull requests would no longer reflect what runs in production, and `git blame` would describe a different history than the live tables.
+## Constraints this places on you
 
-The web console is read-only about schema for this reason. It shows you the current schema, what changed and when, who applied it, and what is waiting on approval — but it does not author `.atl` files. Editing happens in your repository, with your review process, and reaches the database through `tide apply`.
-
-## What the position costs
-
-Schema-as-code has costs. Non-engineers cannot change schema without going through code review. Local experiments have to be reverted explicitly to undo them. Emergency changes still go through `tide apply`.
+- Day-to-day schema changes travel through code review.
+- A local experiment is undone by reverting it, explicitly.
+- Emergency changes still travel through `tide apply` — with the
+  [override path](change-approval.md#overrides) when the gate is in the
+  way.
 
 ## Related
 
-- [Caching and invalidation](caching-and-invalidation.md) — how the cache stays consistent with the schema it derives from.
-- [`tide` vs `tidectl`](tide-vs-tidectl.md) — why only the caller CLI can apply schemas.
+- [How atlantis runs your schema](how-atlantis-runs-your-schema.md) — the
+  checkpoint, the apply, hot reload.
+- [Schema versioning](schema-versioning.md) — the applied-side history.
+- [Caching and invalidation](caching-and-invalidation.md) — how the cache
+  stays consistent with the schema it derives from.

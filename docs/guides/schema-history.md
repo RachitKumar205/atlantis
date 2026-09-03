@@ -1,12 +1,14 @@
-# Schema history
+# Inspect schema history
 
-After this recipe you'll have explored the version history of your deployed schema, diffed two versions, identified who owns and who introduced each field, and performed a rollback.
+`tide history` lists every version of your deployed schema, `tide diff`
+compares two versions, `tide blame` and `tide owners` attribute each field
+and entity to the caller that introduced it, and a rollback restores an
+earlier snapshot.
 
-Prereqs:
+## Prerequisites
 
-- atlantis server running (`tidectl dev` or a production deployment).
-- At least one `tide apply` completed (so the registry has at least one version).
-- `tide` on `$PATH`, configured via `tide.yaml`.
+- At least one `tide apply` completed, so the registry has a version.
+- `tide` on `$PATH`, enrolled via `tide login`.
 
 ## 1. View history
 
@@ -14,7 +16,7 @@ Prereqs:
 tide history
 ```
 
-Output (a graphical timeline, newest first):
+Output, newest first:
 
 ```
   Schema History
@@ -22,7 +24,7 @@ Output (a graphical timeline, newest first):
   ● v7  apply  vendor     2h ago
   │      +4 change(s)
   │
-  ● v6  apply  consumer    1d ago
+  ● v6  apply  consumer    22h ago
   │      +2 change(s)
   │
   ● v5  apply  vendor     Jun 12, 14:30
@@ -41,7 +43,11 @@ Output (a graphical timeline, newest first):
          no changes
 ```
 
-Each row is a schema version created by `tide apply`. The dot indicates the event type (● for apply/rollback, ◌ for seed). Use `--limit=N` to show only the most recent N versions.
+Each row is one schema version, and the second column is the event that
+wrote it: `apply`, `rollback`, `adopt`, or `seed`. A `seed` renders as ◌;
+the other three render as ●. Timestamps under a day old are relative
+(`2h ago`); older ones are absolute. Use `--limit=N` to show only the most
+recent N versions.
 
 ```bash
 tide history --limit=3
@@ -56,19 +62,31 @@ tide diff 3 7
 Output:
 
 ```
-+ entity vendor.VendorImport
-    + vendor_id       varchar(7)  not null
-    + import_strategy varchar(20) not null
-    + status          varchar(10) not null
+diff v3 → v7
 
-~ entity consumer.Order
-    + shipping_label  text
-    ~ total           int -> bigint
+─── vendor.VendorImport (new entity)
+  + vendor_id       varchar(7)  not null
+  + import_strategy varchar(20) not null
+  + status          varchar(10) not null
 
-- entity consumer.LegacyCart
+─── consumer.Order
+    id              varchar(8) primary
+    user_id         varchar(8) not null
+  + shipping_label  text
+  - total           int not null
+  + total           bigint not null
+
+─── consumer.LegacyCart (removed)
+
++4 additive  ~1 backfill  ✗1 destructive
 ```
 
-The diff is structural, not line-level. `+` means added, `-` means removed, `~` means modified. Field-level changes show old and new values for type or constraint changes. Both arguments are required.
+The diff is structural, not line-level. Each changed entity gets a `───`
+header, suffixed `(new entity)` or `(removed)`; inside it, `+` marks an
+added field, `-` a removed one, and a modified field prints as its old
+line with `-` followed by its new line with `+`. Unchanged fields of a
+changed entity print unmarked. The last line counts the changes per plan
+class. Both version arguments are required.
 
 ## 3. Check ownership
 
@@ -85,13 +103,15 @@ auth.Session                     auth             v1      4
 auth.ApiKey                      auth             v4      3
 consumer.Order                   consumer         v1      5
 consumer.Invoice                 consumer         v3      4
-vendor.Product                  vendor          v2      8
-vendor.Variant                  vendor          v2      6
-vendor.Collection               vendor          v2      5
-vendor.VendorImport             vendor          v5      3
+vendor.Product                   vendor           v2      8
+vendor.Variant                   vendor           v2      6
+vendor.Collection                vendor           v2      5
+vendor.VendorImport              vendor           v5      3
 ```
 
-Each row shows which caller introduced the entity, the version it was introduced in, and the current field count. Useful for understanding ownership boundaries before making cross-caller schema changes.
+Each row shows which caller introduced the entity, the version it was
+introduced in, and the current field count. Read this before a
+cross-caller change: it names the caller that owns each entity.
 
 ## 4. Blame a field
 
@@ -99,7 +119,7 @@ Each row shows which caller introduced the entity, the version it was introduced
 tide blame consumer.Order
 ```
 
-Output (six columns — introduced-by/at, last-modified-by/at, and status):
+Output:
 
 ```
 Blame: consumer.Order
@@ -110,12 +130,15 @@ id                       consumer         1        consumer         1        act
 user_id                  consumer         1        consumer         1        active
 item_ids                 consumer         1        consumer         1        active
 total                    consumer         3        consumer         3        active
-shipping_label           vendor          5        vendor          5        active
+shipping_label           vendor           5        vendor           5        active
 ```
 
-Each row shows which caller introduced the field, who last modified it, and whether it is still active. The `shipping_label` field was added by the `vendor` caller in version 5, not `consumer` — this is the kind of cross-caller attribution that `git blame` on the `.atl` file alone cannot reveal, since the server merges submissions from multiple callers.
+Each row shows which caller introduced the field, who last modified it,
+and whether it is still active. `shipping_label` was added by the `vendor`
+caller in version 5. The server merges submissions from several callers,
+so `git blame` on one repository's `.atl` file does not show this.
 
-## 5. Rollback
+## 5. Roll back
 
 Preview what a rollback would do:
 
@@ -129,25 +152,42 @@ Output:
 Rollback preview: v7 -> v5
 
 3 change(s) would be applied.
+  1 additive
+  1 backfill_required
+  1 destructive
 (use without --dry-run to execute)
 ```
 
-When satisfied, run without `--dry-run`:
+Executing the rollback happens in the console: the Operations page's
+Rollback tab, `admin` role. The server refuses `tide rollback` without
+`--dry-run` from a caller enrolment — executing it needs an operator
+capability callers do not hold.
+
+The rollback creates a new version whose IR snapshot matches the target —
+version 8 here, matching version 5. The versions between remain in
+history; nothing is deleted.
+
+## Verify
 
 ```bash
-tide rollback --to=5
+tide history --limit=1
 ```
 
-The rollback creates a new version (version 8 in this case) whose IR snapshot matches version 5. The versions between 5 and 7 remain in history — nothing is deleted.
+The newest row is the rollback's version:
+
+```
+  ● v8  rollback  atlantis-console  just now
+         +3 change(s)
+```
 
 ## Common errors
 
-- **`schema version N not found`** — the version number exceeds the latest version in the registry, or the registry is empty. Run `tide history` to see available versions.
-- **`rollback would break caller X: entity Y is referenced`** — another caller submitted schema that depends on an entity or field that would be removed by the rollback. Coordinate with the owning caller to remove the dependency first, or roll back to a version that still includes the referenced entity.
-- **`not connected to server`** — `tide` cannot reach the endpoint in `tide.yaml`. Check that the atlantis server is running and the endpoint is correct.
+- **`schema version N not found`** — no version with that number exists in
+  the registry: a number above the latest, or an empty registry. Run
+  `tide history` to see available versions.
 
 ## Related
 
-- [Schema versioning](../concepts/schema-versioning.md) — how the version registry works under the hood
-- [`tide` vs `tidectl`](../concepts/tide-vs-tidectl.md) — which CLI runs where
-- [Deploy to production](deploy-to-production.md) — production checklist including version management
+- [Schema versioning](../concepts/schema-versioning.md) — how the version registry works
+- [How atlantis runs your schema](../concepts/how-atlantis-runs-your-schema.md) — the checkpoint the history records
+- [Recover a dropped table](recover-a-dropped-table.md) — when the version you want back parked something

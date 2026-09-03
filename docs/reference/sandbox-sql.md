@@ -1,11 +1,14 @@
 # Sandbox SQL coverage
 
-Two things happen when a SQL statement reaches the in-memory sandbox: it is parsed, then executed. The two stages have different acceptance criteria.
+What the in-memory sandbox runs. Statements are parsed by `pg_query_go`,
+the Postgres parser packaged for Go, so every Postgres syntactic construct
+parses; a statement whose shape the sandbox doesn't model is then rejected
+with `sandbox sql: unsupported: <feature>` — whether the rejection happens
+while converting the parse tree or while executing.
 
-- Parsing is delegated to `pg_query_go`, the actual Postgres parser packaged for Go. Every PG syntactic construct parses, including features the in-memory executor doesn't model. Syntax errors come back from PG with PG's own error messages.
-- Execution is the in-memory executor's responsibility. A parsed statement whose shape the executor doesn't model returns `sandbox sql: unsupported: <feature>`. The error wraps a single sentinel so callers can branch on `errors.Is(err, sql.ErrUnsupported)`.
-
-For the embedded Postgres backend, this page does not apply — that backend runs full PG. See [the sandbox concept page](../concepts/sandbox.md) for the split.
+For the Postgres backend, this page does not apply — that backend runs full
+Postgres. See [the sandbox concept page](../concepts/sandbox.md) for the
+split.
 
 ## Accepted statements
 
@@ -97,7 +100,7 @@ Expressions appear in INSERT values, UPDATE SET, the right side of comparisons, 
 
 ## What is not supported
 
-Every shape below parses but execution rejects with `sandbox sql: unsupported: <feature>`. The error shape is uniform, so callers can use it for differential testing against the Postgres backend.
+Every shape below is rejected with `sandbox sql: unsupported: <feature>`.
 
 FROM clause:
 
@@ -105,7 +108,8 @@ FROM clause:
 - Multi-table `FROM "a", "b"`.
 - Subqueries in FROM (`FROM (SELECT ...) sub`).
 - Table aliases (`FROM "t" AS "x"`).
-- Table-qualified column references (`"t"."col"` — only the trailing `col` is honored).
+
+A table-qualified column reference (`"t"."col"`) is accepted, with only the trailing `col` honored.
 
 Clauses:
 
@@ -130,21 +134,14 @@ Expressions and predicates:
 - Boolean literals (`TRUE` / `FALSE`).
 - Bare `NULL` literals.
 
-## Error wrapping
+## Errors
 
-Every rejection wraps a single sentinel:
-
-```go
-package sql
-var ErrUnsupported = errors.New("sandbox sql: unsupported")
-```
-
-Calling code uses `errors.Is(err, sql.ErrUnsupported)` to distinguish "this is not in the supported surface yet" from a syntax error or a runtime error (catalog miss, type mismatch). Syntax errors from `pg_query_go` are also wrapped with `ErrUnsupported` so the branching surface stays simple.
+Rejections carry the prefix `sandbox sql: unsupported` — unsupported shapes and SQL that does not parse alike. A catalog miss reports as `sandbox: unknown table` without the prefix. The prefix is not a reliable "not at runtime" signal: some execution-time rejections, such as an unimplemented function call, carry it too.
 
 ## Behavioural pins
 
-- **Empty input** (`""`, whitespace-only, comment-only) — `ErrUnsupported: empty SQL`.
-- **Multi-statement input** — `ErrUnsupported: multiple statements`.
+- **Empty input** (`""`, whitespace-only, comment-only) — `sandbox sql: unsupported: empty SQL`.
+- **Multi-statement input** — `sandbox sql: unsupported: multiple statements`.
 - **Trailing semicolons** — accepted, treated as the statement terminator.
 - **Leading or interleaved comments** (`--`, `/* */`) — parsed and skipped.
 - **Quoted identifiers** — case preserved. `"Foo"` is distinct from `"foo"`.

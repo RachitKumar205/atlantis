@@ -18,6 +18,7 @@ Whitespace separates tokens but is otherwise insignificant. Line comments start 
 ```
 File         = { Declaration }
 Declaration  = Entity | Hypertable | Query | Procedure
+             | Job | Workflow | Ephemeral | Enum
 ```
 
 ## Entities
@@ -28,16 +29,19 @@ Entity = "entity" Ident "in" Ident "{" EntityBody "}"
 EntityBody =
     { FieldDecl }
     [ "primary" "by" IdentList ]
-    { "unique" "by" IdentList }
+    { "unique" "by" IdentList [ "deferrable" ] }
     { "index" "by" IndexFieldList }
     { [ "unique" ] "index" "partial" "by" IdentList "where" PartialPredicate }
     { "index" "hnsw" "on" Ident "ops" VectorOps }
     { "index" "gin" "on" Ident }
+    { ("has_many" | "has_one") Ident ":" Ident "via" Ident }
     [ "soft_delete" "by" Ident ]
     [ "touch_on_update" "by" Ident ]
     [ "partition" "by" Ident ]
     [ "table" StringLiteral ]
     [ "ttl_field" Ident ]
+    [ "query_timeout" "=" Duration ]
+    [ "keyless" ]
     { "check" "\"" SQLExpr "\"" [ "as" Ident ] }
     [ CacheBlock ]
 
@@ -82,11 +86,13 @@ FieldDecl = Ident Type { Modifier }
 
 Modifier =
     "primary"
+  | "identity"
   | "serial"
   | "not" "null"
   | "default" DefaultExpr
   | "unique"
-  | "references" QualifiedField [ "on" "delete" RefAction ]
+  | "references" QualifiedField { "on" ("delete" | "update") RefAction }
+  | "backfill" "\"" SQLExpr "\""
   | "check" "\"" SQLExpr "\""     // must share the field's line, or be indented past it
 
 DefaultExpr =
@@ -96,14 +102,14 @@ DefaultExpr =
   | StringLiteral                 // double-quoted, e.g. "pending"
   | BooleanLiteral                // true, false
 
-QualifiedField = [ Namespace "." ] Entity "." Field
+QualifiedField = Namespace "." Entity "." Field
 
 RefAction = "cascade" | "set" "null" | "restrict"
 ```
 
-Field names use `SnakeIdent`. Modifier order is flexible, but the lexer rejects incompatible combinations: `serial` with `default`, two `primary` modifiers on different fields, etc.
+Field names use `SnakeIdent`. Modifier order is flexible; incompatible combinations — `serial` with `default`, `primary` on two different fields — are rejected at parse.
 
-`QualifiedField`: same-namespace references can omit the namespace (`Customer.id`); cross-namespace references qualify (`vendor.Product.id`). The referenced field must be declared `primary` or have a column-level `unique`.
+`QualifiedField` is always the full three-part form, including for a target in the same namespace: `references shop.Customer.id`. The referenced field must be declared `primary` or have a column-level `unique`.
 
 `check`: the string body is parsed as a Postgres boolean expression. Anything valid inside `CREATE TABLE ... CHECK (...)` is accepted.
 
@@ -126,12 +132,9 @@ entity Order in shop {
 
 The rule: **a field's modifiers may continue on following lines, and a continuation line must be indented past the field it belongs to.** A `check` at or left of its field's column starts a new member, so it is an entity-level constraint.
 
-Two consequences worth knowing:
-
-- Only an entity-level `check` accepts `as <name>`. On a field's continuation line, `as` is a syntax error: a field modifier has no name of its own, so atlantis generates one — usually `<table>_<column>_check`, shortened with a hash suffix when that would exceed Postgres's 63-byte identifier limit, or suffixed with a digit if an entity-level check already claimed the name. Name a constraint yourself if you need to depend on what it is called.
-- A field carries exactly one `check`. Declaring a second is an error rather than a silent replacement; express additional constraints as entity-level checks.
-
-Columns count bytes, so one tab is one column. Indent consistently — a file mixing tabs and spaces inside one entity can bind a `check` differently from how it reads.
+- Only an entity-level `check` accepts `as <name>`. On a field's continuation line, `as` is a syntax error. An unnamed field `check` gets a generated name — usually `<table>_<column>_check`, shortened with a hash suffix past Postgres's 63-byte identifier limit, or suffixed with a digit when an entity-level check already claimed it.
+- A field carries exactly one `check`; a second is an error. Additional constraints go at the entity level.
+- Columns count bytes, so one tab is one column. A file mixing tabs and spaces inside one entity can bind a `check` differently from how it reads.
 
 ### Field types
 
@@ -162,43 +165,60 @@ Go and proto mappings are in [the type mapping reference](dsl-types.md).
 ### Modifier semantics
 
 - `primary` — primary key. Exactly one field, unless `primary by` is used at the entity level. The two are mutually exclusive.
+- `identity` — Postgres `GENERATED ALWAYS AS IDENTITY`; the database assigns the value.
 - `serial` — Postgres assigns the value via a sequence. Valid only with `bigint primary` or `int primary`. Incompatible with `default`.
 - `not null` — disallows null. Implied by `primary`.
 - `default <expr>` — Postgres default expression. See `DefaultExpr` above.
 - `unique` — Postgres column-level `UNIQUE`. For multi-column, use `unique by` at the entity level.
-- `references <Entity>.<field>` — foreign key. `on delete` accepts `cascade`, `set null`, `restrict`. `on update` is not supported; see [Known gaps](#known-gaps).
+- `references <ns>.<Entity>.<field>` — foreign key, always fully qualified. `on delete` and `on update` each accept `cascade`, `set null`, `restrict`, in either order. Repeating one overwrites the earlier action.
+- `backfill "<expr>"` — the SQL expression the backfill writes into existing rows when a `not null` field is added to an entity that already holds data. See [Add a new entity](../guides/add-a-new-entity.md).
 - `check "<predicate>"` — Postgres `CHECK` constraint on this column, given a generated name. Must be on the field's line or indented past it; see [Where a `check` binds](#where-a-check-binds). One per field — declare further constraints at the entity level.
 
 ### Entity-level clauses
 
 - `primary by f1, f2` — composite primary key. Member fields must each be `not null`. Mutually exclusive with per-field `primary`.
 - `check "<predicate>" [as <name>]` — table-level `CHECK` constraint. Unlike the field modifier this may reference several columns, and `as <name>` sets the constraint name in the database. Must sit at member indentation; see [Where a `check` binds](#where-a-check-binds).
-- `unique by f1, f2` — multi-column unique constraint. May appear multiple times. For a single column, use the per-field `unique` modifier instead.
+- `unique by f1, f2 [deferrable]` — multi-column unique constraint. May appear multiple times. For a single column, use the per-field `unique` modifier instead. The `deferrable` suffix is accepted and ignored: the emitted constraint is not deferrable.
+- `query_timeout = <duration>` — per-entity deadline applied to the entity's generated RPCs. Unset uses the server default.
+- `has_many <name>: <Target> via <field>` / `has_one <name>: <Target> via <field>` — validated (the target entity and `via` field must exist) but inert: the declaration emits no DDL and no generated code.
 - `index by f1, f2` — non-unique B-tree index. May appear multiple times. Each field may instead be an expression (`expr "lower(email)"`) and may carry a per-field `asc` or `desc` (e.g. `index by created_at desc`).
 - `index partial by f1, f2 where <predicate>` — partial index. `<predicate>` is a [`PartialPredicate`](#entities) (any SQL boolean expression valid in a Postgres index predicate). e.g. `index partial by sku where deleted_at is null`, `index partial by id where status = "active" and lower(sku) like "a%"`.
 - `unique index partial by f1, f2 where <predicate>` — partial **unique** index (`CREATE UNIQUE INDEX … WHERE …`). Use it for uniqueness scoped by a predicate — e.g. `unique index partial by sku where deleted_at is null` makes `sku` unique among non-soft-deleted rows, or `unique index partial by user_id where is_default` for one default per user. A Postgres UNIQUE *constraint* can't be partial, so `unique` / `unique by` can't express this. Same predicate grammar as `index partial`.
 - `index hnsw on <field> ops <cosine|l2|ip>` — pgvector HNSW index over a `vector(N)` field. `ops` picks the operator class: `cosine`, `l2` (Euclidean), or `ip` (inner product).
 - `index gin on <field>` — GIN index, for `jsonb` and array fields.
-
-The only unique-index form is `unique index partial`; `index by`, `index hnsw`, `index gin`, and the non-`unique` `index partial` are all non-unique. Non-partial uniqueness is declared with the per-field `unique` modifier or entity-level `unique by` (which emit UNIQUE constraints). A live `CREATE UNIQUE INDEX` the schema doesn't account for is treated as drift — `tide apply` refuses it unless `ATLANTIS_ALLOW_INDEX_DRIFT=1`; a declared `unique index partial` whose predicate matches the live one is recognized and not drift. See [`tide apply`](cli-tide.md).
 - `soft_delete by <field>` — replaces row deletion with setting `<field>` (must be `timestamptz`) to `now()`. Reads filter `<field> IS NULL` automatically.
 - `touch_on_update by <field>` — Postgres trigger sets `<field>` (must be `timestamptz`) to `now()` on every `UPDATE`.
-- `partition by <field>` — row-level multi-tenancy. `<field>` identifies which tenant a row belongs to and must be `not null`. The server binds the caller's tenant per request from the `atlantis-tenant` request header, on both the dynamic dispatcher and the server `tidectl codegen` emits. Adding, removing or moving the clause on an entity that already exists produces a migration; the plan is classified cross-caller breaking, because it changes what every caller of that table can read. It produces `ENABLE` + `FORCE ROW LEVEL SECURITY`, **two** policies, and an index on the column. The first, `<table>_tenant_isolation`, is `AS RESTRICTIVE` and compares the column to `atlantis.current_partition()` (cast to the column's type when it is not text-shaped) in both `USING` and `WITH CHECK` — restrictive means it ANDs with every other policy, so nothing you add can read outside the tenant. The second, `<table>_default_access`, is `AS PERMISSIVE USING (true)`: PostgreSQL admits a row only when some permissive policy allows it, so without a grant a restrictive-only table returns nothing at all. **`<table>_default_access` is yours to replace** — drop it and write narrower permissive policies to add your own access control, and tenant isolation is unaffected because it does not live there. A later `tide apply` re-creates the grant only when the table carries no permissive policy at all, so your replacement is not undone. The index is emitted — always, even when the schema declares one covering it, because the policy's index must not have its lifetime tied to a droppable constraint. The tenant itself is the transaction-local run-time parameter `atlantis.tenant`; because PostgreSQL cannot lock a custom parameter, `tide apply` rejects any query or procedure body that calls `set_config`. See [Per-tenant partition](../guides/add-a-new-entity.md#per-tenant-partition).
-- `keyless` — the table has no key. atlantis owns its schema — DDL, plan, apply and drift all run — and generates **no service** for it: no `Get`, `List`, `Create`, `Update`, `Delete` or `Query`. Mutually exclusive with `primary` and `primary by`, and cannot be combined with `cache`, because a cached row is addressed by its key. Another entity may still `references` one of its columns, provided that column is `unique` — which is what PostgreSQL requires of a foreign-key target. Without a key there is no `Get` to generate, no way for an `Update` or `Delete` to confirm it changed one row, and no non-nullable column for the keyset cursor to break ties on, which is what guarantees a page advances. `tide inspect --generate` emits it for a table it finds with no key, and suggests the key that would give it an API.
+- `partition by <field>` — row-level multi-tenancy. `<field>` says which tenant a row belongs to and must be `not null`. The server binds the caller's tenant per request from the `atlantis-tenant` request header, before any statement touches the database. Emitted DDL: `ENABLE` + `FORCE ROW LEVEL SECURITY`, an index on the column, and two policies — `<table>_tenant_isolation` (`AS RESTRICTIVE`, comparing the column to `atlantis.current_partition()` in both `USING` and `WITH CHECK`, with the cast on the function side when the column is not text-shaped) and `<table>_default_access` (`AS PERMISSIVE USING (true)`, created only when the table carries no permissive policy, so a replacement survives later applies). Adding, removing, or moving the clause on an existing entity is classified cross-caller breaking. `tide apply` rejects any query or procedure body that calls `set_config`, which would rebind the tenant parameter. Semantics and access-control patterns: [Per-tenant partition](../guides/add-a-new-entity.md#per-tenant-partition).
+- `keyless` — the table has no key. DDL, plan, apply, and drift all run for it; no service is generated — no `Get`, `List`, `Create`, `Update`, `Delete`, or `Query`. Mutually exclusive with `primary` and `primary by`; cannot be combined with `cache`. Another entity may `references` one of its columns when that column is `unique`. `tide inspect --generate` emits `keyless` for a table it finds with no key, with a suggested key that would give it an API.
 - `table "<schema.table>"` — overrides the physical table name. Without it, atlantis stores the entity at `atlantis.<namespace>_<snake_entity>`. The value's shape is `[schema.]table`, each segment matching `[A-Za-z_][A-Za-z0-9_]*`; a bare name (`table "vendors"`) lands in `public`. Foreign keys whose target carries the modifier render `REFERENCES "<schema>"."<table>"`. Changing the value on a previously-applied entity is classified `cross_caller_breaking` and rejected by `tide plan`; atlantis does not auto-rename. Used when adopting an existing database — see [Adopt an existing database](../guides/adopt-an-existing-database.md).
+
+The only unique-index form is `unique index partial`; `index by`, `index hnsw`, `index gin`, and the non-`unique` `index partial` are all non-unique. Non-partial uniqueness is declared with the per-field `unique` modifier or entity-level `unique by` (which emit UNIQUE constraints). A live `CREATE UNIQUE INDEX` the schema doesn't account for is treated as drift and refused at apply; a declared `unique index partial` whose predicate matches the live one is recognized and not drift. See [`tide apply`](cli-tide.md).
 
 ### Cache block
 
 ```
-CacheBlock = "cache" "{" "read_through" "ttl" "=" Duration [ "tag" "=" StringLiteral ] "}"
+CacheBlock = "cache" "{" { CacheClause } "}"
+
+CacheClause =
+    "read_through" "ttl" "=" Duration [ "tag" "=" StringLiteral ]
+  | "invalidate_on" ":" InvalidateClause { "," InvalidateClause }
+  | "consistency" "=" ( "strict" | "eventual" )
+
+InvalidateClause =
+    "write" "(" "self" ")"
+  | "write" "(" Ident [ "where" Ident "=" "self" "." Ident ] ")"
 
 Duration = Integer DurationUnit
 DurationUnit = "ns" | "us" | "ms" | "s" | "m" | "h"
 ```
 
-`read_through` is currently the only supported caching mode.
+`read_through` is the caching mode: reads are served from the cache with the declared TTL.
 
 The `tag` is a double-quoted string with `{field_name}` interpolation placeholders. Field names inside `{...}` must exist on the entity. Cache entries with the same resolved tag are invalidated as a group. See [Caching and invalidation](../concepts/caching-and-invalidation.md).
+
+`invalidate_on: write(<Target> where <field> = self.<field>)` invalidates this entity's cached rows when the named target entity is written: the `where` mapping says which column on the target carries this entity's key, and the matching parent rows are invalidated. `write(self)` is accepted and redundant — an entity's own writes always invalidate it.
+
+`consistency = strict | eventual` is accepted and recorded in the schema, and changes no behavior today.
 
 ## Queries
 
@@ -223,7 +243,7 @@ The `for <Ident>` after the query name names the entity the query semantically b
 - `output as <Entity>` returns rows of that entity. The SQL must project every column the entity declares.
 - `output { ... }` returns an ad-hoc row type. The SQL must project columns matching the declared names and types.
 
-Parameters in the SQL body use `$name` syntax. Atlantis rewrites them to Postgres positional placeholders (`$1`, `$2`, ...) before execution. The body is validated when you run `tide apply`.
+Parameters in the SQL body use `$name` syntax and are rewritten to Postgres positional placeholders (`$1`, `$2`, ...) before execution. The body is validated when you run `tide apply`.
 
 `touches(...)` lists the entities the query reads. The cache layer uses it for query-result invalidation.
 
@@ -243,6 +263,74 @@ Steps run inside one Postgres transaction. The transaction commits when every st
 
 Procedures do not return rows. Read the result with a separate query.
 
+## Jobs
+
+```
+Job = "job" Ident "in" Ident "{" { JobClause } "}"
+
+JobClause =
+    "args" "{" { FieldDecl } "}"
+  | "retries" IntLiteral
+  | "timeout" ( Duration | "none" )
+  | "heartbeat" Duration
+  | "queue" StringLiteral
+  | "schedule" StringLiteral
+  | "visible_to" StringLiteral
+```
+
+Clauses may appear in any order.
+
+- `args { ... }` — the job's argument fields, using the entity field grammar.
+- `retries <n>` — attempts before the job moves to the dead-letter queue.
+- `timeout <duration> | none` — per-attempt deadline. `none` removes it, for long-running handlers that report progress through checkpoints.
+- `heartbeat <duration>` — how often a dispatched worker must signal liveness for this job. Unset uses the server default.
+- `queue "<name>"` — the queue the job runs on.
+- `schedule "<cron>"` — a five-field cron expression, accepted and recorded. A declared schedule does not submit jobs.
+- `visible_to "<caller>"` — restricts which caller may submit the job and whose workers may claim it. Unset or `"*"` means any caller; aliases count.
+
+Handler semantics are in [Jobs and workflows](../concepts/jobs-and-workflows.md).
+
+## Workflows
+
+```
+Workflow = "workflow" Ident "in" Ident "{" { WorkflowClause } "}"
+
+WorkflowClause =
+    "state" "{" { FieldDecl } "}"
+  | "step" Ident "{" "job" QualifiedName [ ArgsBlock ] "}"
+  | "compensate" Ident "{" "job" QualifiedName [ ArgsBlock ] "}"
+
+ArgsBlock     = "args" "{" [ Ident ":" Expr { "," Ident ":" Expr } [ "," ] ] "}"
+QualifiedName = [ Ident "." ] Ident
+```
+
+- `state { ... }` — the fields the workflow instance carries between steps.
+- `step <name> { job <ns.Job> args { ... } }` — one step, running the named job. Steps run in declaration order.
+- `compensate <step-name> { job <ns.Job> args { ... } }` — the job that runs to undo the named step when a later step fails.
+
+## Ephemeral stores
+
+```
+Ephemeral = "ephemeral" Ident "in" Ident "{" { FieldDecl | "ttl" "=" Duration } "}"
+```
+
+An ephemeral declaration is a typed, expiring store with no table behind it. Fields use the entity field grammar; `ttl` sets how long an entry lives and may appear anywhere in the body. Semantics are in [Ephemeral data](../concepts/ephemeral-data.md).
+
+## Enums
+
+```
+Enum      = "enum" Ident "in" Ident "{" [ EnumLabel { "," EnumLabel } [ "," ] ] "}"
+EnumLabel = Ident | Keyword | StringLiteral
+```
+
+Declares a Postgres enum type. Any keyword is a legal label, and the quoted form declares labels an identifier cannot spell — `"in progress"`. A trailing comma is allowed.
+
+```
+enum Status in shop {
+  open, closed, "on hold",
+}
+```
+
 ## Hypertables
 
 ```
@@ -254,15 +342,13 @@ HypertableBody =
     [ other EntityBody clauses... ]
 ```
 
-The time column is named in the header — `hypertable Reading in iot on recorded_at { ... }` — and must be a `timestamptz` field declared in the body. It becomes the time dimension passed to `create_hypertable`. (Not to be confused with the entity-level `partition by` clause, which is tenant isolation via row-level security and unrelated to TimescaleDB chunking — see above.)
+The time column is named in the header — `hypertable Reading in iot on recorded_at { ... }` — and must be a `timestamptz` field declared in the body. It becomes the time dimension passed to `create_hypertable`. The entity-level `partition by` clause is a different mechanism: tenant isolation via row-level security, unrelated to TimescaleDB chunking.
 
 `chunk_time_interval` sizes each chunk and uses the same `Duration` syntax as cache TTLs. Omit it to take TimescaleDB's default (7 days). Changing it later emits `set_chunk_time_interval`, which applies to chunks created from that point on — existing chunks keep the size they were made with.
 
-Only Apache-2.0-licensed TimescaleDB functionality is emitted (`create_hypertable`, `set_chunk_time_interval`), so a hypertable schema imposes no Timescale License obligation.
-
 Hypertables accept every entity-body clause (indexes, unique constraints, soft delete, cache block).
 
-**Every unique index must contain the time column, including the primary key.** TimescaleDB enforces this — a chunk covers a time range, so uniqueness it cannot check per chunk is uniqueness it cannot enforce. Use `primary by id, recorded_at` rather than `id primary`; the same applies to any `unique` clause. atlantis does not check this before applying, so a single-column primary key on a hypertable fails during `tide apply` with `cannot create a unique index without the column ... (used in partitioning)`, `SQLSTATE TS103`.
+**Every unique index must contain the time column, including the primary key.** TimescaleDB enforces uniqueness per chunk, and a chunk covers one time range. A hypertable therefore takes `primary by id, recorded_at`, and every `unique` clause includes the time column. atlantis does not check this before applying: a single-column primary key on a hypertable fails during `tide apply` with `cannot create a unique index without the column ... (used in partitioning)`, `SQLSTATE TS103`.
 
 ## Identifiers
 
@@ -334,4 +420,4 @@ declaration, not an entity member. `read_through`, `ttl` and `tag` belong to
 
 ## Known gaps
 
-This reference does not yet cover: the `ivfflat` vector-index method (only `hnsw` is supported), GiST indexes, view declarations, and import statements. Tracked in the project issue tracker.
+The DSL does not yet support: the `ivfflat` vector-index method (only `hnsw` is supported), GiST indexes, view declarations, and import statements.

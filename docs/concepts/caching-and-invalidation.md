@@ -19,25 +19,37 @@ After `tide apply`, `GetNote` and `QueryNote` are served read-through against me
 
 ## How invalidation reaches the cache
 
-Atlantis appends one row per write to an `outbox` table inside the write's transaction. The transaction commits the data change and the enqueue together, or neither. An outbox worker drains the queue (default every 250ms; see `OUTBOX_DRAIN_INTERVAL`) and applies invalidations to memcached.
+atlantis appends one row per write to an outbox table inside the write's transaction. The transaction commits the data change and the enqueue together, or neither. An outbox worker drains the queue about every 250 milliseconds and applies invalidations to memcached.
 
-The enqueue is transactional with the data change; the cache mutation is not. Between commit and worker pickup (bounded by `OUTBOX_DRAIN_INTERVAL`, typically tens of milliseconds) a read may still hit the pre-write cached value.
+The enqueue is transactional with the data change; the cache mutation is not. Between commit and worker pickup a read may still hit the pre-write cached value. The window is bounded by the drain cadence — 250 milliseconds by default — and a failed invalidation retries, so under fault the window stretches rather than the invalidation being lost.
 
-A `Get` after a `Create`/`Update`/`Delete` from the same caller observes the new value: the body cache uses a version-pointer indirection updated by the write transaction itself, so it bypasses the worker lag. `Query` does not have this property — see [Bypassing the query-result cache](#bypassing-the-query-result-cache).
+The window applies to `Get` and `Query` alike. A reader that must observe its own write on `Query` can bypass the query-result cache per request — see [Bypassing the query-result cache](#bypassing-the-query-result-cache); `Get` has no equivalent flag.
 
 ## The two caches
 
 The body cache holds individual rows keyed by primary key. `Get` and entity-include lookups read it. A write to row 42 invalidates only the body entry for row 42.
 
-The query-result cache holds `Query` result sets keyed by the filter arguments. Invalidation is per-entity rather than per-predicate: each write bumps a generation counter that is part of every cached query key, so reads after the write form keys that miss the cache and fall through to Postgres.
-
-Per-predicate invalidation would require evaluating every cached query's filter on every write; the counter-bump model trades that work for a lower hit rate on the query-result cache after bursts of writes.
+The query-result cache holds `Query` result sets keyed by the filter arguments. Invalidation is per-entity: when the worker picks up a write, it bumps a generation counter that is part of every cached query key, so later reads form keys that miss the cache and fall through to Postgres. After a burst of writes to an entity, its query-result hit rate drops until reads repopulate the cache.
 
 Writes are never cached. Includes resolve through the body cache by primary key.
 
 ## Bypassing the query-result cache
 
-The body cache invalidates by primary key on commit via the version pointer, so `Get` reads its own writes without a flag. `Query` results are invalidated by counter bump on outbox-worker pickup, so a writer that must observe its own write on `Query` sets `cache_skip=true` on the request. With the flag, the server skips the query-result cache and reads from Postgres; the body cache continues to serve.
+A writer that must observe its own write on `Query` sets `cache_skip=true` on the request. With the flag, the server skips the query-result cache and reads from Postgres; the body cache continues to serve. `Get` has no such flag: a `Get` inside the invalidation window can return the pre-write row.
+
+## What can go stale, and for how long
+
+- A read inside the invalidation window returns a stale but self-consistent
+  row — a complete earlier version, never a mix of old and new fields.
+- The window normally closes within a few hundred milliseconds of the
+  commit; a failed invalidation retries, so under fault it stretches rather
+  than the invalidation being lost. `Query` can opt out per request with
+  `cache_skip=true`; `Get` cannot.
+- Pending invalidations live in Postgres, in the same transaction as the
+  write, so a crash between commit and cache update delays the invalidation
+  rather than losing it.
+- A cache restart is a cold cache: reads miss to Postgres and repopulate.
+  Latency rises until the working set rewarms; no read returns wrong data.
 
 ## Cache tags
 
@@ -64,5 +76,5 @@ Both entities resolve the same tag for a given customer. A write to either entit
 ## Related
 
 - [Schema as code](schema-as-code.md) — why the cache opt-in is declared in the schema.
-- [Architecture: the cache](../architecture/cache-architecture.md) — outbox worker, generation counters, and version-pointer mechanics.
+- [How atlantis runs your schema](how-atlantis-runs-your-schema.md) — where the cache sits in the serving path.
 - [The DSL grammar](../reference/dsl-grammar.md) — the `cache { ... }` block syntax.

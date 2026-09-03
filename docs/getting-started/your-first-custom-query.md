@@ -1,6 +1,6 @@
 # Declare a custom query
 
-How to add a custom SQL query to an entity's `.atl` file and register it with the server. Builds on [Getting started](.).
+Add a custom SQL query to an entity's `.atl` file and register it with the server. Builds on [Getting started](.).
 
 ## When you need this
 
@@ -39,11 +39,11 @@ The server validates the SQL against the schema and persists the query into the 
 tide show NoteCountByMonth
 ```
 
-If the canonical text comes back, the query is persisted.
+`tide show` prints the query's SQL and `touches` set as the server holds them.
 
-### A brand-new query needs one server restart
+### A brand-new query becomes callable at the next server restart
 
-A custom query's gRPC method is registered at server startup. A **brand-new** query is persisted and visible to `tide show` immediately, but its RPC returns `Unimplemented` until the server restarts — restart the server once after the first `tide apply` that adds it. Editing the SQL of an **existing** query hot-reloads on `tide apply` with no restart. (Same rule for `procedure` blocks.)
+A custom query's gRPC method is registered at server startup. A **brand-new** query is persisted and visible to `tide show` immediately, but its RPC answers `Unimplemented` until your organisation's server next restarts. Editing the SQL of an **existing** query hot-reloads on `tide apply` with no restart. (Same rule for `procedure` blocks.)
 
 ## What's next
 

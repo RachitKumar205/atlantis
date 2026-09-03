@@ -1,14 +1,25 @@
 # Concepts
 
-Core concepts before writing `.atl` files. Start with [Schema as code](schema-as-code.md); the rest reference it.
-
-- [Schema as code](schema-as-code.md). `.atl` syntax and the SQL, gRPC, and clients derived from it.
-- [The typed query surface](the-typed-query-surface.md). The `Get`/`Create`/`Update`/`Delete`/`Query` methods generated per entity.
-- [Schema versioning](schema-versioning.md). Append-only version registry, structural diffs, per-field blame.
-- [Change approval](change-approval.md). Which classes of change apply unattended, which wait for a person, and who decides.
-- [Caching and invalidation](caching-and-invalidation.md). Declaring read-through cache in `.atl` and how writes invalidate it.
-- [Ephemeral data](ephemeral-data.md). Memcached-only typed data with TTL for short-lived scratch state.
-- [The sandbox](sandbox.md). In-process disposable schema with checkpoints, restore, fork, diff, and seed.
-- [Jobs and workflows](jobs-and-workflows.md). Typed background work: retries, DLQ, checkpointing, multi-step orchestration with compensation.
-- [Custom queries and procedures](custom-queries-and-procedures.md). The synchronous escape hatch for SQL the typed surface can't express.
-- [`tide` vs `tidectl`](tide-vs-tidectl.md). Which CLI runs where and why.
+- [Schema as code](schema-as-code.md). The `.atl` files in git are
+  authoritative; the database derives from them.
+- [How atlantis runs your schema](how-atlantis-runs-your-schema.md). The
+  checkpoint, the apply, hot reload, migration ownership.
+- [The typed query surface](the-typed-query-surface.md). What the generated
+  `Get`/`Query`/`Create` methods can express.
+- [The generated client](the-generated-client.md). Committed code, stable
+  proto numbers, `generate --check`.
+- [Schema versioning](schema-versioning.md). The append-only version
+  registry: history, blame, staleness.
+- [Change approval](change-approval.md). Classes, tiers, rehearsals,
+  protections, freezes, overrides.
+- [The console](the-console.md). Every page, and what deciding costs.
+- [Custom queries and procedures](custom-queries-and-procedures.md). SQL
+  beyond the typed surface.
+- [Caching and invalidation](caching-and-invalidation.md). The two caches
+  and the transactional outbox.
+- [Jobs and workflows](jobs-and-workflows.md). Typed background work and
+  multi-step orchestration.
+- [Ephemeral data](ephemeral-data.md). Typed, expiring stores with no
+  table behind them.
+- [The sandbox](sandbox.md). Disposable test databases — schema only, no
+  production data.

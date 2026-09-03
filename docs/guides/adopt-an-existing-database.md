@@ -1,40 +1,23 @@
 # Adopt an existing database
 
-After this recipe you'll have atlantis running against your existing Postgres database. The same tables, the same rows.
+Bring a database full of existing tables under atlantis: generate
+declarations from what is live, review and commit them, and baseline —
+recording the schema without running any DDL against your tables.
 
-Prereqs:
+## Prerequisites
 
-- A Postgres database whose tables you want atlantis to manage.
-- atlantis built and deployable; see [Deploy to production](deploy-to-production.md).
-- One or more service repos with `tide.yaml` and `.atl` files in progress (or a starting point — see [Add a new entity](add-a-new-entity.md) for the basic shape).
+- Your organisation is already pointed at the database (done during
+  onboarding); the connection string is sealed and never read back out.
+- The `admin` role, for the console import's plan and apply steps; the
+  apply also re-authenticates you.
+- A service repository with `tide.yaml`, for the declarations to live in.
 
-## When to use this
+## How the pieces fit
 
-atlantis creates entity tables under an `atlantis` schema by default: `atlantis.consumer_account` for `entity Account in consumer`. For an existing database the entity tables already live elsewhere. Use the `table "<schema.table>"` entity modifier to point atlantis at them. Without it, atlantis targets its default location and the existing tables go unused.
-
-## Two ways to baseline
-
-There's a dedicated operator command for this — `tidectl adopt` — and a manual `plan` / `apply` loop. They share one diff engine, so they classify the same disagreements; pick by who's driving:
-
-- **`tidectl adopt` (recommended)** introspects the live DB, diffs it against every caller's declared `.atl` in your workspace, and records the IR checkpoint **without running any DDL**. It baselines all callers atomically in one transaction, buckets every difference into addition / removal / mismatch, and **blocks on a mismatch** (a field both sides describe differently) unless you pass `--allow-drift`. Every adopt — clean or drift-accepted — is recorded in `atlantis.adopt_history`. Steps 5–6 below cover it.
-- **Manual `tide plan` + `tide apply`** is the per-caller path when an operator isn't running the workspace-wide command. Steps 4–5 cover it. It does *not* write `adopt_history`, and its zero-change promise has one exception — see [Legacy unique indexes can block apply](#legacy-unique-indexes-can-block-apply).
-
-Either way the inventory and `table "..."` declaration work (steps 1–3) is the same.
-
-## 1. Inventory the existing schema
-
-For each table you want atlantis to manage, capture:
-
-- The schema name (often `public`, sometimes a custom schema like `consumer` or `vendor`).
-- The table name as Postgres knows it (often plural — `accounts`, `products`).
-- Every column's name and type. These must match the `.atl` field declarations exactly.
-- The primary key, foreign keys (with their `ON DELETE` rules), unique constraints, and indexes.
-
-A `pg_dump --schema-only` against a staging clone gives you the full picture in one file. Read it before writing any `.atl`.
-
-## 2. Declare each entity with `table "..."`
-
-In your service repo:
+atlantis creates its own entity tables at `atlantis.<namespace>_<entity>`
+by default, with the entity name snake-cased — `entity VendorImport in
+vendor` is `atlantis.vendor_vendor_import`. Existing tables live elsewhere, so each adopted entity carries
+the `table "<schema.table>"` modifier pointing at its physical table:
 
 ```atl
 entity Account in consumer {
@@ -42,111 +25,119 @@ entity Account in consumer {
 
   id            varchar(8) primary
   email         varchar(255) not null unique
-  password_hash varchar(255)
-  is_active     boolean not null default true
   created_at    timestamptz not null default now()
-  updated_at    timestamptz not null default now()
   deleted_at    timestamptz
 
   soft_delete by deleted_at
-  touch_on_update by updated_at
 }
 ```
 
-The `table "..."` value follows `[schema.]table` shape — each segment matching `[A-Za-z_][A-Za-z0-9_]*`. A bare name (`table "vendors"`) without a schema prefix lands in `public`.
+Field names match the live column names byte for byte, and each
+`table "..."` value is unique across every declared entity — two entities
+claiming one physical table is rejected at `tide plan`.
 
-Two constraints:
+## 1. Generate declarations
 
-- Field names must match the column names byte-for-byte. If prod has `is_email_verified` and your `.atl` declares `email_verified`, atlantis will issue DDL for a column that doesn't exist.
-- Each `table "..."` value must be unique across all declared entities. Two entities claiming the same physical table is rejected at `tide plan`.
+Two routes to the same files:
 
-## 3. Apply atlantis's infra migrations
+**From the console.** The Schema page's onboarding offers **Import a
+database**: the console reads the database read-only and opens a review
+page — every discovered table as a generated entity, suggested tightenings
+(missing primary keys, unindexed foreign keys, tenant-isolation
+candidates), and notes on what introspection could not verify.
 
+**From the terminal.** In a repository with no `.atl` files yet,
+`tide inspect --generate` writes one `.atl` file per undeclared table,
+reading columns, types, keys, defaults, and foreign keys from the
+catalogue:
+
+```bash
+tide inspect --generate=schema/ --schemas=consumer,vendor
 ```
-PG_URL=postgres://... make migrate-up-infra
-```
 
-This creates six bookkeeping tables under a new `atlantis` schema: `caller_registrations`, `ir_checkpoint`, `cache_invalidations`, `cache_invalidations_dead`, `backfill_plan`, and `backfill_field_state`. The `atlantis` schema is created if absent. Existing tables in other schemas are not touched.
+Entity names are derived from table names — `user_accounts` becomes
+`UserAccounts` — and renaming one after adoption is a breaking change, so
+edit the files before committing. Skipped tables are reported with a
+reason, existing files are never overwritten, and warnings about what
+introspection could not verify print with the run; inside a generated
+file, a comment block lists any column whose Postgres type has no `.atl`
+spelling.
 
-(The Makefile target wraps `golang-migrate` with the `x-migrations-table` parameter that keeps the infra history separate from the codegen-emitted history. See [Migration ownership](../architecture/migration-ownership.md) for why the two are split.)
+## 2. Review and commit
 
-## 4. Plan against the existing database
+The generated declarations understate a schema: introspection does not
+read `check` predicates or every index shape back. Read each file, tighten
+what you know — then commit them to the repository at the paths
+`tide.yaml` lists.
 
-From each caller repo:
+## 3. Baseline
 
-```
+The baseline happens in the console. On the import's review page,
+**Commit** computes the plan, and **Apply** — behind a re-authentication —
+records the declarations as the baseline. A baseline records the
+checkpoint; it runs no DDL against your tables. It refuses when a
+declaration and the database **disagree** about something that exists on
+both sides, naming each mismatch; tables declared but absent, or present
+but undeclared, are reported and do not block.
+
+Then register each caller against the baseline:
+
+```bash
 tide plan
-```
-
-The expected result is **zero schema changes**. `tide plan` reports `class: additive` with no `CREATE TABLE` or `ALTER TABLE` in the emitted SQL. atlantis sees the `.atl` files, computes the DDL they imply, and compares to the existing tables; everything should already match.
-
-If `tide plan` reports unexpected DDL, one of three things is wrong:
-
-- A field in `.atl` doesn't match a column in prod (name or type mismatch). Fix the `.atl`.
-- An entity is missing its `table "..."` modifier and atlantis is targeting `atlantis.<ns>_<entity>` instead of the prod table. Add the modifier.
-- The `.atl` declares a column, constraint, or index that doesn't exist in prod. Either add it to prod via a separate migration first, or remove it from `.atl`.
-- The DDL diff is empty but apply still refuses. A zero-change plan is not a guarantee that `tide apply` will succeed: a legacy bare unique index the schema doesn't declare blocks apply, and it shows up only in `tide plan --format=json` (the human table omits it). See [Legacy unique indexes can block apply](#legacy-unique-indexes-can-block-apply).
-
-Iterate until the diff is empty. That confirms atlantis's view matches the database byte-for-byte.
-
-## 5. Baseline the checkpoint
-
-**With `tidectl adopt` (recommended).** From the directory holding your workspace manifest:
-
-```
-tidectl adopt
-```
-
-This introspects the live DB, diffs it against every caller's `.atl`, and records the IR checkpoint for all of them in one transaction. A clean run prints `declared schema matches live DB` and exits 0. Outstanding additions (declared but not yet in the DB) and removals (in the DB but undeclared) are reported but don't block — they're outstanding work for a later `tide apply`. A **mismatch** — a field both sides describe differently — blocks the baseline and exits 1; resolve it by editing the `.atl` to match prod, migrating prod to match the `.atl`, or re-running with `--allow-drift` to baseline anyway (the drift is recorded in `atlantis.adopt_history` for audit).
-
-**With `tide apply` (per-caller).** When you're driving one caller at a time:
-
-```
 tide apply
 ```
 
-Since the schema matches, the apply is a metadata write only: atlantis records the caller's `.atl` files in `caller_registrations` and updates `ir_checkpoint`. No DDL runs against the entity tables. Repeat for each caller repo.
+With the checkpoint recorded and the declarations matching it, the plan is
+zero changes and the apply is a metadata write: the caller's files are
+recorded and the checkpoint moves. No DDL runs. Do not run `tide apply`
+before the console baseline — with no checkpoint recorded, the plan is a
+full set of `CREATE` statements for tables that already exist.
 
 ### Legacy unique indexes can block apply
 
-A zero-change plan does **not** guarantee a clean apply. atlantis enforces uniqueness it declares (`unique`, `unique by …`) as a Postgres `UNIQUE` *constraint*; a legacy database often carries the same uniqueness as a bare `CREATE UNIQUE INDEX` with no backing constraint. The DSL can express a *partial* unique index (`unique index partial`) but not a non-partial bare unique index — non-partial uniqueness is declared as a `UNIQUE` constraint (`unique` / `unique by`), not an index. So an undeclared non-partial index never appears in the DDL diff — but it's a live constraint that will silently reject writes atlantis thinks are legal.
+A zero-change plan does not guarantee a clean apply. atlantis declares
+uniqueness as a Postgres `UNIQUE` constraint; a legacy database often
+carries the same uniqueness as a bare `CREATE UNIQUE INDEX` with no
+backing constraint, which never appears in the DDL diff but rejects
+writes the declared schema allows. `tide apply` refuses to proceed over
+one, printing the live index name and the remediations:
 
-`tidectl adopt` surfaces such an index as a removal (present in the live DB, undeclared), and `tide apply` **refuses** rather than baseline over it:
+- Declare the uniqueness in the `.atl` so atlantis owns it — `unique` on
+  the field or `unique by a, b` for a non-partial index (classified
+  backfill-required), or `unique index partial by <cols> where <pred>` for
+  a partial one (predicates are normalized through Postgres before
+  comparing, so casts and operand order don't matter).
+- Drop the index from the database, if it is unwanted.
 
-```
-apply blocked: the live database enforces UNIQUE index(es) this schema does not declare.
-Applying would leave a hidden constraint that silently rejects legitimate writes.
+`tide plan` only warns about index drift, and only in `--format=json`
+(`index_drift`, `index_drift_notes`, `index_drift_error`).
 
-  vendor.product_variants — UNIQUE index on (sku)
-    resolve: DROP INDEX "vendor"."idx_product_variants_sku_unique";
-    or declare the uniqueness in your .atl (field `unique`, or `unique by sku`)
-```
+## 4. Verify
 
-The error prints the **live** index name verbatim. Resolve it one of these ways:
+Run `tide plan` again — it reports zero changes — and issue a read through
+the generated typed client, confirming it returns the rows direct SQL
+sees.
 
-- `DROP INDEX <name>;` against the live DB, if the index is redundant or unwanted.
-- Declare the uniqueness in the `.atl` so atlantis owns it — match the live index's shape:
-  - **Non-partial index** — add `unique` on the field, or `unique by a, b` on the entity. Classified backfill-required (see [Add a new entity](add-a-new-entity.md)).
-  - **Partial index** (`... WHERE <pred>`) — add `unique index partial by <cols> where <pred>`. You don't need to copy the live predicate verbatim; atlantis normalizes both sides through Postgres before comparing, so casts, `IN` vs `= ANY(ARRAY[…])`, and operand order don't matter (see [DSL grammar](../reference/dsl-grammar.md#entities) for the predicate syntax). Classified additive — but the apply still fails if rows matching the predicate contain duplicates; dedupe them first.
-- Set `ATLANTIS_ALLOW_INDEX_DRIFT=1` in the apply environment to proceed knowingly (prefix `ATLANTIS_`, not `ATL_`; value exactly `1`).
+## 5. Cut over
 
-`tide plan` only **warns** about drift — it doesn't change the plan class or exit code, and the warning data lives only in `--format=json` (`index_drift`, `index_drift_notes`, `index_drift_error`); the human table output omits it. A partial unique index (`... WHERE <pred>`) is recognized when the schema declares a matching `unique index partial` (same columns, equivalent predicate); otherwise it counts as drift.
-
-## 6. Bring atlantis up and cut over
-
-Start the server pointing at the same Postgres. Issue a read through atlantis's typed client and confirm it returns rows that match what direct SQL sees.
-
-Follow the standard cutover pattern: flag-gate your application's atlantis adapters next to the existing pgx code, then flip flags per package during a maintenance window. Both code paths read and write the same physical tables, so the flip is a routing change rather than a data change.
+Move your application package by package:
+flag-gate the atlantis client beside the existing database code and flip
+per package — both paths read and write the same physical tables, so the
+flip is a routing change, not a data change.
 
 ## Common errors
 
-- `<entity>: invalid table name "<value>": must match [schema.]table where each part is [A-Za-z_][A-Za-z0-9_]*` — the value has a syntactically invalid identifier (embedded space, leading digit, multiple dots, embedded quotes). Use a simple two-part name.
-- `table "<name>" is claimed by both <A> and <B> — each \`table "..."\` value must be unique` — two `.atl` entities mapped to the same physical table. Each value must be unique across the merged IR.
-- `tide plan` exits with class `cross_caller_breaking` and the breaking-detail line `<entity>/: table override changed: "<old>" -> "<new>" (manual ALTER TABLE RENAME required)` — the modifier value moved relative to the last applied IR. atlantis won't auto-rename; run `ALTER TABLE "<old-schema>"."<old-table>" RENAME TO "<new-table>"` (and `ALTER TABLE ... SET SCHEMA ...` if the schema is also changing) manually before re-applying.
+- `<entity>: invalid table name "<value>"` — the `table "..."` value has an
+  invalid identifier (embedded space, leading digit, multiple dots). Use a
+  simple `[schema.]table` name.
+- `table "<name>" is claimed by both <A> and <B>` — two entities mapped to
+  one physical table; each value must be unique across the merged schema.
+- A `cross_caller_breaking` plan with `table override changed: "<old>" ->
+  "<new>"` — the modifier value moved relative to the applied schema.
+  atlantis does not auto-rename; rename the physical table first.
 
 ## Related
 
 - [DSL grammar reference](../reference/dsl-grammar.md#entity-level-clauses) — the `table` modifier alongside other entity-body clauses.
-- [Migration ownership](../architecture/migration-ownership.md) — why atlantis's bookkeeping tables stay in the `atlantis` schema even when entity tables do not.
-- [Deploy to production](deploy-to-production.md) — operator-side runbook for standing up the server.
-- [`tidectl` CLI reference](../reference/cli-tidectl.md) — `tidectl adopt` and the other operator commands.
+- [`tide inspect`](../reference/cli-tide.md#tide-inspect) — the drift report and `--generate`.
+- [How atlantis runs your schema](../concepts/how-atlantis-runs-your-schema.md) — the checkpoint a baseline records.

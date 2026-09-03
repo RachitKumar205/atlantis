@@ -1,0 +1,32 @@
+# Checks every relative link and anchor in the markdown trees. Offline: the
+# failure mode this guards is internal nav rot — the index files are
+# hand-maintained, and nothing else validates them. External URLs are not
+# fetched, so a flaky site cannot fail a docs PR.
+name: docs links
+
+on:
+  pull_request:
+    paths:
+      - "**/*.md"
+  push:
+    branches: [main]
+    paths:
+      - "**/*.md"
+
+jobs:
+  lychee:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check internal links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --offline
+            --include-fragments
+            --no-progress
+            "docs/**/*.md"
+            "ops/**/*.md"
+            "README.md"
+            "CONTRIBUTING.md"
+          fail: true

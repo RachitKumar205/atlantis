@@ -1,6 +1,10 @@
-# Row-level TTL
+# Expire rows automatically
 
-Declare a `ttl_field` on any entity with a `timestamptz not null` column, and atlantis automatically deletes expired rows on a 1-minute sweep.
+Declare a `ttl_field` on any entity with a `timestamptz not null` column, and atlantis deletes expired rows every five minutes.
+
+## Prerequisites
+
+- A caller set up with `tide` ([Get started](../getting-started/index.md)).
 
 ## 1. Add the TTL column + directive
 
@@ -16,7 +20,7 @@ entity Session in consumer {
 }
 ```
 
-`ttl_field` names the column the sweeper checks. The column must be `timestamptz` and `not null`.
+`ttl_field` names the column the sweeper compares against `now()`. Declare it `timestamptz not null` — the apply does not check the column's shape, and a sweep against any other shape matches nothing.
 
 ## 2. Apply
 
@@ -28,32 +32,23 @@ The `ttl_field` directive is recorded in the IR checkpoint. The built-in `SweepE
 
 ## 3. Verify
 
-Insert a row with `expires_at` in the past:
-
-```sql
-INSERT INTO consumer.sessions (id, consumer_id, session_token, expires_at)
-VALUES ('s1', 'c1', 'tok', now() - interval '1 hour');
-```
-
-Within five minutes the sweeper deletes it. Check:
-
-```sql
-SELECT count(*) FROM consumer.sessions WHERE expires_at < now();
-```
+Create a row whose `expires_at` is already in the past — through your
+generated client, or any write path your service has. Within five minutes
+the sweeper deletes it: a `Query` with an `expires_at` upper bound of the
+current time returns nothing.
 
 ## How it works
 
 - atlantis ships a built-in job `atlantis.SweepExpired` that runs on a `*/5 * * * *` cron schedule (every five minutes).
 - On each fire, the sweeper loads the IR checkpoint, finds every entity with `ttl_field` set, and deletes up to 1000 expired rows per entity.
-- The batch limit prevents vacuum churn; leftover rows get caught on the next sweep tick.
-- A sweep that fails is reported to the job runtime, so it retries and eventually dead-letters rather than failing silently. Check `tide job dead` if rows are not disappearing.
-- Operators can tune the cadence by updating `atlantis.job_schedules` directly (`UPDATE ... SET cron_spec = '*/5 * * * *'`) or disable with `enabled = false`.
+- The batch limit bounds how long the sweep holds a lock; leftover rows are deleted on the next sweep.
+- A sweep that fails surfaces to atlantis operators, not in your caller's dead-letter queue. If expired rows persist across several sweep intervals, contact atlantis support.
 
 ## Expiring rows on a tenant-isolated table
 
-A `DELETE` sweep cannot work on a table with tenant isolation. The sweeper is a background job with no request behind it, so it binds no tenant; row-level security still applies to its `DELETE`, `atlantis.current_partition()` is `NULL`, the statement matches nothing and reports success. Binding some tenant would not fix it — expiry has to cover every tenant, and there is no single correct value to bind.
+A `DELETE` sweep cannot work on a table with tenant isolation. The sweeper is a background job with no request behind it, so it binds no tenant; row-level security still applies to its `DELETE`, `atlantis.current_partition()` is `NULL`, and the statement matches nothing.
 
-**Declare the entity a hypertable on its TTL column, and expiry drops whole chunks instead.**
+Declare the entity a hypertable on its TTL column, and expiry drops whole chunks instead:
 
 ```atl
 hypertable Event in shop on occurred_at {
@@ -71,33 +66,24 @@ hypertable Event in shop on occurred_at {
 
 The primary key includes `occurred_at` because TimescaleDB refuses a unique index that does not contain the time column. A single-column `id primary` fails the apply with `SQLSTATE TS103`.
 
-Dropping a chunk is DDL, and row-level security filters queries, not `DROP TABLE`. So this needs no tenant bound, no registry of tenants to iterate, and no database role exempt from the policy. It is also far cheaper: one operation per chunk rather than one per row.
+Dropping a chunk is DDL, and row-level security filters queries, not `DROP TABLE`, so this needs no tenant bound. Chunk drops are one operation per chunk rather than one per row.
 
 ### The TTL column must be the time dimension
 
 `ttl_field` has to name the same column the hypertable is declared `on`. Chunks are selected by the time dimension, so if `ttl_field` named a different column a chunk whose time range has passed could still hold rows whose TTL has not — and dropping it would delete live data.
 
-`tide apply` refuses any other combination of `partition by` and `ttl_field`, rather than accepting a retention rule it would silently not honour. The error names all three ways out: declare the hypertable, drop `partition by`, or expire from your caller.
+`tide apply` refuses any other combination of `partition by` and `ttl_field`. The error names all three ways out: declare the hypertable, drop `partition by`, or expire from your caller.
 
 ### Granularity
 
 A chunk is dropped only once its **entire** time range is in the past, so rows can outlive their TTL by up to one `chunk_time_interval`. Choose the interval for the retention precision you need — `1d` means a row expires within a day of its TTL, `1h` within an hour.
 
-### What to watch
+### Entities the sweeper skips
 
-```
-atlantis_sweeper_chunks_dropped_total{entity="shop.Event"}
-```
-
-Incremented on every sweep, including by zero, so `rate() == 0` on a hypertable that should be ageing out is a question you can alert on.
-
-The older counter still exists for entities carrying a checkpoint written before apply started refusing them:
-
-```
-atlantis_sweeper_sweeps_blocked_total{entity="shop.Session"}
-```
-
-**Any non-zero value there means expired rows are accumulating.** Alert on it.
+The sweeper skips a `ttl_field` on a tenant-isolated entity that is not a
+hypertable. `tide apply` refuses that declaration today, so the state
+exists only on schemas recorded before the refusal; if you have one,
+redeclare the entity as a hypertable on its TTL column.
 
 ## Related
 

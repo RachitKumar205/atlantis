@@ -1,6 +1,6 @@
 # Jobs and workflows
 
-Jobs are typed background-work declarations. You declare the args a handler receives, how many times to retry on failure, and how long each attempt can run. atlantis generates a typed Go SDK from the declaration, runs an in-Postgres worker pool, and routes claimed rows to the handler you register at server startup.
+Jobs are typed background-work declarations. You declare the args a handler receives, how many times to retry on failure, and how long each attempt can run. atlantis validates submissions against the declaration, queues them durably, and routes claimed work to the handler your own service registers — handlers run in your binary, not in atlantis.
 
 ```atl
 job ImportContacts in directory {
@@ -11,7 +11,6 @@ job ImportContacts in directory {
   retries  3
   timeout  30m
   queue    "contacts"
-  schedule "0 */15 * * *"
 }
 ```
 
@@ -36,66 +35,60 @@ workflow OnboardAccount in directory {
 
 ## How jobs run
 
-1. A caller submits a job via `SubmitJob` (with the generated `ImportContactsArgs` struct marshaled to JSON) or a procedure's `enqueue` step. The server INSERTs a row into `atlantis.jobs`.
-2. The worker pool wakes on LISTEN/NOTIFY (or a 1s ticker), claims the row with `FOR UPDATE SKIP LOCKED`, and dispatches to the registered handler.
-3. The handler runs under a per-attempt timeout (`context.WithTimeout`). A heartbeat extends the row's lease to prevent duplicate claims.
-4. On success the row moves to `complete`. On failure the row retries up to `max_retries`, then moves to `atlantis.jobs_dead` (the DLQ).
+A submission — over the admin API, from a procedure's `enqueue` step, or from `tide job submit` — becomes a durable queue row. A worker claims the row; claims are exclusive, so two workers never run the same attempt. The handler runs under the declared per-attempt timeout, and a heartbeat extends the claim's lease so a live handler is not claimed twice. On success the job completes; on failure it retries up to `retries`, then moves to the dead-letter queue, visible in the console's Operations page and `tide job dead`.
 
 ## Handler registration
 
-Handlers live in your Go binary. atlantis codegen emits a typed interface per job; you implement it and register at server startup:
+Handlers live in your service's binary. You register a handler under the job's full id and decode the args JSON yourself:
 
 ```go
-directory.RegisterImportContacts(reg, &importContactsHandler{crm: crmClient})
+registry.Register("directory.ImportContacts", jobs.HandlerFunc(handleImportContacts))
 ```
 
-For non-Go handlers, `RegisterRemote(reg, jobID, addr)` dispatches over gRPC to an external service. Any language that can serve a JSON-envelope gRPC endpoint can act as a handler.
+The args arrive as the JSON body the submitter sent, validated against the declaration at submit time. [Declare a background job](../guides/declarative-jobs.md) walks through the whole loop, including the worker that receives dispatched claims.
 
 ## Submission paths
 
 | Path | When to use |
 |---|---|
-| Typed Go SDK | The 95% case. Marshal the generated `Args` struct + call `SubmitJob`. |
-| Procedure `enqueue` step | Atomic with a write transaction. The job row shares the procedure's tx. |
-| `schedule "cron-spec"` | Periodic invocation. The scheduler component INSERTs rows on the cron. |
-| `tide job submit` CLI | Operator ad-hoc triage. Not the standard path. |
+| Admin API `SubmitJob` | From a service: the job's full id plus the args as JSON, over gRPC. |
+| Procedure `enqueue` step | Atomic with a write: the job is enqueued in the procedure's transaction, or not at all. |
+| `tide job submit` | Ad-hoc submission from a terminal, recorded under `cli:<user>`. |
 
 ## Runtime modifiers
 
 | Modifier | Default | Effect |
 |---|---|---|
-| `retries N` | 0 | Max retry count before DLQ. |
-| `timeout 30m` | 30m | Per-attempt deadline. `timeout none` disables the deadline entirely. |
-| `heartbeat 10m` | 2m | Per-attempt lease window. Widen for handlers that block on a single external call longer than the worker's default; narrow to fail fast on quick jobs. |
+| `retries N` | 0 | Attempts before the dead-letter queue. |
+| `timeout 30m` | 30m | Per-attempt deadline. `timeout none` removes it. |
+| `heartbeat 10m` | 5m | Per-attempt lease window. Widen for handlers that block on one long external call; narrow to fail fast on quick jobs. |
 | `queue "name"` | `"default"` | Named queue for partitioning worker pools. |
-| `schedule "cron"` | (none) | Cron spec for periodic invocation. |
-| `visible_to "caller"` | (any) | RBAC: only the named caller can submit. `"*"` for any. |
+| `schedule "cron"` | (none) | Recorded on the job; a declared schedule never enqueues anything. |
+| `visible_to "caller"` | (any) | Only the named caller may submit the job or claim it with its workers. `"*"` means any; aliases count. A procedure's `enqueue` step is not gated by it. |
 
 ## Checkpointing
 
-Long-running handlers call `jobs.Checkpoint(ctx, pct, msg)` to report progress. Each call bumps the row's lease (same path as an auto-heartbeat) AND persists `progress_pct` / `progress_msg` so the operator sees live status in `tide job status` and the console session detail. `Checkpoint` returns an error, but handlers typically discard it — the worker never fails a claim because of a checkpoint write failure, so treating checkpoint errors as advisory keeps the handler focused on its real work.
+Long-running handlers call `jobs.Checkpoint(ctx, pct, msg)` to report progress. Each call bumps the claim's lease and persists the progress, which `tide job status` and the console's worker detail show live. `Checkpoint` returns an error. A failed progress write never fails the claim, so handlers can discard it.
 
 See [Long-running handlers](../guides/long-running-handlers.md) for the full handler contract — idempotency, the heartbeat / checkpoint distinction, resume-from-progress, and a worked contact-import example.
 
 ## Distributed tracing
 
-When the caller has an active OpenTelemetry span, `SubmitJob` captures the W3C traceparent into the row's `trace_ctx` column. The worker resumes the trace on claim and starts a child span around `handler.Handle`, so the submit-side and worker-side spans stitch into one distributed trace in Jaeger / Tempo / Datadog.
+When the caller has an active OpenTelemetry span, `SubmitJob` captures the W3C traceparent into the row's `trace_ctx` column. The worker resumes the trace on claim and starts a child span around `handler.Handle`, so the submit-side and worker-side spans stitch into one distributed trace in any W3C trace-context backend.
 
 ## How workflows run
 
-1. `StartWorkflow` inserts a `workflow_instances` row and enqueues the first step's job.
-2. When that job completes, the workflow engine advances to the next step by enqueuing its job.
-3. When the last step completes, the workflow is marked `complete`.
-4. If any step's job fails (moves to DLQ), the engine runs compensations for prior completed steps in reverse order, then marks the workflow `failed`.
+Starting a workflow records an instance and enqueues the first step's job. Each completion enqueues the next step, and the workflow is `complete` when the last step finishes. If any step's job exhausts its retries, the workflow is marked `failed` and compensations for the completed steps are enqueued in reverse order.
 
-Compensations are themselves jobs. A compensation that fails moves the workflow to `failed` with diagnostic detail; the operator intervenes manually.
+Compensations are themselves jobs: at the moment the workflow reports `failed`, they may still be running, and a compensation that fails dead-letters like any other job.
 
 ## Crash recovery
 
-If a pod crashes mid-handler, the row's lease (`claimed_until`) expires. Another pod's worker claims the row on its next drain pass and retries the handler from scratch. The `attempts` counter tracks how many times the row has been claimed, so idempotent handlers are the documented contract — same as Asynq, Sidekiq, and Riverqueue.
+If a worker dies mid-handler, the claim's lease expires and another worker claims the attempt on its next pass, running the handler from scratch. Each claim increments the attempt count, so handlers must be idempotent — the same input processed twice must land in the same state.
 
 ## Related
 
 - [Declarative jobs guide](../guides/declarative-jobs.md). Step-by-step recipe for declaring and running a job.
+- [Operate jobs and workflows](../guides/operate-jobs-and-workflows.md). Submitting, monitoring, and the dead-letter queue.
 - [Custom queries and procedures](custom-queries-and-procedures.md). The synchronous counterpart to jobs.
-- [DSL grammar reference](../reference/dsl-grammar.md). Full grammar including `job`, `workflow`, `enqueue`, `ttl_field`.
+- [DSL grammar reference](../reference/dsl-grammar.md). Full grammar including `job`, `workflow`, and `enqueue`.

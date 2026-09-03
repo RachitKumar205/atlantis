@@ -1,50 +1,85 @@
 # The sandbox
 
-The sandbox boots an isolated, disposable copy of the production schema. State lives in process memory; closing the sandbox destroys it. The in-memory backend is a pure-Go simulator; the Postgres backend runs a real Postgres child process. The backend is picked at boot.
+A sandbox is an isolated, disposable test database holding your
+organisation's schema — and only the rows you put in it. It never contains
+production data. Closing a sandbox destroys its state, and idle sandboxes
+are evicted after 30 minutes.
+
+Sandboxes answer "does my code work against this schema?". They cannot
+answer "will this migration survive our real rows?" — that is a
+**rehearsal**, which executes the migration against a disposable clone of
+the real database and reports what Postgres did. See
+[Change approval](change-approval.md).
 
 ## Two backends
 
 | | In-memory | Postgres |
 |---|---|---|
-| Implementation | Pure-Go simulator | Real Postgres child process (`fergusstrange/embedded-postgres`) |
-| Boot | Sub-millisecond | 4–8 s on Linux; 8–12 s on macOS |
-| SQL coverage | The subset the simulator's executor models | Full SQL |
-| State ops (checkpoint, restore, fork, seed, snapshot, inspect) | Native | Not supported |
-| Determinism (fixed clock) | Honored | Silently ignored — `now()` always returns wall-time |
-| Footprint | Go heap | Per-instance Postgres data directory + the extracted PG binaries (~150 MB combined, version-dependent) |
+| Implementation | Pure-Go simulator, in process memory | Real Postgres process with a data directory |
+| Boot | Sub-millisecond | A few seconds |
+| SQL coverage | The subset the executor models | Postgres SQL |
+| State ops (checkpoint, restore, fork, diff, seed, snapshot, inspect) | Native | Not supported |
+| Determinism (fixed clock) | Honoured | Ignored — `now()` returns wall-time |
 
-Pick **in-memory** when the work is fast-iteration shaped: agent loops, "try N then rewind," schema exploration, anywhere checkpoint and fork primitives matter. Pick **Postgres** when SQL fidelity matters: custom queries, triggers, plpgsql, multi-table joins, complex CHECK constraints. The Postgres backend exposes the SQL surface and nothing else.
+Pick **in-memory** for fast-iteration work: agent loops, "try N then
+rewind," schema exploration, anywhere checkpoint and fork matter. Pick
+**Postgres** when SQL fidelity matters: custom queries, triggers, plpgsql,
+multi-table joins, complex `check` constraints. On the Postgres backend,
+`vector(N)` columns become `BYTEA`, and HNSW indexes and hypertable
+conversion are stripped from the DDL before it applies — vector distance
+operators fail at query time there.
 
-## The state model (sim-only)
+## The state model (in-memory only)
 
-The simulator uses copy-on-write row maps. A capture records pointers to every table's current row map and marks them shared. A subsequent write clone-on-writes the affected map, leaving the captured pointers untouched. This is why the budget for checkpoint, restore, and fork is `O(num_tables)`, not `O(num_rows)`. The row data is never copied at capture time.
+The simulator uses copy-on-write row maps: a capture records pointers to
+every table's current rows and marks them shared, and a later write clones
+only the affected map. Checkpoint, restore, and fork therefore cost
+`O(tables)`, not `O(rows)` — row data is never copied at capture time.
 
-The model has four primitives:
+Four primitives:
 
 - **Checkpoint** — save the current state.
-- **Restore** — rewind to a saved state. The intermediate writes are dropped.
-- **Fork** — clone the current state into N independent sandboxes, each with its own checkpoint history.
-- **Diff** — compute added, removed, and modified row counts per table between two checkpoints.
+- **Restore** — rewind to a saved state; intermediate writes are dropped.
+- **Fork** — clone the current state into N independent sandboxes, each
+  with its own checkpoint history.
+- **Diff** — added, removed, and modified row counts per table between two
+  checkpoints.
 
-The Postgres backend has no equivalent and rejects calls against these primitives with a sandbox-specific error.
+Over HTTP, a state-op call against a Postgres-backed sandbox returns
+`400` with `<feature> is in-memory only; boot a Sim sandbox to use it`.
 
 ## Supported SQL
 
-The simulator's SQL grammar is supplied by `pg_query_go`, the real Postgres parser packaged for Go via cgo. Every PG syntactic construct parses. What the simulator doesn't run is everything the in-memory executor doesn't yet model: multi-table joins, CTEs, GROUP BY, HAVING, UNION/INTERSECT/EXCEPT, window functions other than `COUNT(*) OVER ()`, locking clauses, NOT predicates, table aliases, table-qualified column references, and most function calls beyond `now()` and `COALESCE`.
+The simulator's SQL grammar is supplied by `pg_query_go`, the Postgres
+parser packaged for Go. Every Postgres syntactic construct parses; what
+runs is what the in-memory executor models: single-table `SELECT` with
+`WHERE` / `ORDER BY` / `LIMIT` / `OFFSET`, `INSERT` (with `RETURNING`),
+`UPDATE` and `DELETE` (without `RETURNING`), `ON CONFLICT`, JSON arrow
+extraction, vector distance operators, `= ANY($N)`, and the window-total
+form `COUNT(*) OVER () AS alias`. Multi-table joins, CTEs, `GROUP BY`, and
+every other window form are outside the surface.
 
-The supported surface covers what generated code emits and what typical operator workflows need: bare-column `SELECT`, `SELECT *` (expanded against the catalog), single-table queries with `WHERE` / `ORDER BY` / `LIMIT` / `OFFSET`, INSERT / UPDATE / DELETE with `RETURNING`, `ON CONFLICT` DO NOTHING / DO UPDATE, `EXCLUDED.col` references, JSON arrow extraction (`->`, `->>`) in both projection and WHERE position, vector distance operators (`<=>`, `<->`, `<#>`), `= ANY($N)`, and integer-literal or `$N` placeholder LIMIT/OFFSET.
-
-See [the SQL coverage reference](../reference/sandbox-sql.md) for the full grammar.
+[Sandbox SQL coverage](../reference/sandbox-sql.md) is the complete list.
 
 ## Surfaces
 
-The sandbox is reached two ways. The `/sandbox` page in the [console](../guides/use-the-sandbox.md) is the operator surface: boot, capture, diff, restore, all via the UI. The HTTP control plane at `/api/sandbox/*` is the programmatic surface. Agent loops and CI fixtures call it directly. Both share the same runtime; the console BFF is a thin auth and ownership layer in front of it.
+The console's Sandbox page is the interactive surface: boot, seed, capture,
+compare, restore, fork, all in the UI. The HTTP control plane at
+`/api/sandbox/*` is the programmatic surface for scripts and agent loops;
+both share one runtime. [`tide sandbox`](../reference/cli-tide.md#tide-sandbox-bootshellspawn)
+runs the same in-memory runtime locally. Booting requires the `developer`
+or `admin` role, and each user holds up to 100 sandboxes at a time.
 
-Per-user sandbox count and idle TTL are governed by `SANDBOX_PER_USER_LIMIT` and `SANDBOX_TTL` — see [configuration](../reference/configuration.md). Sandboxes are ephemeral: a console restart loses them, and the TTL janitor evicts idle ones after 30 minutes by default.
+## What the sandbox does not model
+
+- Production rows — every sandbox starts empty.
+- Row-level tenant isolation: the in-memory backend does not enforce
+  `partition by` policies, so it proves nothing about them.
+- Migration safety against real data — rehearse the plan instead.
 
 ## Related
 
 - [Use the sandbox](../guides/use-the-sandbox.md) — walkthrough of the console flow.
 - [Sandbox SQL coverage](../reference/sandbox-sql.md) — what the simulator's executor runs.
 - [Sandbox HTTP API](../reference/sandbox-api.md) — programmatic surface.
-- [Custom queries and procedures](custom-queries-and-procedures.md) — when generated `Query` isn't enough; useful for testing custom SQL in the Postgres backend.
+- [Change approval](change-approval.md) — rehearsal, the real-data proof.

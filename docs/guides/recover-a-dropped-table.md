@@ -1,100 +1,64 @@
-# Recover a dropped table or column
+# Recover a dropped table
 
-Removing an entity or a field from a `.atl` file does not drop anything. The
-object is **parked**: a table is moved into the `atlantis_tombstone` schema, a
-column is renamed out of the way, and the rows stay exactly where they were.
-It disappears from every read, write and generated type immediately, and it is
-fully restorable for **30 days**. After that a background job drops it.
+A destructive migration parks what it removes instead of dropping it: a
+table moves aside with its rows intact, a dropped column is renamed in
+place, and either is preserved for 30 days before a background job drops
+it for good.
 
-This guide is for the case where you removed something and want it back.
+## Prerequisites
 
-## Is it still there?
+- The dropped object is still inside its retention window.
 
-```sql
-SELECT original_schema, original_name, kind, parked_at, reap_after
-  FROM atlantis.parked_objects
- WHERE reaped_at IS NULL
- ORDER BY reap_after;
-```
-
-Each row is an object you can still recover, and `reap_after` is the instant it
-stops being recoverable. That instant is fixed when the object is parked, so
-changing the retention setting later never shortens a window something was
-already promised.
-
-Rows with `reaped_at` set are the audit trail: the object existed, and it was
-dropped on that date. Those are gone — recovery is a restore from backup.
-
-## Restoring it
-
-Revert the schema change and apply. The down migration renames the object back,
-restores any `NOT NULL` the park had to drop, and removes the registration:
+## 1. Check what is preserved
 
 ```bash
-git revert <the commit that removed it>
-tide plan && tide apply
+tide parked
 ```
 
-That is the whole procedure, and it is the one to prefer: it puts the schema and
-the database back in agreement, which a manual rename does not.
-
-If the retention window has already passed, the down migration fails with a
-message saying so rather than reporting a success that restored nothing.
-
-## Changing the window
-
-`reap_after` is an ordinary column. To keep something longer:
-
-```sql
-UPDATE atlantis.parked_objects
-   SET reap_after = now() + INTERVAL '90 days'
- WHERE original_name = 'orders' AND reaped_at IS NULL;
+```
+KIND     OBJECT                          RECOVERABLE FOR    STATE
+table    atlantis.consumer_cart          22d                recoverable
+column   atlantis.consumer_order.notes   6d                 recoverable
 ```
 
-To reclaim the space now, set it into the past and let the reaper pick it up on
-its next run:
+The console's **Parked** page shows the same objects, with the date each
+one was parked. An object under 7 days from reaping is highlighted.
+`tide parked --all` includes objects already `reaped` — those rows are
+gone, and only a platform backup restore brings them back.
 
-```sql
-UPDATE atlantis.parked_objects
-   SET reap_after = now()
- WHERE original_name = 'orders' AND reaped_at IS NULL;
+The window is an absolute instant fixed when the object is parked;
+changing the retention setting later does not move it.
+
+## 2. Restore the declaration
+
+Re-add the entity or field to the `.atl` file as it was — `git revert` the
+commit that dropped it — then:
+
+```bash
+tide plan
+tide apply
 ```
 
-## When something will not reap
+This restores the schema: the entity exists again, with its API and its
+generated types. It creates a fresh, empty object; the preserved rows stay
+parked.
 
-A drop can fail — most often because a view or foreign key was created against
-the parked object after it was parked. The reaper does not use `CASCADE`, so it
-declines rather than destroying whatever depends on it, records the reason, and
-backs off:
+## 3. Restore the rows
 
-```sql
-SELECT original_name, attempts, next_attempt_after, last_error
-  FROM atlantis.parked_objects
- WHERE reaped_at IS NULL AND attempts > 0;
-```
+Contact atlantis support with the object's name from `tide parked` while
+its window is open, so the preserved rows can be moved back into the
+restored object.
 
-Drop the dependency and the next run will succeed. Until then the object stays
-parked, and — because failures back off — it does not block anything else from
-being reaped.
+## Verify
 
-## How the reap runs
-
-`atlantis.ReapParked` is a built-in job on an hourly schedule, drained by a
-worker on the `atlantis` queue that every server runs. Both are independent of
-`ATL_JOBS_WORKER_ENABLED`, which governs caller job queues only.
-
-To pause reaping entirely:
-
-```sql
-UPDATE atlantis.job_schedules SET enabled = false WHERE job_name = 'atlantis.ReapParked';
-```
-
-An operator's edit to that row survives deploys — the schedule is only ever
-inserted, never overwritten.
+`tide show <path-substring>` — matched against the `.atl` file's path —
+prints the submitted file with the restored declaration in it. After the
+row restore, a query returns the pre-drop data.
 
 ## Related
 
-- [Schema history](schema-history.md). What changed, when, and who applied it.
-- [Deploy to production](deploy-to-production.md). Where apply sits in CI.
-- [Jobs and workflows](../concepts/jobs-and-workflows.md). The runtime the
-  reaper is a job on.
+- [`tide parked`](../reference/cli-tide.md#tide-parked) — flags and output.
+- [Schema history](schema-history.md) — finding the version that dropped
+  the object.
+- [Change approval](../concepts/change-approval.md) — why destructive
+  changes wait for a decision.

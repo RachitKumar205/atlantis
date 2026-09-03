@@ -1,43 +1,33 @@
 # Change approval
 
-Some schema changes should not reach a production database because a pipeline decided they could. Dropping a column, or changing a type another team reads, is a decision — and the moment it becomes routine is the moment nobody is deciding it.
-
-atlantis classifies every apply and looks the class up in a policy you control. The rule says whether that class applies unattended or waits for a person.
+atlantis classifies every apply and looks the class up in policies you control. The rules say what applies unattended and what waits for a person — dropping a column, or changing a type another team reads, waits for someone to decide it.
 
 ## The gate
 
 `tide apply` submits files; the server does the rest:
 
 1. Diff the submitted `.atl` files against the current schema and classify the result.
-2. Read the rule for that class from `atlantis.change_policy`.
-3. Apply it, or record the plan and refuse.
+2. Read the rules: the class's policy, the caller's tier, protections, freezes.
+3. Apply, or record the plan and refuse.
 
-The check runs inside the same advisory-locked transaction as the apply, alongside the drift checks. It is not the CLI's decision: a direct gRPC client holding `CAPABILITY_SCHEMA_APPLY` reaches the same gate, because the gate is in the handler rather than in `tide`.
+The check runs in the server's handler, inside the same advisory-locked transaction as the apply: a direct gRPC client holding `CAPABILITY_SCHEMA_APPLY` reaches the same gate `tide` does.
 
-A refused apply is not an error. The plan is stored, `tide apply` exits 2, and the change waits.
+A refused apply stores the plan, exits 2, and the change waits in the console's Approvals queue.
 
 ## The four classes and their defaults
 
 | Class | Default | What it covers |
 |---|---|---|
 | `additive` | applies unattended | New entities, new nullable fields, new indexes |
-| `backfill_required` | depends on install age — see below | A change that needs data written before it completes |
+| `backfill_required` | **waits for approval** | A change that needs data written before it completes |
 | `cross_caller_breaking` | **waits for approval** | A change another caller reads and would break on |
 | `destructive` | **waits for approval** | Anything that removes something holding data |
 
-`backfill_required` is the one default that is not the same everywhere. A **fresh install** gets "waits for approval"; an **existing deployment upgrading** gets "applies unattended".
-
-The asymmetry is deliberate. Breaking and destructive changes were refused outright before this policy existed, so seeding them to "waits" is strictly *more* permissive than what the deployment had — nothing that used to work stops working. Backfill-required changes did apply unattended, so seeding them to "waits" would be a new gate over an existing workflow, appearing at upgrade time with no warning. New installs get the stricter default because they have no workflow to interrupt.
-
-If you want the strict rule on an upgraded deployment, set it yourself in the console — that way it is a decision somebody made, on a day they chose.
+You can relax any class from the console's Settings page; every edit is recorded with who made it.
 
 ## It fails closed
 
-Three things all mean the same thing: a class with no row, a row whose class name nobody recognises, and a class outside the set a diff can produce. All of them require approval, by the default role.
-
-They are one rule on purpose. Every way of failing to find a rule fails the same way, and the safe way. A deployment where somebody deleted a row, or mistyped one, is a deployment where **more** applies stop for a human — never one where fewer do.
-
-Deleting rows from `atlantis.change_policy` makes a deployment stricter. It is not a way to turn the gate off.
+A class with no stored rule, a rule whose class name is not recognised, and a class outside the set a diff can produce all behave the same way: the change requires approval, by the default role. Removing a rule makes the gate stricter, never looser.
 
 ## The caller's own ceiling: apply policy
 
@@ -53,11 +43,11 @@ The change policy is one rule per class, for the whole deployment. Each caller a
 
 `sandbox_only` refuses rather than queues. There is no approval that makes such a caller one that applies; an admin raises the tier from the console's Callers page. Setting the tier is admin work, behind a re-authentication, and every change is recorded in `atlantis.policy_events`.
 
-A deployment can also set a floor: `ATLANTIS_APPLY_POLICY_FLOOR` caps every caller's tier, and a floor that names no tier refuses to boot.
+The platform can also cap every caller's tier with a deployment-wide floor. When a floor is set, the apply-policy dialog says so, a stored tier above the floor is kept, and the gate uses the cap.
 
 ## Rehearsal: proof against the real data
 
-The verified tiers turn on a **rehearsal**: the server clones the managed database — schema and rows, under one snapshot — into a disposable database, executes the migration's exact SQL there, rolls it back, and destroys the clone. The verdict is what Postgres actually did, not a prediction of it:
+The verified tiers turn on a **rehearsal**: the server clones the managed database — schema and rows, under one snapshot — into a disposable database, executes the migration's exact SQL there, rolls it back, and destroys the clone. The verdict reports what Postgres did:
 
 | Verdict | Meaning |
 |---|---|
@@ -67,7 +57,7 @@ The verified tiers turn on a **rehearsal**: the server clones the managed databa
 | `fail_structural` | The SQL itself does not run. |
 | `unverified` | The rehearsal could not answer: too large, timed out, quota. Never treated as a pass. |
 
-`tide rehearse` runs one from a caller's repository; the console runs one against any queued plan. A verdict binds to the exact content it rehearsed — the same identity approvals bind to — and the gate consumes it only within an hour, so a stale pass is simply not found. Data can still drift inside that hour; the apply's own transactional DDL is the final validator, so the worst a stale pass costs is a failed apply, never a half-applied one.
+`tide rehearse` runs one from a caller's repository; the console runs one against any queued plan. A verdict binds to the exact content it rehearsed — the same identity approvals bind to — and the gate consumes it only within an hour; older is the same as absent. Data can still drift inside that hour: the apply's own transactional DDL validates the real rows, so a stale pass produces a failed apply and a rollback, not a partial migration.
 
 Rehearsing is a capability of its own, in no default bundle: the clone holds every caller's rows, and a rehearsal's failure text is a row-value surface. An admin grants it per caller, beside the tier. Listings redact the lines that embed row values; the full record is behind the same capability that can run one.
 
@@ -76,7 +66,7 @@ Rehearsing is a capability of its own, in no default bundle: the clone holds eve
 Two more gates compose with the class rules, both admin-set from the console's Settings page and both recorded in `atlantis.policy_events`:
 
 - **Protected entities** — per-entity approval floors: `payments.Invoice`, or `payments.*` for a namespace. A change touching one waits for a person at every tier, and an `admin_only` floor demands an admin's decision whatever role the class rule names. When the diff cannot say what it touches, the gate assumes it touches one.
-- **Freeze windows** — absolute intervals during which matching classes do not apply. Approving stays possible during a freeze — the decision is not the action — so an approved change queues behind the window and `tide apply --wait-for-approval` picks it up when the window lifts.
+- **Freeze windows** — absolute intervals during which matching classes do not apply. Approving stays possible during a freeze; the approved change queues behind the window, and `tide apply --wait-for-approval` picks it up when the window lifts.
 
 ## Who approves
 
@@ -86,19 +76,15 @@ The server cannot authenticate a console user — that identity system belongs t
 
 ## Overrides
 
-An admin can approve a plan **past** its gates — a freeze window, a protected-entity floor, the self-approval refusal below. An override is an approval with extra ceremony, never a bypass: it requires the admin role, a re-authentication, and a reason, and it is recorded as `override` on the plan and in both audit ledgers. It cannot waive a capability, the `sandbox_only` tier, or the binding of an approval to its exact content — those are edited, not overridden.
+An admin can approve a plan **past** its gates — a freeze window, a protected-entity floor, the self-approval refusal below. An override is an approval with extra ceremony: it requires the admin role, a re-authentication, and a reason, and it is recorded as `override` on the plan and in both audit ledgers. It cannot waive a capability, the `sandbox_only` tier, or the binding of an approval to its exact content.
 
-The override is what keeps the gates honest. A gate with no sanctioned way past it gets switched off deployment-wide the first time it is inconvenient; a gate with a loud, recorded exception survives the incident that tests it.
+Use an override for the incident that cannot wait — not as the routine path. Every override is visible in the audit log and on the plan itself.
 
 ## Nobody approves their own change
 
-This is structural, not a convention.
+The identity that applies is a machine certificate's common name. The identity that approves is a console user. The capability that permits approving, `CAPABILITY_SCHEMA_APPROVE`, is in no bundle a caller receives when it registers, and none of the identities the platform seeds holds it together with `CAPABILITY_SCHEMA_APPLY` — tests hold both the registration bundles and the seeded grants to that.
 
-The identity that applies is a machine certificate's common name. The identity that approves is a console user. The capability that permits approving, `CAPABILITY_SCHEMA_APPROVE`, is in neither bundle a caller receives when it registers — and the console, which holds it, was deliberately never granted `CAPABILITY_SCHEMA_APPLY`.
-
-So the two identities cannot be the same one. A test fails the build if somebody adds the approve capability to a registration bundle to make a pipeline stop asking.
-
-There is a person-level rule beside the structural one. An apply can carry an attribution — which human asked for this — and a plan records it. A decision from the same person is refused: a request is not approved by whoever made it. The attribution is not authenticated, so this stops the honest loop rather than a determined liar, and an admin's override passes it with a reason on record. A plan whose apply named nobody shows as *unattributed* in the queue, which is what an unattended pipeline's request is.
+There is a person-level rule beside the identity split. An apply can carry an attribution — which human asked for this — and a plan records it. A decision from the same person is refused: a request is not approved by whoever made it. The attribution is not authenticated, so this stops the honest loop rather than a determined liar, and an admin's override passes it with a reason on record. A plan whose apply named nobody shows as *unattributed* in the queue, which is what an unattended pipeline's request is.
 
 ## What an approval is attached to
 
@@ -110,15 +96,13 @@ It is also scoped to what the submitting caller actually depends on: the members
 
 A plan stays actionable for **seven days**, whether it is waiting or already approved.
 
-An approval is a statement about a schema somebody read at a particular moment. Left open-ended it becomes a standing permission that outlives the reasoning behind it — the familiar shape being an approval granted in April and used in September, against a schema that has moved underneath it in every way except the ones the token happens to cover.
+An approval is a statement about a schema somebody read at a particular moment. Left open-ended it becomes a standing permission that outlives the reasoning behind it.
 
 Expiry is evaluated on every read rather than by a background job, so nothing about it depends on a sweeper having run.
 
 ## Rollback is not gated
 
-`tide rollback` returns the schema to a state that already passed this gate once. It requires `CAPABILITY_OPERATOR` rather than `CAPABILITY_SCHEMA_APPLY`, and it is what somebody reaches for at three in the morning.
-
-Requiring a second person there is how a gate gets switched off permanently after the first incident. The rollback is recorded, and an auditor can see it was single-party.
+`tide rollback` returns the schema to a state that already passed this gate once, and it is the incident-response path, so it takes no second person. It requires `CAPABILITY_OPERATOR`, is recorded like any other schema version, and an auditor can see it was single-party.
 
 ## Related
 

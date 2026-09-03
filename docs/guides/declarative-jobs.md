@@ -1,16 +1,20 @@
-# Declarative jobs
+# Declare a background job
 
-After this recipe you'll have a typed background job declared in `.atl`, a Go handler registered at server startup, and a working submit-claim-complete loop running against your local atlantis.
+Declare a typed job in `.atl`, implement its handler in your own service,
+and run the submit–claim–complete loop.
 
-Prereqs:
+## Prerequisites
 
-- atlantis running locally (`tidectl dev` or a manual `go build + exec`).
-- `ATL_JOBS_WORKER_ENABLED=true` in the server's environment.
-- `buf` and `go` (1.25+) on `$PATH`.
+- A caller set up with `tide` ([Get started](../getting-started/index.md)).
+- The `github.com/rachitkumar205/atlantis/clients/go/jobs` package in your
+  service, for the worker and handler types.
+- Job dispatch enabled for your queue on your organisation's server. It is
+  not on by default — contact atlantis support with the queue name before
+  the first worker connects.
 
-## 1. Declare the job in `.atl`
+## 1. Declare the job
 
-In your caller repo (e.g., `backend/internal/directory/schema.atl`):
+In your repository's `.atl`:
 
 ```atl
 job ImportContacts in directory {
@@ -21,105 +25,82 @@ job ImportContacts in directory {
   retries  3
   timeout  30m
   queue    "contacts"
+  visible_to "directory"
 }
 ```
 
-- `args` uses the same type grammar as entity fields (varchar, int, jsonb, arrays, etc.).
-- `schedule "cron-spec"` adds periodic invocation if you want the job to fire on a timer.
-- `visible_to "directory"` restricts which callers can submit.
+- `args` uses the entity field grammar (varchar, int, jsonb, arrays).
+- `visible_to "directory"` restricts which caller may submit the job and
+  claim it.
 
-## 2. Run codegen
-
-```bash
-tidectl codegen --workspace=atlantis.dev.yaml
-```
-
-This emits `gen/go/server/directory/jobs.go` (Go package `directory`) with:
-
-- `ImportContactsArgs` struct (typed, json-tagged). Field names are PascalCase in Go (the snake_case names in `.atl` are converted automatically).
-- `ImportContactsHandler` interface (`Handle(ctx, args) error`).
-- `ImportContactsJobName` const (`"directory.ImportContacts"`).
-- `RegisterImportContacts(reg, handler)` helper.
-
-## 3. Implement the handler
-
-In your server code:
-
-```go
-type importContactsHandler struct {
-    crm *crmapi.Client
-}
-
-func (h *importContactsHandler) Handle(ctx context.Context, args directory.ImportContactsArgs) error {
-    // Checkpoint(ctx, progressPercent, message) — reports progress
-    // visible in `tide job status`. Best-effort; does not fail the job.
-    jobs.Checkpoint(ctx, 10, "fetching contacts")
-
-    contacts, err := h.crm.FetchContacts(ctx, args.AccountId)
-    if err != nil {
-        return err // worker retries up to the declared retries limit, then DLQs
-    }
-
-    jobs.Checkpoint(ctx, 80, "importing contacts")
-    // ... import logic ...
-
-    return nil
-}
-```
-
-`crmapi` here stands in for your upstream provider's Go client — substitute your own.
-
-## 4. Register at server startup
-
-In `cmd/server/main.go` (or your fork's equivalent):
-
-```go
-reg := jobs.NewRegistry()
-directory.RegisterImportContacts(reg, &importContactsHandler{crm: crmClient})
-// pass reg to the worker (see "In-process worker pattern" below)
-```
-
-## 5. Apply the schema
+## 2. Apply
 
 ```bash
 tide apply
 ```
 
-This writes the job's runtime config (retries, timeout, queue) to the database so `SubmitJob` can look it up at submit time.
+The declaration is additive. The server enforces `retries`, `timeout`, and
+`queue` at submit and claim time.
 
-## 6. Submit a job
+## 3. Implement and register the handler
 
-Use the generated `Args` struct for type safety, then submit via the admin RPC:
+Handlers run in your service's binary. Register one against the job's
+canonical id, unmarshalling the args JSON into your own struct:
 
 ```go
-args := directory.ImportContactsArgs{
-    AccountId:      "acct_123",
-    ImportStrategy: "replace",
+type importContactsArgs struct {
+    AccountID      string `json:"account_id"`
+    ImportStrategy string `json:"import_strategy"`
 }
-argsJSON, _ := json.Marshal(args)
-client.SubmitJob(ctx, admin.SubmitJobRequest{
-    JobName: directory.ImportContactsJobName,
-    Args:    argsJSON,
+
+registry := jobs.NewRegistry()
+registry.Register("directory.ImportContacts", jobs.HandlerFunc(
+    func(ctx context.Context, argsJSON []byte) error {
+        var args importContactsArgs
+        if err := json.Unmarshal(argsJSON, &args); err != nil {
+            return err
+        }
+        jobs.Checkpoint(ctx, 10, "fetching contacts")
+        // ... your import logic ...
+        return nil
+    }))
+```
+
+A non-nil return retries the attempt up to the declared `retries`, then
+dead-letters it. `jobs.Checkpoint(ctx, pct, msg)` reports progress and
+extends the attempt's lease; long-running handlers call it as they go.
+
+## 4. Run a worker
+
+The worker holds a gRPC session to your organisation's server and receives
+dispatched work over it — your service needs no database access:
+
+```go
+w := jobs.NewDispatchedWorker(conn, registry, "contacts", jobs.ServerConfig{
+    Logger: slog.Default(),
 })
+go w.Run(ctx)
 ```
 
-Or from the CLI (operator ad-hoc):
+`conn` is your service's authenticated `*grpc.ClientConn` to atlantis.
+`Run` reconnects on stream errors
+with backoff; work in flight when a worker dies is re-dispatched to another
+worker after its lease expires, so handlers must be idempotent.
+
+## 5. Submit
 
 ```bash
-tide job submit directory.ImportContacts --args='{"account_id":"acct_123","import_strategy":"replace"}'
+tide job submit directory.ImportContacts \
+  --args='{"account_id":"acct_123","import_strategy":"replace"}'
 ```
 
-## 7. Monitor
-
-```bash
-tide job status <job-id>
-tide job dead --job-name=directory.ImportContacts
-tide job retry <dead-job-id>
+```
+✔ submitted directory.ImportContacts as job 0198f2c1a4e07000
+       monitor with: tide job status 0198f2c1a4e07000
 ```
 
-## Enqueue from a procedure
-
-Jobs can be enqueued atomically with a write transaction:
+Services submit through the same gRPC API (`SubmitJob`, requiring the
+`JOBS_WRITE` capability), or atomically from a procedure:
 
 ```atl
 procedure ConnectAccount for directory.Account {
@@ -131,64 +112,34 @@ procedure ConnectAccount for directory.Account {
 }
 ```
 
-The job row shares the procedure's tx. If the procedure rolls back, the job is never enqueued.
+The enqueue shares the procedure's transaction: if the procedure rolls
+back, the job is never enqueued. A brand-new procedure's RPC becomes
+callable at the next server restart — see
+[Custom queries and procedures](../concepts/custom-queries-and-procedures.md#adding-vs-editing).
 
-This declares a **new** procedure, so its gRPC method registers only on the next rolling server restart — `tide apply` records the declaration but can't add the method to a running server. (Editing an existing procedure's steps hot-reloads with no restart.)
+## Verify
 
-## In-process worker pattern
-
-The job handler runs inside your application binary, not inside the atlantis server. See [Jobs and workflows](../concepts/jobs-and-workflows.md) for the conceptual model. In short: atlantis stores jobs and workers pull them via `FOR UPDATE SKIP LOCKED`; the handler code runs in the app process that owns the business logic.
-
-```go
-package main
-
-import (
-    "context"
-    "log/slog"
-    "net/http"
-    "time"
-
-    "github.com/jackc/pgx/v5/pgxpool"
-    "github.com/rachitkumar205/atlantis/clients/go/jobs"
-    "gen/go/server/directory"
-)
-
-func main() {
-    ctx := context.Background()
-    crmClient := crmapi.NewClient(/* ... */)
-
-    // Connect to the atlantis database.
-    pool, _ := pgxpool.New(ctx, pgURL)
-
-    // Build the job registry and register handlers.
-    registry := jobs.NewRegistry()
-    directory.RegisterImportContacts(registry, &importContactsHandler{crm: crmClient})
-
-    // Start the worker. It polls the atlantis job queue,
-    // claims rows, and calls the matching handler.
-    w := jobs.NewWorker(pool, registry, "contacts", jobs.Config{
-        Schema:        "atlantis",
-        DrainInterval: time.Second,
-        BatchSize:     10,
-        Logger:        slog.Default(),
-    })
-    go w.Run(ctx)
-
-    // Start the HTTP server in the same binary.
-    http.ListenAndServe(":8080", router)
-}
+```bash
+tide job status 0198f2c1a4e07000
 ```
 
-If a handler returns an error, the worker marks the job for retry (up to the declared `retries` limit) or moves it to the dead-letter queue. Scale workers by scaling app replicas — multiple workers on the same queue coordinate via `SKIP LOCKED`.
+```
+job-id     0198f2c1a4e07000
+job-name   directory.ImportContacts
+queue      contacts
+status     complete
+attempts   1 / 3
+enqueued   2026-09-02T14:03:11Z
+```
 
-## Common errors
+The status reaches `complete`, with any checkpoints your handler reported.
+The console's Workers page shows the connected worker session and its
+queue.
 
-- `unknown job "directory.ImportContacts"` — run `tide apply` to record the declaration into the IR checkpoint.
-- `no handler registered for directory.ImportContacts` — call `RegisterImportContacts(reg, handler)` at server startup. The worker retries until a pod with the handler claims the row.
-- `caller "X" is not allowed to submit` — the job declares `visible_to "Y"`. Either submit from the right caller or update the visibility.
+## Next steps
 
-## Related
-
-- [Jobs and workflows](../concepts/jobs-and-workflows.md) — how the runtime works under the hood
-- [Row-level TTL](row-ttl.md) — automatic expiry using the job runtime's built-in sweeper
-- [Local development](local-development.md) — running atlantis locally with `tidectl dev`
+- [Operate jobs and workflows](operate-jobs-and-workflows.md) — monitoring,
+  the dead-letter queue, retries.
+- [Long-running handlers](long-running-handlers.md) — idempotency, leases,
+  and resume-from-progress in depth.
+- [Jobs and workflows](../concepts/jobs-and-workflows.md) — the model.

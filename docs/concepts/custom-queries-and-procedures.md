@@ -43,15 +43,13 @@ A procedure runs its steps inside a single Postgres transaction. The generated R
 
 Every `sql` block declares the entities it reads or writes with `touches(...)`. Queries register it as the read set for cache invalidation; procedure steps register it as the write set that fires invalidations after commit.
 
-Atlantis validates parameter references and `touches(...)` targets at apply time; pure SQL errors surface when the migration runs.
+atlantis validates parameter references and `touches(...)` targets at apply time; pure SQL errors surface when the migration runs.
 
 ## Adding vs editing
 
 Editing an existing `query` or `procedure` — changing its SQL, inputs, or `touches(...)` set — hot-reloads on `tide apply`. The server swaps the schema snapshot in place and the next request runs the new definition; no restart.
 
-Adding a *brand-new* `query` or `procedure` is different. `tide apply` persists it to the checkpoint, and `tide show` lists it, but its gRPC method only registers at server startup. Until the server restarts, callers invoking the new method get a gRPC `Unimplemented` error. Restart the server to make a newly added custom declaration callable.
-
-This split exists because entity and custom-service gRPC methods are registered once when the server boots; `Reload` only swaps the metadata snapshot and does not add new method descriptors to the running server.
+Adding a *brand-new* `query` or `procedure` persists it to the checkpoint, and `tide show` lists it, but a gRPC method registers only at server startup: callers invoking the new method get a gRPC `Unimplemented` error until your organisation's server next restarts.
 
 Adding, removing, or changing a custom declaration shows up in `tide plan` and `tide diff` as an additive entry. These changes carry no DDL — custom declarations are served at runtime from the checkpoint IR, not migrated — so they never raise the plan class.
 
@@ -62,7 +60,7 @@ Adding, removing, or changing a custom declaration shows up in `tide plan` and `
 
 ## Testing custom SQL before `tide apply`
 
-Paste a `query` or `procedure` body into the SQL tab of the [sandbox](sandbox.md) to verify it against seed data before applying. The sandbox's in-memory backend runs the same SQL surface the in-memory executor models; for shapes outside that surface, switch the sandbox to the Postgres backend at boot time.
+The [sandbox](sandbox.md) verifies a `query` or `procedure` body against seed data before applying. Its in-memory backend covers the subset in [Sandbox SQL coverage](../reference/sandbox-sql.md); the Postgres backend, chosen at boot, runs everything else.
 
 ## Related
 

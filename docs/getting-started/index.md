@@ -1,207 +1,116 @@
-# Getting started
+# Get started
 
-By the end of this page you will have an organisation with its own atlantis, a
-machine enrolled against it, and a `Note` entity applied to that organisation's
-Postgres.
+From nothing to a schema change applied in production: install `tide`, sign
+up for Atlantis Cloud, create an organisation, connect a repository, and
+apply your first entity.
 
-This describes the **local stack**, which is the only way to run atlantis today.
-Every command here was run end to end; where a step needs a browser, it says so.
+## Prerequisites
 
-## What you need
+- A Go service repository to hold the schema.
+- macOS or Linux on amd64 or arm64.
 
-- Go 1.26.4 or later
-- Apple `container` (this repo's local flow uses it rather than Docker)
-- `kubectl`, `psql`
-- Node 22, but only for the two pages you sign in through
+## 1. Install tide
 
-An organisation runs in Kubernetes: its own certificate authorities, its own
-Postgres, its own atlantis and its own certificate signer. That is what the
-cluster below is for.
-
-## 1. Bring up the platform
-
-Four processes and two containers. Each `make` target runs in the foreground, so
-give each one a terminal.
-
-```
-make dev-infra          # Postgres and memcached, in containers
-make dev-k8s            # the Kubernetes cluster organisations are built into
-make build-provision-images
-make dev-k8s-load       # push those images into the cluster
+```bash
+curl -fsSL https://releases.tryatlantis.dev/install.sh | sh
 ```
 
-`make dev-k8s` refuses to start if the disk is nearly full. Take it seriously: a
-full disk stops the cluster in a way that reports anything except disk.
+The script verifies the release checksum and installs into `/usr/local/bin`
+or `~/.local/bin`, whichever is writable first. Confirm the install:
 
-Then, one per terminal:
-
-```
-make dev-auth-app       # Atlantis Cloud, with its sign-in pages
-make dev-console-app    # the management console, with its pages
-make dev-provisioner    # builds organisations that have been queued
+```bash
+tide version
 ```
 
-Use `dev-auth` and `dev-console` instead if you do not want to build the pages —
-the APIs are the same, but you cannot sign in through a browser without them.
-
-See [Local development](../guides/local-development.md) for what each of these
-is and how to configure it.
-
-## 2. Create your account
-
-Open <http://localhost:9500/signin> and sign up. Two things differ from
-production:
-
-- **The verification link is printed, not emailed.** No mail server is
-  configured locally, so `make dev-auth` writes the message to its terminal.
-  Open the link from there.
-- **A second factor is required**, not optional. You will be asked to enrol an
-  authenticator app before your first sign-in completes, and shown ten backup
-  codes once.
-
-`cloud user create` exists but deliberately makes an account with no credential,
-which cannot sign in. Sign up through the browser.
-
-## 3. Create an organisation
-
 ```
-make dev-cloud-seed EMAIL=you@example.com ORG=acme
+  ⊙
+  tide  v0.4.0
 ```
 
-That creates the organisation, makes you its admin, and queues it. The
-provisioner picks it up within a few seconds and takes about a minute to build
-a namespace, two certificate authorities, a Postgres cluster, an atlantis and a
-signer.
+## 2. Sign up and create an organisation
 
-Watch it:
+1. Sign up at Atlantis Cloud with your email, name, and a password, then
+   open the verification link atlantis sends.
+2. Set up two-factor authentication. Sign-in requires it, and your backup
+   codes are shown exactly once — save them.
+3. On the Organisations screen, create an organisation. The name is a DNS
+   label: it starts with a letter or digit, then lowercase letters,
+   digits, and hyphens, up to 63 characters. A few names — `admin`, `api`,
+   `atlantis`, `console`, `support`, `system`, `www` — are reserved.
+4. Wait for the organisation to report ready. Creating it provisions a
+   dedicated database and server; the screen shows progress and links to
+   the console when it is up.
 
-```
-make dev-org-status ORG=acme
-```
+## 3. Register a caller
 
-`state` goes `pending` → `provisioning` → `ready`. To create and wait in one
-command instead:
+A caller is a repository's identity at atlantis
+([Manage members and callers](../guides/manage-members-and-callers.md)).
+In your organisation's console:
 
-```
-./bin/atlantis-cloud org create -org acme -owner you@example.com -wait
-```
+1. Open **Callers** and select **Add caller**.
+2. Name the caller after the repository — `api`, for example — and enable
+   mutate permission so it can plan and apply schema.
 
-It exits non-zero if the organisation does not come up, and prints why.
+## 4. Connect the repository
 
-## 4. Register a caller and enrol this machine
+In the repository root:
 
-A **caller** is a service that talks to atlantis. It needs to exist before a
-machine can enrol as it.
-
-In the console at <http://localhost:3000>, open **Callers**:
-
-1. Add a caller named `backend`. Leave the permission to change schema **on** —
-   it is on by default. A caller without it can read and nothing else, and
-   `tide plan` will refuse.
-2. Use its enrol action to mint a token. This asks you to re-enter your second
-   factor; the token is single-use and expires in fifteen minutes.
-
-If you register a caller through the API rather than the page, note that
-`can_mutate` defaults to **false** there — the opposite of the checkbox.
-
-Then, on the machine that will run `tide`. A released `tide` installs from
-the install script or Homebrew; this walkthrough builds it from the checkout
-you are already standing in, because the local stack is what you are running:
-
-```
-go install ./cmd/tide
-
-tide login \
-  --url https://127.0.0.1:3443 \
-  --org acme \
-  --token <the token> \
-  --ca ./certs/ca.crt
+```bash
+tide init --caller api
+tide login
 ```
 
-Against a hosted Atlantis this whole block is `tide login` with no flags —
-the browser flow discovers everything the four flags carry here. The token
-method remains for enrolling a machine on someone's behalf; `--ca` exists
-because the local stack's certificates chain to an authority in no system
-store.
-
-`tide` generates a private key locally, sends only a certificate signing
-request, and stores the result under `~/.atlantis/acme/backend/`. The key never
-leaves the machine.
-
-`--ca` is **local development only**. It exists because the enrolment listener
-uses a development certificate that your system does not trust. In a deployment
-that listener has a publicly trusted certificate and the flag is not used.
+`tide init` writes `tide.yaml`, the repository's only atlantis
+configuration file.
+`tide login` opens your browser: sign in, type the code the terminal shows,
+and approve the machine. The credential lands in `~/.atlantis/` and renews
+itself.
 
 ## 5. Declare an entity
 
-Create a directory for your service and add `tide.yaml`:
+Create `schema.atl`:
 
-```yaml
-caller: backend       # the caller you registered above
-org: acme             # which organisation this repository belongs to
-schema_paths:         # directories scanned recursively for *.atl
-  - .
-```
-
-There is no `endpoint:` and no TLS configuration. The organisation owns its
-address and issues the credential; `tide login` collected both.
-
-Add `schema.atl`:
-
-```
+```atl
 entity Note in app {
-  id         bigint primary
+  id         bigint primary serial
   title      varchar(200) not null
-  body       text
   created_at timestamptz not null default now()
 }
 ```
 
-`app` is the schema namespace.
+## 6. Plan and apply
 
-## 6. Plan, then apply
-
-```
+```bash
 tide plan
-```
-
-This prints what would change and a plan id. Nothing has been written yet. Then:
-
-```
 tide apply
 ```
 
+`tide apply` runs the migration and records the new schema version. An
+additive change like this one applies unattended; a class that needs a
+decision waits in the console's Approvals queue, and `tide apply` exits 2
+to say the change is queued, not failed.
+
+## Verify
+
+```bash
+tide list
 ```
-✔ applied at 2026-08-23T10:45:31Z
-  content  d809a3ee7eda
-```
-
-The table now exists in that organisation's own Postgres:
 
 ```
-kubectl exec -n org-acme pg-1 -c postgres -- \
-  psql -U postgres -d atlantis -c '\d app_note'
+schema.atl
 ```
 
-## What's next
+`tide list` prints every file the server holds for this caller — the one
+you just applied. The console's **Schema** page shows the entity with its
+fields, and **History** shows the version your apply created.
 
-- `tide list` — every entity in the merged schema.
-- `tide show Note` — the canonical `.atl` text for one entity.
-- [Declare a custom query](your-first-custom-query.md) — a read that does not
-  fit primary-key lookup.
-- [Use the sandbox](../guides/use-the-sandbox.md) — a disposable copy of the
-  schema with seed data.
-- [Concepts](../concepts/) — the model behind `.atl`, the cache, the CLI split.
+## Next steps
 
-`tide generate` writes a typed Go client for the namespaces `tide.yaml` lists
-under `generate:`.
-
-## If something goes wrong
-
-| What you see | What it means |
-|---|---|
-| `requires CAPABILITY_SCHEMA_PLAN` | The caller was registered without permission to change schema — most likely through the API, where it defaults to off. Turn it on in the console; re-enrolling will not help |
-| `duplicate entity` naming `.tide-cache/` | You are on a `tide` older than this page. Rebuild it |
-| `org status` stuck on `pending` | No provisioner is running, or it cannot reach the cluster. Check `make dev-provisioner`'s terminal |
-| `org status` showing `failed` | Read `last error` on the same output. A missing image is the usual cause — run `make dev-k8s-load` |
-| The cluster stops answering | Nearly always a full disk. `make dev-k8s-destroy` then `make dev-k8s` is faster than diagnosing it |
+- [Declare a custom query](your-first-custom-query.md) — SQL the typed
+  surface doesn't cover.
+- [Generate the typed client](../concepts/the-generated-client.md) — set
+  `output_dir` in `tide.yaml` and run `tide generate`.
+- [Add a new entity](../guides/add-a-new-entity.md) — the full modifier
+  tour: references, soft delete, tenant partitioning.
+- [Set up CI](../guides/set-up-ci.md) — plan on pull requests, apply on
+  merge, no repository secrets.
