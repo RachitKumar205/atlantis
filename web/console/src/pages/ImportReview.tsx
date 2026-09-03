@@ -155,12 +155,9 @@ export function ImportReview() {
   )
 }
 
-// ── Commit: the files, and the two steps that create them ─────────────────
-//
-// Plan first, then apply. The declarations describe tables this atlantis does
-// not have — an import reads somebody else's database — so committing them
-// runs CREATE TABLE. The plan is what says how much, and is shown before
-// anything runs.
+// CommitSection previews and applies an import: Commit computes the plan
+// for review, Apply records the declarations as the baseline checkpoint.
+// The apply runs no DDL — the imported tables already exist.
 function CommitSection({ id }: { id: string }) {
   const { data, isPending, isError } = useQuery(queries.schemaImportEntities(id))
   const qc = useQueryClient()
@@ -272,8 +269,8 @@ function CommitSection({ id }: { id: string }) {
           {done
             ? 'Applied.'
             : reviewing
-              ? 'Applying runs the statements above.'
-              : 'Shows what would be created. Nothing runs yet.'}
+              ? 'Applying records these declarations as the baseline. The statements above are not executed — the tables already exist.'
+              : 'Shows the SQL the declarations correspond to. Nothing runs.'}
         </span>
         {reviewing && (
           <button
