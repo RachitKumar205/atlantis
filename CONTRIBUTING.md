@@ -72,7 +72,7 @@ Schema fixtures live under `testdata/schema/`. To exercise a codegen change end-
 | `migrations/infra/` | Hand-written infrastructure migrations |
 | `testdata/schema/` | `.atl` fixtures the codegen tests/CI build against |
 
-[Architecture overview](docs/architecture/) covers how the pieces fit.
+[Architecture overview](ops/architecture/index.md) covers how the pieces fit.
 
 ## Style
 
@@ -104,7 +104,7 @@ atlantis is licensed under [BUSL-1.1](LICENSE). By opening a PR you license your
 ## What we won't merge
 
 - Changes that re-introduce a schema-mutation path outside the `tide apply` flow. See [Schema as code](docs/concepts/schema-as-code.md).
-- A `Backend` interface abstraction over PostgreSQL. See [Architecture](docs/architecture/) for the rationale.
+- A `Backend` interface abstraction over PostgreSQL. See [Architecture](ops/architecture/index.md) for the rationale.
 - Changes to the generated tree without the corresponding emitter change.
 - Vendored copies of third-party code unless there's a clear reason `go mod` can't handle it.
 

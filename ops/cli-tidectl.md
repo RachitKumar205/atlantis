@@ -86,7 +86,7 @@ tidectl adopt [--workspace <file>] [--workspace-cache <dir>]
 | `--format` | `table` | `table` or `json`. |
 | `--timeout` | `120s` | RPC timeout; introspecting a large schema can take a while. |
 
-Exit codes: `0` clean adopt (or drift accepted with `--allow-drift`, checkpoint written); `1` drift detected and the baseline refused; `3` operational error. See [Adopt an existing database](../guides/adopt-an-existing-database.md).
+Exit codes: `0` clean adopt (or drift accepted with `--allow-drift`, checkpoint written); `1` drift detected and the baseline refused; `3` operational error. See [Adopt an existing database](../docs/guides/adopt-an-existing-database.md).
 
 If you want to know what differs without baselining anything, use `tidectl inspect` below. `--allow-drift` is not a way to look — it writes the shared checkpoint for every caller.
 
@@ -110,7 +110,7 @@ Flags are `adopt`'s, minus `--allow-drift`: there is nothing to permit.
 | `2` | Mismatch — both sides exist and disagree |
 | `3` | Operational error |
 
-The same code map as [`tide inspect`](cli-tide.md#tide-inspect), which asks the same question scoped to one caller. An operator comparing a deployment-wide run against a caller's CI run should not have to translate.
+The same code map as [`tide inspect`](../docs/reference/cli-tide.md#tide-inspect), which asks the same question scoped to one caller. An operator comparing a deployment-wide run against a caller's CI run should not have to translate.
 
 The server runs this in a read-only transaction. It takes no advisory lock, so it cannot block a concurrent apply.
 

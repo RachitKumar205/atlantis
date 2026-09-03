@@ -61,4 +61,4 @@ See: [cache architecture](cache-architecture.md), [migration ownership](migratio
 - [Cache architecture](cache-architecture.md) — body cache, query-result cache, outbox worker, version pointers.
 - [Schema flow](schema-flow.md) — dev (`tide apply` mirror) vs prod (workspace manifest).
 - [Migration ownership](migration-ownership.md) — `infra/` vs `tidectl/` split.
-- [The sandbox](../concepts/sandbox.md) — in-process disposable runtime hosted by the console BFF.
+- [The sandbox](../../docs/concepts/sandbox.md) — in-process disposable runtime hosted by the console BFF.

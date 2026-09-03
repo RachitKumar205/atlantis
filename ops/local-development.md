@@ -4,7 +4,7 @@ After this recipe you'll have atlantis running on your laptop against a local Po
 
 Prereqs:
 
-- A Postgres instance the operator can reach. A local snapshot of staging or prod is the common case; see [Adopt an existing database](adopt-an-existing-database.md) for the snapshot + restore path.
+- A Postgres instance the operator can reach. A local snapshot of staging or prod is the common case; see [Adopt an existing database](../docs/guides/adopt-an-existing-database.md) for the snapshot + restore path.
 - A memcached instance on `localhost:11211` (or wherever; the address is configurable). `docker run -d -p 11211:11211 memcached:1.6-alpine` is enough.
 - `buf`, `go` (1.25+) and `openssl` on `$PATH`.
 - One or more caller repos with `.atl` files. They don't need to be committed.
@@ -141,8 +141,7 @@ Kubernetes cluster — its own namespace, its own two certificate authorities, i
 own Postgres, atlantis and signer — and registers it with the console. It takes
 about a minute. `make dev-org-status ORG=acme` shows how far it has got.
 
-This needs the cluster: see [Getting started](../getting-started/) for bringing
-it up.
+This needs the cluster: `make dev-infra` then `make dev-k8s` bring it up.
 
 ### Point it at an atlantis you built by hand
 
@@ -228,7 +227,7 @@ TLS_CA_FILE=./certs/ca.crt \
 
 To iterate: edit a `.atl`, `Ctrl+C` the server, re-run `tidectl dev`.
 
-This flow rebuilds the **server** (and the central `clients/go/` SDK used by atlantis's own tests). It is separate from how a caller gets its typed client: a caller runs [`tide generate`](../reference/cli-tide.md#tide-generate) from its own repo to emit a scoped client into its module. Server-side runtime dispatch means the server never needs the generated client — only callers do.
+This flow rebuilds the **server** (and the central `clients/go/` SDK used by atlantis's own tests). It is separate from how a caller gets its typed client: a caller runs [`tide generate`](../docs/reference/cli-tide.md#tide-generate) from its own repo to emit a scoped client into its module. Server-side runtime dispatch means the server never needs the generated client — only callers do.
 
 ## Flags worth knowing
 
@@ -264,11 +263,10 @@ The two manifests can coexist in the same atlantis deployment repo. Commit `atla
 - `no client certificate configured` from `tide` or `tidectl` — run `make dev-caller-cert CALLER=<name>` and export what it prints.
 - `pg pool init: ...` from the server — `PG_URL` is wrong or Postgres isn't reachable.
 - `memcached: ...` from the server — `MEMCACHED_ADDR` is wrong, or memcached isn't running.
-- `permission denied for table ...` — the role in `PG_URL` doesn't have grants on the caller schemas. See [Adopt an existing database](adopt-an-existing-database.md) §3 for the grant SQL.
+- `permission denied for table ...` — the role in `PG_URL` doesn't have grants on the caller schemas. Grant it `USAGE` on each caller schema and `SELECT` on the tables being introspected.
 
 ## Related
 
-- [Adopt an existing database](adopt-an-existing-database.md) — provisioning the local Postgres clone atlantis runs against.
-- [Deploy to production](deploy-to-production.md) — the prod-shaped workflow with `source: git` and pinned refs.
-- [DSL grammar reference](../reference/dsl-grammar.md) — what goes inside the `.atl` files atlantis reads.
-- [Use the sandbox](use-the-sandbox.md) — disposable copies of the merged schema for testing queries against seeded data.
+- [Adopt an existing database](../docs/guides/adopt-an-existing-database.md) — provisioning the local Postgres clone atlantis runs against.
+- [DSL grammar reference](../docs/reference/dsl-grammar.md) — what goes inside the `.atl` files atlantis reads.
+- [Use the sandbox](../docs/guides/use-the-sandbox.md) — disposable copies of the merged schema for testing queries against seeded data.

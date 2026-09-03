@@ -92,7 +92,7 @@ Set `AUTO_MIGRATE=false` in production. Boot-time migrations race rolling restar
 
 ## Admin RPC gating
 
-`ATL_ALLOW_APPLY_MUTATION` selects the schema-change flow. Default (`true`) is the per-caller-CI flow: callers run `tide apply` against the server and the server runs the DDL + IR write under an advisory lock. Set to `false` only when a regulator requires literal SQL review on a deployment-repo PR before any database change (SOX, HIPAA, PCI). The plan and pull RPCs remain available regardless. See [schema flow](../architecture/schema-flow.md) for the two flows in full.
+`ATL_ALLOW_APPLY_MUTATION` selects the schema-change flow. Default (`true`) is the per-caller-CI flow: callers run `tide apply` against the server and the server runs the DDL + IR write under an advisory lock. Set to `false` only when a regulator requires literal SQL review on a deployment-repo PR before any database change (SOX, HIPAA, PCI). The plan and pull RPCs remain available regardless. See [schema flow](architecture/schema-flow.md) for the two flows in full.
 
 `ATL_ALLOW_APPLY_MUTATION` is a switch, not a permission. It decides whether the mutating admin plane is open at all; it says nothing about who may use it.
 
@@ -129,7 +129,7 @@ ON CONFLICT DO NOTHING;
 
 There is **no hierarchy**. `SCHEMA_APPLY` does not imply `SCHEMA_READ`, and `OPERATOR` implies nothing at all — a grant confers exactly what it names.
 
-That separation is what lets a PR-time credential compute a migration without being able to run one: grant the plan caller `SCHEMA_PLAN` and nothing else, and the apply caller `SCHEMA_APPLY`. See the [CI examples](../examples/).
+That separation is what lets a PR-time credential compute a migration without being able to run one: grant the plan caller `SCHEMA_PLAN` and nothing else, and the apply caller `SCHEMA_APPLY`. See [Set up CI](../docs/guides/set-up-ci.md).
 
 Registering a caller through the console grants a bundle derived from its `can_mutate` flag: read capabilities always, plus plan/apply/jobs-write when the flag is set. Clearing the flag revokes those again. `OPERATOR` and `LOGS_READ` are never part of that bundle and survive re-registration, so an operator can grant them by hand without a later registration silently taking them back. The console itself is seeded as an operator by migration `0019_console_identity`.
 
@@ -159,12 +159,12 @@ do not have.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `ATL_REQUIRE_TENANT_ISOLATION` | `false` | Refuse to start on a deployment where `partition by` would not isolate. Two conditions, both reported either way. **The database role can bypass row-level security** — a superuser, or any role holding `BYPASSRLS`. Such a role sees through `FORCE ROW LEVEL SECURITY`, which leaves every policy attached and completely inert: the catalog looks correct and every read returns every tenant's rows. If the check itself cannot run — a locked-down `pg_roles`, a pooler rewriting `current_user` — the server refuses rather than continuing unchecked. **Or the stored schema contains SQL that can rebind the tenant**: `tide apply` rejects `set_config` and `atlantis.set_partition` in query bodies, procedure steps, `check` expressions and index predicates, but only from the moment that gate existed, so the checkpoint is re-audited at every boot. Set this on any deployment using [`partition by`](dsl-grammar.md). |
+| `ATL_REQUIRE_TENANT_ISOLATION` | `false` | Refuse to start on a deployment where `partition by` would not isolate. Two conditions, both reported either way. **The database role can bypass row-level security** — a superuser, or any role holding `BYPASSRLS`. Such a role sees through `FORCE ROW LEVEL SECURITY`, which leaves every policy attached and completely inert: the catalog looks correct and every read returns every tenant's rows. If the check itself cannot run — a locked-down `pg_roles`, a pooler rewriting `current_user` — the server refuses rather than continuing unchecked. **Or the stored schema contains SQL that can rebind the tenant**: `tide apply` rejects `set_config` and `atlantis.set_partition` in query bodies, procedure steps, `check` expressions and index predicates, but only from the moment that gate existed, so the checkpoint is re-audited at every boot. Set this on any deployment using [`partition by`](../docs/reference/dsl-grammar.md). |
 | `ATL_REQUIRE_APACHE_TIMESCALE` | `false` | Refuse to start on a Community (TSL) TimescaleDB build. Self-hosting on the Community build is legitimate — the Timescale License restricts offering the software as a service, not running it — so this is opt-in and belongs on a hosted deployment. |
 
 ## Schema drift
 
-`ATLANTIS_ALLOW_INDEX_DRIFT` controls whether `tide apply` proceeds over an **undeclared unique index** — a live `CREATE UNIQUE INDEX` with no backing constraint, on columns the schema declares but never marks unique. Such an index silently rejects writes the schema considers legal, so apply refuses by default. A partial unique index isn't drift if the schema declares a matching `unique index partial` (same columns; predicate normalized through Postgres to the same expression). A non-partial unique index isn't drift if the columns are declared `unique` / `unique by`. See [Adopt an existing database](../guides/adopt-an-existing-database.md#legacy-unique-indexes-can-block-apply) for remediation.
+`ATLANTIS_ALLOW_INDEX_DRIFT` controls whether `tide apply` proceeds over an **undeclared unique index** — a live `CREATE UNIQUE INDEX` with no backing constraint, on columns the schema declares but never marks unique. Such an index silently rejects writes the schema considers legal, so apply refuses by default. A partial unique index isn't drift if the schema declares a matching `unique index partial` (same columns; predicate normalized through Postgres to the same expression). A non-partial unique index isn't drift if the columns are declared `unique` / `unique by`. See [Adopt an existing database](../docs/guides/adopt-an-existing-database.md#legacy-unique-indexes-can-block-apply) for remediation.
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -194,7 +194,7 @@ Note the differences from the `ATL_*` gating variables:
 - The value is matched against the literal string `1`. Unlike the boolean `ATL_*` vars, `true` / `yes` / `on` do not enable it.
 - It only affects `tide apply`. `tide plan` always reports drift as a warning (in `--format=json` output) and never blocks, regardless of this variable.
 
-Drift does not change the plan class or the exit code. See [`tide plan` / `tide apply`](cli-tide.md) for how the warning surfaces.
+Drift does not change the plan class or the exit code. See [`tide plan` / `tide apply`](../docs/reference/cli-tide.md) for how the warning surfaces.
 
 ## Trusted front proxy
 
@@ -244,10 +244,10 @@ Read by `cmd/console`, not the Atlantis server.
 | `CONSOLE_ENROLL_TLS_CERT` / `_KEY` | (unset) | That listener's own server certificate. It terminates its own TLS, unlike `CONSOLE_LISTEN`. |
 | `CONSOLE_ENROLL_CLIENT_CA` | **retired — the console refuses to start if it is set** | It named one authority to verify every renewing machine against, which cannot work once each organisation has its own. Renewal now verifies the presented certificate against that organisation's CA from `console.orgs`, after its fingerprint identifies whose it is. Nothing replaces it; unset it. |
 | `CONSOLE_ENROLL_PUBLIC_URL` | (unset; **required with the group**) | Where a machine reaches the enrolment listener. Not derivable from the bind address, and deliberately not read from the `Host` header — the page that uses it prints a live token. |
-| `SANDBOX_PER_USER_LIMIT` | `3` | Maximum concurrent sandboxes per authenticated user. A boot beyond this returns HTTP `429`. The limit also caps fork count — forking N children requires `N + parent` headroom. |
+| `SANDBOX_PER_USER_LIMIT` | `100` | Maximum concurrent sandboxes per authenticated user, per organisation. A boot beyond this returns HTTP `429`. The limit also caps fork count — forking N children requires `N + parent` headroom. |
 | `SANDBOX_TTL` | `30m` | Idle window after which the BFF's janitor evicts a sandbox. Go duration syntax. Set lower (`10s`) for CI; higher (`2h`) for long agent loops. |
 
-The 256 MiB cap on `PUT /api/sandbox/{id}/snapshot` is a compile-time constant, not configurable. See [Sandbox HTTP API](sandbox-api.md#limits).
+The 256 MiB cap on `PUT /api/sandbox/{id}/snapshot` is a compile-time constant, not configurable. See [Sandbox HTTP API](../docs/reference/sandbox-api.md#limits).
 
 ### Identity comes from Atlantis Cloud
 
