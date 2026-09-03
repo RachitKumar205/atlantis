@@ -16,11 +16,12 @@ namespace's entity does not require generating its types); and emits proto
 sources and typed wrappers under `output_dir`, inside your own module with
 your own import paths, running `buf generate` for the wire types.
 
-Each entity gets a client interface with its RPCs — `Get`, `BatchGet`,
-`Create`, `Update`, `Delete`, `Query`, and a `List` the server does not
-serve yet — plus a typed method per custom query and procedure. A
-`keyless` entity gets no client: without a key there is nothing to address
-a row by.
+Each entity gets a client interface with its six RPCs — `Get`, `BatchGet`,
+`Create`, `Update`, `Delete`, `Query` — plus a typed method per custom
+query and procedure. A `keyless` entity gets no client: without a key
+there is nothing to address a row by. A namespace declaring jobs also
+gets a `jobs.go` with a typed `Args` struct, handler interface, and
+`Register<Job>` helper per job.
 
 `generate` owns only the roots it writes — `atlantis/`, `pb/`, `client/`,
 and the two buf config files — and leaves everything else under

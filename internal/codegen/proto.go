@@ -311,7 +311,7 @@ func emitProtoEntity(e *dsl.Entity, inbound []inboundRef) (ProtoFile, error) {
 	}
 	composite := len(pkCols) > 1
 
-	// Every entity, regardless of PK arity, exposes the same seven RPCs.
+	// Every entity, regardless of PK arity, exposes the same six RPCs.
 	// The typed predicate surface (Filter, OrderField, Include) is
 	// PK-arity-agnostic: composite-PK rows expose each PK column as an
 	// independently filterable / orderable field, indistinguishable in the
@@ -320,7 +320,6 @@ func emitProtoEntity(e *dsl.Entity, inbound []inboundRef) (ProtoFile, error) {
 	// wrapper) and in the cache-key encoding (runtime.CompositeID).
 	b.WriteString("service " + e.Name + "Service {\n")
 	fmt.Fprintf(&b, "  rpc Get%s(Get%sRequest) returns (Get%sResponse);\n", e.Name, e.Name, e.Name)
-	fmt.Fprintf(&b, "  rpc List%s(List%sRequest) returns (List%sResponse);\n", e.Name, e.Name, e.Name)
 	fmt.Fprintf(&b, "  rpc Create%s(Create%sRequest) returns (Create%sResponse);\n", e.Name, e.Name, e.Name)
 	fmt.Fprintf(&b, "  rpc Update%s(Update%sRequest) returns (Update%sResponse);\n", e.Name, e.Name, e.Name)
 	fmt.Fprintf(&b, "  rpc Delete%s(Delete%sRequest) returns (Delete%sResponse);\n", e.Name, e.Name, e.Name)
@@ -349,17 +348,6 @@ func emitProtoEntity(e *dsl.Entity, inbound []inboundRef) (ProtoFile, error) {
 	}
 	b.WriteString("}\n")
 	fmt.Fprintf(&b, "message Get%sResponse { %s entity = 1; }\n\n", e.Name, e.Name)
-
-	// List's request shape keeps `offset` for wire compatibility but the
-	// generated server rejects any non-zero value. Callers that page
-	// past the first chunk read `next_page_token` and pass it to
-	// QueryX directly; the shim does not accept a page token in the
-	// List request, since adding a token field would force the offset
-	// field to share oneof semantics with it (proto3 doesn't support
-	// adding a field to an existing message in a way that toggles
-	// presence of another field). New callers should call QueryX.
-	fmt.Fprintf(&b, "message List%sRequest { int32 limit = 1; int32 offset = 2; }\n", e.Name)
-	fmt.Fprintf(&b, "message List%sResponse { repeated %s entities = 1; int64 total = 2; string next_page_token = 3; }\n\n", e.Name, e.Name)
 
 	fmt.Fprintf(&b, "message Create%sRequest { %s entity = 1; }\n", e.Name, e.Name)
 	fmt.Fprintf(&b, "message Create%sResponse { %s entity = 1; }\n\n", e.Name, e.Name)

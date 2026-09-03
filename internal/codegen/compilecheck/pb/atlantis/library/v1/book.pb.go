@@ -335,118 +335,6 @@ func (x *GetBookResponse) GetEntity() *Book {
 	return nil
 }
 
-type ListBookRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Limit         int32                  `protobuf:"varint,1,opt,name=limit,proto3" json:"limit,omitempty"`
-	Offset        int32                  `protobuf:"varint,2,opt,name=offset,proto3" json:"offset,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ListBookRequest) Reset() {
-	*x = ListBookRequest{}
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[3]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ListBookRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ListBookRequest) ProtoMessage() {}
-
-func (x *ListBookRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[3]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ListBookRequest.ProtoReflect.Descriptor instead.
-func (*ListBookRequest) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{3}
-}
-
-func (x *ListBookRequest) GetLimit() int32 {
-	if x != nil {
-		return x.Limit
-	}
-	return 0
-}
-
-func (x *ListBookRequest) GetOffset() int32 {
-	if x != nil {
-		return x.Offset
-	}
-	return 0
-}
-
-type ListBookResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Entities      []*Book                `protobuf:"bytes,1,rep,name=entities,proto3" json:"entities,omitempty"`
-	Total         int64                  `protobuf:"varint,2,opt,name=total,proto3" json:"total,omitempty"`
-	NextPageToken string                 `protobuf:"bytes,3,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ListBookResponse) Reset() {
-	*x = ListBookResponse{}
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[4]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ListBookResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ListBookResponse) ProtoMessage() {}
-
-func (x *ListBookResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[4]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ListBookResponse.ProtoReflect.Descriptor instead.
-func (*ListBookResponse) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{4}
-}
-
-func (x *ListBookResponse) GetEntities() []*Book {
-	if x != nil {
-		return x.Entities
-	}
-	return nil
-}
-
-func (x *ListBookResponse) GetTotal() int64 {
-	if x != nil {
-		return x.Total
-	}
-	return 0
-}
-
-func (x *ListBookResponse) GetNextPageToken() string {
-	if x != nil {
-		return x.NextPageToken
-	}
-	return ""
-}
-
 type CreateBookRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Entity        *Book                  `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
@@ -456,7 +344,7 @@ type CreateBookRequest struct {
 
 func (x *CreateBookRequest) Reset() {
 	*x = CreateBookRequest{}
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[5]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -468,7 +356,7 @@ func (x *CreateBookRequest) String() string {
 func (*CreateBookRequest) ProtoMessage() {}
 
 func (x *CreateBookRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[5]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -481,7 +369,7 @@ func (x *CreateBookRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateBookRequest.ProtoReflect.Descriptor instead.
 func (*CreateBookRequest) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{5}
+	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *CreateBookRequest) GetEntity() *Book {
@@ -500,7 +388,7 @@ type CreateBookResponse struct {
 
 func (x *CreateBookResponse) Reset() {
 	*x = CreateBookResponse{}
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[6]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -512,7 +400,7 @@ func (x *CreateBookResponse) String() string {
 func (*CreateBookResponse) ProtoMessage() {}
 
 func (x *CreateBookResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[6]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -525,7 +413,7 @@ func (x *CreateBookResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateBookResponse.ProtoReflect.Descriptor instead.
 func (*CreateBookResponse) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{6}
+	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *CreateBookResponse) GetEntity() *Book {
@@ -544,7 +432,7 @@ type UpdateBookRequest struct {
 
 func (x *UpdateBookRequest) Reset() {
 	*x = UpdateBookRequest{}
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[7]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -556,7 +444,7 @@ func (x *UpdateBookRequest) String() string {
 func (*UpdateBookRequest) ProtoMessage() {}
 
 func (x *UpdateBookRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[7]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -569,7 +457,7 @@ func (x *UpdateBookRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateBookRequest.ProtoReflect.Descriptor instead.
 func (*UpdateBookRequest) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{7}
+	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *UpdateBookRequest) GetEntity() *Book {
@@ -588,7 +476,7 @@ type UpdateBookResponse struct {
 
 func (x *UpdateBookResponse) Reset() {
 	*x = UpdateBookResponse{}
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[8]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -600,7 +488,7 @@ func (x *UpdateBookResponse) String() string {
 func (*UpdateBookResponse) ProtoMessage() {}
 
 func (x *UpdateBookResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[8]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -613,7 +501,7 @@ func (x *UpdateBookResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateBookResponse.ProtoReflect.Descriptor instead.
 func (*UpdateBookResponse) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{8}
+	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *UpdateBookResponse) GetEntity() *Book {
@@ -632,7 +520,7 @@ type DeleteBookRequest struct {
 
 func (x *DeleteBookRequest) Reset() {
 	*x = DeleteBookRequest{}
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[9]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -644,7 +532,7 @@ func (x *DeleteBookRequest) String() string {
 func (*DeleteBookRequest) ProtoMessage() {}
 
 func (x *DeleteBookRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[9]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -657,7 +545,7 @@ func (x *DeleteBookRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteBookRequest.ProtoReflect.Descriptor instead.
 func (*DeleteBookRequest) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{9}
+	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *DeleteBookRequest) GetId() int64 {
@@ -675,7 +563,7 @@ type DeleteBookResponse struct {
 
 func (x *DeleteBookResponse) Reset() {
 	*x = DeleteBookResponse{}
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[10]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -687,7 +575,7 @@ func (x *DeleteBookResponse) String() string {
 func (*DeleteBookResponse) ProtoMessage() {}
 
 func (x *DeleteBookResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[10]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -700,7 +588,7 @@ func (x *DeleteBookResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteBookResponse.ProtoReflect.Descriptor instead.
 func (*DeleteBookResponse) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{10}
+	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{8}
 }
 
 type BatchGetBookRequest struct {
@@ -712,7 +600,7 @@ type BatchGetBookRequest struct {
 
 func (x *BatchGetBookRequest) Reset() {
 	*x = BatchGetBookRequest{}
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[11]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -724,7 +612,7 @@ func (x *BatchGetBookRequest) String() string {
 func (*BatchGetBookRequest) ProtoMessage() {}
 
 func (x *BatchGetBookRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[11]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -737,7 +625,7 @@ func (x *BatchGetBookRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchGetBookRequest.ProtoReflect.Descriptor instead.
 func (*BatchGetBookRequest) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{11}
+	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *BatchGetBookRequest) GetIds() []int64 {
@@ -756,7 +644,7 @@ type BatchGetBookResponse struct {
 
 func (x *BatchGetBookResponse) Reset() {
 	*x = BatchGetBookResponse{}
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[12]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -768,7 +656,7 @@ func (x *BatchGetBookResponse) String() string {
 func (*BatchGetBookResponse) ProtoMessage() {}
 
 func (x *BatchGetBookResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[12]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -781,7 +669,7 @@ func (x *BatchGetBookResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchGetBookResponse.ProtoReflect.Descriptor instead.
 func (*BatchGetBookResponse) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{12}
+	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *BatchGetBookResponse) GetEntities() []*Book {
@@ -811,7 +699,7 @@ type BookFilter struct {
 
 func (x *BookFilter) Reset() {
 	*x = BookFilter{}
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[13]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -823,7 +711,7 @@ func (x *BookFilter) String() string {
 func (*BookFilter) ProtoMessage() {}
 
 func (x *BookFilter) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[13]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -836,7 +724,7 @@ func (x *BookFilter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BookFilter.ProtoReflect.Descriptor instead.
 func (*BookFilter) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{13}
+	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *BookFilter) GetId() *v1.Int64Predicate {
@@ -933,7 +821,7 @@ type BookOrderBy struct {
 
 func (x *BookOrderBy) Reset() {
 	*x = BookOrderBy{}
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[14]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -945,7 +833,7 @@ func (x *BookOrderBy) String() string {
 func (*BookOrderBy) ProtoMessage() {}
 
 func (x *BookOrderBy) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[14]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -958,7 +846,7 @@ func (x *BookOrderBy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BookOrderBy.ProtoReflect.Descriptor instead.
 func (*BookOrderBy) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{14}
+	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *BookOrderBy) GetField() BookOrderField {
@@ -990,7 +878,7 @@ type QueryBookRequest struct {
 
 func (x *QueryBookRequest) Reset() {
 	*x = QueryBookRequest{}
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[15]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1002,7 +890,7 @@ func (x *QueryBookRequest) String() string {
 func (*QueryBookRequest) ProtoMessage() {}
 
 func (x *QueryBookRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[15]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1015,7 +903,7 @@ func (x *QueryBookRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryBookRequest.ProtoReflect.Descriptor instead.
 func (*QueryBookRequest) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{15}
+	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *QueryBookRequest) GetFilter() *BookFilter {
@@ -1078,7 +966,7 @@ type QueryBookResponse struct {
 
 func (x *QueryBookResponse) Reset() {
 	*x = QueryBookResponse{}
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[16]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1090,7 +978,7 @@ func (x *QueryBookResponse) String() string {
 func (*QueryBookResponse) ProtoMessage() {}
 
 func (x *QueryBookResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_book_proto_msgTypes[16]
+	mi := &file_atlantis_library_v1_book_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1103,7 +991,7 @@ func (x *QueryBookResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryBookResponse.ProtoReflect.Descriptor instead.
 func (*QueryBookResponse) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{16}
+	return file_atlantis_library_v1_book_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *QueryBookResponse) GetEntities() []*Book {
@@ -1154,14 +1042,7 @@ const file_atlantis_library_v1_book_proto_rawDesc = "" +
 	"\x0eGetBookRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\"D\n" +
 	"\x0fGetBookResponse\x121\n" +
-	"\x06entity\x18\x01 \x01(\v2\x19.atlantis.library.v1.BookR\x06entity\"?\n" +
-	"\x0fListBookRequest\x12\x14\n" +
-	"\x05limit\x18\x01 \x01(\x05R\x05limit\x12\x16\n" +
-	"\x06offset\x18\x02 \x01(\x05R\x06offset\"\x87\x01\n" +
-	"\x10ListBookResponse\x125\n" +
-	"\bentities\x18\x01 \x03(\v2\x19.atlantis.library.v1.BookR\bentities\x12\x14\n" +
-	"\x05total\x18\x02 \x01(\x03R\x05total\x12&\n" +
-	"\x0fnext_page_token\x18\x03 \x01(\tR\rnextPageToken\"F\n" +
+	"\x06entity\x18\x01 \x01(\v2\x19.atlantis.library.v1.BookR\x06entity\"F\n" +
 	"\x11CreateBookRequest\x121\n" +
 	"\x06entity\x18\x01 \x01(\v2\x19.atlantis.library.v1.BookR\x06entity\"G\n" +
 	"\x12CreateBookResponse\x121\n" +
@@ -1236,10 +1117,9 @@ const file_atlantis_library_v1_book_proto_rawDesc = "" +
 	"\x1bBOOK_ORDER_FIELD_EXPIRES_AT\x10\b\x12\x1f\n" +
 	"\x1bBOOK_ORDER_FIELD_CREATED_AT\x10\t*+\n" +
 	"\vBookInclude\x12\x1c\n" +
-	"\x18BOOK_INCLUDE_UNSPECIFIED\x10\x002\x9a\x05\n" +
+	"\x18BOOK_INCLUDE_UNSPECIFIED\x10\x002\xc1\x04\n" +
 	"\vBookService\x12T\n" +
-	"\aGetBook\x12#.atlantis.library.v1.GetBookRequest\x1a$.atlantis.library.v1.GetBookResponse\x12W\n" +
-	"\bListBook\x12$.atlantis.library.v1.ListBookRequest\x1a%.atlantis.library.v1.ListBookResponse\x12]\n" +
+	"\aGetBook\x12#.atlantis.library.v1.GetBookRequest\x1a$.atlantis.library.v1.GetBookResponse\x12]\n" +
 	"\n" +
 	"CreateBook\x12&.atlantis.library.v1.CreateBookRequest\x1a'.atlantis.library.v1.CreateBookResponse\x12]\n" +
 	"\n" +
@@ -1263,82 +1143,77 @@ func file_atlantis_library_v1_book_proto_rawDescGZIP() []byte {
 }
 
 var file_atlantis_library_v1_book_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_atlantis_library_v1_book_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_atlantis_library_v1_book_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_atlantis_library_v1_book_proto_goTypes = []any{
 	(BookOrderField)(0),           // 0: atlantis.library.v1.BookOrderField
 	(BookInclude)(0),              // 1: atlantis.library.v1.BookInclude
 	(*Book)(nil),                  // 2: atlantis.library.v1.Book
 	(*GetBookRequest)(nil),        // 3: atlantis.library.v1.GetBookRequest
 	(*GetBookResponse)(nil),       // 4: atlantis.library.v1.GetBookResponse
-	(*ListBookRequest)(nil),       // 5: atlantis.library.v1.ListBookRequest
-	(*ListBookResponse)(nil),      // 6: atlantis.library.v1.ListBookResponse
-	(*CreateBookRequest)(nil),     // 7: atlantis.library.v1.CreateBookRequest
-	(*CreateBookResponse)(nil),    // 8: atlantis.library.v1.CreateBookResponse
-	(*UpdateBookRequest)(nil),     // 9: atlantis.library.v1.UpdateBookRequest
-	(*UpdateBookResponse)(nil),    // 10: atlantis.library.v1.UpdateBookResponse
-	(*DeleteBookRequest)(nil),     // 11: atlantis.library.v1.DeleteBookRequest
-	(*DeleteBookResponse)(nil),    // 12: atlantis.library.v1.DeleteBookResponse
-	(*BatchGetBookRequest)(nil),   // 13: atlantis.library.v1.BatchGetBookRequest
-	(*BatchGetBookResponse)(nil),  // 14: atlantis.library.v1.BatchGetBookResponse
-	(*BookFilter)(nil),            // 15: atlantis.library.v1.BookFilter
-	(*BookOrderBy)(nil),           // 16: atlantis.library.v1.BookOrderBy
-	(*QueryBookRequest)(nil),      // 17: atlantis.library.v1.QueryBookRequest
-	(*QueryBookResponse)(nil),     // 18: atlantis.library.v1.QueryBookResponse
-	(*timestamppb.Timestamp)(nil), // 19: google.protobuf.Timestamp
-	(*v1.Int64Predicate)(nil),     // 20: atlantis.common.v1.Int64Predicate
-	(*v1.StringPredicate)(nil),    // 21: atlantis.common.v1.StringPredicate
-	(*v1.FloatPredicate)(nil),     // 22: atlantis.common.v1.FloatPredicate
-	(*v1.Int32Predicate)(nil),     // 23: atlantis.common.v1.Int32Predicate
-	(*v1.TimestampPredicate)(nil), // 24: atlantis.common.v1.TimestampPredicate
-	(*fieldmaskpb.FieldMask)(nil), // 25: google.protobuf.FieldMask
+	(*CreateBookRequest)(nil),     // 5: atlantis.library.v1.CreateBookRequest
+	(*CreateBookResponse)(nil),    // 6: atlantis.library.v1.CreateBookResponse
+	(*UpdateBookRequest)(nil),     // 7: atlantis.library.v1.UpdateBookRequest
+	(*UpdateBookResponse)(nil),    // 8: atlantis.library.v1.UpdateBookResponse
+	(*DeleteBookRequest)(nil),     // 9: atlantis.library.v1.DeleteBookRequest
+	(*DeleteBookResponse)(nil),    // 10: atlantis.library.v1.DeleteBookResponse
+	(*BatchGetBookRequest)(nil),   // 11: atlantis.library.v1.BatchGetBookRequest
+	(*BatchGetBookResponse)(nil),  // 12: atlantis.library.v1.BatchGetBookResponse
+	(*BookFilter)(nil),            // 13: atlantis.library.v1.BookFilter
+	(*BookOrderBy)(nil),           // 14: atlantis.library.v1.BookOrderBy
+	(*QueryBookRequest)(nil),      // 15: atlantis.library.v1.QueryBookRequest
+	(*QueryBookResponse)(nil),     // 16: atlantis.library.v1.QueryBookResponse
+	(*timestamppb.Timestamp)(nil), // 17: google.protobuf.Timestamp
+	(*v1.Int64Predicate)(nil),     // 18: atlantis.common.v1.Int64Predicate
+	(*v1.StringPredicate)(nil),    // 19: atlantis.common.v1.StringPredicate
+	(*v1.FloatPredicate)(nil),     // 20: atlantis.common.v1.FloatPredicate
+	(*v1.Int32Predicate)(nil),     // 21: atlantis.common.v1.Int32Predicate
+	(*v1.TimestampPredicate)(nil), // 22: atlantis.common.v1.TimestampPredicate
+	(*fieldmaskpb.FieldMask)(nil), // 23: google.protobuf.FieldMask
 }
 var file_atlantis_library_v1_book_proto_depIdxs = []int32{
-	19, // 0: atlantis.library.v1.Book.expires_at:type_name -> google.protobuf.Timestamp
-	19, // 1: atlantis.library.v1.Book.created_at:type_name -> google.protobuf.Timestamp
+	17, // 0: atlantis.library.v1.Book.expires_at:type_name -> google.protobuf.Timestamp
+	17, // 1: atlantis.library.v1.Book.created_at:type_name -> google.protobuf.Timestamp
 	2,  // 2: atlantis.library.v1.GetBookResponse.entity:type_name -> atlantis.library.v1.Book
-	2,  // 3: atlantis.library.v1.ListBookResponse.entities:type_name -> atlantis.library.v1.Book
-	2,  // 4: atlantis.library.v1.CreateBookRequest.entity:type_name -> atlantis.library.v1.Book
-	2,  // 5: atlantis.library.v1.CreateBookResponse.entity:type_name -> atlantis.library.v1.Book
-	2,  // 6: atlantis.library.v1.UpdateBookRequest.entity:type_name -> atlantis.library.v1.Book
-	2,  // 7: atlantis.library.v1.UpdateBookResponse.entity:type_name -> atlantis.library.v1.Book
-	2,  // 8: atlantis.library.v1.BatchGetBookResponse.entities:type_name -> atlantis.library.v1.Book
-	20, // 9: atlantis.library.v1.BookFilter.id:type_name -> atlantis.common.v1.Int64Predicate
-	21, // 10: atlantis.library.v1.BookFilter.tenant:type_name -> atlantis.common.v1.StringPredicate
-	21, // 11: atlantis.library.v1.BookFilter.title:type_name -> atlantis.common.v1.StringPredicate
-	20, // 12: atlantis.library.v1.BookFilter.author_id:type_name -> atlantis.common.v1.Int64Predicate
-	22, // 13: atlantis.library.v1.BookFilter.score:type_name -> atlantis.common.v1.FloatPredicate
-	23, // 14: atlantis.library.v1.BookFilter.page_count:type_name -> atlantis.common.v1.Int32Predicate
-	21, // 15: atlantis.library.v1.BookFilter.summary:type_name -> atlantis.common.v1.StringPredicate
-	24, // 16: atlantis.library.v1.BookFilter.expires_at:type_name -> atlantis.common.v1.TimestampPredicate
-	24, // 17: atlantis.library.v1.BookFilter.created_at:type_name -> atlantis.common.v1.TimestampPredicate
-	15, // 18: atlantis.library.v1.BookFilter.and:type_name -> atlantis.library.v1.BookFilter
-	15, // 19: atlantis.library.v1.BookFilter.or:type_name -> atlantis.library.v1.BookFilter
-	15, // 20: atlantis.library.v1.BookFilter.not:type_name -> atlantis.library.v1.BookFilter
-	0,  // 21: atlantis.library.v1.BookOrderBy.field:type_name -> atlantis.library.v1.BookOrderField
-	15, // 22: atlantis.library.v1.QueryBookRequest.filter:type_name -> atlantis.library.v1.BookFilter
-	16, // 23: atlantis.library.v1.QueryBookRequest.order:type_name -> atlantis.library.v1.BookOrderBy
-	25, // 24: atlantis.library.v1.QueryBookRequest.fields:type_name -> google.protobuf.FieldMask
-	1,  // 25: atlantis.library.v1.QueryBookRequest.includes:type_name -> atlantis.library.v1.BookInclude
-	2,  // 26: atlantis.library.v1.QueryBookResponse.entities:type_name -> atlantis.library.v1.Book
-	3,  // 27: atlantis.library.v1.BookService.GetBook:input_type -> atlantis.library.v1.GetBookRequest
-	5,  // 28: atlantis.library.v1.BookService.ListBook:input_type -> atlantis.library.v1.ListBookRequest
-	7,  // 29: atlantis.library.v1.BookService.CreateBook:input_type -> atlantis.library.v1.CreateBookRequest
-	9,  // 30: atlantis.library.v1.BookService.UpdateBook:input_type -> atlantis.library.v1.UpdateBookRequest
-	11, // 31: atlantis.library.v1.BookService.DeleteBook:input_type -> atlantis.library.v1.DeleteBookRequest
-	13, // 32: atlantis.library.v1.BookService.BatchGetBook:input_type -> atlantis.library.v1.BatchGetBookRequest
-	17, // 33: atlantis.library.v1.BookService.QueryBook:input_type -> atlantis.library.v1.QueryBookRequest
-	4,  // 34: atlantis.library.v1.BookService.GetBook:output_type -> atlantis.library.v1.GetBookResponse
-	6,  // 35: atlantis.library.v1.BookService.ListBook:output_type -> atlantis.library.v1.ListBookResponse
-	8,  // 36: atlantis.library.v1.BookService.CreateBook:output_type -> atlantis.library.v1.CreateBookResponse
-	10, // 37: atlantis.library.v1.BookService.UpdateBook:output_type -> atlantis.library.v1.UpdateBookResponse
-	12, // 38: atlantis.library.v1.BookService.DeleteBook:output_type -> atlantis.library.v1.DeleteBookResponse
-	14, // 39: atlantis.library.v1.BookService.BatchGetBook:output_type -> atlantis.library.v1.BatchGetBookResponse
-	18, // 40: atlantis.library.v1.BookService.QueryBook:output_type -> atlantis.library.v1.QueryBookResponse
-	34, // [34:41] is the sub-list for method output_type
-	27, // [27:34] is the sub-list for method input_type
-	27, // [27:27] is the sub-list for extension type_name
-	27, // [27:27] is the sub-list for extension extendee
-	0,  // [0:27] is the sub-list for field type_name
+	2,  // 3: atlantis.library.v1.CreateBookRequest.entity:type_name -> atlantis.library.v1.Book
+	2,  // 4: atlantis.library.v1.CreateBookResponse.entity:type_name -> atlantis.library.v1.Book
+	2,  // 5: atlantis.library.v1.UpdateBookRequest.entity:type_name -> atlantis.library.v1.Book
+	2,  // 6: atlantis.library.v1.UpdateBookResponse.entity:type_name -> atlantis.library.v1.Book
+	2,  // 7: atlantis.library.v1.BatchGetBookResponse.entities:type_name -> atlantis.library.v1.Book
+	18, // 8: atlantis.library.v1.BookFilter.id:type_name -> atlantis.common.v1.Int64Predicate
+	19, // 9: atlantis.library.v1.BookFilter.tenant:type_name -> atlantis.common.v1.StringPredicate
+	19, // 10: atlantis.library.v1.BookFilter.title:type_name -> atlantis.common.v1.StringPredicate
+	18, // 11: atlantis.library.v1.BookFilter.author_id:type_name -> atlantis.common.v1.Int64Predicate
+	20, // 12: atlantis.library.v1.BookFilter.score:type_name -> atlantis.common.v1.FloatPredicate
+	21, // 13: atlantis.library.v1.BookFilter.page_count:type_name -> atlantis.common.v1.Int32Predicate
+	19, // 14: atlantis.library.v1.BookFilter.summary:type_name -> atlantis.common.v1.StringPredicate
+	22, // 15: atlantis.library.v1.BookFilter.expires_at:type_name -> atlantis.common.v1.TimestampPredicate
+	22, // 16: atlantis.library.v1.BookFilter.created_at:type_name -> atlantis.common.v1.TimestampPredicate
+	13, // 17: atlantis.library.v1.BookFilter.and:type_name -> atlantis.library.v1.BookFilter
+	13, // 18: atlantis.library.v1.BookFilter.or:type_name -> atlantis.library.v1.BookFilter
+	13, // 19: atlantis.library.v1.BookFilter.not:type_name -> atlantis.library.v1.BookFilter
+	0,  // 20: atlantis.library.v1.BookOrderBy.field:type_name -> atlantis.library.v1.BookOrderField
+	13, // 21: atlantis.library.v1.QueryBookRequest.filter:type_name -> atlantis.library.v1.BookFilter
+	14, // 22: atlantis.library.v1.QueryBookRequest.order:type_name -> atlantis.library.v1.BookOrderBy
+	23, // 23: atlantis.library.v1.QueryBookRequest.fields:type_name -> google.protobuf.FieldMask
+	1,  // 24: atlantis.library.v1.QueryBookRequest.includes:type_name -> atlantis.library.v1.BookInclude
+	2,  // 25: atlantis.library.v1.QueryBookResponse.entities:type_name -> atlantis.library.v1.Book
+	3,  // 26: atlantis.library.v1.BookService.GetBook:input_type -> atlantis.library.v1.GetBookRequest
+	5,  // 27: atlantis.library.v1.BookService.CreateBook:input_type -> atlantis.library.v1.CreateBookRequest
+	7,  // 28: atlantis.library.v1.BookService.UpdateBook:input_type -> atlantis.library.v1.UpdateBookRequest
+	9,  // 29: atlantis.library.v1.BookService.DeleteBook:input_type -> atlantis.library.v1.DeleteBookRequest
+	11, // 30: atlantis.library.v1.BookService.BatchGetBook:input_type -> atlantis.library.v1.BatchGetBookRequest
+	15, // 31: atlantis.library.v1.BookService.QueryBook:input_type -> atlantis.library.v1.QueryBookRequest
+	4,  // 32: atlantis.library.v1.BookService.GetBook:output_type -> atlantis.library.v1.GetBookResponse
+	6,  // 33: atlantis.library.v1.BookService.CreateBook:output_type -> atlantis.library.v1.CreateBookResponse
+	8,  // 34: atlantis.library.v1.BookService.UpdateBook:output_type -> atlantis.library.v1.UpdateBookResponse
+	10, // 35: atlantis.library.v1.BookService.DeleteBook:output_type -> atlantis.library.v1.DeleteBookResponse
+	12, // 36: atlantis.library.v1.BookService.BatchGetBook:output_type -> atlantis.library.v1.BatchGetBookResponse
+	16, // 37: atlantis.library.v1.BookService.QueryBook:output_type -> atlantis.library.v1.QueryBookResponse
+	32, // [32:38] is the sub-list for method output_type
+	26, // [26:32] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_atlantis_library_v1_book_proto_init() }
@@ -1347,15 +1222,15 @@ func file_atlantis_library_v1_book_proto_init() {
 		return
 	}
 	file_atlantis_library_v1_book_proto_msgTypes[0].OneofWrappers = []any{}
-	file_atlantis_library_v1_book_proto_msgTypes[13].OneofWrappers = []any{}
-	file_atlantis_library_v1_book_proto_msgTypes[16].OneofWrappers = []any{}
+	file_atlantis_library_v1_book_proto_msgTypes[11].OneofWrappers = []any{}
+	file_atlantis_library_v1_book_proto_msgTypes[14].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_atlantis_library_v1_book_proto_rawDesc), len(file_atlantis_library_v1_book_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   17,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

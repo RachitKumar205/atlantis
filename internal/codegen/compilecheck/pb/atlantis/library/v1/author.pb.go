@@ -313,118 +313,6 @@ func (x *GetAuthorResponse) GetEntity() *Author {
 	return nil
 }
 
-type ListAuthorRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Limit         int32                  `protobuf:"varint,1,opt,name=limit,proto3" json:"limit,omitempty"`
-	Offset        int32                  `protobuf:"varint,2,opt,name=offset,proto3" json:"offset,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ListAuthorRequest) Reset() {
-	*x = ListAuthorRequest{}
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[3]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ListAuthorRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ListAuthorRequest) ProtoMessage() {}
-
-func (x *ListAuthorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[3]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ListAuthorRequest.ProtoReflect.Descriptor instead.
-func (*ListAuthorRequest) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{3}
-}
-
-func (x *ListAuthorRequest) GetLimit() int32 {
-	if x != nil {
-		return x.Limit
-	}
-	return 0
-}
-
-func (x *ListAuthorRequest) GetOffset() int32 {
-	if x != nil {
-		return x.Offset
-	}
-	return 0
-}
-
-type ListAuthorResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Entities      []*Author              `protobuf:"bytes,1,rep,name=entities,proto3" json:"entities,omitempty"`
-	Total         int64                  `protobuf:"varint,2,opt,name=total,proto3" json:"total,omitempty"`
-	NextPageToken string                 `protobuf:"bytes,3,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ListAuthorResponse) Reset() {
-	*x = ListAuthorResponse{}
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[4]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ListAuthorResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ListAuthorResponse) ProtoMessage() {}
-
-func (x *ListAuthorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[4]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ListAuthorResponse.ProtoReflect.Descriptor instead.
-func (*ListAuthorResponse) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{4}
-}
-
-func (x *ListAuthorResponse) GetEntities() []*Author {
-	if x != nil {
-		return x.Entities
-	}
-	return nil
-}
-
-func (x *ListAuthorResponse) GetTotal() int64 {
-	if x != nil {
-		return x.Total
-	}
-	return 0
-}
-
-func (x *ListAuthorResponse) GetNextPageToken() string {
-	if x != nil {
-		return x.NextPageToken
-	}
-	return ""
-}
-
 type CreateAuthorRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Entity        *Author                `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
@@ -434,7 +322,7 @@ type CreateAuthorRequest struct {
 
 func (x *CreateAuthorRequest) Reset() {
 	*x = CreateAuthorRequest{}
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[5]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -446,7 +334,7 @@ func (x *CreateAuthorRequest) String() string {
 func (*CreateAuthorRequest) ProtoMessage() {}
 
 func (x *CreateAuthorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[5]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -459,7 +347,7 @@ func (x *CreateAuthorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateAuthorRequest.ProtoReflect.Descriptor instead.
 func (*CreateAuthorRequest) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{5}
+	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *CreateAuthorRequest) GetEntity() *Author {
@@ -478,7 +366,7 @@ type CreateAuthorResponse struct {
 
 func (x *CreateAuthorResponse) Reset() {
 	*x = CreateAuthorResponse{}
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[6]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -490,7 +378,7 @@ func (x *CreateAuthorResponse) String() string {
 func (*CreateAuthorResponse) ProtoMessage() {}
 
 func (x *CreateAuthorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[6]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -503,7 +391,7 @@ func (x *CreateAuthorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateAuthorResponse.ProtoReflect.Descriptor instead.
 func (*CreateAuthorResponse) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{6}
+	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *CreateAuthorResponse) GetEntity() *Author {
@@ -522,7 +410,7 @@ type UpdateAuthorRequest struct {
 
 func (x *UpdateAuthorRequest) Reset() {
 	*x = UpdateAuthorRequest{}
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[7]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -534,7 +422,7 @@ func (x *UpdateAuthorRequest) String() string {
 func (*UpdateAuthorRequest) ProtoMessage() {}
 
 func (x *UpdateAuthorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[7]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -547,7 +435,7 @@ func (x *UpdateAuthorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateAuthorRequest.ProtoReflect.Descriptor instead.
 func (*UpdateAuthorRequest) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{7}
+	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *UpdateAuthorRequest) GetEntity() *Author {
@@ -566,7 +454,7 @@ type UpdateAuthorResponse struct {
 
 func (x *UpdateAuthorResponse) Reset() {
 	*x = UpdateAuthorResponse{}
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[8]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -578,7 +466,7 @@ func (x *UpdateAuthorResponse) String() string {
 func (*UpdateAuthorResponse) ProtoMessage() {}
 
 func (x *UpdateAuthorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[8]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -591,7 +479,7 @@ func (x *UpdateAuthorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpdateAuthorResponse.ProtoReflect.Descriptor instead.
 func (*UpdateAuthorResponse) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{8}
+	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *UpdateAuthorResponse) GetEntity() *Author {
@@ -610,7 +498,7 @@ type DeleteAuthorRequest struct {
 
 func (x *DeleteAuthorRequest) Reset() {
 	*x = DeleteAuthorRequest{}
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[9]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -622,7 +510,7 @@ func (x *DeleteAuthorRequest) String() string {
 func (*DeleteAuthorRequest) ProtoMessage() {}
 
 func (x *DeleteAuthorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[9]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -635,7 +523,7 @@ func (x *DeleteAuthorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteAuthorRequest.ProtoReflect.Descriptor instead.
 func (*DeleteAuthorRequest) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{9}
+	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *DeleteAuthorRequest) GetId() int64 {
@@ -653,7 +541,7 @@ type DeleteAuthorResponse struct {
 
 func (x *DeleteAuthorResponse) Reset() {
 	*x = DeleteAuthorResponse{}
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[10]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -665,7 +553,7 @@ func (x *DeleteAuthorResponse) String() string {
 func (*DeleteAuthorResponse) ProtoMessage() {}
 
 func (x *DeleteAuthorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[10]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -678,7 +566,7 @@ func (x *DeleteAuthorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteAuthorResponse.ProtoReflect.Descriptor instead.
 func (*DeleteAuthorResponse) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{10}
+	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{8}
 }
 
 type BatchGetAuthorRequest struct {
@@ -690,7 +578,7 @@ type BatchGetAuthorRequest struct {
 
 func (x *BatchGetAuthorRequest) Reset() {
 	*x = BatchGetAuthorRequest{}
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[11]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -702,7 +590,7 @@ func (x *BatchGetAuthorRequest) String() string {
 func (*BatchGetAuthorRequest) ProtoMessage() {}
 
 func (x *BatchGetAuthorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[11]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -715,7 +603,7 @@ func (x *BatchGetAuthorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchGetAuthorRequest.ProtoReflect.Descriptor instead.
 func (*BatchGetAuthorRequest) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{11}
+	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *BatchGetAuthorRequest) GetIds() []int64 {
@@ -734,7 +622,7 @@ type BatchGetAuthorResponse struct {
 
 func (x *BatchGetAuthorResponse) Reset() {
 	*x = BatchGetAuthorResponse{}
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[12]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -746,7 +634,7 @@ func (x *BatchGetAuthorResponse) String() string {
 func (*BatchGetAuthorResponse) ProtoMessage() {}
 
 func (x *BatchGetAuthorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[12]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -759,7 +647,7 @@ func (x *BatchGetAuthorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchGetAuthorResponse.ProtoReflect.Descriptor instead.
 func (*BatchGetAuthorResponse) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{12}
+	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *BatchGetAuthorResponse) GetEntities() []*Author {
@@ -785,7 +673,7 @@ type AuthorFilter struct {
 
 func (x *AuthorFilter) Reset() {
 	*x = AuthorFilter{}
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[13]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -797,7 +685,7 @@ func (x *AuthorFilter) String() string {
 func (*AuthorFilter) ProtoMessage() {}
 
 func (x *AuthorFilter) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[13]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -810,7 +698,7 @@ func (x *AuthorFilter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuthorFilter.ProtoReflect.Descriptor instead.
 func (*AuthorFilter) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{13}
+	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *AuthorFilter) GetId() *v1.Int64Predicate {
@@ -879,7 +767,7 @@ type AuthorOrderBy struct {
 
 func (x *AuthorOrderBy) Reset() {
 	*x = AuthorOrderBy{}
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[14]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -891,7 +779,7 @@ func (x *AuthorOrderBy) String() string {
 func (*AuthorOrderBy) ProtoMessage() {}
 
 func (x *AuthorOrderBy) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[14]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -904,7 +792,7 @@ func (x *AuthorOrderBy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AuthorOrderBy.ProtoReflect.Descriptor instead.
 func (*AuthorOrderBy) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{14}
+	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *AuthorOrderBy) GetField() AuthorOrderField {
@@ -936,7 +824,7 @@ type QueryAuthorRequest struct {
 
 func (x *QueryAuthorRequest) Reset() {
 	*x = QueryAuthorRequest{}
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[15]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -948,7 +836,7 @@ func (x *QueryAuthorRequest) String() string {
 func (*QueryAuthorRequest) ProtoMessage() {}
 
 func (x *QueryAuthorRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[15]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -961,7 +849,7 @@ func (x *QueryAuthorRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryAuthorRequest.ProtoReflect.Descriptor instead.
 func (*QueryAuthorRequest) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{15}
+	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *QueryAuthorRequest) GetFilter() *AuthorFilter {
@@ -1024,7 +912,7 @@ type QueryAuthorResponse struct {
 
 func (x *QueryAuthorResponse) Reset() {
 	*x = QueryAuthorResponse{}
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[16]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1036,7 +924,7 @@ func (x *QueryAuthorResponse) String() string {
 func (*QueryAuthorResponse) ProtoMessage() {}
 
 func (x *QueryAuthorResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_atlantis_library_v1_author_proto_msgTypes[16]
+	mi := &file_atlantis_library_v1_author_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1049,7 +937,7 @@ func (x *QueryAuthorResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryAuthorResponse.ProtoReflect.Descriptor instead.
 func (*QueryAuthorResponse) Descriptor() ([]byte, []int) {
-	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{16}
+	return file_atlantis_library_v1_author_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *QueryAuthorResponse) GetEntities() []*Author {
@@ -1094,14 +982,7 @@ const file_atlantis_library_v1_author_proto_rawDesc = "" +
 	"\x10GetAuthorRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\"H\n" +
 	"\x11GetAuthorResponse\x123\n" +
-	"\x06entity\x18\x01 \x01(\v2\x1b.atlantis.library.v1.AuthorR\x06entity\"A\n" +
-	"\x11ListAuthorRequest\x12\x14\n" +
-	"\x05limit\x18\x01 \x01(\x05R\x05limit\x12\x16\n" +
-	"\x06offset\x18\x02 \x01(\x05R\x06offset\"\x8b\x01\n" +
-	"\x12ListAuthorResponse\x127\n" +
-	"\bentities\x18\x01 \x03(\v2\x1b.atlantis.library.v1.AuthorR\bentities\x12\x14\n" +
-	"\x05total\x18\x02 \x01(\x03R\x05total\x12&\n" +
-	"\x0fnext_page_token\x18\x03 \x01(\tR\rnextPageToken\"J\n" +
+	"\x06entity\x18\x01 \x01(\v2\x1b.atlantis.library.v1.AuthorR\x06entity\"J\n" +
 	"\x13CreateAuthorRequest\x123\n" +
 	"\x06entity\x18\x01 \x01(\v2\x1b.atlantis.library.v1.AuthorR\x06entity\"K\n" +
 	"\x14CreateAuthorResponse\x123\n" +
@@ -1161,11 +1042,9 @@ const file_atlantis_library_v1_author_proto_rawDesc = "" +
 	"\x1dAUTHOR_ORDER_FIELD_CREATED_AT\x10\x06*]\n" +
 	"\rAuthorInclude\x12\x1e\n" +
 	"\x1aAUTHOR_INCLUDE_UNSPECIFIED\x10\x00\x12,\n" +
-	"(AUTHOR_INCLUDE_LIBRARY_BOOK_BY_AUTHOR_ID\x10\x012\xc6\x05\n" +
+	"(AUTHOR_INCLUDE_LIBRARY_BOOK_BY_AUTHOR_ID\x10\x012\xe7\x04\n" +
 	"\rAuthorService\x12Z\n" +
-	"\tGetAuthor\x12%.atlantis.library.v1.GetAuthorRequest\x1a&.atlantis.library.v1.GetAuthorResponse\x12]\n" +
-	"\n" +
-	"ListAuthor\x12&.atlantis.library.v1.ListAuthorRequest\x1a'.atlantis.library.v1.ListAuthorResponse\x12c\n" +
+	"\tGetAuthor\x12%.atlantis.library.v1.GetAuthorRequest\x1a&.atlantis.library.v1.GetAuthorResponse\x12c\n" +
 	"\fCreateAuthor\x12(.atlantis.library.v1.CreateAuthorRequest\x1a).atlantis.library.v1.CreateAuthorResponse\x12c\n" +
 	"\fUpdateAuthor\x12(.atlantis.library.v1.UpdateAuthorRequest\x1a).atlantis.library.v1.UpdateAuthorResponse\x12c\n" +
 	"\fDeleteAuthor\x12(.atlantis.library.v1.DeleteAuthorRequest\x1a).atlantis.library.v1.DeleteAuthorResponse\x12i\n" +
@@ -1186,80 +1065,75 @@ func file_atlantis_library_v1_author_proto_rawDescGZIP() []byte {
 }
 
 var file_atlantis_library_v1_author_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_atlantis_library_v1_author_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_atlantis_library_v1_author_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_atlantis_library_v1_author_proto_goTypes = []any{
 	(AuthorOrderField)(0),          // 0: atlantis.library.v1.AuthorOrderField
 	(AuthorInclude)(0),             // 1: atlantis.library.v1.AuthorInclude
 	(*Author)(nil),                 // 2: atlantis.library.v1.Author
 	(*GetAuthorRequest)(nil),       // 3: atlantis.library.v1.GetAuthorRequest
 	(*GetAuthorResponse)(nil),      // 4: atlantis.library.v1.GetAuthorResponse
-	(*ListAuthorRequest)(nil),      // 5: atlantis.library.v1.ListAuthorRequest
-	(*ListAuthorResponse)(nil),     // 6: atlantis.library.v1.ListAuthorResponse
-	(*CreateAuthorRequest)(nil),    // 7: atlantis.library.v1.CreateAuthorRequest
-	(*CreateAuthorResponse)(nil),   // 8: atlantis.library.v1.CreateAuthorResponse
-	(*UpdateAuthorRequest)(nil),    // 9: atlantis.library.v1.UpdateAuthorRequest
-	(*UpdateAuthorResponse)(nil),   // 10: atlantis.library.v1.UpdateAuthorResponse
-	(*DeleteAuthorRequest)(nil),    // 11: atlantis.library.v1.DeleteAuthorRequest
-	(*DeleteAuthorResponse)(nil),   // 12: atlantis.library.v1.DeleteAuthorResponse
-	(*BatchGetAuthorRequest)(nil),  // 13: atlantis.library.v1.BatchGetAuthorRequest
-	(*BatchGetAuthorResponse)(nil), // 14: atlantis.library.v1.BatchGetAuthorResponse
-	(*AuthorFilter)(nil),           // 15: atlantis.library.v1.AuthorFilter
-	(*AuthorOrderBy)(nil),          // 16: atlantis.library.v1.AuthorOrderBy
-	(*QueryAuthorRequest)(nil),     // 17: atlantis.library.v1.QueryAuthorRequest
-	(*QueryAuthorResponse)(nil),    // 18: atlantis.library.v1.QueryAuthorResponse
-	(*v1.Interval)(nil),            // 19: atlantis.common.v1.Interval
-	(*timestamppb.Timestamp)(nil),  // 20: google.protobuf.Timestamp
-	(*Book)(nil),                   // 21: atlantis.library.v1.Book
-	(*v1.Int64Predicate)(nil),      // 22: atlantis.common.v1.Int64Predicate
-	(*v1.StringPredicate)(nil),     // 23: atlantis.common.v1.StringPredicate
-	(*v1.DoublePredicate)(nil),     // 24: atlantis.common.v1.DoublePredicate
-	(*v1.TimestampPredicate)(nil),  // 25: atlantis.common.v1.TimestampPredicate
-	(*fieldmaskpb.FieldMask)(nil),  // 26: google.protobuf.FieldMask
+	(*CreateAuthorRequest)(nil),    // 5: atlantis.library.v1.CreateAuthorRequest
+	(*CreateAuthorResponse)(nil),   // 6: atlantis.library.v1.CreateAuthorResponse
+	(*UpdateAuthorRequest)(nil),    // 7: atlantis.library.v1.UpdateAuthorRequest
+	(*UpdateAuthorResponse)(nil),   // 8: atlantis.library.v1.UpdateAuthorResponse
+	(*DeleteAuthorRequest)(nil),    // 9: atlantis.library.v1.DeleteAuthorRequest
+	(*DeleteAuthorResponse)(nil),   // 10: atlantis.library.v1.DeleteAuthorResponse
+	(*BatchGetAuthorRequest)(nil),  // 11: atlantis.library.v1.BatchGetAuthorRequest
+	(*BatchGetAuthorResponse)(nil), // 12: atlantis.library.v1.BatchGetAuthorResponse
+	(*AuthorFilter)(nil),           // 13: atlantis.library.v1.AuthorFilter
+	(*AuthorOrderBy)(nil),          // 14: atlantis.library.v1.AuthorOrderBy
+	(*QueryAuthorRequest)(nil),     // 15: atlantis.library.v1.QueryAuthorRequest
+	(*QueryAuthorResponse)(nil),    // 16: atlantis.library.v1.QueryAuthorResponse
+	(*v1.Interval)(nil),            // 17: atlantis.common.v1.Interval
+	(*timestamppb.Timestamp)(nil),  // 18: google.protobuf.Timestamp
+	(*Book)(nil),                   // 19: atlantis.library.v1.Book
+	(*v1.Int64Predicate)(nil),      // 20: atlantis.common.v1.Int64Predicate
+	(*v1.StringPredicate)(nil),     // 21: atlantis.common.v1.StringPredicate
+	(*v1.DoublePredicate)(nil),     // 22: atlantis.common.v1.DoublePredicate
+	(*v1.TimestampPredicate)(nil),  // 23: atlantis.common.v1.TimestampPredicate
+	(*fieldmaskpb.FieldMask)(nil),  // 24: google.protobuf.FieldMask
 }
 var file_atlantis_library_v1_author_proto_depIdxs = []int32{
-	19, // 0: atlantis.library.v1.Author.tenure:type_name -> atlantis.common.v1.Interval
-	20, // 1: atlantis.library.v1.Author.created_at:type_name -> google.protobuf.Timestamp
-	21, // 2: atlantis.library.v1.Author.included_book_by_author_id:type_name -> atlantis.library.v1.Book
+	17, // 0: atlantis.library.v1.Author.tenure:type_name -> atlantis.common.v1.Interval
+	18, // 1: atlantis.library.v1.Author.created_at:type_name -> google.protobuf.Timestamp
+	19, // 2: atlantis.library.v1.Author.included_book_by_author_id:type_name -> atlantis.library.v1.Book
 	2,  // 3: atlantis.library.v1.GetAuthorResponse.entity:type_name -> atlantis.library.v1.Author
-	2,  // 4: atlantis.library.v1.ListAuthorResponse.entities:type_name -> atlantis.library.v1.Author
-	2,  // 5: atlantis.library.v1.CreateAuthorRequest.entity:type_name -> atlantis.library.v1.Author
-	2,  // 6: atlantis.library.v1.CreateAuthorResponse.entity:type_name -> atlantis.library.v1.Author
-	2,  // 7: atlantis.library.v1.UpdateAuthorRequest.entity:type_name -> atlantis.library.v1.Author
-	2,  // 8: atlantis.library.v1.UpdateAuthorResponse.entity:type_name -> atlantis.library.v1.Author
-	2,  // 9: atlantis.library.v1.BatchGetAuthorResponse.entities:type_name -> atlantis.library.v1.Author
-	22, // 10: atlantis.library.v1.AuthorFilter.id:type_name -> atlantis.common.v1.Int64Predicate
-	23, // 11: atlantis.library.v1.AuthorFilter.name:type_name -> atlantis.common.v1.StringPredicate
-	23, // 12: atlantis.library.v1.AuthorFilter.bio:type_name -> atlantis.common.v1.StringPredicate
-	24, // 13: atlantis.library.v1.AuthorFilter.rating:type_name -> atlantis.common.v1.DoublePredicate
-	25, // 14: atlantis.library.v1.AuthorFilter.created_at:type_name -> atlantis.common.v1.TimestampPredicate
-	15, // 15: atlantis.library.v1.AuthorFilter.and:type_name -> atlantis.library.v1.AuthorFilter
-	15, // 16: atlantis.library.v1.AuthorFilter.or:type_name -> atlantis.library.v1.AuthorFilter
-	15, // 17: atlantis.library.v1.AuthorFilter.not:type_name -> atlantis.library.v1.AuthorFilter
-	0,  // 18: atlantis.library.v1.AuthorOrderBy.field:type_name -> atlantis.library.v1.AuthorOrderField
-	15, // 19: atlantis.library.v1.QueryAuthorRequest.filter:type_name -> atlantis.library.v1.AuthorFilter
-	16, // 20: atlantis.library.v1.QueryAuthorRequest.order:type_name -> atlantis.library.v1.AuthorOrderBy
-	26, // 21: atlantis.library.v1.QueryAuthorRequest.fields:type_name -> google.protobuf.FieldMask
-	1,  // 22: atlantis.library.v1.QueryAuthorRequest.includes:type_name -> atlantis.library.v1.AuthorInclude
-	2,  // 23: atlantis.library.v1.QueryAuthorResponse.entities:type_name -> atlantis.library.v1.Author
-	3,  // 24: atlantis.library.v1.AuthorService.GetAuthor:input_type -> atlantis.library.v1.GetAuthorRequest
-	5,  // 25: atlantis.library.v1.AuthorService.ListAuthor:input_type -> atlantis.library.v1.ListAuthorRequest
-	7,  // 26: atlantis.library.v1.AuthorService.CreateAuthor:input_type -> atlantis.library.v1.CreateAuthorRequest
-	9,  // 27: atlantis.library.v1.AuthorService.UpdateAuthor:input_type -> atlantis.library.v1.UpdateAuthorRequest
-	11, // 28: atlantis.library.v1.AuthorService.DeleteAuthor:input_type -> atlantis.library.v1.DeleteAuthorRequest
-	13, // 29: atlantis.library.v1.AuthorService.BatchGetAuthor:input_type -> atlantis.library.v1.BatchGetAuthorRequest
-	17, // 30: atlantis.library.v1.AuthorService.QueryAuthor:input_type -> atlantis.library.v1.QueryAuthorRequest
-	4,  // 31: atlantis.library.v1.AuthorService.GetAuthor:output_type -> atlantis.library.v1.GetAuthorResponse
-	6,  // 32: atlantis.library.v1.AuthorService.ListAuthor:output_type -> atlantis.library.v1.ListAuthorResponse
-	8,  // 33: atlantis.library.v1.AuthorService.CreateAuthor:output_type -> atlantis.library.v1.CreateAuthorResponse
-	10, // 34: atlantis.library.v1.AuthorService.UpdateAuthor:output_type -> atlantis.library.v1.UpdateAuthorResponse
-	12, // 35: atlantis.library.v1.AuthorService.DeleteAuthor:output_type -> atlantis.library.v1.DeleteAuthorResponse
-	14, // 36: atlantis.library.v1.AuthorService.BatchGetAuthor:output_type -> atlantis.library.v1.BatchGetAuthorResponse
-	18, // 37: atlantis.library.v1.AuthorService.QueryAuthor:output_type -> atlantis.library.v1.QueryAuthorResponse
-	31, // [31:38] is the sub-list for method output_type
-	24, // [24:31] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	2,  // 4: atlantis.library.v1.CreateAuthorRequest.entity:type_name -> atlantis.library.v1.Author
+	2,  // 5: atlantis.library.v1.CreateAuthorResponse.entity:type_name -> atlantis.library.v1.Author
+	2,  // 6: atlantis.library.v1.UpdateAuthorRequest.entity:type_name -> atlantis.library.v1.Author
+	2,  // 7: atlantis.library.v1.UpdateAuthorResponse.entity:type_name -> atlantis.library.v1.Author
+	2,  // 8: atlantis.library.v1.BatchGetAuthorResponse.entities:type_name -> atlantis.library.v1.Author
+	20, // 9: atlantis.library.v1.AuthorFilter.id:type_name -> atlantis.common.v1.Int64Predicate
+	21, // 10: atlantis.library.v1.AuthorFilter.name:type_name -> atlantis.common.v1.StringPredicate
+	21, // 11: atlantis.library.v1.AuthorFilter.bio:type_name -> atlantis.common.v1.StringPredicate
+	22, // 12: atlantis.library.v1.AuthorFilter.rating:type_name -> atlantis.common.v1.DoublePredicate
+	23, // 13: atlantis.library.v1.AuthorFilter.created_at:type_name -> atlantis.common.v1.TimestampPredicate
+	13, // 14: atlantis.library.v1.AuthorFilter.and:type_name -> atlantis.library.v1.AuthorFilter
+	13, // 15: atlantis.library.v1.AuthorFilter.or:type_name -> atlantis.library.v1.AuthorFilter
+	13, // 16: atlantis.library.v1.AuthorFilter.not:type_name -> atlantis.library.v1.AuthorFilter
+	0,  // 17: atlantis.library.v1.AuthorOrderBy.field:type_name -> atlantis.library.v1.AuthorOrderField
+	13, // 18: atlantis.library.v1.QueryAuthorRequest.filter:type_name -> atlantis.library.v1.AuthorFilter
+	14, // 19: atlantis.library.v1.QueryAuthorRequest.order:type_name -> atlantis.library.v1.AuthorOrderBy
+	24, // 20: atlantis.library.v1.QueryAuthorRequest.fields:type_name -> google.protobuf.FieldMask
+	1,  // 21: atlantis.library.v1.QueryAuthorRequest.includes:type_name -> atlantis.library.v1.AuthorInclude
+	2,  // 22: atlantis.library.v1.QueryAuthorResponse.entities:type_name -> atlantis.library.v1.Author
+	3,  // 23: atlantis.library.v1.AuthorService.GetAuthor:input_type -> atlantis.library.v1.GetAuthorRequest
+	5,  // 24: atlantis.library.v1.AuthorService.CreateAuthor:input_type -> atlantis.library.v1.CreateAuthorRequest
+	7,  // 25: atlantis.library.v1.AuthorService.UpdateAuthor:input_type -> atlantis.library.v1.UpdateAuthorRequest
+	9,  // 26: atlantis.library.v1.AuthorService.DeleteAuthor:input_type -> atlantis.library.v1.DeleteAuthorRequest
+	11, // 27: atlantis.library.v1.AuthorService.BatchGetAuthor:input_type -> atlantis.library.v1.BatchGetAuthorRequest
+	15, // 28: atlantis.library.v1.AuthorService.QueryAuthor:input_type -> atlantis.library.v1.QueryAuthorRequest
+	4,  // 29: atlantis.library.v1.AuthorService.GetAuthor:output_type -> atlantis.library.v1.GetAuthorResponse
+	6,  // 30: atlantis.library.v1.AuthorService.CreateAuthor:output_type -> atlantis.library.v1.CreateAuthorResponse
+	8,  // 31: atlantis.library.v1.AuthorService.UpdateAuthor:output_type -> atlantis.library.v1.UpdateAuthorResponse
+	10, // 32: atlantis.library.v1.AuthorService.DeleteAuthor:output_type -> atlantis.library.v1.DeleteAuthorResponse
+	12, // 33: atlantis.library.v1.AuthorService.BatchGetAuthor:output_type -> atlantis.library.v1.BatchGetAuthorResponse
+	16, // 34: atlantis.library.v1.AuthorService.QueryAuthor:output_type -> atlantis.library.v1.QueryAuthorResponse
+	29, // [29:35] is the sub-list for method output_type
+	23, // [23:29] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_atlantis_library_v1_author_proto_init() }
@@ -1269,15 +1143,15 @@ func file_atlantis_library_v1_author_proto_init() {
 	}
 	file_atlantis_library_v1_book_proto_init()
 	file_atlantis_library_v1_author_proto_msgTypes[0].OneofWrappers = []any{}
-	file_atlantis_library_v1_author_proto_msgTypes[13].OneofWrappers = []any{}
-	file_atlantis_library_v1_author_proto_msgTypes[16].OneofWrappers = []any{}
+	file_atlantis_library_v1_author_proto_msgTypes[11].OneofWrappers = []any{}
+	file_atlantis_library_v1_author_proto_msgTypes[14].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_atlantis_library_v1_author_proto_rawDesc), len(file_atlantis_library_v1_author_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   17,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

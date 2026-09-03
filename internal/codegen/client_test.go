@@ -124,7 +124,6 @@ func TestEmitGoClient_InterfaceUsesProtoTypes(t *testing.T) {
 	for _, sig := range []string{
 		"type AClient interface {",
 		"GetA(ctx context.Context, req *pb.GetARequest, opts ...grpc.CallOption) (*pb.GetAResponse, error)",
-		"ListA(ctx context.Context, req *pb.ListARequest, opts ...grpc.CallOption) (*pb.ListAResponse, error)",
 		"BatchGetA(ctx context.Context, req *pb.BatchGetARequest, opts ...grpc.CallOption) (*pb.BatchGetAResponse, error)",
 		"CreateA(ctx context.Context, req *pb.CreateARequest, opts ...grpc.CallOption) (*pb.CreateAResponse, error)",
 		"UpdateA(ctx context.Context, req *pb.UpdateARequest, opts ...grpc.CallOption) (*pb.UpdateAResponse, error)",

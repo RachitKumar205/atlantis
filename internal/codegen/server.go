@@ -35,7 +35,7 @@ type GoFile struct {
 //   - github.com/pgvector/pgvector-go                     — only for entities with vector fields
 //   - standard library (context, database/sql, errors, fmt, time)
 //
-// SQL constants are baked into the file, one per query shape (Get / List /
+// SQL constants are baked into the file, one per query shape (Get /
 // BatchGet / Insert / Update / Delete / vector search). Per-entity scan and
 // bind helpers are inlined, so nothing reflects on the hot path.
 
@@ -249,7 +249,7 @@ func emitGoServerEntity(e *dsl.Entity, inbound []inboundRef, cfg GenConfig) (GoF
 	b.WriteString("var _ proto.Message\n")
 	b.WriteString("var _ = codes.OK\n")
 	b.WriteString("var _ = status.Errorf\n")
-	// The back-compat Get/List/BatchGet shims build typed predicates from
+	// The back-compat Get/BatchGet shims build typed predicates from
 	// the common predicates proto. An entity whose PK type has no matching
 	// predicate (e.g., timestamp on a composite-PK hypertable) still needs
 	// the import so the rest of the wrappers compile; the blank reference
@@ -287,14 +287,6 @@ func emitGoServerEntity(e *dsl.Entity, inbound []inboundRef, cfg GenConfig) (GoF
 	fmt.Fprintf(&b, "const sqlGet%s = `SELECT %s FROM %s WHERE %s%s`\n",
 		e.Name, selectList, table, spec.WhereClause(1), softFilter)
 
-	if e.SoftDeleteField != "" {
-		fmt.Fprintf(&b, "const sqlList%s = `SELECT %s, COUNT(*) OVER () AS total FROM %s WHERE %s IS NULL ORDER BY %s LIMIT $1 OFFSET $2`\n",
-			e.Name, selectList, table, quoteIdent(e.SoftDeleteField), spec.OrderByCols())
-	} else {
-		fmt.Fprintf(&b, "const sqlList%s = `SELECT %s, COUNT(*) OVER () AS total FROM %s ORDER BY %s LIMIT $1 OFFSET $2`\n",
-			e.Name, selectList, table, spec.OrderByCols())
-	}
-
 	fmt.Fprintf(&b, "const sqlBatchGet%s = `SELECT %s FROM %s WHERE %s = ANY($1)%s`\n",
 		e.Name, selectList, table, quoteIdent(spec.Fields[0].Name), softFilter)
 
@@ -330,11 +322,10 @@ func emitGoServerEntity(e *dsl.Entity, inbound []inboundRef, cfg GenConfig) (GoF
 	// ORDER BYs (see internal/runtime/pagination.go).
 	emitFilterSpec(&b, e)
 
-	// Method emitters. The seven RPCs are emitted regardless of PK arity;
+	// Method emitters. The six RPCs are emitted regardless of PK arity;
 	// the per-method emitters branch internally where the wire shape
 	// differs (e.g. emitProtoBatchGetMethod's composite-PK path).
 	emitProtoGetMethod(&b, e, serverTypeName, spec)
-	emitProtoListMethod(&b, e, serverTypeName)
 	emitProtoBatchGetMethod(&b, e, serverTypeName, spec)
 	emitProtoCreateMethod(&b, e, serverTypeName, spec)
 	emitProtoUpdateMethod(&b, e, serverTypeName, spec)
@@ -514,47 +505,6 @@ func (s *%s) Get%s(ctx context.Context, req *pb.Get%sRequest) (*pb.Get%sResponse
 }
 
 `, e.Name, e.Name, e.Name)
-}
-
-func emitProtoListMethod(b *strings.Builder, e *dsl.Entity, srv string) {
-	// List is a back-compat shim over QueryX. It rejects req.offset > 0 with
-	// InvalidArgument: offset-based pagination cannot be mapped onto QueryX's
-	// opaque keyset cursor without re-scanning to the offset boundary, or
-	// returning unstable results under concurrent writes. AIP-158 has list APIs
-	// expose page_token only. Callers using offset migrate to next_page_token,
-	// which the response carries alongside the legacy total count.
-	//
-	// The total field stays populated when QueryX returned a count
-	// (limit <= 100). For limit > 100 the count is omitted and total is
-	// zero — the same wire signal Query uses. Callers that always need a
-	// count should call a dedicated Count RPC.
-	fmt.Fprintf(b, `// List%s implements pb.%sServiceServer.
-//
-// Deprecated: thin wrapper around Query%s. Offset-based pagination is
-// rejected; use req.page_token (via Query%s) or read resp.next_page_token
-// on the next call.
-func (s *%s) List%s(ctx context.Context, req *pb.List%sRequest) (*pb.List%sResponse, error) {
-	if req.GetOffset() > 0 {
-		return nil, status.Errorf(codes.InvalidArgument,
-			"List%s.offset is deprecated; use page_token via Query%s")
-	}
-	qResp, err := s.Query%s(ctx, &pb.Query%sRequest{Limit: req.GetLimit()})
-	if err != nil {
-		return nil, err
-	}
-	return &pb.List%sResponse{
-		Entities:      qResp.GetEntities(),
-		Total:         qResp.GetTotalEstimate(),
-		NextPageToken: qResp.GetNextPageToken(),
-	}, nil
-}
-
-`, e.Name, e.Name,
-		e.Name, e.Name,
-		srv, e.Name, e.Name, e.Name,
-		e.Name, e.Name,
-		e.Name, e.Name,
-		e.Name)
 }
 
 func emitProtoBatchGetMethod(b *strings.Builder, e *dsl.Entity, srv string, spec *pkSpec) {

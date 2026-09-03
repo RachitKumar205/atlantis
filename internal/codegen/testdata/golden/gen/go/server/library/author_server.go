@@ -50,7 +50,6 @@ func NewAuthorServer(db runtime.Pool, cache runtime.Cache, outbox runtime.Outbox
 const authorQueryTimeoutMS = 2000
 
 const sqlGetAuthor = `SELECT "id", "name", "bio", "rating", "tenure", "created_at" FROM "atlantis"."library_author" WHERE "id" = $1`
-const sqlListAuthor = `SELECT "id", "name", "bio", "rating", "tenure", "created_at", COUNT(*) OVER () AS total FROM "atlantis"."library_author" ORDER BY "id" LIMIT $1 OFFSET $2`
 const sqlBatchGetAuthor = `SELECT "id", "name", "bio", "rating", "tenure", "created_at" FROM "atlantis"."library_author" WHERE "id" = ANY($1)`
 const sqlInsertAuthor = `INSERT INTO "atlantis"."library_author" ("id", "name", "bio", "rating", "tenure", "created_at") VALUES ($1, $2, $3, $4, $5, COALESCE($6::TIMESTAMPTZ, now())) RETURNING "id"`
 const sqlUpdateAuthor = `UPDATE "atlantis"."library_author" SET "name" = $1, "bio" = $2, "rating" = $3, "tenure" = $4, "created_at" = $5 WHERE "id" = $6`
@@ -84,27 +83,6 @@ func (s *AuthorServer) GetAuthor(ctx context.Context, req *pb.GetAuthorRequest) 
 		return nil, runtime.ErrNotFound
 	}
 	return &pb.GetAuthorResponse{Entity: qResp.GetEntities()[0]}, nil
-}
-
-// ListAuthor implements pb.AuthorServiceServer.
-//
-// Deprecated: thin wrapper around QueryAuthor. Offset-based pagination is
-// rejected; use req.page_token (via QueryAuthor) or read resp.next_page_token
-// on the next call.
-func (s *AuthorServer) ListAuthor(ctx context.Context, req *pb.ListAuthorRequest) (*pb.ListAuthorResponse, error) {
-	if req.GetOffset() > 0 {
-		return nil, status.Errorf(codes.InvalidArgument,
-			"ListAuthor.offset is deprecated; use page_token via QueryAuthor")
-	}
-	qResp, err := s.QueryAuthor(ctx, &pb.QueryAuthorRequest{Limit: req.GetLimit()})
-	if err != nil {
-		return nil, err
-	}
-	return &pb.ListAuthorResponse{
-		Entities:      qResp.GetEntities(),
-		Total:         qResp.GetTotalEstimate(),
-		NextPageToken: qResp.GetNextPageToken(),
-	}, nil
 }
 
 // BatchGetAuthor implements pb.AuthorServiceServer.

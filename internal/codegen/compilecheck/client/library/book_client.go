@@ -13,7 +13,6 @@ import (
 // BookClient is the typed surface for library.Book.
 type BookClient interface {
 	GetBook(ctx context.Context, req *pb.GetBookRequest, opts ...grpc.CallOption) (*pb.GetBookResponse, error)
-	ListBook(ctx context.Context, req *pb.ListBookRequest, opts ...grpc.CallOption) (*pb.ListBookResponse, error)
 	BatchGetBook(ctx context.Context, req *pb.BatchGetBookRequest, opts ...grpc.CallOption) (*pb.BatchGetBookResponse, error)
 	CreateBook(ctx context.Context, req *pb.CreateBookRequest, opts ...grpc.CallOption) (*pb.CreateBookResponse, error)
 	UpdateBook(ctx context.Context, req *pb.UpdateBookRequest, opts ...grpc.CallOption) (*pb.UpdateBookResponse, error)
@@ -37,10 +36,6 @@ func NewBookClient(cc grpc.ClientConnInterface) BookClient {
 
 func (c *bookClient) GetBook(ctx context.Context, req *pb.GetBookRequest, opts ...grpc.CallOption) (*pb.GetBookResponse, error) {
 	return c.inner.GetBook(ctx, req, opts...)
-}
-
-func (c *bookClient) ListBook(ctx context.Context, req *pb.ListBookRequest, opts ...grpc.CallOption) (*pb.ListBookResponse, error) {
-	return c.inner.ListBook(ctx, req, opts...)
 }
 
 func (c *bookClient) BatchGetBook(ctx context.Context, req *pb.BatchGetBookRequest, opts ...grpc.CallOption) (*pb.BatchGetBookResponse, error) {

@@ -88,7 +88,6 @@ func TestEmitGoServer_EmitsAllSixCoreMethods(t *testing.T) {
 	c := entityServerFile(t, files)
 	for _, sig := range []string{
 		"func (s *AServer) GetA(",
-		"func (s *AServer) ListA(",
 		"func (s *AServer) BatchGetA(",
 		"func (s *AServer) CreateA(",
 		"func (s *AServer) UpdateA(",
@@ -106,7 +105,6 @@ func TestEmitGoServer_NativeProtoSignatures(t *testing.T) {
 	c := entityServerFile(t, files)
 	for _, sig := range []string{
 		"GetAccount(ctx context.Context, req *pb.GetAccountRequest) (*pb.GetAccountResponse, error)",
-		"ListAccount(ctx context.Context, req *pb.ListAccountRequest) (*pb.ListAccountResponse, error)",
 		"BatchGetAccount(ctx context.Context, req *pb.BatchGetAccountRequest) (*pb.BatchGetAccountResponse, error)",
 		"CreateAccount(ctx context.Context, req *pb.CreateAccountRequest) (*pb.CreateAccountResponse, error)",
 		"UpdateAccount(ctx context.Context, req *pb.UpdateAccountRequest) (*pb.UpdateAccountResponse, error)",
@@ -151,7 +149,6 @@ func TestEmitGoServer_BakedSQLStatements(t *testing.T) {
 	// Identifiers are
 	// double-quoted (defense-in-depth against PG reserved words).
 	assertContains(t, c, `SELECT "id", "email" FROM "atlantis"."consumer_account" WHERE "id" = $1`)
-	assertContains(t, c, `SELECT "id", "email", COUNT(*) OVER () AS total FROM "atlantis"."consumer_account"`)
 	assertContains(t, c, `INSERT INTO "atlantis"."consumer_account" ("id", "email") VALUES ($1, $2) RETURNING "id"`)
 	assertContains(t, c, `UPDATE "atlantis"."consumer_account" SET "email" = $1 WHERE "id" = $2`)
 	assertContains(t, c, `DELETE FROM "atlantis"."consumer_account" WHERE "id" = $1`)
@@ -423,31 +420,6 @@ func TestEmitGoServer_GetWrapsQuery(t *testing.T) {
 	body := c[getStart : getStart+getEnd]
 	if strings.Contains(body, "sqlGetAccount") {
 		t.Errorf("GetAccount handler still references sqlGetAccount — the wrapper should delegate to QueryAccount instead")
-	}
-}
-
-// TestEmitGoServer_ListRejectsOffset pins the AIP-158-style offset
-// rejection on the List shim. The pre-Step-8 LIMIT/OFFSET path can't be
-// mapped onto QueryX's opaque keyset cursor without either re-scanning
-// (slow) or returning unstable results under concurrent writes (wrong),
-// so the shim rejects req.offset > 0 outright and points callers at
-// page_token. List's response shape gained NextPageToken so callers can
-// move to keyset without leaving the legacy RPC entirely.
-func TestEmitGoServer_ListRejectsOffset(t *testing.T) {
-	ir := lower(t, `entity Account in consumer { id varchar(15) primary  email text not null }`)
-	files, _ := EmitGoServer(ir, GenConfig{})
-	c := entityServerFile(t, files)
-
-	for _, sub := range []string{
-		"if req.GetOffset() > 0 {",
-		"codes.InvalidArgument",
-		"offset is deprecated",
-		"page_token via QueryAccount",
-		"s.QueryAccount(ctx, &pb.QueryAccountRequest{Limit: req.GetLimit()})",
-		"NextPageToken: qResp.GetNextPageToken()",
-		"Total:         qResp.GetTotalEstimate()",
-	} {
-		assertContains(t, c, sub)
 	}
 }
 

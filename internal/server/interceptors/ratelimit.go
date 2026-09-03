@@ -125,8 +125,8 @@ func saturationRatio(pool *pgxpool.Pool) (float64, bool) {
 
 // isLowPriority classifies an RPC's full method path as low-priority for
 // load shedding. The DSL does not yet carry per-RPC priority annotations,
-// so today the rule is "list/search are low, Get and the mutators are
-// high."
+// so today the rule is "vector search and admin List* reads are low, Get
+// and the mutators are high." Entities expose no List RPC.
 //
 // The string match is on the method component of the gRPC path,
 // "/atlantis.v1.<entity>.<Service>/<Method>", which is what follows the final

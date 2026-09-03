@@ -13,7 +13,6 @@ import (
 // AuthorClient is the typed surface for library.Author.
 type AuthorClient interface {
 	GetAuthor(ctx context.Context, req *pb.GetAuthorRequest, opts ...grpc.CallOption) (*pb.GetAuthorResponse, error)
-	ListAuthor(ctx context.Context, req *pb.ListAuthorRequest, opts ...grpc.CallOption) (*pb.ListAuthorResponse, error)
 	BatchGetAuthor(ctx context.Context, req *pb.BatchGetAuthorRequest, opts ...grpc.CallOption) (*pb.BatchGetAuthorResponse, error)
 	CreateAuthor(ctx context.Context, req *pb.CreateAuthorRequest, opts ...grpc.CallOption) (*pb.CreateAuthorResponse, error)
 	UpdateAuthor(ctx context.Context, req *pb.UpdateAuthorRequest, opts ...grpc.CallOption) (*pb.UpdateAuthorResponse, error)
@@ -37,10 +36,6 @@ func NewAuthorClient(cc grpc.ClientConnInterface) AuthorClient {
 
 func (c *authorClient) GetAuthor(ctx context.Context, req *pb.GetAuthorRequest, opts ...grpc.CallOption) (*pb.GetAuthorResponse, error) {
 	return c.inner.GetAuthor(ctx, req, opts...)
-}
-
-func (c *authorClient) ListAuthor(ctx context.Context, req *pb.ListAuthorRequest, opts ...grpc.CallOption) (*pb.ListAuthorResponse, error) {
-	return c.inner.ListAuthor(ctx, req, opts...)
 }
 
 func (c *authorClient) BatchGetAuthor(ctx context.Context, req *pb.BatchGetAuthorRequest, opts ...grpc.CallOption) (*pb.BatchGetAuthorResponse, error) {

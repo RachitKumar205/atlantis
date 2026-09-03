@@ -49,7 +49,6 @@ func NewBookServer(db runtime.Pool, cache runtime.Cache, outbox runtime.Outbox, 
 const bookQueryTimeoutMS = 2000
 
 const sqlGetBook = `SELECT "id", "tenant", "title", "author_id", "score", "page_count", "summary", "expires_at", "created_at" FROM "atlantis"."library_book" WHERE "id" = $1`
-const sqlListBook = `SELECT "id", "tenant", "title", "author_id", "score", "page_count", "summary", "expires_at", "created_at", COUNT(*) OVER () AS total FROM "atlantis"."library_book" ORDER BY "id" LIMIT $1 OFFSET $2`
 const sqlBatchGetBook = `SELECT "id", "tenant", "title", "author_id", "score", "page_count", "summary", "expires_at", "created_at" FROM "atlantis"."library_book" WHERE "id" = ANY($1)`
 const sqlInsertBook = `INSERT INTO "atlantis"."library_book" ("id", "tenant", "title", "author_id", "score", "page_count", "summary", "expires_at", "created_at") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9::TIMESTAMPTZ, now())) RETURNING "id"`
 const sqlUpdateBook = `UPDATE "atlantis"."library_book" SET "tenant" = $1, "title" = $2, "author_id" = $3, "score" = $4, "page_count" = $5, "summary" = $6, "expires_at" = $7, "created_at" = $8 WHERE "id" = $9`
@@ -87,27 +86,6 @@ func (s *BookServer) GetBook(ctx context.Context, req *pb.GetBookRequest) (*pb.G
 		return nil, runtime.ErrNotFound
 	}
 	return &pb.GetBookResponse{Entity: qResp.GetEntities()[0]}, nil
-}
-
-// ListBook implements pb.BookServiceServer.
-//
-// Deprecated: thin wrapper around QueryBook. Offset-based pagination is
-// rejected; use req.page_token (via QueryBook) or read resp.next_page_token
-// on the next call.
-func (s *BookServer) ListBook(ctx context.Context, req *pb.ListBookRequest) (*pb.ListBookResponse, error) {
-	if req.GetOffset() > 0 {
-		return nil, status.Errorf(codes.InvalidArgument,
-			"ListBook.offset is deprecated; use page_token via QueryBook")
-	}
-	qResp, err := s.QueryBook(ctx, &pb.QueryBookRequest{Limit: req.GetLimit()})
-	if err != nil {
-		return nil, err
-	}
-	return &pb.ListBookResponse{
-		Entities:      qResp.GetEntities(),
-		Total:         qResp.GetTotalEstimate(),
-		NextPageToken: qResp.GetNextPageToken(),
-	}, nil
 }
 
 // BatchGetBook implements pb.BookServiceServer.

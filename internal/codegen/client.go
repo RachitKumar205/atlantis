@@ -95,13 +95,13 @@ func New%s(cc grpc.ClientConnInterface) %s {
 	return GoFile{Path: path, Content: b.String()}, nil
 }
 
-// emitClientIfaceMethods writes the seven core methods, plus one search per
+// emitClientIfaceMethods writes the six core methods, plus one search per
 // HNSW index, onto an interface body.
 //
 // The signatures match the buf-generated service client, grpc.CallOption
 // variadics included, so a caller can pass per-call deadlines and retries.
 func emitClientIfaceMethods(b *strings.Builder, e *dsl.Entity) {
-	for _, verb := range []string{"Get", "List", "BatchGet", "Create", "Update", "Delete", "Query"} {
+	for _, verb := range []string{"Get", "BatchGet", "Create", "Update", "Delete", "Query"} {
 		fmt.Fprintf(b, "\t%s%s(ctx context.Context, req *pb.%s%sRequest, opts ...grpc.CallOption) (*pb.%s%sResponse, error)\n",
 			verb, e.Name, verb, e.Name, verb, e.Name)
 	}
@@ -117,7 +117,7 @@ func emitClientIfaceMethods(b *strings.Builder, e *dsl.Entity) {
 // emitClientMethodBodies writes the concrete method implementations.
 // Each body is a one-liner that delegates to the buf-generated client.
 func emitClientMethodBodies(b *strings.Builder, e *dsl.Entity, concrete string) {
-	for _, verb := range []string{"Get", "List", "BatchGet", "Create", "Update", "Delete", "Query"} {
+	for _, verb := range []string{"Get", "BatchGet", "Create", "Update", "Delete", "Query"} {
 		fmt.Fprintf(b, `func (c *%s) %s%s(ctx context.Context, req *pb.%s%sRequest, opts ...grpc.CallOption) (*pb.%s%sResponse, error) {
 	return c.inner.%s%s(ctx, req, opts...)
 }

@@ -477,7 +477,7 @@ func TestProto_ImportsCommonPredicatesAndFieldMask(t *testing.T) {
 
 // TestProto_CompositePK_HasFullSurface confirms that composite-PK
 // entities emit the same proto surface as single-PK ones — service block
-// with all seven RPCs (Get / List / Create / Update / Delete / BatchGet /
+// with all six RPCs (Get / Create / Update / Delete / BatchGet /
 // Query), typed Filter / OrderField / Include messages, request +
 // response shells. PK arity influences only the request shell shapes
 // (composite uses a PK wrapper message + GetIds returning a repeated of

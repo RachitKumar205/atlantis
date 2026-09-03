@@ -89,7 +89,7 @@ deleted_at timestamptz
 soft_delete by deleted_at
 ```
 
-The generated `Delete` RPC sets `deleted_at` to `now()` instead of dropping the row. `Get`, `List`, and `Query` filter `deleted_at IS NULL` automatically. To read tombstones, declare a [custom query](../concepts/custom-queries-and-procedures.md) with the inverse filter.
+The generated `Delete` RPC sets `deleted_at` to `now()` instead of dropping the row. `Get` and `Query` filter `deleted_at IS NULL` automatically. To read tombstones, declare a [custom query](../concepts/custom-queries-and-procedures.md) with the inverse filter.
 
 ### Per-tenant partition
 
