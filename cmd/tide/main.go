@@ -50,6 +50,8 @@ func main() {
 		os.Exit(cmdApply(os.Args[2:]))
 	case "plan":
 		os.Exit(cmdPlan(os.Args[2:]))
+	case "rehearse":
+		os.Exit(cmdRehearse(os.Args[2:]))
 	case "inspect":
 		os.Exit(cmdInspect(os.Args[2:]))
 	case "pull":
@@ -99,6 +101,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "usage: tide init     --caller NAME [--org ORG] [--output-dir DIR]")
 	fmt.Fprintln(os.Stderr, "       tide apply    [--backfill] [--dry-run] [--no-pull]")
 	fmt.Fprintln(os.Stderr, "       tide plan     [--format table|json] [--no-pull]")
+	fmt.Fprintln(os.Stderr, "       tide rehearse [--format table|json] [--timeout D]")
 	fmt.Fprintln(os.Stderr, "       tide inspect  [--format table|json]")
 	fmt.Fprintln(os.Stderr, "       tide pull     [--force]")
 	fmt.Fprintln(os.Stderr, "       tide generate [--check [--against-server]]")

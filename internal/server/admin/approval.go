@@ -34,6 +34,93 @@ const (
 // way except the ones the token happens to cover.
 const defaultPlanTTL = 7 * 24 * time.Hour
 
+// gateOutcome says what authorized an apply the gates let through.
+//
+// Policy and Verdict are written onto the version row for an unattended
+// apply. Both empty when a human approval was consumed — the plan row is
+// that record — and when the diff carried nothing to gate.
+type gateOutcome struct {
+	Policy  string
+	Verdict string
+}
+
+// evaluateApplyGates is the composed decision for one attempted apply: the
+// caller's apply-policy tier, the per-class change policy, protected-entity
+// floors and freeze windows, each only able to restrict. Called from
+// ApplyMigration and BeginBackfillPlan — the two RPCs that run schema SQL —
+// inside the advisory-locked transaction, so a policy edit landing
+// concurrently either precedes the read or waits.
+func (s *Service) evaluateApplyGates(ctx context.Context, tx pgx.Tx, g gateRequest) (gateOutcome, error) {
+	tier, err := s.loadApplyPolicy(ctx, tx, g.Caller)
+	if err != nil {
+		return gateOutcome{}, err
+	}
+	if tier == PolicySandboxOnly {
+		// Refused, not queued: there is no approval that makes this caller
+		// one that applies. The tier is edited from the console.
+		return gateOutcome{}, status.Errorf(codes.FailedPrecondition,
+			"admin: caller %q holds the sandbox_only apply policy, so nothing it submits "+
+				"may apply. Plan and rehearse remain available; an admin can raise the "+
+				"tier from the console's Callers page.", g.Caller)
+	}
+
+	verdict := s.verdictForGate(ctx, tx, g)
+	prot, err := s.protectedHitFor(ctx, tx, g.Diff)
+	if err != nil {
+		return gateOutcome{}, err
+	}
+	consumed, err := s.gateOnChangePolicy(ctx, tx, g, tier, verdict, prot)
+	if err != nil {
+		return gateOutcome{}, err
+	}
+
+	// The freeze check runs after the approval machinery: an unapproved
+	// gated change queues with its ordinary message, so approving stays
+	// possible during the freeze, and the approved change waits here until
+	// the window lifts. An override-approval waives the wait — that is the
+	// ceremony's whole meaning.
+	if consumed == nil || consumed.DecidedVia == "" {
+		frz, err := s.activeFreezeFor(ctx, tx, g.Now, g.Diff.ClassesPresent())
+		if err != nil {
+			return gateOutcome{}, err
+		}
+		if frz != nil {
+			return gateOutcome{}, status.Errorf(codes.FailedPrecondition,
+				"admin: a freeze window holds this change until %s%s. Approvals stay "+
+					"open during a freeze; the apply can retry after the window lifts, "+
+					"or an admin can override the plan from the console.",
+				frz.EndsAt.UTC().Format(time.RFC3339), reasonSuffix(frz.Reason))
+		}
+	}
+
+	if consumed != nil {
+		return gateOutcome{}, nil
+	}
+	return gateOutcome{Policy: string(tier), Verdict: verdict}, nil
+}
+
+// verdictForGate looks up the newest rehearsal verdict bound to this apply's
+// exact content and young enough to consume. The plan id is the binding: it
+// digests (caller, files hash, dependency hash), so a verdict simply does
+// not exist for content that has moved. Absent, stale or unreadable all
+// come back empty — unverified — which no auto tier accepts.
+//
+// Data drift inside the consumption window is accepted: the apply's own
+// transactional DDL validates the real rows and rolls back on violation, so
+// a stale pass costs a failed apply, never a corrupted one.
+func (s *Service) verdictForGate(ctx context.Context, tx pgx.Tx, g gateRequest) string {
+	var verdict string
+	err := tx.QueryRow(ctx, `
+SELECT verdict FROM atlantis.rehearsals
+WHERE plan_id = $1 AND created_at > now() - $2::interval
+ORDER BY created_at DESC LIMIT 1`,
+		g.PlanID, fmt.Sprintf("%d seconds", int(rehearsalConsumeTTL.Seconds()))).Scan(&verdict)
+	if err != nil {
+		return ""
+	}
+	return verdict
+}
+
 // gateOnChangePolicy decides whether this change may apply now, and records the
 // request when it may not.
 //
@@ -56,10 +143,15 @@ const defaultPlanTTL = 7 * 24 * time.Hour
 // to touch a row that is already approved or rejected, so a race can at worst
 // rewrite a pending row with identical content.
 //
-// Returns nil when the apply may proceed. Otherwise the error carries
+// A class is gated when the change policy requires approval, the caller's
+// tier does, or the diff touches a protected entity. consumed is the
+// approved plan an apply is proceeding on, nil for an unattended one — the
+// caller reads DecidedVia off it to know whether an override was spent.
+//
+// Returns (_, nil) when the apply may proceed. Otherwise the error carries
 // codes.FailedPrecondition so a client can branch on the code rather than on
 // message text.
-func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateRequest) error {
+func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateRequest, tier applyPolicy, verdict string, prot *protectedRule) (consumed *schemaPlan, err error) {
 	// Every class the diff contains, not just the worst one.
 	//
 	// The policy is four independent rules. Consulting only the highest class
@@ -71,7 +163,7 @@ func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateReque
 	if len(present) == 0 {
 		// An empty diff has nothing to gate. Reaching here means the caller
 		// asked to apply nothing, which the apply path handles above.
-		return nil
+		return nil, nil
 	}
 
 	stored, _, err := loadChangePolicy(ctx, tx)
@@ -80,7 +172,7 @@ func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateReque
 		// permits: the alternative is that a dropped table or a revoked GRANT
 		// turns every gated class into an unattended apply, which is the exact
 		// failure the gate exists to prevent and the hardest kind to notice.
-		return status.Errorf(codes.FailedPrecondition,
+		return nil, status.Errorf(codes.FailedPrecondition,
 			"admin: the change policy could not be read, so no change may apply unattended: %v", err)
 	}
 
@@ -88,9 +180,14 @@ func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateReque
 	// requires approval is the one to record and to name in the refusal. That
 	// keeps the plan filed under the rule that actually stopped it rather than
 	// under whichever class happened to be worst.
+	// Two passes: a class the change policy gates is found first, and only
+	// when no rule fires does a tier-gated class stop the apply. Either layer
+	// alone gates; the order decides which rule the plan is filed under and
+	// named for, and an operator's explicit rule outranks the tier default —
+	// relaxing the named rule must be what unblocks the change.
 	var class adminpb.PlanClass
 	var policy ChangePolicy
-	var gated bool
+	var gated, byTierOnly bool
 	for _, c := range present {
 		pb := planClassToPB(translateClass(c))
 		// A class outside the settable set cannot be governed by a rule, and
@@ -108,7 +205,7 @@ func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateReque
 		// Keep the arm: it costs nothing, it fails closed, and the day the
 		// invariant breaks is the day it stops being unreachable.
 		if !policyClassIsSettable(pb) {
-			return status.Errorf(codes.FailedPrecondition,
+			return nil, status.Errorf(codes.FailedPrecondition,
 				"admin: plan class %s cannot be evaluated against the change policy", pb)
 		}
 		if p := effectiveChangePolicy(stored, pb); p.RequireApproval {
@@ -117,33 +214,69 @@ func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateReque
 		}
 	}
 	if !gated {
-		return nil
+		for _, c := range present {
+			pb := planClassToPB(translateClass(c))
+			if tierRequiresApproval(tier, pb, verdict) {
+				class, policy, gated = pb, effectiveChangePolicy(stored, pb), true
+				byTierOnly = true
+				break
+			}
+		}
+	}
+	// A protected entity gates on its own, whatever the class rules and the
+	// tier said, and an admin_only floor overrides who may decide.
+	byProtected := false
+	if prot != nil {
+		if !gated {
+			pb := planClassToPB(translateClass(present[0]))
+			class, policy, gated = pb, effectiveChangePolicy(stored, pb), true
+			byProtected = true
+		}
+		if prot.AdminOnly() {
+			policy.ApproverRole = "admin"
+		}
+	}
+	if !gated {
+		return nil, nil
+	}
+
+	// The refusal says which layer queued it. The deciding role comes from
+	// the change policy either way — the rule for the class names the
+	// decider, whatever put the class in front of one.
+	detailNote := func(d string) string {
+		switch {
+		case byProtected:
+			return d + "; queued because " + prot.Pattern + " is protected" + reasonSuffix(prot.Reason)
+		case byTierOnly:
+			return d + "; queued by the caller's apply policy (" + string(tier) + ")"
+		}
+		return d
 	}
 
 	// The rule says a human must decide. Find out whether one has.
 	plan, found, err := loadSchemaPlan(ctx, tx, g.PlanID)
 	if err != nil {
-		return fmt.Errorf("load plan %s: %w", g.PlanID, err)
+		return nil, fmt.Errorf("load plan %s: %w", g.PlanID, err)
 	}
 
 	switch {
 	case !found:
 		if err := s.recordPendingPlan(ctx, g, class); err != nil {
-			return fmt.Errorf("record plan %s: %w", g.PlanID, err)
+			return nil, fmt.Errorf("record plan %s: %w", g.PlanID, err)
 		}
-		return approvalRequired(g.PlanID, class, policy.ApproverRole,
-			"recorded and waiting for a decision")
+		return nil, approvalRequired(g.PlanID, class, policy.ApproverRole,
+			detailNote("recorded and waiting for a decision"))
 
 	case plan.State == planRejected:
 		// Terminal. Re-submitting must not quietly re-open it, or "rejected"
 		// means "rejected until the pipeline retries in five minutes".
-		return status.Errorf(codes.FailedPrecondition,
+		return nil, status.Errorf(codes.FailedPrecondition,
 			"admin: plan %s was rejected by %s%s — change the schema and re-plan; "+
 				"resubmitting the same change does not re-open the request",
 			g.PlanID, plan.DecidedBy, reasonSuffix(plan.DecisionReason))
 
 	case plan.State == planApplied:
-		return status.Errorf(codes.FailedPrecondition,
+		return nil, status.Errorf(codes.FailedPrecondition,
 			"admin: plan %s has already been applied", g.PlanID)
 
 	case plan.State == planSuperseded:
@@ -155,21 +288,21 @@ func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateReque
 		// The only escape was editing the .atl bytes to move the hash, which
 		// no message suggests and no reader would guess.
 		if err := s.recordPendingPlan(ctx, g, class); err != nil {
-			return fmt.Errorf("re-open superseded plan %s: %w", g.PlanID, err)
+			return nil, fmt.Errorf("re-open superseded plan %s: %w", g.PlanID, err)
 		}
-		return approvalRequired(g.PlanID, class, policy.ApproverRole,
-			"the previous request was superseded by a change to the schema it "+
-				"depended on, and has been re-opened for a decision")
+		return nil, approvalRequired(g.PlanID, class, policy.ApproverRole,
+			detailNote("the previous request was superseded by a change to the schema it "+
+				"depended on, and has been re-opened for a decision"))
 
 	case plan.State == planApproved:
 		if plan.Expired(g.Now) {
 			// Same reasoning: void the approval and re-open, so the expiry is
 			// a renewal rather than a dead end.
 			if err := s.recordPendingPlan(ctx, g, class); err != nil {
-				return fmt.Errorf("re-open expired plan %s: %w", g.PlanID, err)
+				return nil, fmt.Errorf("re-open expired plan %s: %w", g.PlanID, err)
 			}
-			return approvalRequired(g.PlanID, class, policy.ApproverRole,
-				"the approval expired before it was used and has been re-opened")
+			return nil, approvalRequired(g.PlanID, class, policy.ApproverRole,
+				detailNote("the approval expired before it was used and has been re-opened"))
 		}
 		// An approval is for a specific change. Re-derive what would run now
 		// and require it to match what was approved.
@@ -193,26 +326,26 @@ func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateReque
 				what = "the submitted file contents"
 			}
 			if err := s.recordPendingPlan(ctx, g, class); err != nil {
-				return fmt.Errorf("re-open diverged plan %s: %w", g.PlanID, err)
+				return nil, fmt.Errorf("re-open diverged plan %s: %w", g.PlanID, err)
 			}
-			return approvalRequired(g.PlanID, class, policy.ApproverRole,
-				"the approval was for a different version of "+what+
-					", so it no longer applies and the request has been re-opened")
+			return nil, approvalRequired(g.PlanID, class, policy.ApproverRole,
+				detailNote("the approval was for a different version of "+what+
+					", so it no longer applies and the request has been re-opened"))
 		}
-		return nil
+		return &plan, nil
 
 	default:
 		// planPending, or a state this build does not recognise. Both mean
 		// "nobody has said yes".
 		if plan.Expired(g.Now) {
 			if err := s.recordPendingPlan(ctx, g, class); err != nil {
-				return fmt.Errorf("refresh plan %s: %w", g.PlanID, err)
+				return nil, fmt.Errorf("refresh plan %s: %w", g.PlanID, err)
 			}
-			return approvalRequired(g.PlanID, class, policy.ApproverRole,
-				"the previous request expired and has been renewed")
+			return nil, approvalRequired(g.PlanID, class, policy.ApproverRole,
+				detailNote("the previous request expired and has been renewed"))
 		}
-		return approvalRequired(g.PlanID, class, policy.ApproverRole,
-			"waiting for a decision")
+		return nil, approvalRequired(g.PlanID, class, policy.ApproverRole,
+			detailNote("waiting for a decision"))
 	}
 }
 
@@ -232,6 +365,10 @@ type gateRequest struct {
 	UpSQL       string
 	DownSQL     string
 	Now         time.Time
+
+	// Actor is the request's untrusted human attribution, stamped onto the
+	// plan row so a decision can be compared against it.
+	Actor string
 }
 
 // approvalRequired is the refusal a caller sees when a human has to decide.
@@ -285,6 +422,18 @@ type schemaPlan struct {
 	DecidedAt      *time.Time
 	DecisionReason string
 
+	// RequestedByActor is the human attributed to the apply that filed this
+	// plan — untrusted, recorded as given, empty when nobody was named.
+	// DecidedVia is '' | 'override' | 'self_approval_override'.
+	RequestedByActor string
+	DecidedVia       string
+
+	// RehearsalID and Verdict denormalize the latest rehearsal of this
+	// plan's exact content, for the queue's rendering. The gate never reads
+	// them — it looks the verdict up itself, with the freshness bound.
+	RehearsalID string
+	Verdict     string
+
 	// Diff is the stored diff as written, kept raw. Nothing on the read path
 	// needs the decoded value except planEntityIDs, and holding it as bytes
 	// means a row this build cannot fully decode still lists.
@@ -305,7 +454,8 @@ func loadSchemaPlan(ctx context.Context, q pgxQuerier, planID string) (schemaPla
 	rows, err := q.Query(ctx, `
 SELECT plan_id, caller, change_class, files_hash, base_checkpoint_hash, up_sql,
        state, requested_by, created_at, expires_at, decided_by, decided_by_role,
-       decided_at, decision_reason
+       decided_at, decision_reason, requested_by_actor, decided_via, diff,
+       rehearsal_id, verdict
 FROM atlantis.schema_plans WHERE plan_id = $1`, planID)
 	if err != nil {
 		return schemaPlan{}, false, err
@@ -317,7 +467,8 @@ FROM atlantis.schema_plans WHERE plan_id = $1`, planID)
 	var p schemaPlan
 	if err := rows.Scan(&p.PlanID, &p.Caller, &p.ChangeClass, &p.FilesHash, &p.BaseHash,
 		&p.UpSQL, &p.State, &p.RequestedBy, &p.CreatedAt, &p.ExpiresAt,
-		&p.DecidedBy, &p.DecidedByRole, &p.DecidedAt, &p.DecisionReason); err != nil {
+		&p.DecidedBy, &p.DecidedByRole, &p.DecidedAt, &p.DecisionReason,
+		&p.RequestedByActor, &p.DecidedVia, &p.Diff, &p.RehearsalID, &p.Verdict); err != nil {
 		return schemaPlan{}, false, err
 	}
 	return p, true, rows.Err()
@@ -358,8 +509,8 @@ func (s *Service) recordPendingPlan(ctx context.Context, g gateRequest, class ad
 	_, err = s.pool.Exec(ctx, `
 INSERT INTO atlantis.schema_plans
     (plan_id, caller, change_class, files, files_hash, diff, up_sql, down_sql,
-     base_checkpoint_hash, state, requested_by, created_at, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     base_checkpoint_hash, state, requested_by, created_at, expires_at, requested_by_actor)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 ON CONFLICT (plan_id) DO UPDATE SET
     files                = EXCLUDED.files,
     files_hash           = EXCLUDED.files_hash,
@@ -371,6 +522,8 @@ ON CONFLICT (plan_id) DO UPDATE SET
     requested_by         = EXCLUDED.requested_by,
     created_at           = EXCLUDED.created_at,
     expires_at           = EXCLUDED.expires_at,
+    requested_by_actor   = EXCLUDED.requested_by_actor,
+    decided_via          = '',
     -- Cleared, because the row is going back to pending and a decision that
     -- no longer applies must not be displayed beside it. Leaving these would
     -- show a re-opened request as "approved by X" in the console while the
@@ -386,7 +539,8 @@ ON CONFLICT (plan_id) DO UPDATE SET
     decision_reason      = ''
 WHERE atlantis.schema_plans.state IN ('pending_approval', 'superseded', 'approved')`,
 		g.PlanID, g.Caller, class.String(), filesJSON, g.FilesHash, diffJSON,
-		g.UpSQL, g.DownSQL, g.BaseHash, planPending, g.RequestedBy, g.Now, expires)
+		g.UpSQL, g.DownSQL, g.BaseHash, planPending, g.RequestedBy, g.Now, expires,
+		normalizeActor(g.Actor))
 	return err
 }
 

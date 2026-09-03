@@ -58,15 +58,15 @@ func TestChangePolicyRoundTrip(t *testing.T) {
 		Entries: []*adminpb.ChangePolicyEntry{{
 			ChangeClass:     adminpb.PlanClass_PLAN_CLASS_BACKFILL_REQUIRED,
 			RequireApproval: true,
-			ApproverRole:    "release-manager",
+			ApproverRole:    "developer",
 		}},
 	})
 	if err != nil {
 		t.Fatalf("SetChangePolicy: %v", err)
 	}
 	got := policyEntry(t, after.GetEntries(), adminpb.PlanClass_PLAN_CLASS_BACKFILL_REQUIRED)
-	if !got.GetRequireApproval() || got.GetApproverRole() != "release-manager" {
-		t.Errorf("after the write: require_approval=%v approver_role=%q, want true/release-manager",
+	if !got.GetRequireApproval() || got.GetApproverRole() != "developer" {
+		t.Errorf("after the write: require_approval=%v approver_role=%q, want true/developer",
 			got.GetRequireApproval(), got.GetApproverRole())
 	}
 	if got.GetUpdatedBy() != "policy-round-trip" || got.GetUpdatedAt() == "" {
@@ -405,6 +405,52 @@ WHERE change_class = 'PLAN_CLASS_BACKFILL_REQUIRED'`).Scan(&got); err != nil {
 				}
 			}
 		})
+	}
+}
+
+// No identity may hold CAPABILITY_SCHEMA_APPLY and CAPABILITY_SCHEMA_APPROVE
+// at once — an identity holding both is a caller that approves its own
+// changes. capability.proto states the rule; this holds the migration tree to
+// it, so a future grant reintroducing the pair fails here rather than in an
+// audit.
+//
+// Runs the whole tree: the pair existed between 0034 and 0038, and a
+// version-stepped check pinned to today's numbering would miss a later grant.
+func TestNoIdentityHoldsBothApplyAndApprove(t *testing.T) {
+	adminDSN := os.Getenv("ATLANTIS_TEST_PG")
+	if adminDSN == "" {
+		t.Skip("set ATLANTIS_TEST_PG to exercise the capability separation")
+	}
+	dsn := freshMigrationDatabase(t, adminDSN, "atlantis_cap_separation")
+	m := openInfraMigrate(t, dsn)
+	if err := m.Up(); err != nil {
+		t.Fatalf("migrate up: %v", err)
+	}
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+
+	rows, err := pool.Query(context.Background(), `
+		SELECT caller FROM atlantis.caller_capabilities
+		WHERE capability = 'CAPABILITY_SCHEMA_APPLY'
+		INTERSECT
+		SELECT caller FROM atlantis.caller_capabilities
+		WHERE capability = 'CAPABILITY_SCHEMA_APPROVE'`)
+	if err != nil {
+		t.Fatalf("query the intersection: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var caller string
+		if err := rows.Scan(&caller); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		t.Errorf("%q holds both CAPABILITY_SCHEMA_APPLY and CAPABILITY_SCHEMA_APPROVE", caller)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
 	}
 }
 

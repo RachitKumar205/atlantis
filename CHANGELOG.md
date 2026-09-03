@@ -13,6 +13,32 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Added
 
+#### Per-caller apply policies, rehearsal, and the gates around approval
+
+Every caller now carries an apply-policy tier — `sandbox_only`, `always_ask`,
+`auto_safe` (the default), `auto_verified`, `auto_all` — composed with the
+change policy by most-restrictive-wins inside the apply transaction, on both
+RPCs that run schema SQL. `tide rehearse` (and the console's Rehearse button)
+executes a migration against a disposable clone of the managed database and
+records the verdict Postgres produced; the verified tiers consume a fresh
+`pass` to apply unattended, and `unverified` never does. Rehearsing is a new
+capability, `CAPABILITY_SCHEMA_REHEARSE`, in no default bundle — an admin
+grants it per caller beside the tier.
+
+Around approvals: protected entities (per-entity floors, `ns.Entity` or
+`ns.*`), absolute freeze windows, admin overrides with a mandatory recorded
+reason, and a person-level self-approval refusal keyed on the apply's actor
+attribution. Console roles gained `developer` (viewer + sandbox + rehearse +
+nameable approver), `approver_role` became a closed set, and the org server
+records every policy change in `atlantis.policy_events`.
+
+Two fixes ride along: the console's schema-import apply route is admin + sudo
+(it reaches `AdoptBaseline`, an operator RPC, and was open to any session),
+and migration 0038 revokes the console's unused `CAPABILITY_SCHEMA_APPLY`,
+restoring the rule that no identity holds both apply and approve.
+
+Migrations: infra 0038–0041, cloud 0014.
+
 #### Generated client code is compiled
 
 `internal/codegen/compilecheck` gained two more trees, so the client and

@@ -49,7 +49,11 @@ func TestMutatingRPCsGateOnChangePolicy(t *testing.T) {
 				if !ok {
 					return true
 				}
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "gateOnChangePolicy" {
+				// evaluateApplyGates is the composed gate; gateOnChangePolicy
+				// is the change-policy layer inside it. The RPCs call the
+				// composition — a direct call to the inner layer would skip
+				// the apply-policy tier, so it does not satisfy this test.
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "evaluateApplyGates" {
 					found[fn.Name.Name] = true
 				}
 				return true
@@ -65,8 +69,8 @@ func TestMutatingRPCsGateOnChangePolicy(t *testing.T) {
 				"— the list is stale", name)
 		}
 		if !found[name] {
-			t.Errorf("%s executes schema DDL but never calls gateOnChangePolicy. "+
-				"Whatever the change policy says, this entry point ignores it — and a "+
+			t.Errorf("%s executes schema DDL but never calls evaluateApplyGates. "+
+				"Whatever the policies say, this entry point ignores them — and a "+
 				"gate one RPC honours and another does not is a suggestion about which "+
 				"RPC to call.", name)
 		}

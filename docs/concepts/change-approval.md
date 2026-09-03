@@ -39,11 +39,56 @@ They are one rule on purpose. Every way of failing to find a rule fails the same
 
 Deleting rows from `atlantis.change_policy` makes a deployment stricter. It is not a way to turn the gate off.
 
+## The caller's own ceiling: apply policy
+
+The change policy is one rule per class, for the whole deployment. Each caller also carries an **apply policy** — a tier that says how much of what *it* submits may run unattended. The gate takes the most restrictive answer of the two; neither layer can widen what the other closed.
+
+| Tier | What applies unattended |
+|---|---|
+| `sandbox_only` | Nothing. Plan, generate and rehearse remain available. |
+| `always_ask` | Nothing; every class waits for a person. |
+| `auto_safe` | Additive changes. The default. |
+| `auto_verified` | Additive, and backfills covered by a passing rehearsal. |
+| `auto_all` | Everything a passing rehearsal covers — except cross-caller breaking changes, which always wait: one caller's policy cannot consent on behalf of the callers it breaks. |
+
+`sandbox_only` refuses rather than queues. There is no approval that makes such a caller one that applies; an admin raises the tier from the console's Callers page. Setting the tier is admin work, behind a re-authentication, and every change is recorded in `atlantis.policy_events`.
+
+A deployment can also set a floor: `ATLANTIS_APPLY_POLICY_FLOOR` caps every caller's tier, and a floor that names no tier refuses to boot.
+
+## Rehearsal: proof against the real data
+
+The verified tiers turn on a **rehearsal**: the server clones the managed database — schema and rows, under one snapshot — into a disposable database, executes the migration's exact SQL there, rolls it back, and destroys the clone. The verdict is what Postgres actually did, not a prediction of it:
+
+| Verdict | Meaning |
+|---|---|
+| `pass` | The SQL completed against the real rows. |
+| `pass_with_warnings` | Completed, with something worth reading first. |
+| `fail_data` | Existing rows violate the change — the real apply would fail the same way. |
+| `fail_structural` | The SQL itself does not run. |
+| `unverified` | The rehearsal could not answer: too large, timed out, quota. Never treated as a pass. |
+
+`tide rehearse` runs one from a caller's repository; the console runs one against any queued plan. A verdict binds to the exact content it rehearsed — the same identity approvals bind to — and the gate consumes it only within an hour, so a stale pass is simply not found. Data can still drift inside that hour; the apply's own transactional DDL is the final validator, so the worst a stale pass costs is a failed apply, never a half-applied one.
+
+Rehearsing is a capability of its own, in no default bundle: the clone holds every caller's rows, and a rehearsal's failure text is a row-value surface. An admin grants it per caller, beside the tier. Listings redact the lines that embed row values; the full record is behind the same capability that can run one.
+
+## Protected entities and freeze windows
+
+Two more gates compose with the class rules, both admin-set from the console's Settings page and both recorded in `atlantis.policy_events`:
+
+- **Protected entities** — per-entity approval floors: `payments.Invoice`, or `payments.*` for a namespace. A change touching one waits for a person at every tier, and an `admin_only` floor demands an admin's decision whatever role the class rule names. When the diff cannot say what it touches, the gate assumes it touches one.
+- **Freeze windows** — absolute intervals during which matching classes do not apply. Approving stays possible during a freeze — the decision is not the action — so an approved change queues behind the window and `tide apply --wait-for-approval` picks it up when the window lifts.
+
 ## Who approves
 
-Each class names an `approver_role`, which is a console role. The default is `admin`.
+Each class names an `approver_role`, which is a console role: `admin` or `developer`. The default is `admin`, and the set is closed — a rule naming anything else is refused, because a mistyped role is a class nobody can ever decide.
 
 The server cannot authenticate a console user — that identity system belongs to the console — so the console tells the server which role the approver held. The server then re-checks that claim against the class's `approver_role` before writing anything. It cannot prove the console asserted the role honestly, but it can refuse a role the class does not name, so a middleware bug cannot quietly produce an under-privileged approval.
+
+## Overrides
+
+An admin can approve a plan **past** its gates — a freeze window, a protected-entity floor, the self-approval refusal below. An override is an approval with extra ceremony, never a bypass: it requires the admin role, a re-authentication, and a reason, and it is recorded as `override` on the plan and in both audit ledgers. It cannot waive a capability, the `sandbox_only` tier, or the binding of an approval to its exact content — those are edited, not overridden.
+
+The override is what keeps the gates honest. A gate with no sanctioned way past it gets switched off deployment-wide the first time it is inconvenient; a gate with a loud, recorded exception survives the incident that tests it.
 
 ## Nobody approves their own change
 
@@ -52,6 +97,8 @@ This is structural, not a convention.
 The identity that applies is a machine certificate's common name. The identity that approves is a console user. The capability that permits approving, `CAPABILITY_SCHEMA_APPROVE`, is in neither bundle a caller receives when it registers — and the console, which holds it, was deliberately never granted `CAPABILITY_SCHEMA_APPLY`.
 
 So the two identities cannot be the same one. A test fails the build if somebody adds the approve capability to a registration bundle to make a pipeline stop asking.
+
+There is a person-level rule beside the structural one. An apply can carry an attribution — which human asked for this — and a plan records it. A decision from the same person is refused: a request is not approved by whoever made it. The attribution is not authenticated, so this stops the honest loop rather than a determined liar, and an admin's override passes it with a reason on record. A plan whose apply named nobody shows as *unattributed* in the queue, which is what an unattended pipeline's request is.
 
 ## What an approval is attached to
 

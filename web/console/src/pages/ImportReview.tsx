@@ -12,6 +12,7 @@ import {
   type ImportSuggestion,
 } from '@/api/client'
 import { PageShell } from '@/components/PageShell'
+import { SudoConfirmDialog } from '@/pages/Settings'
 import { FileBrowser, filesFor } from '@/components/CommitGuide'
 import { Sql } from '@/components/Sql'
 import { Accordion, AccordionItem, Alert, AlertDescription, AlertTitle } from '@/components/ui'
@@ -163,15 +164,22 @@ export function ImportReview() {
 function CommitSection({ id }: { id: string }) {
   const { data, isPending, isError } = useQuery(queries.schemaImportEntities(id))
   const qc = useQueryClient()
+  const [confirmApply, setConfirmApply] = useState(false)
 
   const plan = useMutation<ImportPlan, Error, void>({
     mutationFn: () => api.schemaImport.plan(id),
   })
-  const apply = useMutation<ImportApplied, Error, ImportPlan>({
-    mutationFn: () => api.schemaImport.apply(id),
+  // Apply re-authenticates at Cloud first: it rewrites the caller's
+  // checkpoint, and the route refuses without sudo.
+  const apply = useMutation<ImportApplied, Error, string>({
+    mutationFn: async (assertion: string) => {
+      await api.auth.sudo(assertion)
+      return api.schemaImport.apply(id)
+    },
     onSuccess: () => {
       // The schema page reads the checkpoint this just rewrote.
       qc.invalidateQueries({ queryKey: ['schema'] })
+      setConfirmApply(false)
     },
   })
 
@@ -286,7 +294,7 @@ function CommitSection({ id }: { id: string }) {
             !!done ||
             (reviewing && blocked.length > 0)
           }
-          onClick={() => (p ? apply.mutate(p) : plan.mutate())}
+          onClick={() => (p ? setConfirmApply(true) : plan.mutate())}
         >
           {(plan.isPending || apply.isPending) && <span className="spin" />}
           {done
@@ -300,6 +308,25 @@ function CommitSection({ id }: { id: string }) {
                   : 'Commit'}
         </button>
       </div>
+
+      {confirmApply && p && (
+        <SudoConfirmDialog
+          title="Apply these declarations"
+          icon={<UploadSimple />}
+          body={
+            <p>
+              Atlantis will register this schema as the baseline —{' '}
+              <strong>{statements} statement{statements === 1 ? '' : 's'}</strong> against
+              the checkpoint every later plan compares to.
+            </p>
+          }
+          confirmLabel="Apply"
+          pending={apply.isPending}
+          error={apply.error ? (apply.error as Error).message : null}
+          onCancel={() => { apply.reset(); setConfirmApply(false) }}
+          onConfirm={(assertion) => apply.mutate(assertion)}
+        />
+      )}
     </div>
   )
 }

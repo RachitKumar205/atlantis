@@ -68,6 +68,16 @@ service AdminService {
   rpc SetManagedDatabase(SetManagedDatabaseRequest) returns (SetManagedDatabaseResponse) {
     option (required_capability) = CAPABILITY_OPERATOR;
   }
+  // Where rehearsal clones are created. Same sealing, same authority: a
+  // scratch cluster holds a full copy of the managed database's rows while a
+  // rehearsal runs. Unset, clones land on the managed cluster itself when
+  // its role may CREATE DATABASE.
+  rpc GetRehearsalDatabase(GetRehearsalDatabaseRequest) returns (GetRehearsalDatabaseResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  rpc SetRehearsalDatabase(SetRehearsalDatabaseRequest) returns (SetRehearsalDatabaseResponse) {
+    option (required_capability) = CAPABILITY_OPERATOR;
+  }
   // Reports how the live database differs from a declaration, and writes
   // nothing. Read-only in the same sense PlanSchema is: it runs in a
   // Postgres READ ONLY transaction, so a write added here later fails at the
@@ -155,6 +165,43 @@ service AdminService {
     option (required_capability) = CAPABILITY_SCHEMA_APPROVE;
   }
 
+  // Rehearse a migration against a disposable clone of the managed
+  // database: clone, execute the real up_sql, roll back, destroy. The
+  // verdict is what Postgres actually did.
+  rpc RehearseMigration(RehearseMigrationRequest) returns (RehearseMigrationResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_REHEARSE;
+  }
+  // Listing redacts error detail (it embeds row values); the full record is
+  // behind the same capability that can run one.
+  rpc ListRehearsals(ListRehearsalsRequest) returns (ListRehearsalsResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  rpc GetRehearsal(GetRehearsalRequest) returns (GetRehearsalResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_REHEARSE;
+  }
+
+  // Protected entities and freeze windows: org-wide gates the apply
+  // transaction consults beside the change policy. Reads are SCHEMA_READ;
+  // writes are SCHEMA_APPROVE, like the change policy.
+  rpc ListProtectedEntities(ListProtectedEntitiesRequest) returns (ListProtectedEntitiesResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  rpc PutProtectedEntity(PutProtectedEntityRequest) returns (PutProtectedEntityResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_APPROVE;
+  }
+  rpc DeleteProtectedEntity(DeleteProtectedEntityRequest) returns (DeleteProtectedEntityResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_APPROVE;
+  }
+  rpc ListFreezeWindows(ListFreezeWindowsRequest) returns (ListFreezeWindowsResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  rpc CreateFreezeWindow(CreateFreezeWindowRequest) returns (CreateFreezeWindowResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_APPROVE;
+  }
+  rpc DeleteFreezeWindow(DeleteFreezeWindowRequest) returns (DeleteFreezeWindowResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_APPROVE;
+  }
+
   // Changes waiting on a human, and the decisions about them.
   //
   // Reading is SCHEMA_READ: a change queued for approval is not a secret from
@@ -197,6 +244,16 @@ service AdminService {
   }
   rpc RecordCallerCertExpiry(RecordCallerCertExpiryRequest) returns (RecordCallerCertExpiryResponse) {
     option (required_capability) = CAPABILITY_OPERATOR;
+  }
+  // The apply policy is a caller's tier: how much of what it submits may
+  // apply without a human. Reading is SCHEMA_READ. Setting is
+  // SCHEMA_APPROVE — the same authority that decides individual plans
+  // decides how much never reaches one.
+  rpc GetApplyPolicy(GetApplyPolicyRequest) returns (GetApplyPolicyResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_READ;
+  }
+  rpc SetApplyPolicy(SetApplyPolicyRequest) returns (SetApplyPolicyResponse) {
+    option (required_capability) = CAPABILITY_SCHEMA_APPROVE;
   }
   rpc GetCallerAliases(GetCallerAliasesRequest) returns (GetCallerAliasesResponse) {
     option (required_capability) = CAPABILITY_SCHEMA_READ;
@@ -542,6 +599,22 @@ message SchemaPlanSummary {
   // Derived from the stored diff, so it describes what the plan will actually
   // do rather than what its files appear to say.
   repeated string entity_ids = 14;
+
+  // The human attributed to the apply that filed this plan. Untrusted — the
+  // server records it as given (the 0036 actor reasoning) — and empty when
+  // the apply named nobody, which is what an unattended pipeline is.
+  string requested_by_actor = 15;
+
+  // '' for an ordinary decision; 'override' when an admin forced a gated
+  // plan through; 'self_approval_override' when the override also waived
+  // the requester matching the approver.
+  string decided_via = 16;
+
+  // The latest rehearsal of this plan's exact content, if one ran: its id
+  // and verdict, denormalized onto the row so the queue renders without a
+  // per-plan join.
+  string rehearsal_id = 17;
+  string rehearsal_verdict = 18;
 }
 
 // SchemaPlanDetail is what a reviewer decides on.
@@ -591,6 +664,15 @@ message ApproveSchemaPlanRequest {
   string decided_by = 2;
   string decided_by_role = 3;
   string reason = 4;
+  // An override is an approval with extra ceremony, never a bypass: it can
+  // waive a freeze window, a protected-entity floor, and the self-approval
+  // refusal, and nothing else. Requires reason, and decided_by_role must be
+  // admin. Recorded in decided_via.
+  bool override = 5;
+  // The decider's actor principal (console:<subject>), compared against the
+  // plan's requested_by_actor for the self-approval refusal. decided_by
+  // stays the display identity.
+  string decided_by_actor = 6;
 }
 
 message ApproveSchemaPlanResponse {
@@ -662,6 +744,30 @@ message SetManagedDatabaseRequest {
 message SetManagedDatabaseResponse {
   // Bumped on every write. A server reopens its pool when this moves, so a new
   // DSN takes effect without a restart.
+  int64 version = 1;
+  string source = 2;
+}
+
+message GetRehearsalDatabaseRequest {}
+
+message GetRehearsalDatabaseResponse {
+  // Host and port, never the DSN. Empty when no target is stored — clones
+  // then land on the managed cluster when its role may CREATE DATABASE.
+  string source = 1;
+  int64 version = 2;
+  // True when ATL_REHEARSAL_PG_URL pins the target at boot, which the stored
+  // row then never overrides.
+  bool pinned_by_env = 3;
+}
+
+message SetRehearsalDatabaseRequest {
+  string dsn = 1;
+  // Host and port, for display; refused when it holds a credential.
+  string source = 2;
+  string set_by = 3;
+}
+
+message SetRehearsalDatabaseResponse {
   int64 version = 1;
   string source = 2;
 }
@@ -1005,6 +1111,11 @@ message SchemaVersionSummary {
   // and its diff is empty by definition, so this is the only number that
   // describes it.
   int32 entity_count = 10;
+  // What authorized an unattended apply: the tier that let it through and
+  // the rehearsal verdict it consumed. Both empty for human-approved applies
+  // and for every other event type.
+  string applied_under_policy = 12;
+  string applied_verdict = 13;
 }
 
 message GetSchemaHistoryResponse {
@@ -1145,6 +1256,11 @@ message CallerInfo {
   // field it would be indistinguishable from a working caller, which is the
   // one thing an operator looking at this list must not be misled about.
   string revoked_at = 8;
+  // The stored apply-policy tier; empty means the server default.
+  string apply_policy = 9;
+  // The tier the gate uses: the stored value resolved against the default
+  // and clamped to the deployment floor. Never empty.
+  string effective_apply_policy = 10;
 }
 
 message GetCallersRequest {}
@@ -1187,6 +1303,195 @@ message RecordCallerCertExpiryRequest {
 message RecordCallerCertExpiryResponse {
   string caller = 1;
   string expires_at = 2;
+}
+
+// RehearseMigrationRequest names the change to rehearse, one of two ways.
+//
+// With files, the change is planned exactly as PlanSchema would and the
+// caller must be the connecting identity — `tide rehearse` before an apply.
+// With plan_id, the stored plan's content is rehearsed — the console acting
+// on a queued request; the caller comes from the plan row.
+message RehearseMigrationRequest {
+  string caller = 1;
+  repeated SubmittedFile files = 2;
+  string plan_id = 3;
+}
+
+message RehearseMigrationResponse {
+  string rehearsal_id = 1;
+  // pass | pass_with_warnings | fail_data | fail_structural | unverified.
+  string verdict = 2;
+  // Why an unverified verdict is unverified (too_large, clone_timeout,
+  // quota, target_mismatch, clone_failed:<sqlstate>, …).
+  string reason = 3;
+  // The failure, redacted: SQLSTATE, message, constraint/table/column. The
+  // DETAIL line, which embeds row values, is stored server-side and never
+  // travels here.
+  string sqlstate = 4;
+  string error = 5;
+  // Violation counts by constraint, when the failure allowed counting them
+  // on the clone's pre-migration data.
+  map<string, int64> diagnostics = 6;
+  // A suggested edit, for the shapes the server knows a template for.
+  string remediation = 7;
+  int64 clone_ms = 8;
+  int64 execute_ms = 9;
+}
+
+message RehearsalSummary {
+  string rehearsal_id = 1;
+  string caller = 2;
+  string files_hash = 3;
+  string verdict = 4;
+  string reason = 5;
+  string sqlstate = 6;
+  string error = 7;
+  // '' | applied | apply_failed — what actually happened when the verdict
+  // was consumed.
+  string outcome = 8;
+  string created_at = 9;
+  string expires_at = 10;
+  int64 clone_ms = 11;
+  int64 execute_ms = 12;
+}
+
+message ListRehearsalsRequest {
+  // Optional filter.
+  string caller = 1;
+  int32 limit = 2;
+}
+
+message ListRehearsalsResponse {
+  repeated RehearsalSummary rehearsals = 1;
+}
+
+message GetRehearsalRequest {
+  string rehearsal_id = 1;
+}
+
+message GetRehearsalResponse {
+  RehearsalSummary rehearsal = 1;
+  // The DETAIL and HINT lines, present only behind SCHEMA_REHEARSE and only
+  // when the server persists them.
+  string error_detail = 2;
+  map<string, int64> diagnostics = 3;
+  string remediation = 4;
+}
+
+// One protected entity: an approval floor keyed by pattern.
+message ProtectedEntity {
+  // Exact `namespace.Entity`, or `namespace.*` for the whole namespace.
+  string pattern = 1;
+  // require_approval | admin_only. An unknown value is enforced as
+  // admin_only.
+  string floor = 2;
+  string reason = 3;
+  string created_by = 4;
+  string created_at = 5;
+}
+
+message ListProtectedEntitiesRequest {}
+
+message ListProtectedEntitiesResponse {
+  repeated ProtectedEntity entities = 1;
+}
+
+message PutProtectedEntityRequest {
+  ProtectedEntity entity = 1;
+  // Attribution for atlantis.policy_events; recorded as given.
+  string updated_by = 2;
+  string updated_by_email = 3;
+}
+
+message PutProtectedEntityResponse {
+  ProtectedEntity entity = 1;
+}
+
+message DeleteProtectedEntityRequest {
+  string pattern = 1;
+  string updated_by = 2;
+  string updated_by_email = 3;
+}
+
+message DeleteProtectedEntityResponse {}
+
+// One freeze window: an absolute interval during which matching classes do
+// not apply. Approvals stay possible; the apply queues behind the window.
+message FreezeWindow {
+  int64 id = 1;
+  // RFC3339. The interval is absolute; display_tz says what timezone it was
+  // written in.
+  string starts_at = 2;
+  string ends_at = 3;
+  string display_tz = 4;
+  // codegen class names ('additive', 'backfill-required',
+  // 'cross-caller-breaking', 'destructive'); empty freezes every class.
+  repeated string classes = 5;
+  string reason = 6;
+  string created_by = 7;
+  string created_at = 8;
+}
+
+message ListFreezeWindowsRequest {}
+
+message ListFreezeWindowsResponse {
+  repeated FreezeWindow windows = 1;
+}
+
+message CreateFreezeWindowRequest {
+  FreezeWindow window = 1;
+  string updated_by = 2;
+  string updated_by_email = 3;
+}
+
+message CreateFreezeWindowResponse {
+  FreezeWindow window = 1;
+}
+
+message DeleteFreezeWindowRequest {
+  int64 id = 1;
+  string updated_by = 2;
+  string updated_by_email = 3;
+}
+
+message DeleteFreezeWindowResponse {}
+
+message GetApplyPolicyRequest {
+  string caller = 1;
+}
+
+message GetApplyPolicyResponse {
+  string caller = 1;
+  // Stored tier; empty means the server default.
+  string apply_policy = 2;
+  // Resolved and floor-clamped; what the gate uses. Never empty.
+  string effective_apply_policy = 3;
+  // The deployment floor; empty when none is set.
+  string floor = 4;
+  // Whether this caller holds CAPABILITY_SCHEMA_REHEARSE.
+  bool rehearsal_enabled = 5;
+}
+
+message SetApplyPolicyRequest {
+  string caller = 1;
+  // One of sandbox_only | always_ask | auto_safe | auto_verified | auto_all,
+  // or empty to reset to the server default. Anything else is refused.
+  string apply_policy = 2;
+  // Who is making the change, for atlantis.policy_events. Recorded as given
+  // — evidence, not proof.
+  string updated_by = 3;
+  string updated_by_email = 4;
+  // When set, grants or revokes CAPABILITY_SCHEMA_REHEARSE for this caller.
+  // A separate deliberate act from the tier: rehearsal output is a
+  // cross-caller data surface. Absent leaves the grant alone.
+  optional bool rehearsal_enabled = 5;
+}
+
+message SetApplyPolicyResponse {
+  string caller = 1;
+  string apply_policy = 2;
+  string effective_apply_policy = 3;
+  bool rehearsal_enabled = 4;
 }
 
 message GetCallerAliasesRequest {

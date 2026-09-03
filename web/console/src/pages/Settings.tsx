@@ -11,10 +11,18 @@ import {
   Shield,
   ShieldCheck,
   SignOut,
+  Snowflake,
   Users,
   Warning,
 } from '@phosphor-icons/react'
-import { api, queries, type ChangePolicyEntry, type MeResult } from '@/api/client'
+import {
+  api,
+  queries,
+  type ChangePolicyEntry,
+  type FreezeWindow,
+  type MeResult,
+  type ProtectedEntity,
+} from '@/api/client'
 import { useMe } from '@/hooks/useAuth'
 import { STEP_UP_MESSAGE } from '@/pages/Login'
 import { PageShell } from '@/components/PageShell'
@@ -83,6 +91,8 @@ export function Settings() {
             </div>
             <div className={`set-panel ${active === 'policy' ? 'is-active' : ''}`}>
               <ChangePolicyPanel onToast={fire} isAdmin={me?.role === 'admin'} />
+              <ProtectedEntitiesPanel onToast={fire} isAdmin={me?.role === 'admin'} />
+              <FreezeWindowsPanel onToast={fire} isAdmin={me?.role === 'admin'} />
             </div>
             <div className={`set-panel ${active === 'danger' ? 'is-active' : ''}`}>
               <DangerPanel
@@ -535,6 +545,268 @@ function ChangePolicyPanel({ onToast, isAdmin }: { onToast: (msg: string) => voi
           error={save.error ? (save.error as Error).message : null}
           onCancel={() => { save.reset(); setPending(null) }}
           onConfirm={(assertion) => save.mutate({ entry: pending, assertion })}
+        />
+      )}
+    </>
+  )
+}
+
+function ProtectedEntitiesPanel({ onToast, isAdmin }: { onToast: (msg: string) => void; isAdmin: boolean }) {
+  const qc = useQueryClient()
+  const { data, isLoading } = useQuery({
+    queryKey: ['protected-entities'],
+    queryFn: api.protection.list,
+  })
+  const [pattern, setPattern] = useState('')
+  const [floor, setFloor] = useState('require_approval')
+  const [reason, setReason] = useState('')
+  const [confirm, setConfirm] = useState<{ kind: 'put' | 'remove'; pattern: string } | null>(null)
+
+  const act = useMutation({
+    mutationFn: async ({ kind, pattern: p, assertion }: { kind: 'put' | 'remove'; pattern: string; assertion: string }) => {
+      await api.auth.sudo(assertion)
+      if (kind === 'put') return api.protection.put({ pattern: p, floor, reason })
+      return api.protection.remove(p)
+    },
+    onSuccess: (_res, v) => {
+      qc.invalidateQueries({ queryKey: ['protected-entities'] })
+      onToast(v.kind === 'put' ? `Protected ${v.pattern}` : `Protection removed: ${v.pattern}`)
+      setConfirm(null)
+      if (v.kind === 'put') { setPattern(''); setReason('') }
+    },
+  })
+
+  const entities = data?.entities ?? []
+
+  return (
+    <>
+      <div className="set-head" style={{ marginTop: 32 }}>
+        <h2>Protected entities</h2>
+        <p>
+          Per-entity approval floors. A change touching a protected entity waits for a human
+          whatever the caller's apply policy and the change policy say, and an{' '}
+          <span className="mono">admin_only</span> floor demands an admin's decision.
+        </p>
+      </div>
+
+      {isLoading && <div className="setrow"><div className="setrow__main">Loading…</div></div>}
+      {!isLoading && entities.length === 0 && (
+        <div className="setrow"><div className="setrow__main setrow__help">
+          Nothing is protected. Patterns are exact (<span className="mono">payments.Invoice</span>)
+          or a whole namespace (<span className="mono">payments.*</span>).
+        </div></div>
+      )}
+
+      {entities.map(e => (
+        <div className="setrow" key={e.pattern}>
+          <div className="setrow__main">
+            <div className="setrow__label mono">{e.pattern}</div>
+            <div className="setrow__help">
+              {e.floor === 'admin_only' ? 'Needs an admin' : 'Needs approval'}
+              {e.reason ? ` — ${e.reason}` : ''}
+            </div>
+          </div>
+          <div className="setrow__control">
+            <button
+              className="btn btn--sm btn--ghost"
+              disabled={!isAdmin || act.isPending}
+              title={isAdmin ? undefined : 'Only admins can change this'}
+              onClick={() => setConfirm({ kind: 'remove', pattern: e.pattern })}
+            >
+              Remove
+            </button>
+          </div>
+        </div>
+      ))}
+
+      <div className="setrow">
+        <div className="setrow__main" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <input
+            className="input mono"
+            style={{ width: 200 }}
+            placeholder="payments.*"
+            value={pattern}
+            onChange={e => setPattern(e.target.value)}
+            disabled={!isAdmin}
+          />
+          <select className="input" value={floor} onChange={e => setFloor(e.target.value)} disabled={!isAdmin}>
+            <option value="require_approval">needs approval</option>
+            <option value="admin_only">needs an admin</option>
+          </select>
+          <input
+            className="input"
+            style={{ flex: 1, minWidth: 160 }}
+            placeholder="why (shown in refusals)"
+            value={reason}
+            onChange={e => setReason(e.target.value)}
+            disabled={!isAdmin}
+          />
+          <button
+            className="btn btn--sm"
+            disabled={!isAdmin || pattern.trim() === '' || act.isPending}
+            onClick={() => setConfirm({ kind: 'put', pattern: pattern.trim() })}
+          >
+            Protect
+          </button>
+        </div>
+      </div>
+
+      {confirm && (
+        <SudoConfirmDialog
+          title={confirm.kind === 'put' ? 'Protect an entity' : 'Remove a protection'}
+          icon={<ShieldCheck />}
+          body={
+            confirm.kind === 'put'
+              ? <p>Changes touching <span className="mono">{confirm.pattern}</span> will wait for
+                  {floor === 'admin_only' ? ' an admin' : ' an approval'}, at every tier.</p>
+              : <p><span className="mono">{confirm.pattern}</span> loses its floor; the change
+                  policy and each caller's apply policy still apply.</p>
+          }
+          confirmLabel={confirm.kind === 'put' ? 'Protect' : 'Remove'}
+          pending={act.isPending}
+          error={act.error ? (act.error as Error).message : null}
+          onCancel={() => { act.reset(); setConfirm(null) }}
+          onConfirm={(assertion) => act.mutate({ kind: confirm.kind, pattern: confirm.pattern, assertion })}
+        />
+      )}
+    </>
+  )
+}
+
+function FreezeWindowsPanel({ onToast, isAdmin }: { onToast: (msg: string) => void; isAdmin: boolean }) {
+  const qc = useQueryClient()
+  const { data, isLoading } = useQuery({
+    queryKey: ['freeze-windows'],
+    queryFn: api.freezes.list,
+  })
+  const [starts, setStarts] = useState('')
+  const [ends, setEnds] = useState('')
+  const [reason, setReason] = useState('')
+  const [confirm, setConfirm] = useState<{ kind: 'create' } | { kind: 'remove'; window: FreezeWindow } | null>(null)
+
+  const toRFC3339 = (local: string) => (local ? new Date(local).toISOString() : '')
+
+  const act = useMutation({
+    mutationFn: async ({ assertion }: { assertion: string }) => {
+      await api.auth.sudo(assertion)
+      if (confirm?.kind === 'remove') return api.freezes.remove(confirm.window.id)
+      return api.freezes.create({
+        starts_at: toRFC3339(starts),
+        ends_at: toRFC3339(ends),
+        display_tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        reason,
+      })
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['freeze-windows'] })
+      onToast(confirm?.kind === 'remove' ? 'Freeze window removed' : 'Freeze window created')
+      setConfirm(null)
+      setStarts(''); setEnds(''); setReason('')
+    },
+  })
+
+  const windows = data?.windows ?? []
+  const fmt = (iso: string) => new Date(iso).toLocaleString()
+
+  return (
+    <>
+      <div className="set-head" style={{ marginTop: 32 }}>
+        <h2>Freeze windows</h2>
+        <p>
+          Intervals during which nothing applies. Approvals stay open during a freeze — the
+          decision is not the action — and an approved change queues behind the window.
+          An admin can override a plan through it.
+        </p>
+      </div>
+
+      {isLoading && <div className="setrow"><div className="setrow__main">Loading…</div></div>}
+      {!isLoading && windows.length === 0 && (
+        <div className="setrow"><div className="setrow__main setrow__help">
+          No freezes. Applies run whenever a caller submits them, subject to the policies above.
+        </div></div>
+      )}
+
+      {windows.map(w => {
+        const active = new Date(w.starts_at) <= new Date() && new Date() < new Date(w.ends_at)
+        return (
+          <div className="setrow" key={w.id}>
+            <div className="setrow__main">
+              <div className="setrow__label">
+                {fmt(w.starts_at)} — {fmt(w.ends_at)}
+                {active && <span className="badge badge--destroy" style={{ marginLeft: 8 }}>active</span>}
+              </div>
+              <div className="setrow__help">
+                {(w.classes?.length ?? 0) === 0 ? 'Every class' : w.classes!.join(', ')}
+                {w.reason ? ` — ${w.reason}` : ''}
+              </div>
+            </div>
+            <div className="setrow__control">
+              <button
+                className="btn btn--sm btn--ghost"
+                disabled={!isAdmin || act.isPending}
+                title={isAdmin ? undefined : 'Only admins can change this'}
+                onClick={() => setConfirm({ kind: 'remove', window: w })}
+              >
+                Lift
+              </button>
+            </div>
+          </div>
+        )
+      })}
+
+      <div className="setrow">
+        <div className="setrow__main" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <input
+            className="input"
+            type="datetime-local"
+            value={starts}
+            onChange={e => setStarts(e.target.value)}
+            disabled={!isAdmin}
+            aria-label="Freeze starts"
+          />
+          <span className="muted">to</span>
+          <input
+            className="input"
+            type="datetime-local"
+            value={ends}
+            onChange={e => setEnds(e.target.value)}
+            disabled={!isAdmin}
+            aria-label="Freeze ends"
+          />
+          <input
+            className="input"
+            style={{ flex: 1, minWidth: 140 }}
+            placeholder="why (shown in refusals)"
+            value={reason}
+            onChange={e => setReason(e.target.value)}
+            disabled={!isAdmin}
+          />
+          <button
+            className="btn btn--sm"
+            disabled={!isAdmin || !starts || !ends || act.isPending}
+            onClick={() => setConfirm({ kind: 'create' })}
+          >
+            Freeze
+          </button>
+        </div>
+      </div>
+
+      {confirm && (
+        <SudoConfirmDialog
+          title={confirm.kind === 'create' ? 'Create a freeze window' : 'Lift a freeze window'}
+          icon={<Snowflake />}
+          body={
+            confirm.kind === 'create'
+              ? <p>Nothing will apply between <strong>{starts && fmt(toRFC3339(starts))}</strong> and{' '}
+                  <strong>{ends && fmt(toRFC3339(ends))}</strong>. Approvals stay open; applies queue.</p>
+              : <p>Applies resume immediately; anything queued behind the window can run on its
+                  next retry.</p>
+          }
+          confirmLabel={confirm.kind === 'create' ? 'Freeze' : 'Lift'}
+          pending={act.isPending}
+          error={act.error ? (act.error as Error).message : null}
+          onCancel={() => { act.reset(); setConfirm(null) }}
+          onConfirm={(assertion) => act.mutate({ assertion })}
         />
       )}
     </>

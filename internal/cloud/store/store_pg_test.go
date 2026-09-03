@@ -211,7 +211,7 @@ func TestEveryRoleTheProductUnderstandsIsStorable(t *testing.T) {
 		t.Fatalf("create org: %v", err)
 	}
 
-	for _, role := range []identity.Role{identity.RoleAdmin, identity.RoleViewer} {
+	for _, role := range []identity.Role{identity.RoleAdmin, identity.RoleDeveloper, identity.RoleViewer} {
 		if !role.Valid() {
 			t.Fatalf("%q is in the list but identity says it is not a role", role)
 		}

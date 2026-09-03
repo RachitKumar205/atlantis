@@ -290,7 +290,7 @@ export function Sandbox() {
   return (
     <PageShell
       title="Sandbox"
-      sub="Isolated test databases · state lives in memory · destroyed on close"
+      sub="Isolated test databases · schema only, no production data · for real-data proof, rehearse a plan from Approvals"
     >
       <div className="sandbox-page">
         <ActiveStrip

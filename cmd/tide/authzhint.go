@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -58,6 +59,14 @@ func explainAuthz(err error) error {
 	var b strings.Builder
 	b.WriteString(err.Error())
 	b.WriteString("\n\n")
+	if capability == "CAPABILITY_SCHEMA_REHEARSE" {
+		b.WriteString("  This caller may not rehearse. A rehearsal clones the managed\n")
+		b.WriteString("  database — every caller's rows — so the grant is deliberate and\n")
+		b.WriteString("  separate from applying.\n\n")
+		b.WriteString("  An admin turns it on in the console: Callers → apply policy →\n")
+		b.WriteString("  \"May rehearse\".\n")
+		return errors.New(b.String())
+	}
 	if mutateCapabilities[capability] {
 		b.WriteString("  This caller was registered without permission to change anything.\n")
 		b.WriteString("  A new caller gets read access only; plan, apply and job writes\n")

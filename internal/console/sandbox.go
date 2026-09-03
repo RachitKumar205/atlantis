@@ -264,8 +264,12 @@ func sweepEmbeddedTempdirs(logf func(string, ...any)) {
 // passed user-context middleware (auth + csrf) is already applied at
 // the registration level — handlers here see the User via ctxUser.
 func (s *Server) mountSandbox(mux *http.ServeMux) {
-	// BFF-custom endpoints.
-	mux.HandleFunc("POST /api/sandbox", s.auth(s.csrf(s.handleSandboxBoot)))
+	// BFF-custom endpoints. Booting and forking create sandboxes and are
+	// held to developer or admin; every other route resolves the pubID
+	// through the owner-scoped lookup, so a role that cannot boot owns
+	// nothing the other routes can reach.
+	mux.HandleFunc("POST /api/sandbox",
+		s.auth(s.requireAnyRole([]string{"developer", "admin"}, s.csrf(s.handleSandboxBoot))))
 	mux.HandleFunc("GET /api/sandbox", s.auth(s.handleSandboxList))
 	mux.HandleFunc("DELETE /api/sandbox/{pubID}", s.auth(s.csrf(s.handleSandboxDestroy)))
 
@@ -286,7 +290,8 @@ func (s *Server) mountSandbox(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/sandbox/{pubID}/mark", s.auth(s.csrf(s.handleSandboxProxy)))
 	mux.HandleFunc("POST /api/sandbox/{pubID}/restore", s.auth(s.csrf(s.handleSandboxProxy)))
 	mux.HandleFunc("POST /api/sandbox/{pubID}/fixtures/bulk", s.auth(s.csrf(s.handleSandboxProxy)))
-	mux.HandleFunc("POST /api/sandbox/{pubID}/fork", s.auth(s.csrf(s.handleSandboxFork)))
+	mux.HandleFunc("POST /api/sandbox/{pubID}/fork",
+		s.auth(s.requireAnyRole([]string{"developer", "admin"}, s.csrf(s.handleSandboxFork))))
 }
 
 // sandboxBootRequest carries the browser's boot intent. Backend is
@@ -380,6 +385,12 @@ func (s *Server) handleSandboxBoot(w http.ResponseWriter, r *http.Request) {
 	}
 	s.sandboxes.register(meta)
 
+	s.db.forOrg(user.Org).logAction(r.Context(), user.Subject, user.Email, "sandbox_booted", map[string]any{
+		"sandbox":        pubID,
+		"backend":        string(backend),
+		"schema_version": hash,
+	})
+
 	jsonOK(w, sandboxBootResponse{
 		PubID:         pubID,
 		Backend:       string(backend),
@@ -462,6 +473,9 @@ func (s *Server) handleSandboxDestroy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.sandboxes.destroy(pubID)
+	s.db.forOrg(user.Org).logAction(r.Context(), user.Subject, user.Email, "sandbox_destroyed", map[string]any{
+		"sandbox": pubID,
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -612,6 +626,13 @@ func (s *Server) handleSandboxFork(w http.ResponseWriter, r *http.Request) {
 		})
 		ids = append(ids, newPub)
 	}
+
+	s.db.forOrg(user.Org).logAction(r.Context(), user.Subject, user.Email, "sandbox_booted", map[string]any{
+		"sandboxes":      ids,
+		"forked_from":    pubID,
+		"backend":        parent.backend,
+		"schema_version": parent.schemaVersion,
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)

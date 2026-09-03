@@ -68,7 +68,8 @@ SELECT
     ci.caller IS NOT NULL                   AS registered,
     COALESCE(ci.can_mutate, false)          AS can_mutate,
     ci.cert_expires_at::text                AS cert_expires_at,
-    ci.revoked_at::text                     AS revoked_at
+    ci.revoked_at::text                     AS revoked_at,
+    COALESCE(ci.apply_policy, '')           AS apply_policy
 FROM atlantis.caller_identities ci
 FULL OUTER JOIN (
     SELECT
@@ -94,9 +95,12 @@ ORDER BY caller`)
 		var schemaVer *int64
 		var certExp *string
 		var revokedAt *string
-		if err := rows.Scan(&ci.Caller, &fileCount, &lastAt, &schemaVer, &ci.Registered, &ci.CanMutate, &certExp, &revokedAt); err != nil {
+		var applyPolicy string
+		if err := rows.Scan(&ci.Caller, &fileCount, &lastAt, &schemaVer, &ci.Registered, &ci.CanMutate, &certExp, &revokedAt, &applyPolicy); err != nil {
 			return nil, err
 		}
+		ci.ApplyPolicy = applyPolicy
+		ci.EffectiveApplyPolicy = string(s.effectiveApplyPolicy(applyPolicy))
 		// file_count is a COUNT(*), so Postgres returns int8 while the wire
 		// field is int32. Unreachable in practice — it would take two billion
 		// .atl files for one caller — but report rather than clamp: a clamped

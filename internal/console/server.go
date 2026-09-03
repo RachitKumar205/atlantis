@@ -369,8 +369,13 @@ func (s *Server) buildMux() {
 	mux.HandleFunc("GET /api/schema/imports/{id}", s.auth(s.handleGetSchemaImport))
 	mux.HandleFunc("GET /api/schema/imports/{id}/entities", s.auth(s.handleGetSchemaImportEntities))
 	mux.HandleFunc("GET /api/schema/imports/{id}/notes", s.auth(s.handleGetSchemaImportNotes))
-	mux.HandleFunc("POST /api/schema/imports/{id}/plan", s.auth(s.csrf(s.handlePlanImport)))
-	mux.HandleFunc("POST /api/schema/imports/{id}/apply", s.auth(s.csrf(s.handleApplyImport)))
+	// Plan previews the adopt; apply performs it. Apply reaches AdoptBaseline,
+	// an OPERATOR RPC that rewrites the caller's checkpoint, so it carries the
+	// same admin + sudo posture as the other checkpoint-rewriting routes.
+	mux.HandleFunc("POST /api/schema/imports/{id}/plan",
+		s.auth(s.requireRole("admin", s.csrf(s.handlePlanImport))))
+	mux.HandleFunc("POST /api/schema/imports/{id}/apply",
+		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleApplyImport)))))
 
 	// Auth-required endpoints.
 	mux.HandleFunc("POST /api/auth/logout", s.auth(s.handleLogout))
@@ -411,6 +416,11 @@ func (s *Server) buildMux() {
 	// as setting the change policy or revoking every caller.
 	mux.HandleFunc("POST /api/callers/{caller}/enroll",
 		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleMintEnrollToken)))))
+	// The apply policy decides how much this caller may apply without a
+	// human, so setting it is gated as the change policy is.
+	mux.HandleFunc("GET /api/callers/{caller}/apply-policy", s.auth(s.handleGetApplyPolicy))
+	mux.HandleFunc("PUT /api/callers/{caller}/apply-policy",
+		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleSetApplyPolicy)))))
 	// The self-enrolment flag decides who can obtain this caller's identity
 	// through `tide login`, so it is gated as minting is.
 	mux.HandleFunc("GET /api/callers/{caller}/enrollment", s.auth(s.handleGetCallerEnrollment))
@@ -470,6 +480,32 @@ func (s *Server) buildMux() {
 		s.auth(s.requirePolicyRole(s.csrf(s.requireSudo(s.handleApproveSchemaPlan)))))
 	mux.HandleFunc("POST /api/plans/{id}/reject",
 		s.auth(s.requirePolicyRole(s.csrf(s.handleRejectSchemaPlan))))
+	// Rehearsing a queued plan runs it against a clone of the real data;
+	// developers and admins may trigger one, and anyone signed in reads the
+	// results (the server redacts row values from listings).
+	mux.HandleFunc("POST /api/plans/{id}/rehearse",
+		s.auth(s.requireAnyRole([]string{"developer", "admin"}, s.csrf(s.handleRehearsePlan))))
+	mux.HandleFunc("GET /api/rehearsals", s.auth(s.handleListRehearsals))
+
+	// Override is a separate route with a static admin gate rather than the
+	// per-class one: it exists precisely for the plans whose ordinary gate
+	// the admin is waiving, so requirePolicyRole would refuse the cases it
+	// is for. The org server enforces admin + reason again.
+	mux.HandleFunc("POST /api/plans/{id}/override",
+		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleOverrideSchemaPlan)))))
+
+	// Protected entities and freeze windows — the org-wide gates beside the
+	// change policy, gated for writing as it is.
+	mux.HandleFunc("GET /api/protected-entities", s.auth(s.handleListProtectedEntities))
+	mux.HandleFunc("PUT /api/protected-entities",
+		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handlePutProtectedEntity)))))
+	mux.HandleFunc("DELETE /api/protected-entities",
+		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleDeleteProtectedEntity)))))
+	mux.HandleFunc("GET /api/freeze-windows", s.auth(s.handleListFreezeWindows))
+	mux.HandleFunc("POST /api/freeze-windows",
+		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleCreateFreezeWindow)))))
+	mux.HandleFunc("DELETE /api/freeze-windows/{id}",
+		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleDeleteFreezeWindow)))))
 
 	// Job queue management.
 	mux.HandleFunc("GET /api/jobs/dead", s.auth(s.handleListDeadJobs))
@@ -1135,6 +1171,22 @@ func (s *Server) requireRole(role string, next http.HandlerFunc) http.HandlerFun
 			return
 		}
 		next(w, r)
+	}
+}
+
+// requireAnyRole wraps a handler enforcing that the authenticated user holds
+// one of the listed roles. Must be composed inside auth() so ctxUser is
+// populated.
+func (s *Server) requireAnyRole(roles []string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		u := r.Context().Value(ctxUser).(*User)
+		for _, role := range roles {
+			if u.Role == role {
+				next(w, r)
+				return
+			}
+		}
+		jsonError(w, fmt.Sprintf("forbidden: %s role required", strings.Join(roles, " or ")), http.StatusForbidden)
 	}
 }
 
@@ -1921,6 +1973,58 @@ func (s *Server) handleGetChangePolicy(w http.ResponseWriter, r *http.Request) {
 	s.proxyProto(w, "GetChangePolicy", resp, err)
 }
 
+// handleGetApplyPolicy answers one caller's apply-policy tier.
+func (s *Server) handleGetApplyPolicy(w http.ResponseWriter, r *http.Request) {
+	caller := r.PathValue("caller")
+	if caller == "" {
+		jsonError(w, "caller is required", http.StatusBadRequest)
+		return
+	}
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.GetApplyPolicy(r.Context(), &adminpb.GetApplyPolicyRequest{Caller: caller})
+	s.proxyProto(w, "GetApplyPolicy", resp, err)
+}
+
+// handleSetApplyPolicy writes one caller's tier. updated_by comes from the
+// session, not the body, for the reason handleSetChangePolicy gives.
+func (s *Server) handleSetApplyPolicy(w http.ResponseWriter, r *http.Request) {
+	caller := r.PathValue("caller")
+	if caller == "" {
+		jsonError(w, "caller is required", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		ApplyPolicy      string `json:"apply_policy"`
+		RehearsalEnabled *bool  `json:"rehearsal_enabled"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	u := r.Context().Value(ctxUser).(*User)
+	actor, actorEmail, _ := u.Actor()
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.SetApplyPolicy(r.Context(), &adminpb.SetApplyPolicyRequest{
+		Caller:           caller,
+		ApplyPolicy:      body.ApplyPolicy,
+		UpdatedBy:        actor,
+		UpdatedByEmail:   actorEmail,
+		RehearsalEnabled: body.RehearsalEnabled,
+	})
+	if err == nil {
+		s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "apply_policy_set",
+			map[string]any{"caller": caller, "apply_policy": body.ApplyPolicy,
+				"rehearsal_enabled": body.RehearsalEnabled})
+	}
+	s.proxyProto(w, "SetApplyPolicy", resp, err)
+}
+
 // handleSetChangePolicy writes the rules the request names and leaves the rest
 // alone.
 //
@@ -2081,6 +2185,201 @@ func (s *Server) handleRejectSchemaPlan(w http.ResponseWriter, r *http.Request) 
 	s.decideSchemaPlan(w, r, false)
 }
 
+// handleRehearsePlan runs one queued plan against a clone of the real data.
+// Slow by nature — the server clones the managed database first — so the
+// SPA treats it as a long request, not a click-refresh.
+func (s *Server) handleRehearsePlan(w http.ResponseWriter, r *http.Request) {
+	planID := r.PathValue("id")
+	u := r.Context().Value(ctxUser).(*User)
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.RehearseMigration(r.Context(), &adminpb.RehearseMigrationRequest{
+		PlanId: planID,
+	})
+	if err == nil {
+		s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "plan_rehearsed", map[string]any{
+			"plan_id": planID,
+			"verdict": resp.GetVerdict(),
+		})
+	}
+	s.proxyProto(w, "RehearseMigration", resp, err)
+}
+
+func (s *Server) handleListRehearsals(w http.ResponseWriter, r *http.Request) {
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.ListRehearsals(r.Context(), &adminpb.ListRehearsalsRequest{
+		Caller: r.URL.Query().Get("caller"),
+	})
+	s.proxyProto(w, "ListRehearsals", resp, err)
+}
+
+// handleOverrideSchemaPlan approves a plan past its gates: a freeze window,
+// a protected-entity floor, the self-approval refusal. The org server
+// re-checks admin + reason and records decided_via.
+func (s *Server) handleOverrideSchemaPlan(w http.ResponseWriter, r *http.Request) {
+	planID := r.PathValue("id")
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(body.Reason) == "" {
+		jsonError(w, "an override needs a reason — it is the record of why the gate was waived",
+			http.StatusBadRequest)
+		return
+	}
+	u := r.Context().Value(ctxUser).(*User)
+	actor, _, _ := u.Actor()
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.ApproveSchemaPlan(r.Context(), &adminpb.ApproveSchemaPlanRequest{
+		PlanId: planID, DecidedBy: u.Email, DecidedByRole: "admin", Reason: body.Reason,
+		Override: true, DecidedByActor: actor,
+	})
+	if err != nil {
+		s.log.Error("ApproveSchemaPlan(override)", "plan", planID, "err", err)
+		jsonError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "override_schema_plan", map[string]any{
+		"plan_id": planID,
+		"reason":  body.Reason,
+	})
+	s.proxyProto(w, "ApproveSchemaPlan", resp, nil)
+}
+
+func (s *Server) handleListProtectedEntities(w http.ResponseWriter, r *http.Request) {
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.ListProtectedEntities(r.Context(), &adminpb.ListProtectedEntitiesRequest{})
+	s.proxyProto(w, "ListProtectedEntities", resp, err)
+}
+
+func (s *Server) handlePutProtectedEntity(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Pattern string `json:"pattern"`
+		Floor   string `json:"floor"`
+		Reason  string `json:"reason"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	u := r.Context().Value(ctxUser).(*User)
+	actor, actorEmail, _ := u.Actor()
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.PutProtectedEntity(r.Context(), &adminpb.PutProtectedEntityRequest{
+		Entity: &adminpb.ProtectedEntity{
+			Pattern: body.Pattern, Floor: body.Floor, Reason: body.Reason,
+		},
+		UpdatedBy: actor, UpdatedByEmail: actorEmail,
+	})
+	if err == nil {
+		s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "protected_entity_put",
+			map[string]any{"pattern": body.Pattern, "floor": body.Floor})
+	}
+	s.proxyProto(w, "PutProtectedEntity", resp, err)
+}
+
+func (s *Server) handleDeleteProtectedEntity(w http.ResponseWriter, r *http.Request) {
+	pattern := r.URL.Query().Get("pattern")
+	if pattern == "" {
+		jsonError(w, "pattern is required", http.StatusBadRequest)
+		return
+	}
+	u := r.Context().Value(ctxUser).(*User)
+	actor, actorEmail, _ := u.Actor()
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.DeleteProtectedEntity(r.Context(), &adminpb.DeleteProtectedEntityRequest{
+		Pattern: pattern, UpdatedBy: actor, UpdatedByEmail: actorEmail,
+	})
+	if err == nil {
+		s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "protected_entity_deleted",
+			map[string]any{"pattern": pattern})
+	}
+	s.proxyProto(w, "DeleteProtectedEntity", resp, err)
+}
+
+func (s *Server) handleListFreezeWindows(w http.ResponseWriter, r *http.Request) {
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.ListFreezeWindows(r.Context(), &adminpb.ListFreezeWindowsRequest{})
+	s.proxyProto(w, "ListFreezeWindows", resp, err)
+}
+
+func (s *Server) handleCreateFreezeWindow(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		StartsAt  string   `json:"starts_at"`
+		EndsAt    string   `json:"ends_at"`
+		DisplayTz string   `json:"display_tz"`
+		Classes   []string `json:"classes"`
+		Reason    string   `json:"reason"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	u := r.Context().Value(ctxUser).(*User)
+	actor, actorEmail, _ := u.Actor()
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.CreateFreezeWindow(r.Context(), &adminpb.CreateFreezeWindowRequest{
+		Window: &adminpb.FreezeWindow{
+			StartsAt: body.StartsAt, EndsAt: body.EndsAt, DisplayTz: body.DisplayTz,
+			Classes: body.Classes, Reason: body.Reason,
+		},
+		UpdatedBy: actor, UpdatedByEmail: actorEmail,
+	})
+	if err == nil {
+		s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "freeze_window_created",
+			map[string]any{"starts_at": body.StartsAt, "ends_at": body.EndsAt, "reason": body.Reason})
+	}
+	s.proxyProto(w, "CreateFreezeWindow", resp, err)
+}
+
+func (s *Server) handleDeleteFreezeWindow(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		jsonError(w, "invalid window id", http.StatusBadRequest)
+		return
+	}
+	u := r.Context().Value(ctxUser).(*User)
+	actor, actorEmail, _ := u.Actor()
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, rerr := atl.DeleteFreezeWindow(r.Context(), &adminpb.DeleteFreezeWindowRequest{
+		Id: id, UpdatedBy: actor, UpdatedByEmail: actorEmail,
+	})
+	if rerr == nil {
+		s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "freeze_window_deleted",
+			map[string]any{"id": id})
+	}
+	s.proxyProto(w, "DeleteFreezeWindow", resp, rerr)
+}
+
 // decideSchemaPlan records a console user's decision.
 //
 // decided_by comes from the session, never from the body. A body field would
@@ -2115,8 +2414,10 @@ func (s *Server) decideSchemaPlan(w http.ResponseWriter, r *http.Request, approv
 		if atl == nil {
 			return
 		}
+		actor, _, _ := u.Actor()
 		resp, err := atl.ApproveSchemaPlan(r.Context(), &adminpb.ApproveSchemaPlanRequest{
 			PlanId: planID, DecidedBy: u.Email, DecidedByRole: role, Reason: body.Reason,
+			DecidedByActor: actor,
 		})
 		if err != nil {
 			s.log.Error("ApproveSchemaPlan", "plan", planID, "err", err)

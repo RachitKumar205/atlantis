@@ -293,6 +293,7 @@ func TestImportPlanIsNotFoundForAnUnknownImport(t *testing.T) {
 func TestImportCommitIsNotFoundForAnUnknownImport(t *testing.T) {
 	f := newConsoleFixture(t)
 	token := f.signIn(t, "admin@example.com", "admin")
+	f.elevate(t, token)
 
 	w := httptest.NewRecorder()
 	f.srv.handler.ServeHTTP(w, f.request(t, "POST",

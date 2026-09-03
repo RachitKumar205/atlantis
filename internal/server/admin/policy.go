@@ -178,6 +178,11 @@ func (s *Service) SetChangePolicy(ctx context.Context, req *adminpb.SetChangePol
 				"a plan is only unparseable when the DSL did not compile, which is "+
 				"refused before any policy is consulted", e.GetChangeClass())
 		}
+		if role := e.GetApproverRole(); role != "" && !approverRoleSettable(role) {
+			return nil, fmt.Errorf("admin: %q cannot be an approver_role — the roles "+
+				"that approve are %q and %q, and a rule naming anything else describes "+
+				"a class nobody can decide", role, "admin", "developer")
+		}
 	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -217,6 +222,14 @@ ON CONFLICT (change_class) DO UPDATE SET
 	}
 	return &adminpb.SetChangePolicyResponse{Entries: changePolicyToPB(stored)}, nil
 }
+
+// approverRoleSettable reports whether a change policy may name this role.
+//
+// The set is closed: decide() compares the console's asserted role to the
+// stored value by string equality, so a value outside the roles Cloud issues
+// is a class no session can ever decide. Viewer is absent — the read-only
+// role cannot be the one that permits schema changes.
+func approverRoleSettable(role string) bool { return role == "admin" || role == "developer" }
 
 // policyClassIsSettable reports whether a rule can exist for this class.
 func policyClassIsSettable(c adminpb.PlanClass) bool {

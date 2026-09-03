@@ -115,6 +115,16 @@ function VersionNode({ version }: { version: SchemaVersionSummary }) {
             {version.event_type === 'rollback' && (
               <span className="badge badge--back">rollback</span>
             )}
+            {version.applied_under_policy && (
+              <span
+                className="badge"
+                title={`Applied unattended under the ${version.applied_under_policy} tier${
+                  version.applied_verdict ? `, on a ${version.applied_verdict} rehearsal` : ''}`}
+              >
+                auto · {version.applied_under_policy.replaceAll('_', ' ')}
+                {version.applied_verdict ? ` · ${version.applied_verdict.replaceAll('_', ' ')}` : ''}
+              </span>
+            )}
           </span>
         </div>
 

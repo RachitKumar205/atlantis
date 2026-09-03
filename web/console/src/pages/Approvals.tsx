@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CheckCircle, ShieldChevron, XCircle } from '@phosphor-icons/react'
+import { CheckCircle, ShieldChevron, Snowflake, XCircle } from '@phosphor-icons/react'
 import { api, planClassBadge, planClassLabel, type SchemaPlanSummary } from '@/api/client'
 import { useMe } from '@/hooks/useAuth'
 import { PageShell } from '@/components/PageShell'
@@ -25,11 +25,28 @@ import { SudoConfirmDialog } from '@/pages/Settings'
 // a class was added, and the badge for a destructive change is exactly the
 // signal that must not quietly fall back to grey.
 
+// verdictBadge maps a rehearsal verdict to the badge tone the classes
+// already use: green is "the real apply would work", red is "it would fail".
+function verdictBadge(verdict: string): string {
+  switch (verdict) {
+    case 'pass':
+      return 'badge--add'
+    case 'pass_with_warnings':
+      return 'badge--back'
+    case 'fail_data':
+    case 'fail_structural':
+      return 'badge--destroy'
+    default:
+      return 'badge--plain'
+  }
+}
+
 export function Approvals() {
   const qc = useQueryClient()
   const { data: me } = useMe()
   const [openID, setOpenID] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<{ plan: SchemaPlanSummary; approve: boolean } | null>(null)
+  const [overrideFor, setOverrideFor] = useState<SchemaPlanSummary | null>(null)
   const [reason, setReason] = useState('')
   const [toast, setToast] = useState<string | null>(null)
 
@@ -42,6 +59,12 @@ export function Approvals() {
     queryKey: ['schema-plans', 'pending_approval'],
     queryFn: () => api.plans.list('pending_approval'),
   })
+  const { data: freezes } = useQuery({
+    queryKey: ['freeze-windows'],
+    queryFn: api.freezes.list,
+  })
+  const activeFreeze = (freezes?.windows ?? []).find(w =>
+    new Date(w.starts_at) <= new Date() && new Date() < new Date(w.ends_at))
   const { data: detail } = useQuery({
     queryKey: ['schema-plan', openID],
     queryFn: () => api.plans.get(openID as string),
@@ -65,6 +88,34 @@ export function Approvals() {
     },
   })
 
+  // Override is a separate mutation and a separate route: it is the
+  // admin-only path past a freeze, a protection, or the self-approval
+  // refusal, and the org server demands the reason.
+  const override = useMutation({
+    mutationFn: async ({ id, assertion }: { id: string; assertion: string }) => {
+      await api.auth.sudo(assertion)
+      return api.plans.override(id, reason)
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['schema-plans'] })
+      fire('Overridden. The caller can apply it now, freeze or no freeze.')
+      setOverrideFor(null)
+      setOpenID(null)
+      setReason('')
+    },
+  })
+
+  // Rehearsal is slow by design — the server clones the managed database —
+  // so the button shows a spinner and the verdict lands on the row.
+  const rehearse = useMutation({
+    mutationFn: (id: string) => api.plans.rehearse(id),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['schema-plans'] })
+      fire(`Rehearsed: ${res.verdict.replaceAll('_', ' ')}${res.error ? ` — ${res.error}` : ''}`)
+    },
+    onError: (e: Error) => fire(e.message),
+  })
+
   const reject = useMutation({
     mutationFn: (id: string) => api.plans.reject(id, reason),
     onSuccess: () => {
@@ -82,6 +133,18 @@ export function Approvals() {
   return (
     <PageShell title="Approvals" sub="schema changes waiting on a decision">
       <div className="page__bodyinner">
+        {activeFreeze && (
+          <div className="notice" style={{ marginBottom: 14, display: 'flex', gap: 8, alignItems: 'center' }}>
+            <Snowflake size={16} />
+            <span>
+              A freeze holds every apply until{' '}
+              <strong>{new Date(activeFreeze.ends_at).toLocaleString()}</strong>
+              {activeFreeze.reason ? <> — {activeFreeze.reason}</> : null}. Approvals stay
+              open; approved changes queue behind the window, and an override passes it.
+            </span>
+          </div>
+        )}
+
         {isLoading && <p className="muted">Loading…</p>}
 
         {!isLoading && plans.length === 0 && (
@@ -103,7 +166,17 @@ export function Approvals() {
                       {planClassLabel(p.change_class)}
                     </span>
                     <strong>{p.caller}</strong>
-                    <span className="muted">requested by {p.requested_by}</span>
+                    {p.rehearsal_verdict && (
+                      <span className={`badge ${verdictBadge(p.rehearsal_verdict)}`}>
+                        rehearsed · {p.rehearsal_verdict.replaceAll('_', ' ')}
+                      </span>
+                    )}
+                    <span className="muted">
+                      requested by {p.requested_by}
+                      {p.requested_by_actor
+                        ? <> for <span className="mono">{p.requested_by_actor}</span></>
+                        : ' (unattributed)'}
+                    </span>
                   </div>
                   <div className="muted" style={{ marginTop: 4, fontSize: 12 }}>
                     {p.expired
@@ -112,6 +185,17 @@ export function Approvals() {
                   </div>
                 </div>
                 <div className="row" style={{ gap: 8 }}>
+                  {me?.role !== 'viewer' && (
+                    <button
+                      className="btn btn--sm btn--ghost"
+                      disabled={rehearse.isPending}
+                      title="Run this plan's SQL against a clone of the real data"
+                      onClick={() => rehearse.mutate(p.plan_id)}
+                    >
+                      {rehearse.isPending && <span className="spin" />}
+                      Rehearse
+                    </button>
+                  )}
                   <button className="btn btn--sm" onClick={() => setOpenID(open ? null : p.plan_id)}>
                     {open ? 'Hide' : 'Review'}
                   </button>
@@ -158,6 +242,18 @@ export function Approvals() {
                     >
                       <XCircle size={12} /><span>Reject</span>
                     </button>
+                    {me?.role === 'admin' && (
+                      <button
+                        className="btn btn--sm btn--ghost"
+                        disabled={p.expired || reason.trim() === '' || override.isPending}
+                        title={reason.trim() === ''
+                          ? 'An override needs a reason'
+                          : 'Approve past a freeze, a protection, or the self-approval refusal'}
+                        onClick={() => setOverrideFor(p)}
+                      >
+                        Override
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
@@ -183,6 +279,26 @@ export function Approvals() {
           error={approve.error ? (approve.error as Error).message : null}
           onCancel={() => { approve.reset(); setConfirm(null) }}
           onConfirm={(assertion) => approve.mutate({ id: confirm.plan.plan_id, assertion })}
+        />
+      )}
+
+      {overrideFor && (
+        <SudoConfirmDialog
+          title="Override this plan"
+          icon={<Snowflake />}
+          body={
+            <p>
+              <strong>{overrideFor.caller}</strong>'s{' '}
+              <strong>{planClassLabel(overrideFor.change_class)}</strong> change is approved past
+              whatever held it — a freeze window, a protected entity, or the requester being the
+              approver. The reason is recorded in both audit ledgers.
+            </p>
+          }
+          confirmLabel="Override"
+          pending={override.isPending}
+          error={override.error ? (override.error as Error).message : null}
+          onCancel={() => { override.reset(); setOverrideFor(null) }}
+          onConfirm={(assertion) => override.mutate({ id: overrideFor.plan_id, assertion })}
         />
       )}
 

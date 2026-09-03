@@ -43,6 +43,12 @@ type SchemaVersionSummary struct {
 	// definition — it records what the database already had — so this is the
 	// only number that says how large the baseline was.
 	EntityCount int `json:"entity_count"`
+
+	// What authorized an unattended apply: the tier that let it through and
+	// the rehearsal verdict it consumed. Both empty for human-approved
+	// applies and for every other event type.
+	AppliedUnderPolicy string `json:"applied_under_policy"`
+	AppliedVerdict     string `json:"applied_verdict"`
 }
 
 // GetSchemaHistoryResponse carries one page of versions plus a flag
@@ -72,7 +78,8 @@ func (s *Service) GetSchemaHistory(ctx context.Context, req *adminpb.GetSchemaHi
 	// reason countDiffChanges stopped listing them by hand.
 	rows, err := s.pool.Query(ctx, `
 SELECT version, caller, plan_class, event_type, diff, created_at, ir_hash, actor, actor_email, actor_name,
-       COALESCE(jsonb_array_length(ir_snapshot->'entities'), 0)
+       COALESCE(jsonb_array_length(ir_snapshot->'entities'), 0),
+       applied_under_policy, applied_verdict
 FROM atlantis.schema_versions
 WHERE ($1::bigint = 0 OR version < $1)
   AND ($2::text = '' OR caller = $2)
@@ -91,7 +98,8 @@ LIMIT $4`, req.GetBefore(), req.GetCaller(), req.GetEntityId(), fetchLimit)
 		var diffJSON []byte
 		var createdAt interface{}
 		if err := rows.Scan(&v.Version, &v.Caller, &v.PlanClass, &v.EventType, &diffJSON, &createdAt,
-			&v.IRHash, &v.Actor, &v.ActorEmail, &v.ActorName, &v.EntityCount); err != nil {
+			&v.IRHash, &v.Actor, &v.ActorEmail, &v.ActorName, &v.EntityCount,
+			&v.AppliedUnderPolicy, &v.AppliedVerdict); err != nil {
 			return nil, err
 		}
 		v.CreatedAt = fmt.Sprintf("%v", createdAt)
@@ -572,7 +580,8 @@ func schemaVersionSummariesToPB(in []SchemaVersionSummary) []*adminpb.SchemaVers
 			EventType: v.EventType, ChangeCount: int32(v.ChangeCount),
 			CreatedAt: v.CreatedAt, IrHash: v.IRHash,
 			Actor: v.Actor, ActorEmail: v.ActorEmail, ActorName: v.ActorName,
-			EntityCount: int32(v.EntityCount),
+			EntityCount:        int32(v.EntityCount),
+			AppliedUnderPolicy: v.AppliedUnderPolicy, AppliedVerdict: v.AppliedVerdict,
 		})
 	}
 	return out

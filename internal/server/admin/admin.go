@@ -109,6 +109,14 @@ type Service struct {
 	// Nil when ATL_JOBS_DISPATCHER_ENABLED=false; the four worker-
 	// admin RPCs return "not found" in that case.
 	dispatcher WorkerDispatcher
+
+	// applyPolicyFloor caps every caller's apply-policy tier. '' means no
+	// floor. Validated at boot by ParseApplyPolicyFloor.
+	applyPolicyFloor string
+
+	// rehearsalTargetDSN pins where rehearsal clones are created. '' falls
+	// through to the sealed row, then the managed cluster itself.
+	rehearsalTargetDSN string
 }
 
 // Config holds optional toggles; the zero value is read-only with no mirror.
@@ -171,6 +179,16 @@ type Config struct {
 	// mTLS unless explicitly opted in.
 	TrustedProxyMayOperate bool
 
+	// ApplyPolicyFloor caps every caller's apply-policy tier. '' means no
+	// floor. Pass a value ParseApplyPolicyFloor accepted; New stores it
+	// verbatim.
+	ApplyPolicyFloor string
+
+	// RehearsalTargetDSN pins where rehearsal clones are created
+	// (ATL_REHEARSAL_PG_URL). '' falls through to the sealed
+	// atlantis.rehearsal_database row, then the managed cluster itself.
+	RehearsalTargetDSN string
+
 	// BackfillEnabled gates the BeginBackfillPlan RPC. Default false so
 	// a server running without the backfill worker can't accept plans
 	// that would pile up unprocessed. Operator sets this to true after
@@ -224,6 +242,9 @@ func New(pool *pgxpool.Pool, cfg Config) *Service {
 		proxyForwarded:         cfg.ProxyForwardedFromContext,
 		trustedProxyMayApply:   cfg.TrustedProxyMayApply,
 		trustedProxyMayOperate: cfg.TrustedProxyMayOperate,
+
+		applyPolicyFloor:   cfg.ApplyPolicyFloor,
+		rehearsalTargetDSN: cfg.RehearsalTargetDSN,
 	}
 }
 
@@ -929,7 +950,7 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 	// It runs after emit because it compares against the SQL that would
 	// actually execute, and before the drift checks and the DDL because a
 	// change waiting on a human should not first spend the migration's locks.
-	if err := s.gateOnChangePolicy(ctx, tx, gateRequest{
+	gate, err := s.evaluateApplyGates(ctx, tx, gateRequest{
 		Caller:      req.GetCaller(),
 		PlanID:      gotPlanID,
 		RequestedBy: req.GetCaller(),
@@ -940,7 +961,9 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 		UpSQL:       scripts.Up,
 		DownSQL:     scripts.Down,
 		Now:         time.Now().UTC(),
-	}); err != nil {
+		Actor:       req.GetActor(),
+	})
+	if err != nil {
 		return nil, err
 	}
 
@@ -1064,6 +1087,9 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 		Actor:      req.GetActor(),
 		ActorEmail: req.GetActorEmail(),
 		ActorName:  req.GetActorName(),
+
+		AppliedUnderPolicy: gate.Policy,
+		AppliedVerdict:     gate.Verdict,
 	}
 	version, err := s.persistCheckpoint(ctx, tx, newIR, meta)
 	if err != nil {
@@ -1101,6 +1127,12 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
+	}
+
+	// The verdict this apply consumed is reconciled with what happened —
+	// the row that says a rehearsal's promise was kept.
+	if gate.Verdict != "" {
+		s.markRehearsalOutcome(ctx, gotPlanID, "applied")
 	}
 
 	if s.mirrorEnabled {
@@ -1404,6 +1436,13 @@ type versionMeta struct {
 	ActorEmail string
 	ActorName  string
 
+	// AppliedUnderPolicy and AppliedVerdict record what authorized an
+	// unattended apply: the tier that let it through and the rehearsal
+	// verdict it consumed. Both empty when a human approved — the plan row
+	// is that record — and for every event type but "apply".
+	AppliedUnderPolicy string
+	AppliedVerdict     string
+
 	// Lineage replaces Diff as the source of blame rows when set. adopt is
 	// the event that needs it — see seedEntityLineage.
 	Lineage *lineageSeed
@@ -1464,12 +1503,13 @@ ON CONFLICT (id) DO UPDATE SET ir = EXCLUDED.ir, applied_at = now(), applied_by 
 	var version int64
 	err = tx.QueryRow(ctx, `
 INSERT INTO atlantis.schema_versions
-    (caller, plan_class, diff, up_sql, down_sql, ir_snapshot, ir_hash, plan_id, parent_version, event_type, actor, actor_email, actor_name)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    (caller, plan_class, diff, up_sql, down_sql, ir_snapshot, ir_hash, plan_id, parent_version, event_type, actor, actor_email, actor_name, applied_under_policy, applied_verdict)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 RETURNING version`,
 		meta.Caller, meta.PlanClass, diffJSON, meta.UpSQL, meta.DownSQL,
 		raw, irHash, meta.PlanID, meta.ParentVer, meta.EventType,
 		normalizeActor(meta.Actor), meta.ActorEmail, meta.ActorName,
+		meta.AppliedUnderPolicy, meta.AppliedVerdict,
 	).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("insert schema_versions: %w", err)

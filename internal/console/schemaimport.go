@@ -391,6 +391,12 @@ func (s *Server) handleApplyImport(w http.ResponseWriter, r *http.Request) {
 		AdoptedByEmail: actorEmail,
 		AdoptedByName:  actorName,
 	})
+	if err == nil {
+		s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "schema_import_applied", map[string]any{
+			"import":   r.PathValue("id"),
+			"entities": len(ents),
+		})
+	}
 	s.proxyProto(w, "AdoptBaseline", resp, err)
 }
 

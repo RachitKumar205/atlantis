@@ -91,4 +91,13 @@ enum Capability {
   // granted only to the console, which holds no SCHEMA_APPLY — and a test
   // asserts it rather than leaving it to be noticed.
   CAPABILITY_SCHEMA_APPROVE = 10;
+
+  // Rehearse a migration against a disposable clone of the managed database.
+  //
+  // In no default bundle, for the LOGS_READ reason: the clone holds every
+  // caller's rows, and a rehearsal's error text and diagnostics are a
+  // row-value surface. Granted per caller through SetApplyPolicy's
+  // rehearsal_enabled flag, and to the console (0041), which triggers
+  // rehearsals from the approval queue.
+  CAPABILITY_SCHEMA_REHEARSE = 11;
 }

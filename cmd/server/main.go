@@ -393,12 +393,21 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		adminKeys = k
 	}
 
+	// A typo'd floor refuses boot: silently not clamping is the failure the
+	// floor exists to prevent.
+	applyPolicyFloor, err := admin.ParseApplyPolicyFloor()
+	if err != nil {
+		return err
+	}
+
 	adminSvc := admin.New(pool.Raw(), admin.Config{
 		Managed:            managedPool,
 		Keys:               adminKeys,
 		MirrorDir:          cfg.AdminMirrorDir,
 		MirrorEnabled:      cfg.AdminMirrorSchema,
 		AllowApplyMutation: cfg.AdminAllowApplyMutation,
+		ApplyPolicyFloor:   applyPolicyFloor,
+		RehearsalTargetDSN: os.Getenv("ATL_REHEARSAL_PG_URL"),
 		// Share the cert-CN extractor with the auth + rate-limit
 		// interceptors so every layer agrees on caller identity for the
 		// same request — a divergence here would let a CN authorized
@@ -695,6 +704,14 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		}
 	} else {
 		log.Info("jobs dispatcher disabled (set ATL_JOBS_DISPATCHER_ENABLED=true to enable)")
+	}
+
+	// The rehearsal clone reaper: drops expired or orphaned clone databases.
+	// Correctness never depends on it — verdicts live in atlantis.rehearsals
+	// — so a mutation-disabled deployment, which can rehearse nothing,
+	// simply never has anything to reap.
+	if cfg.AdminAllowApplyMutation {
+		adminSvc.StartRehearsalReaper(ctx)
 	}
 
 	log.Debug("init: load IR checkpoint")

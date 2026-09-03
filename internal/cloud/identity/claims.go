@@ -24,12 +24,19 @@ import (
 type Role string
 
 const (
-	RoleAdmin  Role = "admin"
+	RoleAdmin Role = "admin"
+
+	// RoleDeveloper sits between viewer and admin: everything a viewer reads,
+	// plus booting sandboxes and triggering rehearsals, plus being nameable as
+	// a change policy's approver_role. Registration, minting, policy edits and
+	// rollback stay admin.
+	RoleDeveloper Role = "developer"
+
 	RoleViewer Role = "viewer"
 )
 
 // Valid reports whether r is a role this console understands.
-func (r Role) Valid() bool { return r == RoleAdmin || r == RoleViewer }
+func (r Role) Valid() bool { return r == RoleAdmin || r == RoleDeveloper || r == RoleViewer }
 
 // Private is the set of claims Cloud adds beyond the registered ones in
 // RFC 7519. They are serialised alongside iss/sub/aud/exp/nbf/iat rather than
@@ -174,7 +181,7 @@ func (c Claims) Validate() error {
 	case c.Role == "":
 		return fmt.Errorf("%w: role", ErrMissingClaim)
 	case !c.Role.Valid():
-		return fmt.Errorf("unknown role %q: expected %q or %q", c.Role, RoleAdmin, RoleViewer)
+		return fmt.Errorf("unknown role %q: expected %q, %q or %q", c.Role, RoleAdmin, RoleDeveloper, RoleViewer)
 	case c.Expiry.IsZero():
 		return fmt.Errorf("%w: exp", ErrMissingClaim)
 	}

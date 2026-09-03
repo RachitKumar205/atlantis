@@ -43,7 +43,8 @@ func (s *Service) ListSchemaPlans(ctx context.Context, req *adminpb.ListSchemaPl
 	rows, err := s.pool.Query(ctx, `
 SELECT plan_id, caller, change_class, files_hash, base_checkpoint_hash, up_sql,
        state, requested_by, created_at, expires_at, decided_by, decided_by_role,
-       decided_at, decision_reason, diff
+       decided_at, decision_reason, diff, requested_by_actor, decided_via,
+       rehearsal_id, verdict
 FROM atlantis.schema_plans
 WHERE ($1 = '' OR state = $1)
   AND ($2 = '' OR caller = $2)
@@ -59,7 +60,8 @@ LIMIT $3`, req.GetState(), req.GetCaller(), limit)
 		var p schemaPlan
 		if err := rows.Scan(&p.PlanID, &p.Caller, &p.ChangeClass, &p.FilesHash, &p.BaseHash,
 			&p.UpSQL, &p.State, &p.RequestedBy, &p.CreatedAt, &p.ExpiresAt,
-			&p.DecidedBy, &p.DecidedByRole, &p.DecidedAt, &p.DecisionReason, &p.Diff); err != nil {
+			&p.DecidedBy, &p.DecidedByRole, &p.DecidedAt, &p.DecisionReason, &p.Diff,
+			&p.RequestedByActor, &p.DecidedVia, &p.RehearsalID, &p.Verdict); err != nil {
 			return nil, fmt.Errorf("scan schema plan: %w", err)
 		}
 		plans = append(plans, p)
@@ -144,6 +146,8 @@ func (s *Service) ApproveSchemaPlan(ctx context.Context, req *adminpb.ApproveSch
 		Role:     req.GetDecidedByRole(),
 		Reason:   req.GetReason(),
 		NewState: planApproved,
+		Actor:    req.GetDecidedByActor(),
+		Override: req.GetOverride(),
 	})
 	if err != nil {
 		return nil, err
@@ -179,6 +183,16 @@ type decision struct {
 	Role     string
 	Reason   string
 	NewState string
+
+	// Actor is the decider's principal (console:<subject>), compared against
+	// the plan's requested_by_actor for the self-approval refusal.
+	Actor string
+
+	// Override marks an approval with extra ceremony: it waives the
+	// self-approval refusal, a protected-entity floor's wait, and any freeze
+	// window at apply time — never a capability, the sandbox_only tier, or
+	// the plan's content binding. Requires a reason and the admin role.
+	Override bool
 }
 
 // decide is the shared body of approve and reject.
@@ -195,6 +209,21 @@ func (s *Service) decide(ctx context.Context, d decision) (*adminpb.SchemaPlanSu
 	if d.By == "" {
 		return nil, status.Error(codes.InvalidArgument,
 			"admin: decided_by is required — an unattributed decision is not an audit record")
+	}
+	if d.Override {
+		// An override is an approval with extra ceremony, never a bypass.
+		if d.NewState != planApproved {
+			return nil, status.Error(codes.InvalidArgument,
+				"admin: only an approval can be an override")
+		}
+		if d.Reason == "" {
+			return nil, status.Error(codes.InvalidArgument,
+				"admin: an override needs a reason — it is the record of why the gate was waived")
+		}
+		if d.Role != "admin" {
+			return nil, status.Error(codes.PermissionDenied,
+				"admin: overrides are decided by admin, and this decision asserts "+d.Role)
+		}
 	}
 	if err := s.requireMutablePlane("schema plan decision"); err != nil {
 		return nil, err
@@ -247,19 +276,62 @@ func (s *Service) decide(ctx context.Context, d decision) (*adminpb.SchemaPlanSu
 	}
 	class := planClassFromName(plan.ChangeClass)
 	policy := effectiveChangePolicy(stored, class)
-	if d.Role != policy.ApproverRole {
+
+	// A protected entity's admin_only floor overrides who may decide,
+	// whatever role the class rule names. Matched from the stored diff;
+	// undecodable rows fail toward requiring an admin.
+	prot, err := s.decideProtectedFloor(ctx, tx, plan)
+	if err != nil {
+		return nil, err
+	}
+	if prot != nil && prot.AdminOnly() {
+		policy.ApproverRole = "admin"
+	}
+
+	// An admin's override satisfies the role rule — the override ceremony
+	// already demanded admin — but an ordinary decision must assert exactly
+	// the role the rule names.
+	if d.Role != policy.ApproverRole && !(d.Override && d.Role == "admin") {
 		return nil, status.Errorf(codes.PermissionDenied,
 			"admin: %s changes are decided by %s, and this decision asserts %q",
 			humanClass(class), policy.ApproverRole, d.Role)
 	}
 
+	// The requester cannot be the approver. Soft-mandatory: the actor is
+	// unauthenticated attribution, so this stops the honest loop — a person
+	// approving the change they themselves submitted — and an override with
+	// a reason passes it, loudly. An empty actor never matches.
+	decidedVia := ""
+	if d.Override {
+		decidedVia = "override"
+	}
+	if d.NewState == planApproved && plan.RequestedByActor != "" &&
+		normalizeActor(d.Actor) == plan.RequestedByActor {
+		if !d.Override {
+			return nil, status.Errorf(codes.PermissionDenied,
+				"admin: this plan was requested by %s, and a request is not approved by "+
+					"the person who made it. Another %s can approve it, or an admin can "+
+					"override with a reason.", plan.RequestedByActor, policy.ApproverRole)
+		}
+		decidedVia = "self_approval_override"
+	}
+
 	if _, err := tx.Exec(ctx, `
 UPDATE atlantis.schema_plans
    SET state = $2, decided_by = $3, decided_by_role = $4, decided_at = $5,
-       decision_reason = $6
+       decision_reason = $6, decided_via = $8
  WHERE plan_id = $1 AND state = $7`,
-		d.PlanID, d.NewState, d.By, d.Role, now, d.Reason, planPending); err != nil {
+		d.PlanID, d.NewState, d.By, d.Role, now, d.Reason, planPending, decidedVia); err != nil {
 		return nil, fmt.Errorf("record decision on %s: %w", d.PlanID, err)
+	}
+
+	if decidedVia != "" {
+		if err := s.recordPolicyEvent(ctx, tx, "plan_override", map[string]string{
+			"plan_id": d.PlanID, "caller": plan.Caller, "class": plan.ChangeClass,
+			"decided_via": decidedVia, "reason": d.Reason,
+		}, normalizeActor(d.Actor), d.By); err != nil {
+			return nil, err
+		}
 	}
 
 	updated, _, err := loadSchemaPlan(ctx, tx, d.PlanID)
@@ -270,6 +342,26 @@ UPDATE atlantis.schema_plans
 		return nil, err
 	}
 	return planSummaryToPB(updated, stored, now), nil
+}
+
+// decideProtectedFloor answers whether this plan's diff touches a protected
+// entity. From the stored diff — decide has no live one — failing toward
+// admin_only when the row cannot say what it touches.
+func (s *Service) decideProtectedFloor(ctx context.Context, tx pgx.Tx, p schemaPlan) (*protectedRule, error) {
+	rules, err := loadProtectedEntities(ctx, tx)
+	if err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"admin: the protected entities could not be read, so no plan can be decided: %v", err)
+	}
+	if len(rules) == 0 {
+		return nil, nil
+	}
+	ids := planEntityIDs(p.Diff)
+	if len(ids) == 0 {
+		return &protectedRule{Pattern: "(unattributable diff)", Floor: "admin_only",
+			Reason: "the stored diff names no entities, so protection cannot be matched"}, nil
+	}
+	return matchProtected(rules, ids), nil
 }
 
 // planClassFromName resolves a stored class name.
@@ -341,6 +433,11 @@ func planSummaryToPB(p schemaPlan, stored map[adminpb.PlanClass]ChangePolicy, no
 		ApproverRole:   effectiveChangePolicy(stored, class).ApproverRole,
 		Expired:        p.Expired(now),
 		EntityIds:      planEntityIDs(p.Diff),
+
+		RequestedByActor: p.RequestedByActor,
+		DecidedVia:       p.DecidedVia,
+		RehearsalId:      p.RehearsalID,
+		RehearsalVerdict: p.Verdict,
 	}
 	if p.ExpiresAt != nil {
 		out.ExpiresAt = p.ExpiresAt.UTC().Format(time.RFC3339)

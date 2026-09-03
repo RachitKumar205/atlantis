@@ -284,7 +284,7 @@ func (s *Service) BeginBackfillPlan(ctx context.Context, req *adminpb.BeginBackf
 	// The SQL compared is PreBackfillUp, because that is what this transaction
 	// executes. The post-backfill half runs later, in the worker, against a
 	// plan whose approval this one records.
-	if err := s.gateOnChangePolicy(ctx, tx, gateRequest{
+	gate, err := s.evaluateApplyGates(ctx, tx, gateRequest{
 		Caller:      req.GetCaller(),
 		PlanID:      gotPlanID,
 		RequestedBy: req.GetCaller(),
@@ -294,7 +294,9 @@ func (s *Service) BeginBackfillPlan(ctx context.Context, req *adminpb.BeginBackf
 		Diff:        backfillDiff,
 		UpSQL:       scripts.PreBackfillUp,
 		Now:         time.Now().UTC(),
-	}); err != nil {
+		Actor:       req.GetActor(),
+	})
+	if err != nil {
 		return nil, err
 	}
 
@@ -414,6 +416,9 @@ VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
 		Actor:      req.GetActor(),
 		ActorEmail: req.GetActorEmail(),
 		ActorName:  req.GetActorName(),
+
+		AppliedUnderPolicy: gate.Policy,
+		AppliedVerdict:     gate.Verdict,
 	})
 	if err != nil {
 		return nil, err
@@ -442,6 +447,10 @@ VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
+	}
+
+	if gate.Verdict != "" {
+		s.markRehearsalOutcome(ctx, gotPlanID, "applied")
 	}
 
 	// CREATE INDEX CONCURRENTLY must run outside a transaction. Each

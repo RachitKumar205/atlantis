@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Check,
   Copy,
+  Gauge,
   Key,
   LinkSimpleHorizontal,
   Plus,
@@ -55,8 +56,12 @@ export function Callers() {
   // shape minting uses.
   const [policySudoFor, setPolicySudoFor] = useState<string | null>(null)
   const [policyFor, setPolicyFor] = useState<string | null>(null)
+  const [applySudoFor, setApplySudoFor] = useState<CallerInfo | null>(null)
+  const [applyFor, setApplyFor] = useState<CallerInfo | null>(null)
   const [policyError, setPolicyError] = useState<string | null>(null)
   const [policyPending, setPolicyPending] = useState(false)
+  const [applyPolicyError, setApplyPolicyError] = useState<string | null>(null)
+  const [applyPolicyPending, setApplyPolicyPending] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
 
   // The design's pages.css gates .callergrid and .callertable behind a
@@ -197,6 +202,7 @@ export function Callers() {
                   onRevoke={() => setRevoking(c.caller)}
                   onManageAliases={() => setAliasEditing(c.caller)}
                   onManageAccess={() => setPolicySudoFor(c.caller)}
+                  onApplyPolicy={() => setApplySudoFor(c)}
                 />
               ))}
             </div>
@@ -294,6 +300,46 @@ export function Callers() {
         />
       )}
 
+      {applySudoFor && (
+        <SudoConfirmDialog
+          title="Apply policy"
+          icon={<Gauge />}
+          body={
+            <div>
+              <p>
+                How much <span className="mono">{applySudoFor.caller}</span> may apply
+                without a human. Raising the tier widens what runs unattended.
+              </p>
+            </div>
+          }
+          confirmLabel="Continue"
+          pending={applyPolicyPending}
+          error={applyPolicyError}
+          onCancel={() => { setApplySudoFor(null); setApplyPolicyError(null) }}
+          onConfirm={async (assertion) => {
+            setApplyPolicyPending(true)
+            setApplyPolicyError(null)
+            try {
+              await api.auth.sudo(assertion)
+              setApplyFor(applySudoFor)
+              setApplySudoFor(null)
+            } catch (e) {
+              setApplyPolicyError(e instanceof Error ? e.message : 'Could not elevate')
+            } finally {
+              setApplyPolicyPending(false)
+            }
+          }}
+        />
+      )}
+
+      {applyFor && (
+        <ApplyPolicyDialog
+          caller={applyFor}
+          onClose={() => setApplyFor(null)}
+          showToast={showToast}
+        />
+      )}
+
       {policyFor && (
         <EnrolmentPolicyDialog
           caller={policyFor}
@@ -335,6 +381,7 @@ function CallerCard({
   enrolledAt,
   onRevoke,
   onManageAliases,
+  onApplyPolicy,
 }: {
   caller: CallerInfo
   canAdmin: boolean
@@ -348,6 +395,7 @@ function CallerCard({
   enrolledAt?: string
   onRevoke: () => void
   onManageAliases: () => void
+  onApplyPolicy: () => void
 }) {
   // cert_expires_at is populated whenever a cert is issued through the
   // console — see `RecordCallerCertExpiry` on the server. Callers whose cert
@@ -398,6 +446,23 @@ function CallerCard({
                 aria-label="Manage aliases"
               >
                 <LinkSimpleHorizontal size={13} />
+              </button>
+            </HoverInfo>
+            <HoverInfo
+              side="bottom"
+              inline
+              content={
+                <>
+                  <p>Apply policy — how much this caller may apply without a human: from sandbox-only up to everything a rehearsal covers.</p>
+                </>
+              }
+            >
+              <button
+                className="btn btn--sm btn--ghost btn--icon"
+                onClick={onApplyPolicy}
+                aria-label="Apply policy"
+              >
+                <Gauge size={13} />
               </button>
             </HoverInfo>
             <HoverInfo
@@ -483,8 +548,10 @@ function CallerCard({
           <span className="cstat__v">{fmtDateShort(caller.last_applied_at)}</span>
         </div>
         <div className="cstat">
-          <span className="cstat__l">can apply</span>
-          <span className="cstat__v">{caller.can_mutate ? 'yes' : 'no'}</span>
+          <span className="cstat__l">applies</span>
+          <span className="cstat__v">
+            {caller.can_mutate ? (caller.effective_apply_policy ?? 'auto_safe').replaceAll('_', ' ') : 'no'}
+          </span>
         </div>
       </div>
 
@@ -947,6 +1014,109 @@ function arraysEqual(a: string[], b: string[]): boolean {
 // `tide login`, and which CI workloads may obtain a certificate under a
 // federation rule. Both writes run behind admin + sudo; the gate that opened
 // this dialog elevated the session.
+const APPLY_TIERS: { value: string; label: string; blurb: string }[] = [
+  { value: 'sandbox_only', label: 'Sandbox only', blurb: 'Nothing applies. Plan, generate and rehearse stay available.' },
+  { value: 'always_ask', label: 'Always ask', blurb: 'Every change waits for an approval.' },
+  { value: 'auto_safe', label: 'Auto: safe', blurb: 'Additive changes apply unattended; everything else waits. The default.' },
+  { value: 'auto_verified', label: 'Auto: verified', blurb: 'Backfills also apply unattended when a fresh rehearsal passes.' },
+  { value: 'auto_all', label: 'Auto: all', blurb: 'Destructive changes too, behind a passing rehearsal. Cross-caller breaking changes still wait — this caller cannot consent for the others.' },
+]
+
+function ApplyPolicyDialog({
+  caller,
+  onClose,
+  showToast,
+}: {
+  caller: CallerInfo
+  onClose: () => void
+  showToast: (msg: string) => void
+}) {
+  const qc = useQueryClient()
+  const policyQ = useQuery({
+    queryKey: ['caller-apply-policy', caller.caller],
+    queryFn: () => api.callers.applyPolicy(caller.caller),
+  })
+  const [err, setErr] = useState<string | null>(null)
+  const saveM = useMutation({
+    // The current tier always travels with a rehearsal toggle (and the other
+    // way round): the route treats an absent tier as "reset to default".
+    mutationFn: ({ policy, rehearse }: { policy: string; rehearse: boolean }) =>
+      api.callers.setApplyPolicy(caller.caller, policy, rehearse),
+    onSuccess: (resp) => {
+      qc.invalidateQueries({ queryKey: ['caller-apply-policy', caller.caller] })
+      qc.invalidateQueries({ queryKey: ['callers'] })
+      showToast(`Apply policy for ${caller.caller}: ${resp.effective_apply_policy.replaceAll('_', ' ')}`)
+    },
+    onError: (e) => setErr(e instanceof Error ? e.message : 'Could not save'),
+  })
+
+  const stored = policyQ.data?.apply_policy ?? ''
+  const rehearseOn = policyQ.data?.rehearsal_enabled ?? false
+  const floor = policyQ.data?.floor
+
+  return (
+    <div className="overlay is-open" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="modal" role="dialog" aria-modal style={{ width: 560 }}>
+        <div className="modal__head">
+          <div className="modal__title">Apply policy — {caller.caller}</div>
+          <div className="modal__sub">
+            How much this caller may apply without a human. The change policy still
+            applies on top: a class it holds for approval waits at every tier.
+          </div>
+        </div>
+        <div className="modal__body">
+          {err && <div className="notice notice--error" style={{ marginBottom: 12 }}>{err}</div>}
+          {floor && (
+            <div className="notice" style={{ marginBottom: 12 }}>
+              This deployment caps every caller at <span className="mono">{floor}</span>.
+              A higher tier saves, but the gate uses the cap.
+            </div>
+          )}
+          <label className="check" style={{ marginBottom: 14, alignItems: 'flex-start' }}>
+            <input
+              type="checkbox"
+              checked={rehearseOn}
+              disabled={policyQ.isLoading || saveM.isPending}
+              onChange={e => saveM.mutate({ policy: stored, rehearse: e.target.checked })}
+            />
+            <span>
+              <strong>May rehearse</strong>
+              <br />
+              <span className="faint" style={{ fontSize: 12 }}>
+                <span className="mono">tide rehearse</span> runs this caller's migration against
+                a clone of the real data. A deliberate grant: the clone holds every caller's rows,
+                and the verified tiers need a passing rehearsal to do anything.
+              </span>
+            </span>
+          </label>
+
+          <div role="radiogroup" aria-label="Apply policy tier">
+            {APPLY_TIERS.map(t => (
+              <label className="check" key={t.value} style={{ marginBottom: 10, alignItems: 'flex-start' }}>
+                <input
+                  type="radio"
+                  name="apply-tier"
+                  checked={(stored === '' ? 'auto_safe' : stored) === t.value}
+                  disabled={policyQ.isLoading || saveM.isPending}
+                  onChange={() => saveM.mutate({ policy: t.value, rehearse: rehearseOn })}
+                />
+                <span>
+                  <strong>{t.label}</strong>
+                  <br />
+                  <span className="faint" style={{ fontSize: 12 }}>{t.blurb}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
+        <div className="modal__foot">
+          <button className="btn btn--ghost" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function EnrolmentPolicyDialog({
   caller,
   onClose,

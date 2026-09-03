@@ -54,6 +54,19 @@ var migratedRPCs = map[string]bool{
 	"GetCallerAliases":       true,
 	"SetCallerAliases":       true,
 	"GetCallers":             true,
+	"GetApplyPolicy":         true,
+	"SetApplyPolicy":         true,
+	"RehearseMigration":      true,
+	"ListRehearsals":         true,
+	"GetRehearsal":           true,
+	"GetRehearsalDatabase":   true,
+	"SetRehearsalDatabase":   true,
+	"ListProtectedEntities":  true,
+	"PutProtectedEntity":     true,
+	"DeleteProtectedEntity":  true,
+	"ListFreezeWindows":      true,
+	"CreateFreezeWindow":     true,
+	"DeleteFreezeWindow":     true,
 	"RegisterCaller":         true,
 	"RevokeCaller":           true,
 	"RecordCallerCertExpiry": true,
@@ -103,6 +116,58 @@ func (g *grpcServer) SetCallerAliases(ctx context.Context, req *adminpb.SetCalle
 
 func (g *grpcServer) GetCallers(ctx context.Context, req *adminpb.GetCallersRequest) (*adminpb.GetCallersResponse, error) {
 	return g.svc.GetCallers(ctx, req)
+}
+
+func (g *grpcServer) GetApplyPolicy(ctx context.Context, req *adminpb.GetApplyPolicyRequest) (*adminpb.GetApplyPolicyResponse, error) {
+	return g.svc.GetApplyPolicy(ctx, req)
+}
+
+func (g *grpcServer) SetApplyPolicy(ctx context.Context, req *adminpb.SetApplyPolicyRequest) (*adminpb.SetApplyPolicyResponse, error) {
+	return g.svc.SetApplyPolicy(ctx, req)
+}
+
+func (g *grpcServer) RehearseMigration(ctx context.Context, req *adminpb.RehearseMigrationRequest) (*adminpb.RehearseMigrationResponse, error) {
+	return g.svc.RehearseMigration(ctx, req)
+}
+
+func (g *grpcServer) ListRehearsals(ctx context.Context, req *adminpb.ListRehearsalsRequest) (*adminpb.ListRehearsalsResponse, error) {
+	return g.svc.ListRehearsals(ctx, req)
+}
+
+func (g *grpcServer) GetRehearsal(ctx context.Context, req *adminpb.GetRehearsalRequest) (*adminpb.GetRehearsalResponse, error) {
+	return g.svc.GetRehearsal(ctx, req)
+}
+
+func (g *grpcServer) GetRehearsalDatabase(ctx context.Context, req *adminpb.GetRehearsalDatabaseRequest) (*adminpb.GetRehearsalDatabaseResponse, error) {
+	return g.svc.GetRehearsalDatabase(ctx, req)
+}
+
+func (g *grpcServer) SetRehearsalDatabase(ctx context.Context, req *adminpb.SetRehearsalDatabaseRequest) (*adminpb.SetRehearsalDatabaseResponse, error) {
+	return g.svc.SetRehearsalDatabase(ctx, req)
+}
+
+func (g *grpcServer) ListProtectedEntities(ctx context.Context, req *adminpb.ListProtectedEntitiesRequest) (*adminpb.ListProtectedEntitiesResponse, error) {
+	return g.svc.ListProtectedEntities(ctx, req)
+}
+
+func (g *grpcServer) PutProtectedEntity(ctx context.Context, req *adminpb.PutProtectedEntityRequest) (*adminpb.PutProtectedEntityResponse, error) {
+	return g.svc.PutProtectedEntity(ctx, req)
+}
+
+func (g *grpcServer) DeleteProtectedEntity(ctx context.Context, req *adminpb.DeleteProtectedEntityRequest) (*adminpb.DeleteProtectedEntityResponse, error) {
+	return g.svc.DeleteProtectedEntity(ctx, req)
+}
+
+func (g *grpcServer) ListFreezeWindows(ctx context.Context, req *adminpb.ListFreezeWindowsRequest) (*adminpb.ListFreezeWindowsResponse, error) {
+	return g.svc.ListFreezeWindows(ctx, req)
+}
+
+func (g *grpcServer) CreateFreezeWindow(ctx context.Context, req *adminpb.CreateFreezeWindowRequest) (*adminpb.CreateFreezeWindowResponse, error) {
+	return g.svc.CreateFreezeWindow(ctx, req)
+}
+
+func (g *grpcServer) DeleteFreezeWindow(ctx context.Context, req *adminpb.DeleteFreezeWindowRequest) (*adminpb.DeleteFreezeWindowResponse, error) {
+	return g.svc.DeleteFreezeWindow(ctx, req)
 }
 
 func (g *grpcServer) RegisterCaller(ctx context.Context, req *adminpb.RegisterCallerRequest) (*adminpb.RegisterCallerResponse, error) {

@@ -30,7 +30,7 @@ export const TLS_REQUIRED = 'tls_required'
 // Wire types
 // ---------------------------------------------------------------------------
 
-export type UserRole = 'admin' | 'viewer'
+export type UserRole = 'admin' | 'developer' | 'viewer'
 
 // Who is signed in, as asserted by Atlantis Cloud and copied onto the session.
 //
@@ -121,6 +121,10 @@ export interface SchemaVersionSummary {
   actor_email?: string
   actor_name?: string
   entity_count?: number
+  /** The tier that let an unattended apply through, and the rehearsal
+   * verdict it consumed. Both absent for human-approved applies. */
+  applied_under_policy?: string
+  applied_verdict?: string
 }
 
 export interface SchemaHistoryResponse {
@@ -503,6 +507,75 @@ export interface CallerInfo {
   registered: boolean
   can_mutate: boolean
   cert_expires_at?: string // RFC3339; absent when no cert has been issued through the console
+  /** Stored apply-policy tier; absent or '' means the server default. */
+  apply_policy?: string
+  /** The tier the gate uses: resolved against the default and clamped to the
+   * deployment floor. */
+  effective_apply_policy?: string
+}
+
+/** One protected entity: an approval floor keyed by pattern. */
+export interface ProtectedEntity {
+  /** Exact `namespace.Entity`, or `namespace.*`. */
+  pattern: string
+  /** 'require_approval' | 'admin_only'. */
+  floor: string
+  reason?: string
+  created_by?: string
+  created_at?: string
+}
+
+/** One freeze window: an absolute interval during which matching classes do
+ * not apply. Approving stays possible; the apply queues behind the window. */
+export interface FreezeWindow {
+  id: number
+  starts_at: string
+  ends_at: string
+  display_tz?: string
+  /** codegen class names; empty freezes every class. */
+  classes?: string[]
+  reason?: string
+  created_by?: string
+  created_at?: string
+}
+
+export interface ApplyPolicyResponse {
+  caller: string
+  apply_policy?: string
+  effective_apply_policy: string
+  /** Deployment floor; absent when none is set. */
+  floor?: string
+  /** Whether this caller may rehearse — run migrations against a clone of
+   * the real data. A deliberate grant beside the tier. */
+  rehearsal_enabled?: boolean
+}
+
+export interface RehearsalResult {
+  rehearsal_id: string
+  verdict: string
+  reason?: string
+  sqlstate?: string
+  error?: string
+  diagnostics?: Record<string, number>
+  remediation?: string
+  clone_ms?: number
+  execute_ms?: number
+}
+
+export interface RehearsalSummary {
+  rehearsal_id: string
+  caller: string
+  files_hash: string
+  verdict: string
+  reason?: string
+  sqlstate?: string
+  error?: string
+  /** '' | applied | apply_failed — what happened when the verdict was consumed. */
+  outcome?: string
+  created_at: string
+  expires_at: string
+  clone_ms?: number
+  execute_ms?: number
 }
 
 export interface RegisterCallerResponse {
@@ -548,6 +621,14 @@ export interface SchemaPlanSummary {
   /** The role the class requires, resolved from the policy as it stands now. */
   approver_role: string
   expired?: boolean
+  /** The human attributed to the apply that filed this plan. Untrusted, and
+   * empty for an unattended pipeline — the "unattributed request" case. */
+  requested_by_actor?: string
+  /** '' | 'override' | 'self_approval_override'. */
+  decided_via?: string
+  /** The latest rehearsal of this exact content, when one ran. */
+  rehearsal_id?: string
+  rehearsal_verdict?: string
   /**
    * The entities this plan touches, derived server-side from the stored diff.
    *
@@ -1078,6 +1159,68 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ reason }),
       }),
+
+    /** Admin + sudo. Approves past a freeze window, a protected-entity
+     * floor, or the self-approval refusal; the reason is the record. */
+    override: (id: string, reason: string): Promise<SchemaPlanResponse> =>
+      apiFetch<SchemaPlanResponse>(`/api/plans/${encodeURIComponent(id)}/override`, {
+        method: 'POST',
+        body: JSON.stringify({ reason }),
+      }),
+
+    /** Developer or admin. Slow: the server clones the managed database and
+     * runs this plan's SQL against the copy. */
+    rehearse: (id: string): Promise<RehearsalResult> =>
+      apiFetch<RehearsalResult>(`/api/plans/${encodeURIComponent(id)}/rehearse`, {
+        method: 'POST',
+        body: '{}',
+      }),
+  },
+
+  rehearsals: {
+    list: (caller?: string): Promise<{ rehearsals?: RehearsalSummary[] }> =>
+      apiFetch<{ rehearsals?: RehearsalSummary[] }>(
+        `/api/rehearsals${caller ? `?caller=${encodeURIComponent(caller)}` : ''}`),
+  },
+
+  protection: {
+    list: (): Promise<{ entities?: ProtectedEntity[] }> =>
+      apiFetch<{ entities?: ProtectedEntity[] }>('/api/protected-entities'),
+
+    /** Admin + sudo. Upserts one pattern. */
+    put: (e: { pattern: string; floor: string; reason?: string }): Promise<unknown> =>
+      apiFetch<unknown>('/api/protected-entities', {
+        method: 'PUT',
+        body: JSON.stringify(e),
+      }),
+
+    /** Admin + sudo. */
+    remove: (pattern: string): Promise<unknown> =>
+      apiFetch<unknown>(`/api/protected-entities?pattern=${encodeURIComponent(pattern)}`, {
+        method: 'DELETE',
+      }),
+  },
+
+  freezes: {
+    list: (): Promise<{ windows?: FreezeWindow[] }> =>
+      apiFetch<{ windows?: FreezeWindow[] }>('/api/freeze-windows'),
+
+    /** Admin + sudo. Times are RFC3339; empty classes freeze everything. */
+    create: (w: {
+      starts_at: string
+      ends_at: string
+      display_tz?: string
+      classes?: string[]
+      reason?: string
+    }): Promise<unknown> =>
+      apiFetch<unknown>('/api/freeze-windows', {
+        method: 'POST',
+        body: JSON.stringify(w),
+      }),
+
+    /** Admin + sudo. */
+    remove: (id: number): Promise<unknown> =>
+      apiFetch<unknown>(`/api/freeze-windows/${id}`, { method: 'DELETE' }),
   },
 
   policy: {
@@ -1118,6 +1261,24 @@ export const api = {
       apiFetch<EnrollTokenResponse>(`/api/callers/${encodeURIComponent(caller)}/enroll`, {
         method: 'POST',
       }),
+
+    /** The caller's apply-policy tier: how much may apply without a human. */
+    applyPolicy: (caller: string): Promise<ApplyPolicyResponse> =>
+      apiFetch<ApplyPolicyResponse>(
+        `/api/callers/${encodeURIComponent(caller)}/apply-policy`),
+
+    /** Admin + sudo. Empty policy resets the caller to the server default;
+     * always send the current tier beside a rehearsal toggle, or the save
+     * resets it. */
+    setApplyPolicy: (caller: string, policy: string, rehearsalEnabled?: boolean): Promise<ApplyPolicyResponse> =>
+      apiFetch<ApplyPolicyResponse>(
+        `/api/callers/${encodeURIComponent(caller)}/apply-policy`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            apply_policy: policy,
+            ...(rehearsalEnabled === undefined ? {} : { rehearsal_enabled: rehearsalEnabled }),
+          }),
+        }),
 
     /** Whether viewers may self-enrol as this caller through `tide login`. */
     enrollmentPolicy: (caller: string): Promise<{ developers_may_enroll: boolean }> =>

@@ -454,7 +454,7 @@ func memberChange(args []string, add bool, log *slog.Logger) error {
 	fs := flag.NewFlagSet("member "+verb, flag.ExitOnError)
 	email := fs.String("email", "", "the account's email address")
 	orgName := fs.String("org", "", "organisation")
-	role := fs.String("role", string(identity.RoleAdmin), `"admin" or "viewer"`)
+	role := fs.String("role", string(identity.RoleAdmin), `"admin", "developer" or "viewer"`)
 	dbURL := cloudDBFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
