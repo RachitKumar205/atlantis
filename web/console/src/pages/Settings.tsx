@@ -888,7 +888,7 @@ function DangerPanel({
           <div className="setrow__main">
             <div className="setrow__label">Revoke all caller certificates</div>
             <div className="setrow__help">
-              Drop every caller from the allowlist. <b>All callers will fail</b> until they're re-registered and re-issued from the Callers page.
+              Revoke every caller at once. <b>All callers will fail</b> until each is restored from the Callers page; their registered files re-register on the next apply.
             </div>
           </div>
           <div className="setrow__control">

@@ -69,6 +69,7 @@ var migratedRPCs = map[string]bool{
 	"DeleteFreezeWindow":     true,
 	"RegisterCaller":         true,
 	"RevokeCaller":           true,
+	"RestoreCaller":          true,
 	"RecordCallerCertExpiry": true,
 	"ListConnectedWorkers":   true,
 	"GetWorkerSession":       true,
@@ -176,6 +177,10 @@ func (g *grpcServer) RegisterCaller(ctx context.Context, req *adminpb.RegisterCa
 
 func (g *grpcServer) RevokeCaller(ctx context.Context, req *adminpb.RevokeCallerRequest) (*adminpb.RevokeCallerResponse, error) {
 	return g.svc.RevokeCaller(ctx, req)
+}
+
+func (g *grpcServer) RestoreCaller(ctx context.Context, req *adminpb.RestoreCallerRequest) (*adminpb.RestoreCallerResponse, error) {
+	return g.svc.RestoreCaller(ctx, req)
 }
 
 func (g *grpcServer) RecordCallerCertExpiry(ctx context.Context, req *adminpb.RecordCallerCertExpiryRequest) (*adminpb.RecordCallerCertExpiryResponse, error) {

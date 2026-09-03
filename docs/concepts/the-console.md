@@ -41,8 +41,9 @@ See [Adopt an existing database](../guides/adopt-an-existing-database.md).
   [Change approval](change-approval.md).
 - **Danger zone** — sign out every session; **Revoke all caller
   certificates**, which revokes every caller: all of them stop
-  authenticating and their registered files are removed, and each must be
-  re-registered and re-issued from the Callers page.
+  authenticating and their registered files are removed. Each is restored
+  individually from the Callers page, and its files re-register on the
+  caller's next apply.
 
 ## What needs re-authentication
 
@@ -55,6 +56,7 @@ by role, and for the actions below by a fresh re-authentication at Cloud
 - Editing the change policy, protected entities, or freeze windows
 - Setting a caller's apply policy or rehearsal grant
 - Minting an enrolment token; changing enrolment policy or federation rules
+- Restoring a revoked caller
 - Setting caller aliases; draining or evicting a worker
 - Applying a schema import
 - Signing out all sessions; revoking all caller certificates

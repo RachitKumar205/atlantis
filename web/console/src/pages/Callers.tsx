@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
+  ArrowCounterClockwise,
   Check,
   Copy,
   Gauge,
@@ -143,6 +144,37 @@ export function Callers() {
     },
   })
 
+  // Restoring a revoked caller is sudo-gated the way minting is: elevate at
+  // the gate, then call the route inside the sudo window.
+  const [restoreSudoFor, setRestoreSudoFor] = useState<string | null>(null)
+  const [restoreError, setRestoreError] = useState<string | null>(null)
+  const [restorePending, setRestorePending] = useState(false)
+  const restoreOpen = useRef(false)
+  const openRestoreGate = (caller: string | null) => {
+    restoreOpen.current = caller !== null
+    setRestoreSudoFor(caller)
+  }
+
+  const restoreWithSudo = async (assertion: string) => {
+    const caller = restoreSudoFor
+    if (!caller) return
+    setRestorePending(true)
+    setRestoreError(null)
+    try {
+      await api.auth.sudo(assertion)
+      await api.callers.restore(caller)
+      openRestoreGate(null)
+      qc.invalidateQueries({ queryKey: ['callers'] })
+      showToast(`Caller restored: ${caller}`)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Could not restore the caller'
+      if (restoreOpen.current) setRestoreError(msg)
+      else showToast(msg)
+    } finally {
+      setRestorePending(false)
+    }
+  }
+
   const registerM = useMutation({
     mutationFn: ({ name, canMutate }: { name: string; canMutate: boolean }) =>
       api.callers.register(name, canMutate),
@@ -200,6 +232,7 @@ export function Callers() {
                   enrolState={enrolControlState(certs, c.caller)}
                   enrolledAt={certs?.certs.find(x => x.caller === c.caller)?.issued_at}
                   onRevoke={() => setRevoking(c.caller)}
+                  onRestore={() => { setRestoreError(null); openRestoreGate(c.caller) }}
                   onManageAliases={() => setAliasEditing(c.caller)}
                   onManageAccess={() => setPolicySudoFor(c.caller)}
                   onApplyPolicy={() => setApplySudoFor(c)}
@@ -233,6 +266,31 @@ export function Callers() {
         the two are never on screen together — the same "one modal at a time"
         rule the alias save follows.
       */}
+      {restoreSudoFor && (
+        <SudoConfirmDialog
+          title="Restore caller"
+          icon={<ArrowCounterClockwise size={18} />}
+          body={
+            <div className="col">
+              <p>
+                <span className="mono">{restoreSudoFor}</span> starts
+                authenticating again within seconds — any certificate it holds
+                that has not expired works immediately.
+              </p>
+              <p className="muted">
+                Its registered schema files were removed by the revocation; the
+                caller re-registers them with its next apply.
+              </p>
+            </div>
+          }
+          confirmLabel="Restore the caller"
+          pending={restorePending}
+          error={restoreError}
+          onCancel={() => { openRestoreGate(null); setRestoreError(null) }}
+          onConfirm={restoreWithSudo}
+        />
+      )}
+
       {enrolSudoFor && (
         <SudoConfirmDialog
           title="Mint an enrolment token"
@@ -380,6 +438,7 @@ function CallerCard({
   enrolState,
   enrolledAt,
   onRevoke,
+  onRestore,
   onManageAliases,
   onApplyPolicy,
 }: {
@@ -394,9 +453,11 @@ function CallerCard({
    * 503 in every deployment it ever ran in. */
   enrolledAt?: string
   onRevoke: () => void
+  onRestore: () => void
   onManageAliases: () => void
   onApplyPolicy: () => void
 }) {
+  const revoked = !!caller.revoked_at
   // cert_expires_at is populated whenever a cert is issued through the
   // console — see `RecordCallerCertExpiry` on the server. Callers whose cert
   // was minted out-of-band (`make dev-caller-cert`, or straight from the
@@ -421,14 +482,37 @@ function CallerCard({
       <div className="callercard__top">
         <span className="dot dot--brass" />
         <span className="callercard__name">{caller.caller}</span>
+        {revoked && (
+          <span className="badge badge--destroy">revoked</span>
+        )}
         {!caller.can_mutate && (
           <span className="badge badge--plain">read-only</span>
         )}
-        {caller.registered === false && (
+        {caller.registered === false && !revoked && (
           <span className="badge badge--plain">implicit</span>
         )}
         <span className="spacer" style={{ flex: 1 }} />
-        {canAdmin && (
+        {canAdmin && revoked && (
+          <HoverInfo
+            side="bottom"
+            inline
+            content={
+              <>
+                <p>Clears the revocation. Certificates this caller holds start authenticating again within seconds.</p>
+                <p className="hi-foot">Its files re-register on the caller&rsquo;s next apply.</p>
+              </>
+            }
+          >
+            <button
+              className="btn btn--sm btn--ghost btn--icon"
+              onClick={onRestore}
+              aria-label="Restore caller"
+            >
+              <ArrowCounterClockwise size={13} />
+            </button>
+          </HoverInfo>
+        )}
+        {canAdmin && !revoked && (
           <>
             <HoverInfo
               side="bottom"
@@ -517,8 +601,8 @@ function CallerCard({
               inline
               content={
                 <>
-                  <p>Drops this caller's identity and any files they registered.</p>
-                  <p className="hi-foot">Every cert for this caller stops authenticating — reads and writes both fail.</p>
+                  <p>Revokes this caller's identity and removes any files it registered.</p>
+                  <p className="hi-foot">Every cert stops authenticating — reads and writes both fail. Restore brings the identity back.</p>
                 </>
               }
             >

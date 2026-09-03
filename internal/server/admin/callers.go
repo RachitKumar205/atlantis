@@ -458,3 +458,29 @@ ON CONFLICT (caller) DO UPDATE SET revoked_at = NOW()`, req.GetCaller()); err !=
 	}
 	return &adminpb.RevokeCallerResponse{FilesRemoved: int32(removed)}, nil
 }
+
+// RestoreCaller clears a revoked caller's tombstone, so its certificates
+// authenticate again within one cert-binding cache TTL (~5s).
+//
+// The identity row and every capability grant survive a revocation, so a
+// restore returns the caller intact. Its schema registrations do not: revoke
+// deletes them, and the caller re-registers its files with the next
+// `tide apply`.
+//
+// Restored=false reports a caller that was not revoked; the write is a no-op
+// there, including for a caller that does not exist.
+func (s *Service) RestoreCaller(ctx context.Context, req *adminpb.RestoreCallerRequest) (*adminpb.RestoreCallerResponse, error) {
+	if err := s.guardOperatorTransport(ctx); err != nil {
+		return nil, err
+	}
+	if req.GetCaller() == "" {
+		return nil, fmt.Errorf("caller is required")
+	}
+	tag, err := s.pool.Exec(ctx, `
+UPDATE atlantis.caller_identities SET revoked_at = NULL
+WHERE caller = $1 AND revoked_at IS NOT NULL`, req.GetCaller())
+	if err != nil {
+		return nil, fmt.Errorf("restore caller: %w", err)
+	}
+	return &adminpb.RestoreCallerResponse{Restored: tag.RowsAffected() > 0}, nil
+}

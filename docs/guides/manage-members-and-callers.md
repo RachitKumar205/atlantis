@@ -75,13 +75,17 @@ caller's rows. The verified tiers do nothing until the caller can rehearse.
 **Callers → Revoke** revokes the caller's identity: every certificate for
 it stops authenticating within seconds, reads and writes both, and its
 registered schema files are removed. The schema history remains.
-Revocation is final from the console — registering the same name again is
-refused for a revoked caller — so contact atlantis support to restore one.
+
+A revoked caller stays in the list with a `revoked` badge. **Restore** on
+its card — behind a re-authentication — clears the revocation: unexpired
+certificates work again within seconds, and the caller's files re-register
+with its next `tide apply`. Registering the same name again is refused
+while the caller is revoked; restore is the way back.
 
 There is no per-machine revocation. The granularities are the caller
 (**Callers → Revoke**) and the whole organisation (Settings → Danger zone
-→ **Revoke all caller certificates**, which revokes every caller at once
-and needs the same support-side restore before any of them work again).
+→ **Revoke all caller certificates**, which revokes every caller at once;
+each is restored individually from its card).
 
 ## Verify
 

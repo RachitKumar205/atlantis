@@ -242,6 +242,9 @@ service AdminService {
   rpc RevokeCaller(RevokeCallerRequest) returns (RevokeCallerResponse) {
     option (required_capability) = CAPABILITY_OPERATOR;
   }
+  rpc RestoreCaller(RestoreCallerRequest) returns (RestoreCallerResponse) {
+    option (required_capability) = CAPABILITY_OPERATOR;
+  }
   rpc RecordCallerCertExpiry(RecordCallerCertExpiryRequest) returns (RecordCallerCertExpiryResponse) {
     option (required_capability) = CAPABILITY_OPERATOR;
   }
@@ -1287,6 +1290,15 @@ message RevokeCallerRequest {
 
 message RevokeCallerResponse {
   int32 files_removed = 1;
+}
+
+message RestoreCallerRequest {
+  string caller = 1;
+}
+
+message RestoreCallerResponse {
+  // False when the caller was not revoked, so there was nothing to clear.
+  bool restored = 1;
 }
 
 message RecordCallerCertExpiryRequest {

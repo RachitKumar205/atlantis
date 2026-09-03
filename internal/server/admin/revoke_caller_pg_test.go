@@ -240,9 +240,12 @@ func TestRestoringARevokedCallerReturnsItIntact(t *testing.T) {
 	if _, err := svc.RevokeCaller(ctx, &adminpb.RevokeCallerRequest{Caller: caller}); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	if _, err := pool.Exec(ctx,
-		`UPDATE atlantis.caller_identities SET revoked_at = NULL WHERE caller = $1`, caller); err != nil {
+	resp, err := svc.RestoreCaller(ctx, &adminpb.RestoreCallerRequest{Caller: caller})
+	if err != nil {
 		t.Fatalf("restore: %v", err)
+	}
+	if !resp.GetRestored() {
+		t.Error("restoring a revoked caller reported restored=false")
 	}
 
 	if !inActiveCallers(t, pool, ctx, caller) {
@@ -251,6 +254,15 @@ func TestRestoringARevokedCallerReturnsItIntact(t *testing.T) {
 	if got := capCount(t, pool, ctx, caller); got != 1 {
 		t.Errorf("a restored caller holds %d capabilities, want 1 — CAPABILITY_OPERATOR "+
 			"did not survive the round trip", got)
+	}
+
+	// A second restore has nothing to clear, and says so.
+	again, err := svc.RestoreCaller(ctx, &adminpb.RestoreCallerRequest{Caller: caller})
+	if err != nil {
+		t.Fatalf("second restore: %v", err)
+	}
+	if again.GetRestored() {
+		t.Error("restoring an already-live caller reported restored=true")
 	}
 }
 

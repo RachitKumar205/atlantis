@@ -405,6 +405,11 @@ func (s *Server) buildMux() {
 	mux.HandleFunc("GET /api/callers", s.auth(s.handleGetCallers))
 	mux.HandleFunc("POST /api/callers", s.auth(s.requireRole("admin", s.csrf(s.handleRegisterCaller))))
 	mux.HandleFunc("DELETE /api/callers/{caller}", s.auth(s.requireRole("admin", s.csrf(s.handleRevokeCaller))))
+	// Restore clears a revocation, so a caller's certificates authenticate
+	// again. Sudo as well as admin: it re-admits an identity that was cut
+	// off, the inverse of the credential-issuing routes gated the same way.
+	mux.HandleFunc("POST /api/callers/{caller}/restore",
+		s.auth(s.requireRole("admin", s.csrf(s.requireSudo(s.handleRestoreCaller)))))
 	// Enrolment replaces cert issuance.
 	//
 	// This mints a single-use token rather than generating a private key and
@@ -1404,13 +1409,16 @@ func (s *Server) handleSignOutAll(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRevokeAllCallers iterates every known caller and calls the
-// existing single-revoke admin RPC for each. This drops them from
-// caller_identities so the server stops accepting their certs (the
-// certs themselves remain cryptographically valid until expiry; the
-// allowlist is the trust gate). Schema files in caller_registrations
-// are also removed, matching the single-revoke semantics — the design
-// label "Revoke all caller certificates" frames the user-visible
-// effect, not the underlying table operation.
+// single-revoke admin RPC for each. Revocation tombstones the identity
+// so the server stops accepting its certs (the certs themselves remain
+// cryptographically valid until expiry; the allowlist is the trust
+// gate) and removes its schema files from caller_registrations,
+// matching the single-revoke semantics.
+//
+// The platform's own identities — the console, the signer — are
+// skipped: revoking atlantis-console cuts this org's console off from
+// its own server, and the only restore for a reserved CN is the cloud
+// operator CLI. Already-revoked callers are skipped as no-ops.
 //
 // Admin-only, CSRF-protected. The SPA additionally requires the user
 // to type "revoke all" before allowing the call.
@@ -1432,7 +1440,11 @@ func (s *Server) handleRevokeAllCallers(w http.ResponseWriter, r *http.Request) 
 	revoked := 0
 	failures := []string{}
 	for _, c := range list.GetCallers() {
-		if c.GetCaller() == "" {
+		switch c.GetCaller() {
+		case "", "atlantis", "atlantis-console", "atlantis-signer", "anonymous":
+			continue
+		}
+		if c.GetRevokedAt() != "" {
 			continue
 		}
 		atl := s.orgATL(w, r)
@@ -1580,6 +1592,30 @@ func (s *Server) handleRevokeCaller(w http.ResponseWriter, r *http.Request) {
 
 	u := r.Context().Value(ctxUser).(*User)
 	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "revoke_caller", map[string]any{"caller": caller})
+
+	s.proxyProto(w, "admin", resp, nil)
+}
+
+func (s *Server) handleRestoreCaller(w http.ResponseWriter, r *http.Request) {
+	caller := r.PathValue("caller")
+	if caller == "" {
+		jsonError(w, "caller is required", http.StatusBadRequest)
+		return
+	}
+
+	atl := s.orgATL(w, r)
+	if atl == nil {
+		return
+	}
+	resp, err := atl.RestoreCaller(r.Context(), &adminpb.RestoreCallerRequest{Caller: caller})
+	if err != nil {
+		s.log.Error("RestoreCaller", "caller", caller, "err", err)
+		jsonError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	u := r.Context().Value(ctxUser).(*User)
+	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "restore_caller", map[string]any{"caller": caller})
 
 	s.proxyProto(w, "admin", resp, nil)
 }

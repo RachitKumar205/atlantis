@@ -512,6 +512,8 @@ export interface CallerInfo {
   /** The tier the gate uses: resolved against the default and clamped to the
    * deployment floor. */
   effective_apply_policy?: string
+  /** RFC3339 when the caller is revoked; '' or absent when live. */
+  revoked_at?: string
 }
 
 /** One protected entity: an approval floor keyed by pattern. */
@@ -696,6 +698,10 @@ export interface CallerAliasesResponse {
 
 export interface RevokeCallerResponse {
   files_removed: number
+}
+
+export interface RestoreCallerResponse {
+  restored: boolean
 }
 
 /** A single-use enrolment token, to be carried to the machine that will hold
@@ -1253,6 +1259,12 @@ export const api = {
     revoke: (caller: string): Promise<RevokeCallerResponse> =>
       apiFetch<RevokeCallerResponse>(`/api/callers/${encodeURIComponent(caller)}`, {
         method: 'DELETE',
+      }),
+
+    /** Clear a revocation. Admin, and sudo — it re-admits a cut-off identity. */
+    restore: (caller: string): Promise<RestoreCallerResponse> =>
+      apiFetch<RestoreCallerResponse>(`/api/callers/${encodeURIComponent(caller)}/restore`, {
+        method: 'POST',
       }),
 
     /** Mint a single-use enrolment token. Admin, and sudo — this produces a

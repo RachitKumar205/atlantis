@@ -95,6 +95,7 @@ func TestADeveloperBootsASandboxAndCannotReachAdminRoutes(t *testing.T) {
 
 	for _, tc := range []struct{ method, path string }{
 		{"POST", "/api/callers"},
+		{"POST", "/api/callers/somecaller/restore"},
 		{"PUT", "/api/policy"},
 		{"PUT", "/api/callers/somecaller/apply-policy"},
 		{"POST", "/api/schema/imports/imp_x/plan"},

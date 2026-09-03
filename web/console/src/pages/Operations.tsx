@@ -438,6 +438,7 @@ function fmtTime(ts: string) {
 
 const ACTION_LABEL: Record<string, string> = {
   revoke_caller: 'revoked caller',
+  restore_caller: 'restored caller',
   register_caller: 'registered caller',
   rollback_schema: 'rolled back',
   retry_dead_job: 'retried job',
