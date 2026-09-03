@@ -281,7 +281,10 @@ entity B in x { id bigint primary  name text }
 	d := ComputeDiff(oldIR, newIR)
 	scripts, _ := EmitSQL(oldIR, newIR, d)
 	assertContains(t, scripts.Up, `CREATE TABLE IF NOT EXISTS "atlantis"."x_b"`)
-	assertContains(t, scripts.Down, `DROP TABLE IF EXISTS "atlantis"."x_b"`)
+	// The down parks rather than drops: when the up restored a parked
+	// table, a dropping down would destroy the recovered rows.
+	assertContains(t, scripts.Down, `SET SCHEMA "atlantis_tombstone"`)
+	assertNotContains(t, scripts.Down, `DROP TABLE IF EXISTS "atlantis"."x_b"`)
 	// No A changes.
 	assertNotContains(t, scripts.Up, `CREATE TABLE IF NOT EXISTS "atlantis"."x_a"`)
 }
@@ -304,8 +307,12 @@ func TestEmit_Diff_FieldAddedNullable(t *testing.T) {
 	newIR := lower(t, `entity A in x { id bigint primary  name text }`)
 	d := ComputeDiff(oldIR, newIR)
 	scripts, _ := EmitSQL(oldIR, newIR, d)
-	assertContains(t, scripts.Up, `ALTER TABLE "atlantis"."x_a" ADD COLUMN "name" TEXT`)
-	assertContains(t, scripts.Down, `ALTER TABLE "atlantis"."x_a" DROP COLUMN "name"`)
+	assertContains(t, scripts.Up, `ALTER TABLE "atlantis"."x_a" ADD COLUMN IF NOT EXISTS "name" TEXT`)
+	// The down parks the column rather than dropping it, for the same
+	// reason the entity down parks: an up that restored a parked column
+	// must not have its rollback destroy the data.
+	assertContains(t, scripts.Down, `RENAME COLUMN "name" TO "name__parked"`)
+	assertNotContains(t, scripts.Down, `DROP COLUMN "name"`)
 }
 
 func TestEmit_Diff_FieldAddedNotNullDefault(t *testing.T) {
@@ -313,7 +320,7 @@ func TestEmit_Diff_FieldAddedNotNullDefault(t *testing.T) {
 	newIR := lower(t, `entity A in x { id bigint primary  v text not null default "" }`)
 	d := ComputeDiff(oldIR, newIR)
 	scripts, _ := EmitSQL(oldIR, newIR, d)
-	assertContains(t, scripts.Up, `ADD COLUMN "v" TEXT NOT NULL DEFAULT ''`)
+	assertContains(t, scripts.Up, `ADD COLUMN IF NOT EXISTS "v" TEXT NOT NULL DEFAULT ''`)
 }
 
 func TestEmit_Diff_FieldAddedNotNullNoDefaultIsBackfillBanner(t *testing.T) {

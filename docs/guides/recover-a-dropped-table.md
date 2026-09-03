@@ -29,31 +29,32 @@ gone, and only a platform backup restore brings them back.
 The window is an absolute instant fixed when the object is parked;
 changing the retention setting later does not move it.
 
-## 2. Restore the declaration
+## 2. Restore it
 
-Re-add the entity or field to the `.atl` file as it was — `git revert` the
-commit that dropped it — then:
+Re-add the entity or field to the `.atl` file exactly as it was —
+`git revert` the commit that dropped it — then:
 
 ```bash
 tide plan
 tide apply
 ```
 
-This restores the schema: the entity exists again, with its API and its
-generated types. It creates a fresh, empty object; the preserved rows stay
-parked.
+The apply moves the parked object back: the entity exists again, with its
+API, its generated types, and the rows it held when it was dropped.
 
-## 3. Restore the rows
+Two conditions on the restore:
 
-Contact atlantis support with the object's name from `tide parked` while
-its window is open, so the preserved rows can be moved back into the
-restored object.
+- The re-declared columns must match the parked object's. A declaration
+  whose column set differs is refused, naming the mismatch — restore
+  first with the original declaration, then change it in a second apply.
+- The window must still be open. Re-declaring after the reaper has run
+  creates a fresh, empty object; the rows are gone, and only a platform
+  backup restore brings them back.
 
 ## Verify
 
-`tide show <path-substring>` — matched against the `.atl` file's path —
-prints the submitted file with the restored declaration in it. After the
-row restore, a query returns the pre-drop data.
+A query through the generated client returns the pre-drop rows, and the
+object no longer appears in `tide parked`.
 
 ## Related
 

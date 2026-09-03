@@ -488,7 +488,24 @@ func emitPhaseSplitChange(ch Change, newByID, oldByID map[string]*dsl.Entity, pr
 // f.NotNull is true. Used by the phase-split builder so the column is
 // nullable while the chunked backfill populates it; Phase 3 then runs
 // SET NOT NULL.
+//
+// A parked column of the same name refuses the add. Backfilling implies
+// computed values, and a fresh column beside the parked one would leave
+// the parked data on a live reap clock while the name it belongs to
+// fills with something else. Restoring and backfilling are separate
+// intents; the message names both ways forward.
 func emitFieldAddNullable(b *sqlBuilder, e *dsl.Entity, f *dsl.Field) {
+	parked := parkedName(f.Name)
+	sch, tbl := physicalParts(e)
+	b.line("DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = " +
+		"to_regclass(format('%I.%I', " + sqlStringLiteral(sch) + ", " +
+		sqlStringLiteral(tbl) + ")) AND attname = " + sqlStringLiteral(parked) +
+		" AND attnum > 0 AND NOT attisdropped) THEN " +
+		"RAISE EXCEPTION 'atlantis: a parked column % exists on %. Re-declare the " +
+		"field without a backfill to restore the parked data, or have the parked " +
+		"column reaped before backfilling a fresh one.', " +
+		sqlStringLiteral(f.Name) + ", " + sqlStringLiteral(sch+"."+tbl) +
+		"; END IF; END $$;")
 	nullable := *f
 	nullable.NotNull = false
 	b.linef("ALTER TABLE %s ADD COLUMN %s;", qualifiedTable(e), columnDecl(nullable, fieldCheckName(e, nullable.Name)))
@@ -584,11 +601,14 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 	switch ch.Kind {
 	case KindEntityAdded:
 		e := newByID[ch.EntityID]
-		emitEntityCreate(up, e)
-		// A real drop, not a park. This undoes a table the same migration
-		// created, so the only rows it can lose are ones written since it ran.
-		// Parking is for an author deleting a declaration.
-		emitEntityDrop(down, e)
+		emitEntityRestoreOrCreate(up, e)
+		// A park, not a drop: when the up restored a parked table, a
+		// down that dropped it would destroy the rows the restore just
+		// recovered. Parking a table the same migration created fresh
+		// preserves nothing but costs nothing either — the reaper drops
+		// the empty tombstone after the window. Tolerant of an absent
+		// table, so the down still runs after a part-way-failed up.
+		emitEntityParkIfExists(down, e)
 	case KindEntityRemoved:
 		e := oldByID[ch.EntityID]
 		emitEntityPark(up, e)
@@ -596,8 +616,10 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 	case KindFieldAdded:
 		e := newByID[ch.EntityID]
 		f := e.FindField(ch.Field)
-		emitFieldAdd(up, e, f)
-		emitFieldDrop(down, e, f.Name)
+		emitFieldRestoreOrAdd(up, e, f)
+		// A park, for the same reason as the entity case above, and
+		// tolerant of an absent column for the same reason.
+		emitFieldParkIfExists(down, e, f.Name)
 	case KindFieldRemoved:
 		oldE := oldByID[ch.EntityID]
 		f := oldE.FindField(ch.Field)
@@ -959,14 +981,9 @@ func emitEntityCreate(b *sqlBuilder, e *dsl.Entity) {
 	emitTouchTrigger(b, e)
 }
 
-// emitEntityDrop parks a table instead of dropping it.
-//
-// The table moves into the tombstone schema, out of reach because every
-// generated statement names atlantis.<table> explicitly, and stays intact until
-// a scheduled reaper drops it. Undoing the change moves it back with its rows.
-//
-// Not CASCADE-equivalent: if another object still depends on the table, the
-// move fails and the migration stops rather than removing the dependent.
+// emitEntityDrop drops the table. Only the initial migration's down uses
+// it: a rollback of the very first setup has nothing parked to preserve.
+// Diff-driven removals park instead (emitEntityPark).
 func emitEntityDrop(b *sqlBuilder, e *dsl.Entity) {
 	// No CASCADE. It removed dependent objects — views, foreign keys from
 	// tables outside this change — that the plan never showed, so the blast
@@ -1015,6 +1032,42 @@ func emitEntityPark(b *sqlBuilder, e *dsl.Entity) {
 	emitParkRegistration(b, "table", TombstoneSchema, parked, "", srcSchema, srcTable)
 }
 
+// emitEntityParkIfExists parks the table when it exists and no-ops when it
+// does not. The down of an entity add uses it: an up that failed before the
+// create leaves nothing to park, and the down must still run.
+func emitEntityParkIfExists(b *sqlBuilder, e *dsl.Entity) {
+	srcSchema, srcTable := physicalParts(e)
+	parked := parkedName(srcSchema + "_" + srcTable)
+
+	b.linef("CREATE SCHEMA IF NOT EXISTS %s;", quoteIdent(TombstoneSchema))
+	b.line("DO $$ BEGIN IF to_regclass(format('%I.%I', " +
+		sqlStringLiteral(srcSchema) + ", " + sqlStringLiteral(srcTable) +
+		")) IS NOT NULL THEN " +
+		"ALTER TABLE " + qualifiedTable(e) + " SET SCHEMA " + quoteIdent(TombstoneSchema) + "; " +
+		"ALTER TABLE " + quoteIdent(TombstoneSchema) + "." + quoteIdent(srcTable) +
+		" RENAME TO " + quoteIdent(parked) + "; " +
+		parkRegistrationSQL("table", TombstoneSchema, parked, "", srcSchema, srcTable) +
+		" END IF; END $$;")
+}
+
+// emitFieldParkIfExists parks the column when it exists and no-ops when it
+// does not — the down of a field add, tolerant of a part-way-failed up.
+func emitFieldParkIfExists(b *sqlBuilder, e *dsl.Entity, name string) {
+	parked := parkedName(name)
+	sch, tbl := physicalParts(e)
+
+	b.line("DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = " +
+		"to_regclass(format('%I.%I', " + sqlStringLiteral(sch) + ", " +
+		sqlStringLiteral(tbl) + ")) AND attname = " + sqlStringLiteral(name) +
+		" AND attnum > 0 AND NOT attisdropped) THEN " +
+		"ALTER TABLE " + qualifiedTable(e) + " RENAME COLUMN " + quoteIdent(name) +
+		" TO " + quoteIdent(parked) + "; " +
+		"ALTER TABLE " + qualifiedTable(e) + " ALTER COLUMN " + quoteIdent(parked) +
+		" DROP NOT NULL; " +
+		parkRegistrationSQL("column", sch, parked, tbl, sch, name) +
+		" END IF; END $$;")
+}
+
 // emitEntityUnpark is the inverse: bring the table back with its rows.
 //
 // Not emitEntityCreate. Recreating the table would produce an empty one and
@@ -1047,6 +1100,104 @@ func emitEntityUnpark(b *sqlBuilder, e *dsl.Entity) {
 	emitParkDeregistration(b, TombstoneSchema, "", parked)
 }
 
+// emitEntityRestoreOrCreate creates the entity's table, restoring a parked
+// table first when the tombstone holds one whose columns match the
+// declaration.
+//
+// The decision runs in the database: EmitSQL has no catalogue access, and
+// the same script must behave identically at plan preview, apply, rehearse,
+// and rollback. When no tombstone exists, the DO block is a no-op and the
+// CREATE below builds a fresh table.
+//
+// A tombstone whose column names differ from the declaration raises: a
+// silent restore would leave the checkpoint recording a shape the table
+// does not have, and a silent fresh CREATE would strand the parked rows
+// behind an identically-named live table. The comparison is column names
+// only — types, defaults, NOT NULLs and constraints are not compared, so
+// the supported restore is re-declaring the entity exactly as it was
+// when it was dropped. Columns the table had parked before it was itself
+// parked (the `__parked` suffix) are excluded, staying parked inside the
+// restored table.
+//
+// After a restore, the CREATE TABLE IF NOT EXISTS is a no-op, and the
+// index, trigger, and policy statements find their objects already on the
+// restored table under their original derived names.
+func emitEntityRestoreOrCreate(b *sqlBuilder, e *dsl.Entity) {
+	srcSchema, srcTable := physicalParts(e)
+	parked := parkedName(srcSchema + "_" + srcTable)
+
+	cols := make([]string, 0, len(e.Fields))
+	for _, f := range e.Fields {
+		cols = append(cols, sqlStringLiteral(f.Name))
+	}
+	sort.Strings(cols)
+	colArray := "ARRAY[" + strings.Join(cols, ", ") + "]::text[]"
+
+	regclass := "to_regclass(format('%I.%I', " +
+		sqlStringLiteral(TombstoneSchema) + ", " + sqlStringLiteral(parked) + "))"
+	b.line("DO $$ BEGIN IF " + regclass + " IS NOT NULL THEN " +
+		"IF (SELECT array_agg(attname::text ORDER BY attname) FROM pg_attribute " +
+		"WHERE attrelid = " + regclass + " AND attnum > 0 AND NOT attisdropped " +
+		"AND right(attname, 8) <> '__parked') " +
+		"IS DISTINCT FROM " + colArray + " THEN " +
+		"RAISE EXCEPTION 'atlantis: % is parked with a different column set than " +
+		"the declaration. Re-declare it as it was when it was dropped to restore " +
+		"its rows (tide parked lists it), or have the parked object reaped before " +
+		"creating a fresh table under this name.', " +
+		sqlStringLiteral(srcSchema+"."+srcTable) + "; END IF; " +
+		"ALTER TABLE " + quoteIdent(TombstoneSchema) + "." + quoteIdent(parked) +
+		" RENAME TO " + quoteIdent(srcTable) + "; " +
+		"ALTER TABLE " + quoteIdent(TombstoneSchema) + "." + quoteIdent(srcTable) +
+		" SET SCHEMA " + quoteIdent(srcSchema) + "; " +
+		"DELETE FROM atlantis.parked_objects WHERE schema_name = " +
+		sqlStringLiteral(TombstoneSchema) + " AND parent_table IS NULL " +
+		"AND object_name = " + sqlStringLiteral(parked) + " AND reaped_at IS NULL; " +
+		"END IF; END $$;")
+
+	emitEntityCreate(b, e)
+}
+
+// emitFieldRestoreOrAdd adds the field's column, restoring a parked column
+// of the same name first when the table holds one.
+//
+// The restore is emitFieldUnpark's rename inside a DO block, so the same
+// script serves the fresh-add and the re-declare case. Restoring a
+// declared NOT NULL onto parked data that grew NULLs while parked fails
+// the apply, which is the correct answer: those rows have no value for
+// the column.
+func emitFieldRestoreOrAdd(b *sqlBuilder, e *dsl.Entity, f *dsl.Field) {
+	parked := parkedName(f.Name)
+	sch, tbl := physicalParts(e)
+
+	restore := "ALTER TABLE " + qualifiedTable(e) + " RENAME COLUMN " +
+		quoteIdent(parked) + " TO " + quoteIdent(f.Name) + "; "
+	if f.NotNull && !f.Primary {
+		restore += "ALTER TABLE " + qualifiedTable(e) + " ALTER COLUMN " +
+			quoteIdent(f.Name) + " SET NOT NULL; "
+	}
+	restore += "DELETE FROM atlantis.parked_objects WHERE schema_name = " +
+		sqlStringLiteral(sch) + " AND parent_table = " + sqlStringLiteral(tbl) +
+		" AND object_name = " + sqlStringLiteral(parked) + " AND reaped_at IS NULL; "
+
+	b.line("DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = " +
+		"to_regclass(format('%I.%I', " + sqlStringLiteral(sch) + ", " +
+		sqlStringLiteral(tbl) + ")) AND attname = " + sqlStringLiteral(parked) +
+		" AND attnum > 0 AND NOT attisdropped) THEN " + restore + "END IF; END $$;")
+
+	b.linef("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s;",
+		qualifiedTable(e), columnDecl(*f, fieldCheckName(e, f.Name)))
+	if f.Ref != nil {
+		// The restored column kept its constraint through the rename, so
+		// the add is conditional on the derived name.
+		b.line("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = " +
+			sqlStringLiteral(fkName(e, f.Name)) + " AND conrelid = to_regclass(format('%I.%I', " +
+			sqlStringLiteral(sch) + ", " + sqlStringLiteral(tbl) + "))) THEN " +
+			"ALTER TABLE " + qualifiedTable(e) + " ADD CONSTRAINT " +
+			quoteIdent(fkName(e, f.Name)) + " " + fkConstraintBody(f) + "; " +
+			"END IF; END $$;")
+	}
+}
+
 // TombstoneSchema holds parked objects awaiting the retention window.
 //
 // A separate schema rather than a naming convention inside atlantis: a parked
@@ -1064,25 +1215,6 @@ const TombstoneSchema = "atlantis_tombstone"
 // makes the reaper's retention decision and any manual restore legible.
 func parkedName(base string) string {
 	return truncateIdent(base + "__parked")
-}
-
-func emitFieldAdd(b *sqlBuilder, e *dsl.Entity, f *dsl.Field) {
-	b.linef("ALTER TABLE %s ADD COLUMN %s;", qualifiedTable(e), columnDecl(*f, fieldCheckName(e, f.Name)))
-	if f.Ref != nil {
-		emitFKAdd(b, e, f)
-	}
-}
-
-// emitFieldDrop parks a column instead of dropping it.
-//
-// A column cannot move schema, so it is renamed. Every generated statement
-// names its columns explicitly, so a renamed column is absent from reads,
-// writes and the proto surface while the data stays. Undoing it is a rename.
-//
-// Its NOT NULL is dropped: a parked NOT NULL column would block inserts. The
-// column is retained for its data, not its rules.
-func emitFieldDrop(b *sqlBuilder, e *dsl.Entity, name string) {
-	b.linef("ALTER TABLE %s DROP COLUMN %s;", qualifiedTable(e), quoteIdent(name))
 }
 
 // emitFieldPark renames a column out of the way instead of dropping it.
@@ -1136,6 +1268,12 @@ const DefaultParkRetention = 30 * 24 * time.Hour
 // not recorded is invisible to the reaper and absent from `tide parked`, so the
 // object outlives every retention window with nothing listing it.
 func emitParkRegistration(b *sqlBuilder, kind, schemaName, objectName, parentTable, originalSchema, originalName string) {
+	b.line(parkRegistrationSQL(kind, schemaName, objectName, parentTable, originalSchema, originalName))
+}
+
+// parkRegistrationSQL renders the registration INSERT as one statement, so
+// the conditional park variants can carry it inside a DO block.
+func parkRegistrationSQL(kind, schemaName, objectName, parentTable, originalSchema, originalName string) string {
 	parent := "NULL"
 	if parentTable != "" {
 		parent = sqlStringLiteral(parentTable)
@@ -1146,7 +1284,7 @@ func emitParkRegistration(b *sqlBuilder, kind, schemaName, objectName, parentTab
 	// The conflict target is the partial unique index over live registrations.
 	// Untargeted, DO NOTHING would swallow a primary-key conflict too, turning
 	// a failed registration into a park applied and never recorded.
-	b.linef("INSERT INTO atlantis.parked_objects "+
+	return fmt.Sprintf("INSERT INTO atlantis.parked_objects "+
 		"(kind, schema_name, object_name, parent_table, original_schema, original_name, reap_after) "+
 		"VALUES (%s, %s, %s, %s, %s, %s, now() + INTERVAL '%d days') "+
 		"ON CONFLICT (schema_name, coalesce(parent_table, ''), object_name) "+

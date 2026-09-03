@@ -421,7 +421,8 @@ tide parked [--all] [--limit N] [--format {table|json}]
 Columns: kind, object, recoverable-for, state. An object under 7 days from
 reaping renders highlighted; one whose reap has failed twice or more shows
 as stuck. Restoring is a schema change: revert the `.atl` that dropped the
-object and apply — see [Recover a dropped table](../guides/recover-a-dropped-table.md).
+object and apply, and the object comes back with its rows — see
+[Recover a dropped table](../guides/recover-a-dropped-table.md).
 
 ### `tide sandbox boot|shell|spawn`
 
