@@ -28,7 +28,7 @@ err := tx.QueryRow(ctx, `
     INSERT INTO contact_import_state (account_id, status)
     VALUES ($1, 'running')
     ON CONFLICT (account_id) DO UPDATE SET status = 'running'
-    RETURNING next_cursor`, args.AccountID).Scan(&cursor)
+    RETURNING next_cursor`, args.AccountId).Scan(&cursor)
 ```
 
 The second invocation reads `next_cursor` and resumes; the work it re-does is overwriting the same destination rows, not duplicating them.
@@ -76,8 +76,8 @@ For resume, store the cursor in your state table from section 1 — that's the s
 ## 4. Forking goroutines
 
 ```go
-func (h *handler) handle(ctx context.Context, argsJSON []byte) error {
-    go h.expensiveBackground(ctx, argsJSON)  // lost work
+func (h *handler) Handle(ctx context.Context, args directory.ImportContactsArgs) error {
+    go h.expensiveBackground(ctx, args)  // lost work
     return nil
 }
 ```
@@ -118,19 +118,11 @@ CREATE TABLE contact_import_state (
 
 ### Handler
 
-Registered with `registry.Register("directory.ImportContacts",
-jobs.HandlerFunc(h.handle))` — see
+Registered with `directory.RegisterImportContacts(registry, h)` — see
 [Declare a background job](declarative-jobs.md).
 
 ```go
-func (h *importContactsHandler) handle(ctx context.Context, argsJSON []byte) error {
-    var args struct {
-        AccountID string `json:"account_id"`
-    }
-    if err := json.Unmarshal(argsJSON, &args); err != nil {
-        return fmt.Errorf("decode args: %w", err)
-    }
-
+func (h *importContactsHandler) Handle(ctx context.Context, args directory.ImportContactsArgs) error {
     // 1. Idempotent open: resume cursor + counters from the state table.
     var state importState
     err := h.db.QueryRow(ctx, `
@@ -138,7 +130,7 @@ func (h *importContactsHandler) handle(ctx context.Context, argsJSON []byte) err
         VALUES ($1, 'running')
         ON CONFLICT (account_id) DO UPDATE SET status = 'running', updated_at = now()
         RETURNING next_cursor, pages_done, contacts_done`,
-        args.AccountID,
+        args.AccountId,
     ).Scan(&state.cursor, &state.pages, &state.contacts)
     if err != nil {
         return fmt.Errorf("open import state: %w", err)
@@ -147,11 +139,11 @@ func (h *importContactsHandler) handle(ctx context.Context, argsJSON []byte) err
 
     // 2. Paginated fetch + write. Each iteration is one upstream page.
     for {
-        page, err := h.crm.FetchContacts(ctx, args.AccountID, state.cursor)
+        page, err := h.crm.FetchContacts(ctx, args.AccountId, state.cursor)
         if err != nil {
             return fmt.Errorf("fetch page after cursor=%q: %w", state.cursor, err)
         }
-        if err := h.writeContacts(ctx, args.AccountID, page.Contacts); err != nil {
+        if err := h.writeContacts(ctx, args.AccountId, page.Contacts); err != nil {
             return fmt.Errorf("write contacts: %w", err)
         }
 
@@ -163,7 +155,7 @@ func (h *importContactsHandler) handle(ctx context.Context, argsJSON []byte) err
             UPDATE contact_import_state
                SET next_cursor = $1, pages_done = $2, contacts_done = $3, updated_at = now()
              WHERE account_id = $4`,
-            state.cursor, state.pages, state.contacts, args.AccountID)
+            state.cursor, state.pages, state.contacts, args.AccountId)
         if err != nil {
             return fmt.Errorf("checkpoint state: %w", err)
         }
@@ -182,7 +174,7 @@ func (h *importContactsHandler) handle(ctx context.Context, argsJSON []byte) err
     _, err = h.db.Exec(ctx, `
         UPDATE contact_import_state
            SET status = 'complete', updated_at = now()
-         WHERE account_id = $1`, args.AccountID)
+         WHERE account_id = $1`, args.AccountId)
     return err
 }
 ```

@@ -80,7 +80,8 @@ func cmdGenerate(args []string) int {
 		return 3
 	}
 	scoped := codegen.FilterIR(ir, cfg.Generate)
-	if len(scoped.Entities) == 0 && len(scoped.Queries) == 0 && len(scoped.Procedures) == 0 {
+	if len(scoped.Entities) == 0 && len(scoped.Queries) == 0 &&
+		len(scoped.Procedures) == 0 && len(scoped.Jobs) == 0 {
 		fmt.Fprintf(os.Stderr, "tide generate: no declarations found for namespaces %v\n", cfg.Generate)
 		return 3
 	}
@@ -189,7 +190,11 @@ func planSDKFiles(ir *dsl.IR, modulePrefix string) (map[string]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("emit custom client: %w", err)
 	}
-	for _, gf := range append(clientFiles, customClient...) {
+	jobsFiles, err := codegen.EmitCallerJobsHandlers(ir)
+	if err != nil {
+		return nil, fmt.Errorf("emit jobs handlers: %w", err)
+	}
+	for _, gf := range append(append(clientFiles, customClient...), jobsFiles...) {
 		// Emitter paths are repo-relative (clients/go/client/<ns>/...);
 		// remap onto the caller's output dir as client/<ns>/...
 		rel := filepath.ToSlash(strings.TrimPrefix(gf.Path, "clients/go/"))

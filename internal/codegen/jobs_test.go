@@ -183,3 +183,42 @@ func TestPascalCaseJobField(t *testing.T) {
 		}
 	}
 }
+
+// The caller flavor writes into the committed client tree and links the
+// clients/go jobs runtime — the registry a DispatchedWorker takes —
+// while the server flavor keeps the server-module runtime.
+func TestEmitCallerJobsHandlers_PathAndImport(t *testing.T) {
+	ir := parseToIR(t, `
+job BulkImport in vendor {
+  args {
+    vendor_id varchar(7) not null
+  }
+}
+`)
+	files, err := EmitCallerJobsHandlers(ir)
+	if err != nil {
+		t.Fatalf("EmitCallerJobsHandlers: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+	f := files[0]
+	if f.Path != "clients/go/client/vendorpkg/jobs.go" {
+		t.Errorf("path = %q", f.Path)
+	}
+	if !strings.Contains(f.Content, `"github.com/rachitkumar205/atlantis/clients/go/jobs"`) {
+		t.Error("the caller flavor does not import the clients/go jobs runtime")
+	}
+	if strings.Contains(f.Content, `"github.com/rachitkumar205/atlantis/jobs"`) {
+		t.Error("the caller flavor links the server-module jobs runtime")
+	}
+	for _, want := range []string{
+		"type BulkImportArgs struct",
+		"func RegisterBulkImport(reg *jobs.Registry, h BulkImportHandler)",
+		`const BulkImportJobName = "vendor.BulkImport"`,
+	} {
+		if !strings.Contains(f.Content, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+}

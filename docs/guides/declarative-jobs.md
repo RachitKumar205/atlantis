@@ -8,9 +8,8 @@ and run the submit–claim–complete loop.
 - A caller set up with `tide` ([Get started](../getting-started/index.md)).
 - The `github.com/rachitkumar205/atlantis/clients/go/jobs` package in your
   service, for the worker and handler types.
-- Job dispatch enabled for your queue on your organisation's server. It is
-  not on by default — contact atlantis support with the queue name before
-  the first worker connects.
+- `output_dir` and `generate:` set in `tide.yaml`, for the typed job
+  surface `tide generate` writes.
 
 ## 1. Declare the job
 
@@ -42,29 +41,33 @@ tide apply
 The declaration is additive. The server enforces `retries`, `timeout`, and
 `queue` at submit and claim time.
 
-## 3. Implement and register the handler
+## 3. Generate, implement, and register the handler
 
-Handlers run in your service's binary. Register one against the job's
-canonical id, unmarshalling the args JSON into your own struct:
+```bash
+tide generate
+```
+
+Alongside the entity clients, `tide generate` writes `client/<ns>/jobs.go`
+with a typed `Args` struct, a handler interface, and a `Register<Job>`
+helper per declared job. Handlers run in your service's binary:
 
 ```go
-type importContactsArgs struct {
-    AccountID      string `json:"account_id"`
-    ImportStrategy string `json:"import_strategy"`
+type importContactsHandler struct{ crm *crm.Client }
+
+func (h *importContactsHandler) Handle(ctx context.Context, args directory.ImportContactsArgs) error {
+    jobs.Checkpoint(ctx, 10, "fetching contacts")
+    // ... your import logic, reading args.AccountId ...
+    return nil
 }
 
 registry := jobs.NewRegistry()
-registry.Register("directory.ImportContacts", jobs.HandlerFunc(
-    func(ctx context.Context, argsJSON []byte) error {
-        var args importContactsArgs
-        if err := json.Unmarshal(argsJSON, &args); err != nil {
-            return err
-        }
-        jobs.Checkpoint(ctx, 10, "fetching contacts")
-        // ... your import logic ...
-        return nil
-    }))
+directory.RegisterImportContacts(registry, &importContactsHandler{crm: crmClient})
 ```
+
+The helper decodes the row's args JSON into the typed struct before
+invoking `Handle`. (Registering under the raw id
+`"directory.ImportContacts"` with `jobs.HandlerFunc` and your own
+`json.Unmarshal` works the same way.)
 
 A non-nil return retries the attempt up to the declared `retries`, then
 dead-letters it. `jobs.Checkpoint(ctx, pct, msg)` reports progress and
@@ -83,7 +86,9 @@ go w.Run(ctx)
 ```
 
 `conn` is your service's authenticated `*grpc.ClientConn` to atlantis.
-`Run` reconnects on stream errors
+The queue must be one a declared job runs on (`"default"` when no job
+names one) — an unknown queue is refused at session open. `Run`
+reconnects on stream errors
 with backoff; work in flight when a worker dies is re-dispatched to another
 worker after its lease expires, so handlers must be idempotent.
 

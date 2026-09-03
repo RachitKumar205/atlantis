@@ -39,13 +39,13 @@ A submission — over the admin API, from a procedure's `enqueue` step, or from 
 
 ## Handler registration
 
-Handlers live in your service's binary. You register a handler under the job's full id and decode the args JSON yourself:
+Handlers live in your service's binary. `tide generate` writes a typed surface per declared job into the generated client tree — an `Args` struct, a handler interface, and a `Register<Job>` helper that decodes the args JSON before invoking your handler:
 
 ```go
-registry.Register("directory.ImportContacts", jobs.HandlerFunc(handleImportContacts))
+directory.RegisterImportContacts(registry, &importContactsHandler{crm: crmClient})
 ```
 
-The args arrive as the JSON body the submitter sent, validated against the declaration at submit time. [Declare a background job](../guides/declarative-jobs.md) walks through the whole loop, including the worker that receives dispatched claims.
+Registering under the raw job id with `jobs.HandlerFunc` works too, decoding the JSON yourself. [Declare a background job](../guides/declarative-jobs.md) walks through the whole loop, including the worker that receives dispatched claims.
 
 ## Submission paths
 
@@ -54,6 +54,7 @@ The args arrive as the JSON body the submitter sent, validated against the decla
 | Admin API `SubmitJob` | From a service: the job's full id plus the args as JSON, over gRPC. |
 | Procedure `enqueue` step | Atomic with a write: the job is enqueued in the procedure's transaction, or not at all. |
 | `tide job submit` | Ad-hoc submission from a terminal, recorded under `cli:<user>`. |
+| Declared `schedule` | The platform fires the job on its cron cadence, recorded under `atlantis.scheduler`. |
 
 ## Runtime modifiers
 
@@ -63,7 +64,7 @@ The args arrive as the JSON body the submitter sent, validated against the decla
 | `timeout 30m` | 30m | Per-attempt deadline. `timeout none` removes it. |
 | `heartbeat 10m` | 5m | Per-attempt lease window. Widen for handlers that block on one long external call; narrow to fail fast on quick jobs. |
 | `queue "name"` | `"default"` | Named queue for partitioning worker pools. |
-| `schedule "cron"` | (none) | Recorded on the job; a declared schedule never enqueues anything. |
+| `schedule "cron"` | (none) | Fires the job on the 5-field cron cadence, with no args. A fired run carries the job's queue, retries, and timeout, and skips while a previous run is still pending. |
 | `visible_to "caller"` | (any) | Only the named caller may submit the job or claim it with its workers. `"*"` means any; aliases count. A procedure's `enqueue` step is not gated by it. |
 
 ## Checkpointing
