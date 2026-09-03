@@ -44,6 +44,8 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "init":
+		os.Exit(cmdInit(os.Args[2:]))
 	case "apply":
 		os.Exit(cmdApply(os.Args[2:]))
 	case "plan":
@@ -94,7 +96,8 @@ func main() {
 func printUsage() {
 	cliout.LogoInline(os.Stderr, "tide", version)
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "usage: tide apply    [--backfill] [--dry-run] [--no-pull]")
+	fmt.Fprintln(os.Stderr, "usage: tide init     --caller NAME [--org ORG] [--output-dir DIR]")
+	fmt.Fprintln(os.Stderr, "       tide apply    [--backfill] [--dry-run] [--no-pull]")
 	fmt.Fprintln(os.Stderr, "       tide plan     [--format table|json] [--no-pull]")
 	fmt.Fprintln(os.Stderr, "       tide inspect  [--format table|json]")
 	fmt.Fprintln(os.Stderr, "       tide pull     [--force]")

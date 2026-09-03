@@ -68,8 +68,9 @@ func deviceCaller(callerFlag string) (string, error) {
 	if cfg, err := parseTideConfig("tide.yaml"); err == nil && cfg.Caller != "" {
 		return cfg.Caller, nil
 	}
-	return "", fmt.Errorf("which caller? Run this in a repository with a " +
-		"tide.yaml naming one, or pass --caller")
+	return "", fmt.Errorf("which caller? Run this in a repository whose "+
+		"tide.yaml names one — `tide init --caller %s` writes it — or pass --caller",
+		"<name>")
 }
 
 func deviceLogin(caller, caFile string) int {

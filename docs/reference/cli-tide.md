@@ -71,6 +71,19 @@ exists to end exactly that, and nothing replaces it yet — see
 
 Every command accepts `--config <path>` (default `tide.yaml`) and `--timeout <duration>`. Duration uses Go's `time.ParseDuration` format (e.g. `30s`, `1m`, `500ms`). Default `30s`.
 
+### `tide init`
+
+```
+tide init --caller NAME [--org ORG] [--output-dir DIR] [--generate ns1,ns2]
+```
+
+Writes `tide.yaml` — the caller name, where the `.atl` files live, and
+optionally where a generated client goes. Refuses to overwrite one that
+exists. The optional half is written as commented guidance until asked for,
+so the file says what else it can carry.
+
+The first command in a new repository; `tide login` is the second.
+
 ### `tide apply`
 
 Submits the local `.atl` files to the server, runs the migration, and prints a hint for the caller to regenerate the typed Go client. No endpoint override flag — `apply` always targets the configured `endpoint`.

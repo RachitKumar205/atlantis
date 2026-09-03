@@ -35,7 +35,7 @@ func dial(cfg *tideConfig) (*adminClient, error) {
 	if cfg.TLS.CertPEM == "" {
 		return nil, fmt.Errorf(
 			"this machine has no certificate for %q, and atlantis requires one.\n\n"+
-				"Run `tide login` — the console's Callers page prints the command.",
+				"Run `tide login` and approve in the browser.",
 			cfg.Caller)
 	}
 	creds, err := buildTLS(cfg)

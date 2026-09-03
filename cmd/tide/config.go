@@ -109,9 +109,9 @@ func loadPCConfig(path string) (*tideConfig, error) {
 	renewIfDue(c)
 	if c.Endpoint == "" {
 		return nil, fmt.Errorf("%s: this repository has no credentials.\n\n"+
-			"Run `tide login` — the console's Callers page prints the command. "+
-			"The address of your atlantis comes with them; it is not something "+
-			"to configure here", path)
+			"Run `tide login` and approve in the browser. The address of your "+
+			"atlantis comes with the credentials; it is not something to "+
+			"configure here", path)
 	}
 	if len(c.SchemaPaths) == 0 {
 		return nil, fmt.Errorf("%s: `schema_paths` must list at least one directory", path)
