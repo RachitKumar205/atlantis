@@ -18,7 +18,7 @@ export const ogCardConfig = {
   ],
   border: { color: [39, 39, 42], width: 2, side: "inline-start" },
   padding: 96,
-  fonts: ["./public/fonts/Inter-Bold.ttf"],
+  fonts: ["./src/assets/fonts/outfit-var-latin.woff2"],
   font: {
     title: {
       color: [250, 250, 250],
