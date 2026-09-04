@@ -327,6 +327,11 @@ DOCS_SERVICE ?= atlantis-docs
 
 .PHONY: docs-image
 docs-image: ## Build the documentation site image
+	@docker version >/dev/null 2>&1 || { \
+	  echo "docker daemon is not running. Start it with:  open -a Docker"; \
+	  echo "(these targets need docker specifically — see the note above)"; \
+	  exit 1; \
+	}
 	docker build --file web/docs/Dockerfile -t atlantis-docs:local .
 
 .PHONY: docs-serve
