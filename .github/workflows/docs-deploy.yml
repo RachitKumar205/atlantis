@@ -1,0 +1,52 @@
+# Publishes the documentation site to Cloudflare Workers static assets.
+#
+# Only the site's own inputs trigger it: the pages, the components that render
+# them, and the lockfile the build installs from. A server change does not
+# redeploy the docs.
+#
+# The CI `web` job is what proves the site builds and its links resolve; this
+# workflow builds again rather than reusing that artifact, so a deploy always
+# reflects the commit it names.
+name: docs deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/docs/**"
+      - "web/shared/**"
+      - "package-lock.json"
+      - ".github/workflows/docs-deploy.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: docs-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: install
+        run: npm ci
+
+      - name: build
+        run: npm run build --workspace web/docs
+
+      # Invoked through npx rather than added to the root lockfile: wrangler
+      # pulls workerd, which ships a platform binary per target and would widen
+      # the lockfile the platform gate checks for two SPAs that never use it.
+      - name: deploy
+        working-directory: web/docs
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4 deploy

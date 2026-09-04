@@ -324,6 +324,16 @@ jobs:
         # is a server that ships a stale SPA.
         run: npm run build --workspaces --if-present
 
+      - name: docs lint
+        # After the build, not before: nimbus/internal-link resolves each link
+        # against the route list the build emits, and with no build it reports
+        # every internal link on every page as broken.
+        #
+        # This is the only thing checking links inside the documentation site.
+        # lychee covers README.md, CONTRIBUTING.md, ops/ and docs/STYLE.md,
+        # and stops where the site's own root-relative links begin.
+        run: npm run lint:docs --workspaces --if-present
+
       # The only job that can compile the embedding half of cmd/cloud and
       # cmd/console, and therefore the only thing standing between a typo in a
       # //go:embed directive and a release.
