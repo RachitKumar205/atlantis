@@ -1,7 +1,7 @@
-# How atlantis runs your schema
+# The apply path
 
-The path from a `.atl` file in your repository to a serving API, and the
-guarantees along it.
+A `.atl` file in your repository reaches a serving API through a
+checkpoint, an apply, and a hot reload. Each step carries a guarantee.
 
 ## The checkpoint
 

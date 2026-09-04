@@ -189,5 +189,5 @@ The newest row is the rollback's version:
 ## Related
 
 - [Schema versioning](../concepts/schema-versioning.md) — how the version registry works
-- [How atlantis runs your schema](../concepts/how-atlantis-runs-your-schema.md) — the checkpoint the history records
+- [The apply path](../concepts/how-atlantis-runs-your-schema.md) — the checkpoint the history records.
 - [Recover a dropped table](recover-a-dropped-table.md) — when the version you want back parked something

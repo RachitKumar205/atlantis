@@ -49,7 +49,7 @@ Registering under the raw job id with `jobs.HandlerFunc` works too, decoding the
 
 ## Submission paths
 
-| Path | When to use |
+| Path | What it is |
 |---|---|
 | Admin API `SubmitJob` | From a service: the job's full id plus the args as JSON, over gRPC. |
 | Procedure `enqueue` step | Atomic with a write: the job is enqueued in the procedure's transaction, or not at all. |
@@ -71,7 +71,7 @@ Registering under the raw job id with `jobs.HandlerFunc` works too, decoding the
 
 Long-running handlers call `jobs.Checkpoint(ctx, pct, msg)` to report progress. Each call bumps the claim's lease and persists the progress, which `tide job status` and the console's worker detail show live. `Checkpoint` returns an error. A failed progress write never fails the claim, so handlers can discard it.
 
-See [Long-running handlers](../guides/long-running-handlers.md) for the full handler contract — idempotency, the heartbeat / checkpoint distinction, resume-from-progress, and a worked contact-import example.
+See [Write a long-running handler](../guides/long-running-handlers.md) for the full handler contract: idempotency, the heartbeat and checkpoint distinction, resume-from-progress, and a worked contact-import example.
 
 ## Distributed tracing
 

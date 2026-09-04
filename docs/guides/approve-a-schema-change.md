@@ -30,12 +30,12 @@ this guide is the workflow.
 
 Console → **Approvals**. Each waiting plan shows its class, the caller,
 who requested it (or *unattributed*, for an unattended pipeline), the
-deciding role, its expiry, and — once one has run — its rehearsal verdict.
+deciding role, its expiry, and its rehearsal verdict once one has run.
 
 ## 2. Read the change
 
 **Review** opens the plan: the proposed `.atl` source first, then the SQL
-that will run. The approval you give binds to exactly this content — if the
+that will run. The approval you give binds to exactly this content: if the
 caller submits anything different, the decision does not carry over.
 
 ## 3. Rehearse it
@@ -47,8 +47,8 @@ counts, `fail_structural`, or `unverified`. Rehearsing needs the
 `developer` or `admin` role, and takes as long as cloning the database.
 
 From the terminal, [`tide rehearse`](../reference/cli-tide.md#tide-rehearse)
-runs the same rehearsal against your working tree — exit 0 on a pass, 2 on
-a failure, 4 when the clone could not verify — so a caller can pre-clear a
+runs the same rehearsal against your working tree, exiting 0 on a pass, 2
+on a failure and 4 when the clone could not verify, so a caller can pre-clear a
 change before it reaches the queue.
 
 A `fail_data` verdict means the apply would fail the same way; reject with
@@ -59,8 +59,7 @@ cannot land.
 
 - **Approve** re-authenticates you at Cloud, then records the decision.
   The approval covers this exact content and lasts until the plan's
-  expiry — seven days from when the change was requested, not from the
-  approval.
+  expiry, seven days from when the change was requested.
 - **Reject** requires a reason and needs no re-authentication. The caller
   sees only that reason.
 - **Override** (admins) approves past a freeze window, a protected-entity

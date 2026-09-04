@@ -30,7 +30,7 @@ tide apply
 
 The `ttl_field` directive is recorded in the IR checkpoint. The built-in `SweepExpired` job reads the checkpoint at runtime to discover which entities have TTL columns.
 
-## 3. Verify
+## Verify
 
 Create a row whose `expires_at` is already in the past — through your
 generated client, or any write path your service has. Within five minutes

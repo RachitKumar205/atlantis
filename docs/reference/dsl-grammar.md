@@ -75,7 +75,7 @@ aggregate syntax (`count(*)`, `… filter (…)`) are rejected at parse with a c
 error. A plain aggregate (`sum(col)`) or a volatile function (`now()`, `random()`)
 is caught by Postgres when the index is built at apply time.
 
-Entity names use `PascalIdent`; namespaces use `SnakeIdent`. Underscores are syntactically valid in namespaces but not conventional.
+Entity names use `PascalIdent`; namespaces use `SnakeIdent`. Underscores are syntactically valid in namespaces.
 
 The namespace becomes the package segment under `output_dir/` and the schema prefix on the generated table name: `<namespace>_<snake_entity>`.
 
@@ -189,10 +189,10 @@ Go and proto mappings are in [the type mapping reference](dsl-types.md).
 - `soft_delete by <field>` — replaces row deletion with setting `<field>` (must be `timestamptz`) to `now()`. Reads filter `<field> IS NULL` automatically.
 - `touch_on_update by <field>` — Postgres trigger sets `<field>` (must be `timestamptz`) to `now()` on every `UPDATE`.
 - `partition by <field>` — row-level multi-tenancy. `<field>` says which tenant a row belongs to and must be `not null`. The server binds the caller's tenant per request from the `atlantis-tenant` request header, before any statement touches the database. Emitted DDL: `ENABLE` + `FORCE ROW LEVEL SECURITY`, an index on the column, and two policies — `<table>_tenant_isolation` (`AS RESTRICTIVE`, comparing the column to `atlantis.current_partition()` in both `USING` and `WITH CHECK`, with the cast on the function side when the column is not text-shaped) and `<table>_default_access` (`AS PERMISSIVE USING (true)`, created only when the table carries no permissive policy, so a replacement survives later applies). Adding, removing, or moving the clause on an existing entity is classified cross-caller breaking. `tide apply` rejects any query or procedure body that calls `set_config`, which would rebind the tenant parameter. Semantics and access-control patterns: [Per-tenant partition](../guides/add-a-new-entity.md#per-tenant-partition).
-- `keyless` — the table has no key. DDL, plan, apply, and drift all run for it; no service is generated — no `Get`, `Create`, `Update`, `Delete`, or `Query`. Mutually exclusive with `primary` and `primary by`; cannot be combined with `cache`. Another entity may `references` one of its columns when that column is `unique`. `tide inspect --generate` emits `keyless` for a table it finds with no key, with a suggested key that would give it an API.
+- `keyless` — the table has no key. DDL, plan, apply, and drift all run for it; no service is generated — no `Get`, `BatchGet`, `Create`, `Update`, `Delete`, or `Query`. Mutually exclusive with `primary` and `primary by`; cannot be combined with `cache`. Another entity may `references` one of its columns when that column is `unique`. `tide inspect --generate` emits `keyless` for a table it finds with no key, with a suggested key that would give it an API.
 - `table "<schema.table>"` — overrides the physical table name. Without it, atlantis stores the entity at `atlantis.<namespace>_<snake_entity>`. The value's shape is `[schema.]table`, each segment matching `[A-Za-z_][A-Za-z0-9_]*`; a bare name (`table "vendors"`) lands in `public`. Foreign keys whose target carries the modifier render `REFERENCES "<schema>"."<table>"`. Changing the value on a previously-applied entity is classified `cross_caller_breaking` and rejected by `tide plan`; atlantis does not auto-rename. Used when adopting an existing database — see [Adopt an existing database](../guides/adopt-an-existing-database.md).
 
-The only unique-index form is `unique index partial`; `index by`, `index hnsw`, `index gin`, and the non-`unique` `index partial` are all non-unique. Non-partial uniqueness is declared with the per-field `unique` modifier or entity-level `unique by` (which emit UNIQUE constraints). A live `CREATE UNIQUE INDEX` the schema doesn't account for is treated as drift and refused at apply; a declared `unique index partial` whose predicate matches the live one is recognized and not drift. See [`tide apply`](cli-tide.md).
+The only unique-index form is `unique index partial`; `index by`, `index hnsw`, `index gin`, and the non-`unique` `index partial` are all non-unique. Non-partial uniqueness is declared with the per-field `unique` modifier or entity-level `unique by` (which emit UNIQUE constraints). A live `CREATE UNIQUE INDEX` the schema doesn't account for is treated as drift and refused at apply; a declared `unique index partial` whose predicate matches the live one is recognised and not drift. See [`tide apply`](cli-tide.md).
 
 ### Cache block
 
@@ -218,7 +218,7 @@ The `tag` is a double-quoted string with `{field_name}` interpolation placeholde
 
 `invalidate_on: write(<Target> where <field> = self.<field>)` invalidates this entity's cached rows when the named target entity is written: the `where` mapping says which column on the target carries this entity's key, and the matching parent rows are invalidated. `write(self)` is accepted and redundant — an entity's own writes always invalidate it.
 
-`consistency = strict | eventual` is accepted and recorded in the schema, and changes no behavior today.
+`consistency = strict | eventual` is accepted and recorded in the schema, and changes no behaviour.
 
 ## Queries
 
@@ -285,7 +285,7 @@ Clauses may appear in any order.
 - `timeout <duration> | none` — per-attempt deadline. `none` removes it, for long-running handlers that report progress through checkpoints.
 - `heartbeat <duration>` — how often a dispatched worker must signal liveness for this job. Unset uses the server default.
 - `queue "<name>"` — the queue the job runs on.
-- `schedule "<cron>"` — a five-field cron expression, accepted and recorded. A declared schedule does not submit jobs.
+- `schedule "<cron>"` — a five-field cron expression. The server fires the job on that cadence with empty args, carrying the job's `queue`, `retries` and `timeout`, and skips a firing while a previous run is still outstanding.
 - `visible_to "<caller>"` — restricts which caller may submit the job and whose workers may claim it. Unset or `"*"` means any caller; aliases count.
 
 Handler semantics are in [Jobs and workflows](../concepts/jobs-and-workflows.md).
@@ -357,7 +357,7 @@ PascalIdent = [A-Z][A-Za-z0-9]*
 SnakeIdent  = [a-z][a-z0-9_]*
 ```
 
-Entity, namespace, query, and procedure names use `PascalIdent`. Field, input, and output names use `SnakeIdent`.
+Entity, query, and procedure names use `PascalIdent`. Namespace, field, input, and output names use `SnakeIdent`.
 
 ## Reserved words
 

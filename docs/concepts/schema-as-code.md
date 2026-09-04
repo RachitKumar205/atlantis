@@ -79,8 +79,8 @@ shape that was not already declared.
 
 ## Related
 
-- [How atlantis runs your schema](how-atlantis-runs-your-schema.md) — the
-  checkpoint, the apply, hot reload.
+- [The apply path](how-atlantis-runs-your-schema.md) — the checkpoint, the
+  apply, hot reload.
 - [Schema versioning](schema-versioning.md) — the applied-side history.
 - [Caching and invalidation](caching-and-invalidation.md) — how the cache
   stays consistent with the schema it derives from.

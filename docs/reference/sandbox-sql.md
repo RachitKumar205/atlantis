@@ -109,7 +109,7 @@ FROM clause:
 - Subqueries in FROM (`FROM (SELECT ...) sub`).
 - Table aliases (`FROM "t" AS "x"`).
 
-A table-qualified column reference (`"t"."col"`) is accepted, with only the trailing `col` honored.
+A table-qualified column reference (`"t"."col"`) is accepted, with only the trailing `col` honoured.
 
 Clauses:
 

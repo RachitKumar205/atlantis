@@ -1,14 +1,14 @@
 # The sandbox
 
 A sandbox is an isolated, disposable test database holding your
-organisation's schema — and only the rows you put in it. It never contains
+organisation's schema, and only the rows you put in it. It never contains
 production data. Closing a sandbox destroys its state, and idle sandboxes
 are evicted after 30 minutes.
 
-Sandboxes answer "does my code work against this schema?". They cannot
-answer "will this migration survive our real rows?" — that is a
-**rehearsal**, which executes the migration against a disposable clone of
-the real database and reports what Postgres did. See
+A sandbox proves your code works against this schema. It proves nothing
+about whether a migration survives your real rows: that is a **rehearsal**,
+which executes the migration against a disposable clone of the real
+database and reports what Postgres did. See
 [Change approval](change-approval.md).
 
 ## Two backends
@@ -19,14 +19,14 @@ the real database and reports what Postgres did. See
 | Boot | Sub-millisecond | A few seconds |
 | SQL coverage | The subset the executor models | Postgres SQL |
 | State ops (checkpoint, restore, fork, diff, seed, snapshot, inspect) | Native | Not supported |
-| Determinism (fixed clock) | Honoured | Ignored — `now()` returns wall-time |
+| Determinism (fixed clock) | Honoured | Ignored; `now()` returns wall-time |
 
 Pick **in-memory** for fast-iteration work: agent loops, "try N then
 rewind," schema exploration, anywhere checkpoint and fork matter. Pick
 **Postgres** when SQL fidelity matters: custom queries, triggers, plpgsql,
 multi-table joins, complex `check` constraints. On the Postgres backend,
 `vector(N)` columns become `BYTEA`, and HNSW indexes and hypertable
-conversion are stripped from the DDL before it applies — vector distance
+conversion are stripped from the DDL before it applies, so vector distance
 operators fail at query time there.
 
 ## The state model (in-memory only)
@@ -34,7 +34,7 @@ operators fail at query time there.
 The simulator uses copy-on-write row maps: a capture records pointers to
 every table's current rows and marks them shared, and a later write clones
 only the affected map. Checkpoint, restore, and fork therefore cost
-`O(tables)`, not `O(rows)` — row data is never copied at capture time.
+`O(tables)` rather than `O(rows)`: row data is never copied at capture time.
 
 Four primitives:
 
@@ -80,6 +80,6 @@ or `admin` role, and each user holds up to 100 sandboxes at a time.
 ## Related
 
 - [Use the sandbox](../guides/use-the-sandbox.md) — walkthrough of the console flow.
-- [Sandbox SQL coverage](../reference/sandbox-sql.md) — what the simulator's executor runs.
+- [Sandbox SQL coverage](../reference/sandbox-sql.md) — the SQL the in-memory backend accepts.
 - [Sandbox HTTP API](../reference/sandbox-api.md) — programmatic surface.
 - [Change approval](change-approval.md) — rehearsal, the real-data proof.

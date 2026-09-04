@@ -16,8 +16,8 @@
   in your own service.
 - [Operate jobs and workflows](operate-jobs-and-workflows.md). Monitoring,
   the dead-letter queue, workflows, backfills.
-- [Long-running handlers](long-running-handlers.md). Idempotency, leases,
-  checkpoints, resume-from-progress.
+- [Write a long-running handler](long-running-handlers.md). Idempotency,
+  leases, checkpoints, resume-from-progress.
 - [Expire rows automatically](row-ttl.md). Row TTL, and chunk-drop expiry
   on tenant-isolated tables.
 - [Inspect schema history](schema-history.md). History, diff, blame,

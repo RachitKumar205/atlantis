@@ -1,14 +1,21 @@
-# Long-running handlers
+# Write a long-running handler
 
-The idempotency contract that keeps re-dispatched handlers safe, when to call `jobs.Checkpoint`, and when to override the lease window with the `heartbeat` modifier. Skip section 1 only if your handler runs in well under a minute.
+Make a handler safe to re-dispatch, report its progress with
+`jobs.Checkpoint`, and widen its lease window with the `heartbeat`
+modifier.
+
+## Prerequisites
+
+- A declared job with a running worker
+  ([Declare a background job](declarative-jobs.md)).
 
 ## 1. Idempotency
 
 atlantis dispatches each row to exactly one worker at a time. If the worker crashes or loses its lease, the row is re-claimed and the same arguments run again — possibly more than twice inside the `retries` budget.
 
-**Your handler MUST be idempotent.** Run it twice with the same arguments and the observable side-effects should be the same as running it once.
+Your handler must be idempotent: run it twice with the same arguments and the observable side-effects are the same as running it once.
 
-- External calls (a payment charge, an object-store upload, an email send) need an idempotency key the external system honors, or a read-then-write against its state.
+- External calls (a payment charge, an object-store upload, an email send) need an idempotency key the external system honours, or a read-then-write against its state.
 - Database writes use `ON CONFLICT DO NOTHING` / `ON CONFLICT DO UPDATE`, or check a per-logical-run state table first.
 
 The standard pattern is a per-run state table. Each handler invocation opens with:
@@ -65,11 +72,9 @@ jobs.Checkpoint(ctx, pct, msg)
 - `msg` is a short human-readable label, truncated server-side at 256 characters. Operators see it in `tide job status <id>` and on the console session detail.
 - The return error is advisory; handlers typically `_ = jobs.Checkpoint(...)`.
 
-Each call bumps the lease (same effect as a heartbeat) AND persists progress to the `progress_pct` / `progress_msg` / `progress_at` columns on `atlantis.jobs`. A handler that checkpoints every minute won't need an extended `heartbeat` modifier on top — the manual calls keep the lease fresh too.
+Each call bumps the lease and persists progress to the `progress_pct`, `progress_msg`, and `progress_at` columns on `atlantis.jobs`. A handler that checkpoints every minute needs no extended `heartbeat` modifier, because the manual calls keep the lease fresh.
 
-**Call when:** each meaningful unit of work finishes (a page fetched, a thousand rows imported, an epoch trained) and right before a long blocking call.
-
-**Don't call:** from a tight loop millions of iterations deep, or from a goroutine the handler has forked (see section 4).
+Call it when each meaningful unit of work finishes — a page fetched, a thousand rows imported, an epoch trained — and right before a long blocking call. Do not call it from a tight loop millions of iterations deep, or from a goroutine the handler has forked.
 
 For resume, store the cursor in your state table from section 1 — that's the source of truth. `progress_msg` is for operators reading a live job; relying on it for resume couples the handler to a column it was never meant to own.
 

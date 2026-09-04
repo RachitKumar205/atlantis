@@ -145,6 +145,6 @@ queue.
 
 - [Operate jobs and workflows](operate-jobs-and-workflows.md) — monitoring,
   the dead-letter queue, retries.
-- [Long-running handlers](long-running-handlers.md) — idempotency, leases,
+- [Write a long-running handler](long-running-handlers.md) — idempotency, leases,
   and resume-from-progress in depth.
 - [Jobs and workflows](../concepts/jobs-and-workflows.md) — the model.

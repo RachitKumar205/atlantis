@@ -1,10 +1,10 @@
 # Custom queries and procedures
 
-`query` and `procedure` are `.atl` blocks for SQL the typed CRUD surface cannot express, such as aggregations, multi-entity joins, and multi-step transactions. Both compile to typed gRPC methods alongside the generated `Query`, `Create`, `Update`, and `Delete`.
+`query` and `procedure` are `.atl` blocks for SQL the typed CRUD surface cannot express, such as aggregations, multi-entity joins, and multi-step transactions. Both compile to typed gRPC methods alongside an entity's generated six.
 
 ## Custom queries
 
-```
+```atl
 query OrdersForCustomer for Order {
   input  { customer_id: varchar(8), limit: int }
   output as Order
@@ -21,7 +21,7 @@ query OrdersForCustomer for Order {
 
 ## Procedures
 
-```
+```atl
 procedure PlaceOrderAndDecrementInventory for Order {
   input { order_id: bigint, variant_id: varchar(8), quantity: int }
   steps {
@@ -64,7 +64,7 @@ The [sandbox](sandbox.md) verifies a `query` or `procedure` body against seed da
 
 ## Related
 
-- [The typed query surface](the-typed-query-surface.md) — the generated `Query`/`Create`/`Update`/`Delete` methods.
+- [The typed query surface](the-typed-query-surface.md) — the six generated per-entity methods.
 - [Caching and invalidation](caching-and-invalidation.md) — how `touches(...)` keeps the cache consistent.
 - [The sandbox](sandbox.md) — preview custom SQL against synthetic rows before applying.
 - [The DSL grammar](../reference/dsl-grammar.md) — the full `query` and `procedure` syntax.

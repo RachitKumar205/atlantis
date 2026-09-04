@@ -1,14 +1,10 @@
 # Change approval
 
-atlantis classifies every apply and looks the class up in policies you control. The rules say what applies unattended and what waits for a person — dropping a column, or changing a type another team reads, waits for someone to decide it.
+atlantis classifies every apply and looks the class up in policies you control. The rules say what applies unattended and what waits for a person: dropping a column, or changing a type another team reads, waits for someone to decide it.
 
 ## The gate
 
-`tide apply` submits files; the server does the rest:
-
-1. Diff the submitted `.atl` files against the current schema and classify the result.
-2. Read the rules: the class's policy, the caller's tier, protections, freezes.
-3. Apply, or record the plan and refuse.
+`tide apply` submits files; the server does the rest. It diffs the submitted `.atl` files against the current schema and classifies the result, reads the rules that govern that class — the class's policy, the caller's tier, protected entities, freeze windows — and then either applies the change or records the plan and refuses.
 
 The check runs in the server's handler, inside the same advisory-locked transaction as the apply: a direct gRPC client holding `CAPABILITY_SCHEMA_APPLY` reaches the same gate `tide` does.
 
@@ -25,11 +21,11 @@ A refused apply stores the plan, exits 2, and the change waits in the console's 
 
 You can relax any class from the console's Settings page; every edit is recorded with who made it.
 
-## It fails closed
+## Missing and unrecognised rules
 
 A class with no stored rule, a rule whose class name is not recognised, and a class outside the set a diff can produce all behave the same way: the change requires approval, by the default role. Removing a rule makes the gate stricter, never looser.
 
-## The caller's own ceiling: apply policy
+## Apply policy
 
 The change policy is one rule per class, for the whole deployment. Each caller also carries an **apply policy** — a tier that says how much of what *it* submits may run unattended. The gate takes the most restrictive answer of the two; neither layer can widen what the other closed.
 
@@ -41,11 +37,11 @@ The change policy is one rule per class, for the whole deployment. Each caller a
 | `auto_verified` | Additive, and backfills covered by a passing rehearsal. |
 | `auto_all` | Everything a passing rehearsal covers — except cross-caller breaking changes, which always wait: one caller's policy cannot consent on behalf of the callers it breaks. |
 
-`sandbox_only` refuses rather than queues. There is no approval that makes such a caller one that applies; an admin raises the tier from the console's Callers page. Setting the tier is admin work, behind a re-authentication, and every change is recorded in `atlantis.policy_events`.
+`sandbox_only` refuses; it does not queue. No approval makes such a caller one that applies; an admin raises the tier from the console's Callers page. Setting the tier is admin work, behind a re-authentication, and every change is recorded in `atlantis.policy_events`.
 
 The platform can also cap every caller's tier with a deployment-wide floor. When a floor is set, the apply-policy dialog says so, a stored tier above the floor is kept, and the gate uses the cap.
 
-## Rehearsal: proof against the real data
+## Rehearsal
 
 The verified tiers turn on a **rehearsal**: the server clones the managed database — schema and rows, under one snapshot — into a disposable database, executes the migration's exact SQL there, rolls it back, and destroys the clone. The verdict reports what Postgres did:
 
@@ -78,11 +74,11 @@ The server cannot authenticate a console user — that identity system belongs t
 
 An admin can approve a plan **past** its gates — a freeze window, a protected-entity floor, the self-approval refusal below. An override is an approval with extra ceremony: it requires the admin role, a re-authentication, and a reason, and it is recorded as `override` on the plan and in both audit ledgers. It cannot waive a capability, the `sandbox_only` tier, or the binding of an approval to its exact content.
 
-Use an override for the incident that cannot wait — not as the routine path. Every override is visible in the audit log and on the plan itself.
+Use an override for the incident that cannot wait. Every override is visible in the audit log and on the plan itself.
 
-## Nobody approves their own change
+## Self-approval
 
-The identity that applies is a machine certificate's common name. The identity that approves is a console user. The capability that permits approving, `CAPABILITY_SCHEMA_APPROVE`, is in no bundle a caller receives when it registers, and none of the identities the platform seeds holds it together with `CAPABILITY_SCHEMA_APPLY` — tests hold both the registration bundles and the seeded grants to that.
+The identity that applies is a machine certificate's common name. The identity that approves is a console user. The capability that permits approving, `CAPABILITY_SCHEMA_APPROVE`, is in no bundle a caller receives when it registers, and none of the identities the platform seeds holds it together with `CAPABILITY_SCHEMA_APPLY`.
 
 There is a person-level rule beside the identity split. An apply can carry an attribution — which human asked for this — and a plan records it. A decision from the same person is refused: a request is not approved by whoever made it. The attribution is not authenticated, so this stops the honest loop rather than a determined liar, and an admin's override passes it with a reason on record. A plan whose apply named nobody shows as *unattributed* in the queue, which is what an unattended pipeline's request is.
 
@@ -92,7 +88,7 @@ An approval is granted against **the exact file contents you reviewed**, not aga
 
 It is also scoped to what the submitting caller actually depends on: the members it owns, the members it reads, and everything in the diff. An unrelated team applying their own schema does not expire your approval. See [schema versioning](schema-versioning.md) for how that scoping is derived.
 
-## Approvals expire
+## Expiry
 
 A plan stays actionable for **seven days**, whether it is waiting or already approved.
 
@@ -100,7 +96,7 @@ An approval is a statement about a schema somebody read at a particular moment. 
 
 Expiry is evaluated on every read rather than by a background job, so nothing about it depends on a sweeper having run.
 
-## Rollback is not gated
+## Rollback
 
 `tide rollback` returns the schema to a state that already passed this gate once, and it is the incident-response path, so it takes no second person. It requires `CAPABILITY_OPERATOR`, is recorded like any other schema version, and an auditor can see it was single-party.
 

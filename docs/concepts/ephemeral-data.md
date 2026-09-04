@@ -1,6 +1,8 @@
 # Ephemeral data
 
-An `ephemeral` declaration is a typed data shape backed by memcached, not Postgres. No table, no migration, no VACUUM. The data lives in the cache layer with a declared TTL and is automatically evicted when the TTL expires.
+An `ephemeral` declaration is a typed data shape backed by memcached, not
+Postgres. No table, no migration, no VACUUM. The data lives in the cache
+layer with a declared TTL.
 
 ```atl
 ephemeral EphemeralOutfit in consumer {
@@ -12,25 +14,22 @@ ephemeral EphemeralOutfit in consumer {
 }
 ```
 
-Codegen emits a typed store with three methods:
+`tide generate` writes a typed store with three methods:
 
 ```go
 store := &consumer.EphemeralOutfitStore{MC: memcachedClient}
 
-// Write with the declared TTL.
 store.Set(ctx, "outfit:abc123", consumer.EphemeralOutfitValue{
     VariantIds: []string{"v1", "v2"},
     ProductIds: []string{"p1", "p2"},
 })
 
-// Read by key.
 val, err := store.Get(ctx, "outfit:abc123")
 
-// Explicit removal (optional — TTL handles cleanup).
 store.Delete(ctx, "outfit:abc123")
 ```
 
-## When to use ephemeral vs entity
+## Choosing between ephemeral and entity
 
 | | `entity` | `ephemeral` |
 |---|---|---|
@@ -40,32 +39,36 @@ store.Delete(ctx, "outfit:abc123")
 | Queryability | Full SQL (indexes, FKs, JOINs) | Key-lookup only |
 | Use case | Durable state, relationships, audit | Short-lived scratch data the caller can regenerate |
 
-Use `ephemeral` when:
-- The data is generated per request or per session and has a natural expiry (hours, not days).
-- Loss is acceptable — the caller can regenerate or the client can re-supply the data.
-- High write + expire volume would bloat a Postgres table with dead tuples.
+Two considerations the table does not hold. High write-and-expire volume
+bloats a Postgres table with dead tuples, which is the case `ephemeral`
+avoids. And `ephemeral` suits data with a natural expiry measured in
+hours, not days.
 
-Use `entity` with `ttl_field` when:
-- The data must survive memcached eviction or a pod restart.
-- You need to query it (e.g., "find all sessions expiring in the next hour").
-- Audit or compliance requires the row to exist durably until explicit deletion.
+## How it works
 
-## How it works under the hood
+`Set` serialises the value struct as JSON and writes it to memcached with
+the declared TTL as the expiry. `Get` reads the raw bytes and
+deserialises them into the typed struct; a cache miss returns an error,
+and the caller regenerates or falls back to a durable source. `Delete` is
+a memcached DELETE, optional because the TTL handles cleanup.
 
-1. **Set** serializes the value struct as JSON and writes to memcached with the declared TTL as the expiry.
-2. **Get** reads the raw bytes, deserializes into the typed struct. A cache miss returns an error; the caller regenerates or falls back to a durable source.
-3. **Delete** is a memcached DELETE. Optional since the TTL handles cleanup.
-4. **Key namespacing**: the generated code prefixes every key with `eph:<namespace>.<Name>:` so ephemeral entries don't collide with entity cache entries or each other.
-
-The memcached client is the same one atlantis already runs for entity read-through caching. No new infrastructure.
+The generated code prefixes every key with `eph:<namespace>.<Name>:`, so
+ephemeral entries collide neither with entity cache entries nor with each
+other. The memcached client is the one atlantis already runs for entity
+read-through caching.
 
 ## Limits
 
-- **Value size**: memcached's default slab limit is 1 MB per key. The JSON-serialized value must fit. For most typed structs (string arrays, small payloads) this is not a concern; if you're storing large blobs, use an entity with a `bytea` column instead.
-- **Eviction pressure**: memcached evicts LRU entries when memory is full, even before TTL expires. Design callers to handle a miss gracefully — either regenerate or fall back to a durable source. Ephemeral data is a performance optimization, not a durability guarantee.
+- **Value size**: memcached's default slab limit is 1 MB per key, and the
+  JSON-serialised value must fit. For large blobs, use an entity with a
+  `bytea` column.
+- **Eviction pressure**: memcached evicts LRU entries when memory is
+  full, even before the TTL expires. Ephemeral data is a performance
+  optimisation, not a durability guarantee; callers handle a miss by
+  regenerating or falling back to a durable source.
 
 ## Related
 
-- [Caching and invalidation](caching-and-invalidation.md). The entity-level cache layer ephemeral builds on.
-- [Row-level TTL](../guides/row-ttl.md). The Postgres-durable alternative for data that must survive restarts.
-- [Jobs and workflows](jobs-and-workflows.md). The SweepExpired job that cleans TTL-expired entity rows.
+- [Caching and invalidation](caching-and-invalidation.md) — the entity-level cache layer ephemeral builds on.
+- [Expire rows automatically](../guides/row-ttl.md) — the Postgres-durable alternative, and the SweepExpired job behind it.
+- [Jobs and workflows](jobs-and-workflows.md) — the runtime that SweepExpired runs on.

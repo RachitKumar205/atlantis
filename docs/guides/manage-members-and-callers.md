@@ -9,9 +9,10 @@ much each caller may do on its own.
 
 ## Members and roles
 
-Membership is per organisation, and a member holds one of three roles —
-`viewer`, `developer`, or `admin`. [The console](../concepts/the-console.md#roles)
-lists what each role can do.
+Membership is per organisation, and a member holds one of three roles:
+`viewer`, `developer`, or `admin`. The
+[console reference](../reference/console.md#roles) states what each role
+can do.
 
 The console's Settings → Members panel shows your own membership and role.
 The panel is read-only: contact atlantis support to add a teammate to your

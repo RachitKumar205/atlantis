@@ -54,7 +54,7 @@ move, or delete.
 ## Verifiability
 
 Every CLI flag, exit code, grammar production, limit, error message, and
-behavior claim is checked against the source before it is written: the flag
+behaviour claim is checked against the source before it is written: the flag
 definitions in `cmd/tide/*.go`, the parser in `internal/dsl/`, the console
 routes in `internal/console/server.go`. A claim that cannot be verified is
 cut, not hedged.

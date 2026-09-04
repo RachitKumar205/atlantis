@@ -1,0 +1,95 @@
+# Tenant isolation
+
+When one table holds rows for many tenants, `partition by <field>` names
+the column that says which tenant a row belongs to, and PostgreSQL — not
+atlantis — keeps the tenants apart.
+
+```atl
+tenant_id varchar(8) not null
+partition by tenant_id
+```
+
+The column must be `not null`. A NULL in that column matches no tenant's
+policy, so the row becomes invisible to everyone, including whoever wrote
+it.
+
+## What PostgreSQL enforces
+
+Applying `partition by` emits `ENABLE` and `FORCE ROW LEVEL SECURITY` on
+the table, plus a policy comparing the column to the tenant bound for the
+current transaction, in both `USING` (what a statement may read) and
+`WITH CHECK` (what it may write). On a `uuid` or `bigint` column the
+comparison casts the tenant value, not the column, so the column's index
+stays usable. Every path is covered, including custom query bodies.
+
+An index on the column is emitted always, including when you already
+declare one covering it, because the policy predicate runs on every read:
+on 200k rows, a scan without the index measured 590 ms against 0.046 ms
+with it. A covering index you declared yourself is kept alongside it, so
+you will have two; remove yours if you want one.
+
+## Two policies
+
+`partition by` emits `<table>_tenant_isolation`, a `RESTRICTIVE` policy
+comparing the column to `atlantis.current_partition()`. That is the tenant
+boundary, ANDed with every other policy. A table also needs at least one
+`PERMISSIVE` policy to return rows at all; when none exists, the apply
+emits `<table>_default_access`, `PERMISSIVE USING (true)`, so within a
+tenant every statement proceeds.
+
+## What is trusted
+
+Your service asserts which tenant a request is for, through the
+`atlantis-tenant` request header, and atlantis does not derive or
+second-guess that. Once asserted, every statement in the transaction is
+confined to that tenant. The guarantee stops the accidental leak; the
+tenant assertion itself is trusted, so a caller that names the wrong
+tenant is not caught.
+
+## How the tenant reaches the policy
+
+The tenant is a transaction-local run-time parameter, `atlantis.tenant`,
+compared through `atlantis.current_partition()`. Transaction-local means
+it reverts when the transaction ends, so a value cannot outlive the
+request that set it on a pooled connection. Because PostgreSQL cannot
+lock a custom parameter, two protections close the rebinding route:
+
+- `tide apply` rejects `set_config` and `atlantis.set_partition` in every
+  piece of SQL you write: query bodies, procedure steps, `check`
+  expressions, and partial-index predicates. A bare `SET` is rejected too.
+- Each pooled connection is opened with the parameter cleared, so a value
+  cannot arrive from a role default or a connection pooler.
+
+Every entity RPC, custom query, and custom procedure binds the tenant
+before touching the database, and the platform runs the managed database
+on a role that cannot bypass row-level security. A bypassing role would
+leave the policy attached and inert.
+
+## Changing it on a live entity
+
+`partition by` is diffed, so you can add it to an entity that already
+exists, move it to another column, or remove it. The plan is classified
+cross-caller breaking: enabling isolation means a request that carries no
+tenant reads nothing from that table, and removing it means every caller
+reads every tenant's rows. Neither is applied without an explicit
+decision.
+
+## Boundaries
+
+- Narrower per-row access control — this user sees only their own
+  invoices — is not declarable through the DSL. The tenant boundary is
+  the isolation the platform enforces.
+- `ttl_field` on a partitioned entity is refused unless the entity is a
+  hypertable on its TTL column. See
+  [Expire rows automatically](../guides/row-ttl.md).
+- `tide apply --backfill` refuses a partitioned entity by name. A chunked
+  backfill has to cover every tenant, and there is no single tenant to
+  bind.
+- The sandbox's in-memory backend does not enforce the policies, so it
+  proves nothing about isolation.
+
+## Related
+
+- [Add a new entity](../guides/add-a-new-entity.md) — declaring `partition by` on an entity.
+- [DSL grammar](../reference/dsl-grammar.md#entity-level-clauses) — the clause and the DDL it emits.
+- [The sandbox](sandbox.md) — why the in-memory backend cannot test policies.

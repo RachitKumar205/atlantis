@@ -55,8 +55,8 @@ catalogue:
 tide inspect --generate=schema/ --schemas=consumer,vendor
 ```
 
-Entity names are derived from table names — `user_accounts` becomes
-`UserAccounts` — and renaming one after adoption is a breaking change, so
+Entity names are derived from table names, so `user_accounts` becomes
+`UserAccounts`. Renaming one after adoption is a breaking change, so
 edit the files before committing. Skipped tables are reported with a
 reason, existing files are never overwritten, and warnings about what
 introspection could not verify print with the run; inside a generated
@@ -73,7 +73,7 @@ what you know — then commit them to the repository at the paths
 ## 3. Baseline
 
 The baseline happens in the console. On the import's review page,
-**Commit** computes the plan, and **Apply** — behind a re-authentication —
+**Commit** computes the plan, and **Apply**, behind a re-authentication,
 records the declarations as the baseline. A baseline records the
 checkpoint; it runs no DDL against your tables. It refuses when a
 declaration and the database **disagree** about something that exists on
@@ -105,7 +105,7 @@ one, printing the live index name and the remediations:
 - Declare the uniqueness in the `.atl` so atlantis owns it — `unique` on
   the field or `unique by a, b` for a non-partial index (classified
   backfill-required), or `unique index partial by <cols> where <pred>` for
-  a partial one (predicates are normalized through Postgres before
+  a partial one (predicates are normalised through Postgres before
   comparing, so casts and operand order don't matter).
 - Drop the index from the database, if it is unwanted.
 
@@ -140,4 +140,4 @@ flip is a routing change, not a data change.
 
 - [DSL grammar reference](../reference/dsl-grammar.md#entity-level-clauses) — the `table` modifier alongside other entity-body clauses.
 - [`tide inspect`](../reference/cli-tide.md#tide-inspect) — the drift report and `--generate`.
-- [How atlantis runs your schema](../concepts/how-atlantis-runs-your-schema.md) — the checkpoint a baseline records.
+- [The apply path](../concepts/how-atlantis-runs-your-schema.md) — the checkpoint a baseline records.
