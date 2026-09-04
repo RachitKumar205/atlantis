@@ -324,6 +324,12 @@ build-cloud-image: ## Build the Cloud identity service image
 # builds successfully and serves an empty /srv.
 DOCS_REGION  ?= us-central1
 DOCS_SERVICE ?= atlantis-docs
+# Cloud Run runs the linux/amd64 ABI and nothing else, so an image built on an
+# Apple Silicon machine is refused with "failed to start and listen on the
+# port" — the container never executes at all. Only the Caddy stage is built
+# for this platform: the Dockerfile pins the node stage to $BUILDPLATFORM, so
+# npm and astro run natively and emit static files that have no architecture.
+DOCS_PLATFORM ?= linux/amd64
 
 .PHONY: docs-image
 docs-image: ## Build the documentation site image
@@ -332,7 +338,7 @@ docs-image: ## Build the documentation site image
 	  echo "(these targets need docker specifically — see the note above)"; \
 	  exit 1; \
 	}
-	docker build --file web/docs/Dockerfile -t atlantis-docs:local .
+	docker build --platform $(DOCS_PLATFORM) --file web/docs/Dockerfile -t atlantis-docs:local .
 
 .PHONY: docs-serve
 docs-serve: docs-image ## Build and serve the documentation site image on :8099
