@@ -21,7 +21,7 @@ import (
 // a word documented as usable for a field name must parse as one, and a word
 // documented as reserved must not.
 func TestEveryKeywordIsAccountedForByTheReference(t *testing.T) {
-	b, err := os.ReadFile("../../docs/reference/dsl-grammar.md")
+	b, err := os.ReadFile("../../web/docs/src/content/docs/reference/dsl-grammar.mdx")
 	if err != nil {
 		t.Fatalf("read grammar reference: %v", err)
 	}
@@ -117,6 +117,12 @@ func fencedBlocksAfter(t *testing.T, text, heading string) []string {
 			return out
 		}
 		rest = rest[start+3:]
+		// Drop the opening fence's info string. It sits between the
+		// backticks and the first newline, and a tagged fence would
+		// otherwise contribute its language as a documented word.
+		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+			rest = rest[nl+1:]
+		}
 		end := strings.Index(rest, "```")
 		if end < 0 {
 			return out

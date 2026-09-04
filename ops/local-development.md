@@ -4,7 +4,7 @@ After this recipe you'll have atlantis running on your laptop against a local Po
 
 Prereqs:
 
-- A Postgres instance the operator can reach. A local snapshot of staging or prod is the common case; see [Adopt an existing database](../docs/guides/adopt-an-existing-database.md) for the snapshot + restore path.
+- A Postgres instance the operator can reach. A local snapshot of staging or prod is the common case; see [Adopt an existing database](https://docs.tryatlantis.dev/guides/adopt-an-existing-database/) for the snapshot + restore path.
 - A memcached instance on `localhost:11211` (or wherever; the address is configurable). `docker run -d -p 11211:11211 memcached:1.6-alpine` is enough.
 - `buf`, `go` (1.25+) and `openssl` on `$PATH`.
 - One or more caller repos with `.atl` files. They don't need to be committed.
@@ -227,7 +227,7 @@ TLS_CA_FILE=./certs/ca.crt \
 
 To iterate: edit a `.atl`, `Ctrl+C` the server, re-run `tidectl dev`.
 
-This flow rebuilds the **server** (and the central `clients/go/` SDK used by atlantis's own tests). It is separate from how a caller gets its typed client: a caller runs [`tide generate`](../docs/reference/cli-tide.md#tide-generate) from its own repo to emit a scoped client into its module. Server-side runtime dispatch means the server never needs the generated client — only callers do.
+This flow rebuilds the **server** (and the central `clients/go/` SDK used by atlantis's own tests). It is separate from how a caller gets its typed client: a caller runs [`tide generate`](https://docs.tryatlantis.dev/reference/cli-tide/#tide-generate) from its own repo to emit a scoped client into its module. Server-side runtime dispatch means the server never needs the generated client — only callers do.
 
 ## Flags worth knowing
 
@@ -267,6 +267,6 @@ The two manifests can coexist in the same atlantis deployment repo. Commit `atla
 
 ## Related
 
-- [Adopt an existing database](../docs/guides/adopt-an-existing-database.md) — provisioning the local Postgres clone atlantis runs against.
-- [DSL grammar reference](../docs/reference/dsl-grammar.md) — what goes inside the `.atl` files atlantis reads.
-- [Use the sandbox](../docs/guides/use-the-sandbox.md) — disposable copies of the merged schema for testing queries against seeded data.
+- [Adopt an existing database](https://docs.tryatlantis.dev/guides/adopt-an-existing-database/) — provisioning the local Postgres clone atlantis runs against.
+- [DSL grammar reference](https://docs.tryatlantis.dev/reference/dsl-grammar/) — what goes inside the `.atl` files atlantis reads.
+- [Use the sandbox](https://docs.tryatlantis.dev/guides/use-the-sandbox/) — disposable copies of the merged schema for testing queries against seeded data.

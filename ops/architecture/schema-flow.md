@@ -4,7 +4,7 @@ How a schema change moves from a caller's repository into a running atlantis ser
 
 atlantis never reads from caller repositories at runtime, and callers never write into the atlantis repository. The connecting tissue is the **IR checkpoint**: a single row in `atlantis.ir_checkpoint` holding the canonical proto representation of every caller's merged schema, plus a content hash. Every `tide apply` is a CAS update of that row, gated by a Postgres advisory lock so concurrent applies serialise.
 
-Dev and prod differ in how the schema bytes reach the server; the IR-checkpoint invariant holds in both paths. A schema change is an edit to one or more `.atl` files in a caller's repo (typically `internal/<pkg>/schema.atl`). See the [DSL reference](../../docs/reference/dsl-grammar.md) for the syntax.
+Dev and prod differ in how the schema bytes reach the server; the IR-checkpoint invariant holds in both paths. A schema change is an edit to one or more `.atl` files in a caller's repo (typically `internal/<pkg>/schema.atl`). See the [DSL reference](https://docs.tryatlantis.dev/reference/dsl-grammar/) for the syntax.
 
 ## Dev path
 
@@ -31,7 +31,7 @@ Prod has `ATL_ALLOW_APPLY_MUTATION=true` and `ATL_MIRROR_SCHEMA=false`. Callers 
 3. PR merges.
 4. Caller CI (on merge) runs `tide apply`. The endpoint comes from the credential store `tide login` wrote; it is not configurable.
 5. Server acquires an advisory lock, validates, re-checks unique-index drift inside the locked transaction, applies the DDL migration, and persists the new IR checkpoint with a content hash. CAS (compare-and-swap) on the content hash rejects stale applies if the checkpoint moved since planning. **Apply refuses** if it finds a bare unique index the schema doesn't declare, with a `DROP INDEX` remediation, unless `ATLANTIS_ALLOW_INDEX_DRIFT=1` is set in the server's environment.
-   Also inside that locked transaction, the server looks the plan's class up in the [change policy](../../docs/concepts/change-approval.md). A class the policy holds for a human does not apply here: the plan is recorded, `tide apply` exits 2, and step 6 happens only after somebody approves it in the console. By default that covers breaking and destructive changes.
+   Also inside that locked transaction, the server looks the plan's class up in the [change policy](https://docs.tryatlantis.dev/concepts/change-approval/). A class the policy holds for a human does not apply here: the plan is recorded, `tide apply` exits 2, and step 6 happens only after somebody approves it in the console. By default that covers breaking and destructive changes.
 6. A PostgreSQL trigger fires `NOTIFY atl_schema_changed`. The server's schema listener rebuilds entity metadata and swaps it atomically. In-flight requests complete on the old metadata; new requests see the updated schema immediately.
 
 No restart, no recompilation, no workspace manifest update. A rolling restart is only needed when a `tide apply` introduces a brand-new entity, custom query, or procedure — gRPC services and methods register once at startup, so a newly declared method isn't dispatchable until the next restart, even though it's already persisted and visible to `tide show`. The server binary is generic and serves any entity described by the current IR.

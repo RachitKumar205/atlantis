@@ -1,6 +1,6 @@
 # Cache architecture
 
-Implementation of the two-cache model described in [Caching and invalidation](../../docs/concepts/caching-and-invalidation.md). Source lives under `internal/cache/{read,invalidate,memcached,queryresult}/`.
+Implementation of the two-cache model described in [Caching and invalidation](https://docs.tryatlantis.dev/concepts/caching-and-invalidation/). Source lives under `internal/cache/{read,invalidate,memcached,queryresult}/`.
 
 Atlantis runs two caches with different shapes:
 

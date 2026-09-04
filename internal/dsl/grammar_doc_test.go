@@ -16,7 +16,7 @@ import (
 // Nothing else compiles the document, so a name in it that the lexer does not
 // know produces a parse error and no hint that the reference is wrong.
 func TestDocumentedReservedWordsExist(t *testing.T) {
-	b, err := os.ReadFile("../../docs/reference/dsl-grammar.md")
+	b, err := os.ReadFile("../../web/docs/src/content/docs/reference/dsl-grammar.mdx")
 	if err != nil {
 		t.Fatalf("read grammar reference: %v", err)
 	}

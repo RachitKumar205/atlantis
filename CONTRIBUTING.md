@@ -103,7 +103,7 @@ atlantis is licensed under [BUSL-1.1](LICENSE). By opening a PR you license your
 
 ## What we won't merge
 
-- Changes that re-introduce a schema-mutation path outside the `tide apply` flow. See [Schema as code](docs/concepts/schema-as-code.md).
+- Changes that re-introduce a schema-mutation path outside the `tide apply` flow. See [Schema as code](https://docs.tryatlantis.dev/concepts/schema-as-code/).
 - A `Backend` interface abstraction over PostgreSQL. See [Architecture](ops/architecture/index.md) for the rationale.
 - Changes to the generated tree without the corresponding emitter change.
 - Vendored copies of third-party code unless there's a clear reason `go mod` can't handle it.

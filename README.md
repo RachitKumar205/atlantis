@@ -12,9 +12,10 @@ published to the public releases bucket.
 
 ## Documentation
 
-- [`docs/`](docs/index.md) — customer documentation: getting started,
-  guides, concepts, and the DSL/CLI/API references. Written to
-  [`docs/STYLE.md`](docs/STYLE.md).
+- [docs.tryatlantis.dev](https://docs.tryatlantis.dev/) — customer
+  documentation: getting started, guides, concepts, and the DSL/CLI/API
+  references. The pages are in `web/docs/src/content/docs/`, and are written
+  to [`docs/STYLE.md`](docs/STYLE.md).
 - [`ops/`](ops/README.md) — operator and internal documentation: server
   configuration, the admin CLI, local development, architecture notes.
 
@@ -26,11 +27,11 @@ published to the public releases bucket.
 | `internal/` | Server, console, and cloud implementation |
 | `jobs/` | The job runtime: scheduler, cron, workflow engine, built-in sweeper and reaper |
 | `clients/go/` | Hand-written runtime libraries callers link (`jobs`, admin JSON, transport) — `tide generate` writes typed clients into caller repos, not here |
-| `web/` | The console and cloud frontends |
+| `web/` | The console and cloud frontends, and the documentation site |
 | `migrations/` | The platform's own SQL migration histories |
 | `atlantis/` | Protobuf definitions for the admin and common APIs |
 | `scripts/` | Release packaging, including the `tide` install script |
-| `docs/`, `ops/` | Documentation (see above) |
+| `docs/`, `ops/` | The documentation style guide, and operator documentation (see above) |
 
 ## Development
 

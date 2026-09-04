@@ -5,7 +5,7 @@
 // renders the DDL, coltype.ProtoType and coltype.GoType shape the generated
 // API, coltype.ScanFragments and coltype.BindExpr move values across the wire,
 // entity.setProtoType publishes the wire type from the runtime dispatcher, and
-// docs/reference/dsl-types.md states what a caller can expect.
+// the type-mapping reference states what a caller can expect.
 //
 // Unconnected, they drift: `real` and `double` were documented and parsed while
 // absent from every code table, and `double` rendered as the Postgres type
@@ -29,7 +29,11 @@ import (
 )
 
 // DocPath is the reference page, relative to the repository root.
-const DocPath = "docs/reference/dsl-types.md"
+//
+// Front matter precedes the prose; Rows skips every line that does not begin
+// with `|`, so the two YAML delimiters and the fields between them are read
+// as ordinary non-table lines.
+const DocPath = "web/docs/src/content/docs/reference/dsl-types.mdx"
 
 // ArrayRowSpelling is the one documented row that is a template rather than a
 // type: `[]T` maps to `T[]` for whatever T is. Callers assert arrays against a
