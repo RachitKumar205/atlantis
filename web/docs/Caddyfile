@@ -1,0 +1,43 @@
+# Static file server for the documentation site on Cloud Run.
+#
+# Cloud Run terminates TLS and proxies plain HTTP/1 to the container, so
+# automatic HTTPS is off: Caddy would otherwise try to provision a
+# certificate for a hostname it does not own and cannot answer challenges on.
+#
+# The port comes from Cloud Run's injected PORT, and the bind address is
+# unqualified so it listens on 0.0.0.0 — the contract rejects a container
+# listening only on 127.0.0.1.
+{
+	auto_https off
+	admin off
+	persist_config off
+}
+
+:{$PORT:8080} {
+	root * /srv
+	encode zstd gzip
+
+	# Content-hashed filenames, so a URL's bytes never change.
+	@hashed path /_astro/*
+	header @hashed Cache-Control "public, max-age=31536000, immutable"
+
+	# Everything else is revalidated. A page's URL outlives its content.
+	@rest not path /_astro/*
+	header @rest Cache-Control "public, max-age=0, must-revalidate"
+
+	# Serves /guides/ from /guides/index.html, and redirects /guides to it.
+	# Astro's directory build format produces 37 pages of that shape.
+	file_server
+
+	# The built 404 page, returned with a 404 rather than the 200 that a
+	# plain rewrite would send. A soft 404 is indexed as a real page.
+	handle_errors {
+		@notfound expression {err.status_code} == 404
+		handle @notfound {
+			rewrite * /404.html
+			file_server {
+				status 404
+			}
+		}
+	}
+}

@@ -1,0 +1,88 @@
+# Proves the documentation site's container still builds and serves.
+#
+# It publishes nothing. Deploys are run by hand with `make docs-deploy`,
+# which authenticates as whoever ran `gcloud auth login` — so this workflow
+# needs no Google credentials, no Workload Identity pool, and no repository
+# variables to configure.
+#
+# The Dockerfile is compiled nowhere else. Two bugs in it were found by hand:
+# .dockerignore excluded web/docs, so the image carried no site at all, and
+# node:22's npm could not resolve this lockfile. Both would have reached a
+# deploy.
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/docs/**"
+      - "web/shared/**"
+      - "package-lock.json"
+      - ".github/workflows/docs-image.yml"
+  pull_request:
+    paths:
+      - "web/docs/**"
+      - "web/shared/**"
+      - "package-lock.json"
+      - ".github/workflows/docs-image.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  LOCAL_IMAGE: atlantis-docs:ci
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # load, not push: the image goes to the local daemon so the next step
+      # can run it. Layers are cached between runs, so only a change to the
+      # lockfile or the site's source pays the install and the astro build.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: web/docs/Dockerfile
+          push: false
+          load: true
+          tags: ${{ env.LOCAL_IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # A built image that serves nothing is the failure this is here to
+      # catch. Two bugs in this Dockerfile were found by hand rather than by
+      # CI — .dockerignore excluded web/docs, so the image carried no site at
+      # all, and node:22's npm could not resolve this lockfile.
+      - name: the image serves the site
+        run: |
+          docker run -d --name docs -e PORT=8080 -p 8099:8080 "$LOCAL_IMAGE"
+          for _ in $(seq 1 30); do
+            curl -sf -o /dev/null http://127.0.0.1:8099/ && break
+            sleep 1
+          done
+
+          fail=0
+          for path in / /getting-started/ /guides/schema-history/ /reference/cli-tide/; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8099$path")
+            [ "$code" = "200" ] || { echo "::error::$path returned $code, want 200"; fail=1; }
+          done
+
+          # A soft 404 is indexed as a real page, so the status matters as
+          # much as the body.
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8099/nope/)
+          [ "$code" = "404" ] || { echo "::error::/nope/ returned $code, want 404"; fail=1; }
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8099/guides)
+          [ "$code" = "308" ] || { echo "::error::/guides returned $code, want 308"; fail=1; }
+
+          docker rm -f docs >/dev/null
+          exit $fail

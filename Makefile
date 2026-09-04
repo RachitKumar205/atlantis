@@ -315,6 +315,47 @@ build-console-image: ## Build the atlantis-console image
 build-cloud-image: ## Build the Cloud identity service image
 	$(CONTAINER) build --file Dockerfile --target cloud -t atlantis-cloud:local .
 
+# ---- documentation site -----------------------------------------------------
+#
+# docker, not $(CONTAINER). Apple's container 1.2.2 cannot build this image
+# for two independent reasons, and fails quietly at both: its builder gives
+# the container no outbound network, so `npm ci` dies on EAI_AGAIN, and a
+# directory COPY creates the destination and copies zero files — the image
+# builds successfully and serves an empty /srv.
+DOCS_REGION  ?= europe-west1
+DOCS_SERVICE ?= atlantis-docs
+
+.PHONY: docs-image
+docs-image: ## Build the documentation site image
+	docker build --file web/docs/Dockerfile -t atlantis-docs:local .
+
+.PHONY: docs-serve
+docs-serve: docs-image ## Build and serve the documentation site image on :8099
+	docker run --rm -p 8099:8080 -e PORT=8080 atlantis-docs:local
+
+# Deploys as whoever `gcloud auth login` last authenticated, to whichever
+# project `gcloud config set project` names. Tagged with the commit so a
+# rollback names a revision and the image it came from without ambiguity.
+.PHONY: docs-deploy
+docs-deploy: docs-image ## Push the docs image and deploy it to Cloud Run
+	@project=$$(gcloud config get-value project 2>/dev/null); \
+	if [ -z "$$project" ] || [ "$$project" = "(unset)" ]; then \
+	  echo "no gcloud project set — run: gcloud config set project <id>"; exit 1; \
+	fi; \
+	image="$(DOCS_REGION)-docker.pkg.dev/$$project/docs/atlantis-docs:$$(git rev-parse --short HEAD)"; \
+	echo "deploying $$image"; \
+	gcloud auth configure-docker $(DOCS_REGION)-docker.pkg.dev --quiet && \
+	docker tag atlantis-docs:local "$$image" && \
+	docker push "$$image" && \
+	gcloud run deploy $(DOCS_SERVICE) \
+	  --image "$$image" \
+	  --region $(DOCS_REGION) \
+	  --platform managed \
+	  --allow-unauthenticated \
+	  --min-instances 0 \
+	  --port 8080 \
+	  --quiet
+
 # If a build dies in the `proto` stage with
 #
 #   lookup proxy.golang.org on 192.168.64.1:53: read: connection refused

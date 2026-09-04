@@ -43,14 +43,14 @@ bin/
 
 # Docs that don't change the build.
 #
-# web/docs is the documentation site: no image serves it and the spa stage does
-# not build it. Its package.json is the one exception — `npm ci` reads the root
-# lockfile, which names every workspace member, and fails on a missing one.
+# web/docs stays in the context: web/docs/Dockerfile builds the documentation
+# site from it. Only its build output is excluded, which that image produces
+# for itself. The spa stage does not copy it.
 *.md
 docs/
 ops/
-web/docs/
-!web/docs/package.json
+web/docs/dist/
+web/docs/.astro/
 
 # Tests' large fixtures don't ship in the runtime binary either; the
 # `go build ./cmd/server` only needs the import graph. Test files
