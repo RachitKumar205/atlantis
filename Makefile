@@ -322,7 +322,7 @@ build-cloud-image: ## Build the Cloud identity service image
 # the container no outbound network, so `npm ci` dies on EAI_AGAIN, and a
 # directory COPY creates the destination and copies zero files — the image
 # builds successfully and serves an empty /srv.
-DOCS_REGION  ?= europe-west1
+DOCS_REGION  ?= us-central1
 DOCS_SERVICE ?= atlantis-docs
 
 .PHONY: docs-image
