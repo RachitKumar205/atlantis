@@ -21,7 +21,6 @@ import {
   type ChangePolicyEntry,
   type FreezeWindow,
   type MeResult,
-  type ProtectedEntity,
 } from '@/api/client'
 import { useMe } from '@/hooks/useAuth'
 import { STEP_UP_MESSAGE } from '@/pages/Login'

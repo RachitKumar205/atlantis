@@ -140,7 +140,7 @@ function refPhrase(e: EntityDecl): string {
 // ── Schema page — design HTML 1:1 ──────────────────────────────────────────
 export function Schema() {
   const navigate = useNavigate()
-  const search = useSearch({ from: '/schema' }) as { namespace?: string; entity?: string; blame?: boolean }
+  const search = useSearch({ from: '/schema' })
 
   const { data: canonical, isLoading } = useQuery(queries.schemaCanonical())
   const { data: ownersData } = useQuery(queries.entityOwners())

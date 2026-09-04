@@ -1,8 +1,11 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
+    "target": "ES2021",
     "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    // ES2021 for String.prototype.replaceAll, used on six lines across
+    // Approvals, Callers and History. Vite's default browser floor is
+    // safari14, and replaceAll landed in Safari 13.1.
+    "lib": ["ES2021", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "skipLibCheck": true,
 
