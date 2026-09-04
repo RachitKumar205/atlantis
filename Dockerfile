@@ -34,8 +34,13 @@ RUN buf generate
 # Built in one stage because they are one npm workspace with one lockfile at the
 # root. `npm ci` installs the whole tree and fails if a member named in the
 # lockfile is missing, so every member's package.json has to be present — which
-# is why all three are copied before any source, and why a change to a component
+# is why all four are copied before any source, and why a change to a component
 # does not invalidate the install layer.
+#
+# web/docs is the documentation site. No image serves it, and this stage does
+# not build it — its package.json is copied only so `npm ci` can resolve the
+# member the lockfile names. The install is scoped to the two members that are
+# built here, which also keeps Astro's tree out of the image.
 #
 # Nothing that does not embed a SPA depends on this stage. See the note on
 # build-spa below for why that is arranged the way it is.
@@ -45,7 +50,11 @@ COPY package.json package-lock.json ./
 COPY web/console/package.json ./web/console/
 COPY web/cloud/package.json ./web/cloud/
 COPY web/shared/package.json ./web/shared/
-RUN npm ci --prefer-offline
+COPY web/docs/package.json ./web/docs/
+RUN npm ci --prefer-offline \
+      --workspace web/console \
+      --workspace web/cloud \
+      --include-workspace-root
 
 COPY web/shared/ ./web/shared/
 COPY web/console/ ./web/console/

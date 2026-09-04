@@ -41,9 +41,16 @@ bin/
 # Nothing caught this because no CI job builds the console image.
 **/node_modules
 
-# Docs that don't change the build
+# Docs that don't change the build.
+#
+# web/docs is the documentation site: no image serves it and the spa stage does
+# not build it. Its package.json is the one exception — `npm ci` reads the root
+# lockfile, which names every workspace member, and fails on a missing one.
 *.md
 docs/
+ops/
+web/docs/
+!web/docs/package.json
 
 # Tests' large fixtures don't ship in the runtime binary either; the
 # `go build ./cmd/server` only needs the import graph. Test files

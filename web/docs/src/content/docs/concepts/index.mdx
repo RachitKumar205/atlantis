@@ -1,0 +1,32 @@
+---
+title: "Concepts"
+description: "The concepts pages cover schema as code, the apply path, versioning, change approval, caching, tenant isolation, jobs, and the sandbox."
+sidebar:
+  order: 0
+---
+- [Schema as code](/concepts/schema-as-code/). The `.atl` files in git are
+  authoritative; the database derives from them.
+- [The apply path](/concepts/how-atlantis-runs-your-schema/). The checkpoint, the
+  apply, hot reload, migration ownership, and the boundaries.
+- [The typed query surface](/concepts/the-typed-query-surface/). What the generated
+  per-entity methods can express.
+- [The generated client](/concepts/the-generated-client/). Committed code, stable
+  proto numbers, `generate --check`.
+- [Schema versioning](/concepts/schema-versioning/). The append-only version
+  registry: history, blame, staleness.
+- [Change approval](/concepts/change-approval/). Classes, tiers, rehearsals,
+  protections, freezes, overrides.
+- [The console](/concepts/the-console/). What the browser view shows, and what
+  deciding requires.
+- [Custom queries and procedures](/concepts/custom-queries-and-procedures/). SQL
+  beyond the typed surface.
+- [Caching and invalidation](/concepts/caching-and-invalidation/). The two caches
+  and the transactional outbox.
+- [Tenant isolation](/concepts/tenant-isolation/). What `partition by` enforces,
+  what it trusts, and where it stops.
+- [Jobs and workflows](/concepts/jobs-and-workflows/). Typed background work and
+  multi-step orchestration.
+- [Ephemeral data](/concepts/ephemeral-data/). Typed, expiring stores with no
+  table behind them.
+- [The sandbox](/concepts/sandbox/). Disposable test databases holding schema
+  only, never production data.

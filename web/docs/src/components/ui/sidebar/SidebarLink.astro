@@ -1,0 +1,42 @@
+---
+/**
+ * SidebarLink — a leaf row. The optional `leading` slot renders before the
+ * label for consumers that need a leading decoration.
+ */
+import { cn } from "@/lib/cn";
+import type { HTMLAttributes } from "astro/types";
+import { Badge } from "@/components/ui/badge";
+import type { SidebarBadge } from "@cloudflare/nimbus-docs/types";
+
+interface Props extends HTMLAttributes<"a"> {
+  label: string;
+  href: string;
+  isCurrent?: boolean;
+  badge?: SidebarBadge;
+}
+
+const { label, href, isCurrent, badge, class: className, ...attrs } = Astro.props;
+---
+
+<a
+  href={href}
+  aria-current={isCurrent ? "page" : undefined}
+  data-nb-sidebar-link
+  class={cn(
+    // Size, weight, colour and every state come from .nb-nav-row, which is
+    // .rail-btn from the console. Only layout is left here.
+    "nb-nav-row flex items-center gap-2 py-1 no-underline focus-visible:outline-offset-[-2px]",
+    isCurrent && "is-current",
+    className,
+  )}
+  {...attrs}
+>
+  <slot name="leading" />
+  <span class="break-words">{label}</span>
+  {badge &&
+    (typeof badge === "string" ? (
+      <Badge text={badge} />
+    ) : (
+      <Badge text={badge.text} variant={badge.variant} />
+    ))}
+</a>

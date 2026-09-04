@@ -1,0 +1,664 @@
+@import "tailwindcss";
+@import "@atlantis/shared/datum.css";
+
+/* ============================================================
+ * The theme, in two layers.
+ *
+ *   1. datum.css declares the product's tokens under `.datum`, which
+ *      <html> carries. Nothing here defines a colour of its own.
+ *   2. --nb-* names them for Nimbus's components, and the `@theme` block
+ *      below exposes those to Tailwind as bg-card, text-foreground and
+ *      the rest.
+ *
+ * Nimbus's names are kept so its components need no edit, and they are
+ * functional rather than visual: `primary` is the action, `accent` the
+ * hover surface, `muted` the de-emphasised one. Tailwind keywords are
+ * avoided as colour names — `text-base`, `font-sans` and `shadow-lg`
+ * collide with built-ins.
+ *
+ * There is no dark palette. datum.css carries one, and <html> opts out
+ * with data-theme="light" because the console and Cloud are light-only.
+ * ============================================================ */
+
+:root {
+	color-scheme: light;
+
+	/* Surfaces (paired with foregrounds for contrast) */
+	--nb-background: var(--canvas-0);
+	--nb-foreground: var(--ink-1);
+
+	--nb-card: var(--canvas-2);
+	--nb-card-foreground: var(--nb-foreground);
+
+	--nb-muted: var(--canvas-1);
+	--nb-muted-foreground: var(--ink-2);
+
+	/* Nimbus's `accent` is the hover surface, not the brand colour. */
+	--nb-accent: var(--canvas-3);
+	--nb-accent-foreground: var(--nb-foreground);
+
+	/* Primary action / brand */
+	--nb-primary: var(--accent);
+	--nb-primary-foreground: var(--accent-ink);
+	--nb-primary-hover: var(--accent-hover);
+
+	/* Borders / focus */
+	--nb-border: var(--line-soft);
+	--nb-border-strong: var(--line);
+	--nb-selected: var(--accent-tint-2);
+	--nb-ring: var(--accent-tint);
+
+	/* Status colors — paired (saturated for text/border + muted for bg) */
+	--nb-info: var(--accent);
+	--nb-info-foreground: var(--accent);
+	--nb-info-muted: var(--accent-tint);
+
+	--nb-success: var(--sage);
+	--nb-success-foreground: var(--sage);
+	--nb-success-muted: var(--sage-tint);
+
+	/* --warn-ink, not --warn: --warn lands at 4.1:1 on its own tint, which
+	   carries an icon and not label text. */
+	--nb-warning: var(--warn);
+	--nb-warning-foreground: var(--warn-ink);
+	--nb-warning-muted: var(--warn-tint);
+
+	--nb-danger: var(--coral);
+	--nb-danger-foreground: var(--coral);
+	--nb-danger-muted: var(--coral-tint);
+
+	/* API method palette — the method chip across the sidebar, endpoint card
+	   and code rail (api-sidebar / api-layout / api-code-rail). Each is the
+	   datum role for what the method does to a row. */
+	--nb-m-get: var(--sage);
+	--nb-m-post: var(--accent);
+	--nb-m-put: var(--warn);
+	--nb-m-delete: var(--coral);
+	--nb-m-other: var(--ink-2);
+
+	/* Layout */
+	--nb-sidebar-width: 18.75rem;
+	--nb-toc-width: 18rem;
+	--nb-content-max: 43.5rem;
+	/* Used only by the API reference (registry: api-layout); harmless elsewhere. */
+	--nb-code-rail-width: 34rem;
+
+	/* Typography. Faces come from ../styles/fonts.css; datum.css names them
+	   and loads nothing itself. Nimbus has no display slot, so --nb-font-display
+	   is added here and the heading rules below take it. */
+	--nb-font-sans: var(--sans);
+	--nb-font-mono: var(--mono);
+	--nb-font-display: var(--display);
+
+	/* The console's four steps stop at 20px for a screen read at a glance.
+	   A documentation page is read a paragraph at a time, so the display end
+	   extends and 16px — datum's --size-subject, "the one thing a pane is
+	   about" — carries the prose. 11px and 13px keep their console jobs:
+	   uppercase labels, and code and table cells. */
+	--nb-body-size: 1rem;
+	--nb-body-leading: 1.65;
+
+	/* One display weight, matching .page__title in the console. Rank comes
+	   from size, face and tracking; a fourth variable carrying the same
+	   signal only lets the four headings disagree. The 650 that stood on h2
+	   made it heavier than the h1 above it. */
+	--nb-heading-weight: 600;
+	/* Headings set solid-ish: 1.65 is a measure for paragraphs and leaves a
+	   two-line heading looking like two headings. */
+	--nb-heading-leading: 1.2;
+
+	--nb-h1-size: 2rem;
+	--nb-h1-weight: var(--nb-heading-weight);
+	--nb-h1-tracking: var(--track-display);
+	--nb-h2-size: 1.375rem;
+	--nb-h2-weight: var(--nb-heading-weight);
+	--nb-h2-tracking: var(--track-tight);
+	--nb-h3-size: 1.0625rem;
+	--nb-h3-weight: var(--nb-heading-weight);
+	--nb-h3-tracking: -0.01em;
+	--nb-h4-size: 0.9375rem;
+	--nb-h4-weight: var(--nb-heading-weight);
+
+	/* Shadows */
+	--nb-shadow-sm: var(--drop);
+	--nb-shadow: var(--drop);
+	--nb-shadow-lg: var(--drop-lg);
+}
+
+/* Wider content area on large displays (e.g. MacBook Pro 16″) */
+@media (min-width: 1536px) {
+	:root {
+		--nb-content-max: 52rem;
+	}
+}
+
+
+/* ---- Tailwind theme mapping ----
+ * These generate Tailwind utility classes:
+ *   bg-card, text-foreground, border-border, ring-ring, etc.
+ */
+@theme {
+	--color-background: var(--nb-background);
+	--color-foreground: var(--nb-foreground);
+
+	--color-card: var(--nb-card);
+	--color-card-foreground: var(--nb-card-foreground);
+
+	--color-muted: var(--nb-muted);
+	--color-muted-foreground: var(--nb-muted-foreground);
+
+	--color-accent: var(--nb-accent);
+	--color-accent-foreground: var(--nb-accent-foreground);
+
+	--color-primary: var(--nb-primary);
+	--color-primary-foreground: var(--nb-primary-foreground);
+	--color-primary-hover: var(--nb-primary-hover);
+
+	--color-border: var(--nb-border);
+	--color-border-strong: var(--nb-border-strong);
+	--color-selected: var(--nb-selected);
+	--color-ring: var(--nb-ring);
+
+	--color-info: var(--nb-info);
+	--color-info-foreground: var(--nb-info-foreground);
+	--color-info-muted: var(--nb-info-muted);
+
+	--color-success: var(--nb-success);
+	--color-success-foreground: var(--nb-success-foreground);
+	--color-success-muted: var(--nb-success-muted);
+
+	--color-warning: var(--nb-warning);
+	--color-warning-foreground: var(--nb-warning-foreground);
+	--color-warning-muted: var(--nb-warning-muted);
+
+	--color-danger: var(--nb-danger);
+	--color-danger-foreground: var(--nb-danger-foreground);
+	--color-danger-muted: var(--nb-danger-muted);
+
+	--font-sans: var(--nb-font-sans);
+	--font-mono: var(--nb-font-mono);
+
+	--shadow-sm: var(--nb-shadow-sm);
+	--shadow-default: var(--nb-shadow);
+	--shadow-lg: var(--nb-shadow-lg);
+}
+
+/* ---- Minimal overrides the plugin doesn't cover ---- */
+/* No font-feature-settings here. The cv02/cv03/cv04/cv11 that stood on this
+   rule are Inter's character variants and do nothing in Manrope, and the
+   --feat-sans that replaced them sets tabular figures — right for a column of
+   numbers, wrong for a sentence, where proportional figures space evenly.
+   The console applies it per surface for the same reason; tables below do the
+   same. */
+html {
+	font-family: var(--nb-font-sans);
+	font-size: var(--nb-body-size);
+	line-height: var(--nb-body-leading);
+	-webkit-font-smoothing: antialiased;
+	text-rendering: optimizeLegibility;
+}
+
+/* The navigation column, drawn the way the console draws its rail: a sunken
+ * trough holding the rows, and the current row raised back out of it.
+ *
+ * The values are .rail__group and .rail-btn from console.css. Row height is
+ * the exception — the rail's 36px comes from an invariant this column has
+ * no part in, that the logo, every nav icon and the role badge share one x.
+ * These rows carry no icon and there are forty of them, so they keep the
+ * 32px they had.
+ */
+/* --canvas-1, which datum.css names for "sunk wells, inputs, rails" — this
+   is one. The console mixes --ink-0 at 4% to reach the same value; written
+   that way here, Lightning CSS folds the color-mix down to var(--ink-0) and
+   the column renders near-black. */
+.nb-nav-trough {
+	gap: 2px;
+	padding: 4px;
+	border: 1px solid var(--line-soft);
+	border-radius: var(--radius-lg);
+	background: var(--canvas-1);
+	box-shadow: var(--drop);
+}
+
+.nb-nav-row {
+	min-height: 2rem;
+	padding: 0 8px;
+	border-radius: var(--radius);
+	/* Transparent, not absent. The hover below draws a border onto the one
+	   already reserved here, so the row does not move when it gains an edge. */
+	border: 1px solid transparent;
+	/* Every row at the heading ink. The rail's --ink-2 is a muted label, and
+	   these are the page titles the reader is choosing between. Which one is
+	   current is carried by the raised pill and the weight, not by the other
+	   forty being dimmer than it. */
+	color: var(--ink-0);
+	font-size: var(--size-data);
+	font-weight: 400;
+	transition:
+		color var(--fast) var(--ease),
+		background-color var(--fast) var(--ease),
+		border-color var(--fast) var(--ease),
+		box-shadow var(--fast) var(--ease);
+}
+
+/* Hover tints and does not lift: two raised rows would name two current
+   pages. --canvas-3 is the palette's hover, and it is lighter than the
+   trough, so the row separates from its container rather than matching it. */
+@media (hover: hover) {
+	.nb-nav-row:hover {
+		color: var(--ink-0);
+		background: var(--canvas-3);
+	}
+	.nb-nav-row:not(.is-current):hover {
+		border-color: var(--line-soft);
+	}
+}
+
+/* The raised pill. Its own drop draws its edge, so it takes no border. */
+.nb-nav-row.is-current {
+	color: var(--ink-0);
+	font-weight: 600;
+	background: var(--canvas-2);
+	box-shadow: inset 0 1px 0 var(--edge-hi), var(--drop);
+}
+
+/* A column label above a rail — the table of contents, the mobile navigation
+   sheet. 11px is the floor the type scale sets for a single-word label, and
+   uppercase closes up below about 5% of added tracking. */
+.nb-rail-label {
+	margin-top: 0;
+	font-size: var(--size-label);
+	font-weight: 500;
+	letter-spacing: var(--track-caps);
+	text-transform: uppercase;
+	color: var(--ink-2);
+}
+
+/* Every mono-faced element, in one place.
+ *
+ * "zero" is the slashed zero, aliased to ss03 in IBM Plex Mono. There is no
+ * tnum to ask for: every glyph in the face is one advance width already.
+ *
+ * 0.32px of tracking is IBM's own production value for Plex Mono below 14px,
+ * which is every use here — code at 13px, inline code at 13px, keycaps at
+ * 12px. Neither Outfit nor Manrope carries an opsz axis, so nothing
+ * compensates at small sizes unless it is set. */
+code,
+kbd,
+pre,
+samp,
+.nb-code-title {
+	font-feature-settings: var(--feat-mono);
+	letter-spacing: var(--track-mono);
+}
+
+body {
+	opacity: 1;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+	html:focus-within {
+		scroll-behavior: smooth;
+	}
+}
+
+::selection {
+	background: color-mix(in oklch, var(--nb-primary) 10%, transparent);
+	color: var(--nb-foreground);
+}
+
+/* ---- Focus indicators ---- */
+@layer base {
+	/* Default the outline to the focus ring's resting values so turning the
+	   ring on (outline-style: none → solid) changes nothing a transition can
+	   animate — no color/width/offset flash under transition-colors/-all. */
+	*,
+	::before,
+	::after {
+		outline-color: var(--nb-ring);
+		outline-width: 2px;
+		outline-offset: 2px;
+	}
+	:focus-visible {
+		outline: 2px solid var(--nb-ring);
+		outline-offset: 2px;
+	}
+}
+
+/* ---- Reduced motion ---- */
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		scroll-behavior: auto !important;
+	}
+}
+
+/* ---- Scroll lock (used by native <dialog> overlays) ---- */
+[data-scroll-locked] {
+	overflow: hidden;
+}
+
+/* ---- Scrollbar ---- */
+::-webkit-scrollbar {
+	width: 6px;
+	height: 6px;
+}
+::-webkit-scrollbar-track {
+	background: transparent;
+}
+::-webkit-scrollbar-thumb {
+	background: color-mix(in oklch, var(--nb-foreground) 20%, transparent);
+	border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+	background: var(--nb-muted-foreground);
+}
+
+/* ---- Shiki code-block styling + copy button ---- */
+
+/* --code-bg, on a page that is otherwise light. datum.css fixes the code
+   ground in both themes: a declaration is read against one surface, and the
+   nine --code-* token colours are calibrated to clear 4.5 on this one. */
+/* Type and rhythm only. Every block is wrapped in a .nb-code-figure, which
+   owns the border, the radius and the ground — two elements drawing a card
+   each is what renders as a box inside a box. */
+pre.astro-code {
+	position: relative;
+	margin: 0;
+	padding: 0.75rem 1rem;
+	color: var(--code-ink);
+	overflow-x: auto;
+	font-family: var(--nb-font-mono);
+	font-size: var(--size-data);
+	line-height: 1.625;
+}
+pre.astro-code > code {
+	background: transparent;
+}
+
+/* No --shiki-light/--shiki-dark pair here. astro.config.ts names one theme,
+   which turns off Nimbus's token classing, so Shiki writes each colour into
+   the token's own style attribute. */
+
+/* Copy button injected by initCodeCopy. */
+.nb-code-copy {
+	position: absolute;
+	top: 0.5rem;
+	right: 0.5rem;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.75rem;
+	height: 1.75rem;
+	margin: 0;
+	padding: 0;
+	/* On the code ground, not the page's. */
+	border: 1px solid rgba(220, 227, 221, 0.16);
+	border-radius: var(--radius-sm);
+	background: var(--code-bg);
+	color: var(--code-gutter-hi);
+	cursor: pointer;
+	opacity: 0;
+	transition:
+		opacity 0.15s ease,
+		color 0.15s ease,
+		background 0.15s ease;
+	z-index: 2;
+}
+.nb-code-figure:hover .nb-code-copy,
+.nb-code-copy:focus-visible {
+	opacity: 1;
+}
+.nb-code-copy:hover {
+	color: var(--code-entity);
+	background: var(--code-bg);
+}
+.nb-code-copy svg {
+	width: 0.875rem;
+	height: 0.875rem;
+}
+.nb-code-copy[data-state="copied"] {
+	color: var(--nb-success);
+}
+
+/* ---- Premium code chrome ---- */
+
+/* Every Shiki block is wrapped in a .nb-code-figure (titled or not).
+   Chrome lives on the figure so the language badge + copy button can sit
+   on a non-scrolling ancestor — iOS Safari slides absolutely-positioned
+   children of overflow:auto containers. */
+/* The card is on the code ground, not the page's. datum.css fixes --code-bg
+   in both themes, and a --nb-card figure around a --code-bg pre draws a
+   second, lighter rectangle around the first. */
+.nb-code-figure {
+	position: relative;
+	margin: 1rem 0;
+	border: 1px solid var(--line-soft);
+	border-radius: var(--radius);
+	background-color: var(--code-bg);
+	overflow: hidden;
+}
+.nb-code-figure > pre.astro-code {
+	margin: 0;
+	border: 0;
+	border-radius: 0;
+	background-color: transparent;
+}
+/* The title bar names the file a block is from, or the command that printed
+   it. On a `tideout` block the name is the command, so it reads as a prompt
+   and takes the mono face at the code's own size. */
+.nb-code-title {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.75rem;
+	padding: 0.5rem 0.875rem;
+	border-bottom: 1px solid rgba(220, 227, 221, 0.1);
+	background: rgba(220, 227, 221, 0.03);
+	font-family: var(--nb-font-mono);
+	font-size: var(--size-data);
+	line-height: 1.4;
+}
+.nb-code-title-name {
+	color: var(--code-ink);
+	font-weight: 500;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* A transcript's title is the command that produced it. The prompt marks it
+   as one without the reader having to infer it from the wording. */
+.nb-code-figure[data-nb-lang="tideout"] .nb-code-title-name::before {
+	content: "$ ";
+	color: var(--code-ref);
+}
+
+.nb-code-title-lang {
+	flex-shrink: 0;
+	padding: 0.0625rem 0.375rem;
+	border-radius: var(--radius-sm);
+	background: rgba(220, 227, 221, 0.08);
+	color: var(--code-gutter-hi);
+	font-size: var(--size-label);
+	letter-spacing: var(--track-caps);
+	text-transform: uppercase;
+}
+
+/* `tideout` names a grammar, not a language a reader can act on. */
+.nb-code-figure[data-nb-lang="tideout"] .nb-code-title-lang {
+	display: none;
+}
+
+/* Language badge — pinned to the figure (which doesn't scroll), so it
+   stays at top-right even when the pre overflows horizontally. Hidden
+   when a figcaption is already showing the language (titled blocks). */
+.nb-code-figure[data-nb-lang]:not(.nb-code-figure-titled)::before {
+	content: attr(data-nb-lang);
+	position: absolute;
+	top: 0.5rem;
+	right: 0.625rem;
+	padding: 0.0625rem 0.375rem;
+	border-radius: var(--radius-sm);
+	background: rgba(220, 227, 221, 0.08);
+	color: var(--code-gutter-hi);
+	font-family: var(--nb-font-mono);
+	font-size: var(--size-label);
+	letter-spacing: var(--track-caps);
+	text-transform: uppercase;
+	pointer-events: none;
+	opacity: 0.75;
+	transition: opacity 0.15s ease;
+	z-index: 1;
+}
+.nb-code-figure:hover::before {
+	opacity: 0;
+}
+/* Hide plaintext/text "language" — it's noise. */
+.nb-code-figure[data-nb-lang="text"]::before,
+.nb-code-figure[data-nb-lang="plaintext"]::before,
+.nb-code-figure[data-nb-lang="plain"]::before,
+.nb-code-figure[data-nb-lang="txt"]::before,
+/* `tideout` names the grammar that colours a transcript's glyphs. It is not
+   a language, and nothing a reader can do with the block depends on it. */
+.nb-code-figure[data-nb-lang="tideout"]::before {
+	display: none;
+}
+
+/* Block-level lines so tints + gutters paint across the full row. */
+pre.astro-code code {
+	display: block;
+	width: max-content;
+	min-width: 100%;
+}
+pre.astro-code .line {
+	display: inline-block;
+	width: 100%;
+	padding-inline: 1rem;
+	margin-inline: -1rem;
+	box-sizing: content-box;
+}
+
+/* Highlighted lines (`{1,3-5}` meta or `// [!code highlight]`). */
+pre.astro-code .line.highlighted {
+	background: color-mix(in oklch, var(--nb-info) 12%, transparent);
+	box-shadow: inset 2px 0 0 var(--nb-info);
+}
+
+/* Diff lines (`// [!code ++]` / `// [!code --]`). */
+pre.astro-code .line.diff {
+	position: relative;
+}
+pre.astro-code .line.diff.add {
+	background: color-mix(in oklch, var(--nb-success) 10%, transparent);
+	box-shadow: inset 2px 0 0 var(--nb-success);
+}
+pre.astro-code .line.diff.remove {
+	background: color-mix(in oklch, var(--nb-danger) 10%, transparent);
+	box-shadow: inset 2px 0 0 var(--nb-danger);
+}
+pre.astro-code .line.diff.add::before,
+pre.astro-code .line.diff.remove::before {
+	position: absolute;
+	left: 0.25rem;
+	color: var(--nb-muted-foreground);
+	font-weight: 600;
+}
+pre.astro-code .line.diff.add::before {
+	content: "+";
+	color: var(--nb-success);
+}
+pre.astro-code .line.diff.remove::before {
+	content: "−";
+	color: var(--nb-danger);
+}
+
+/* Focus mode — dim non-focused lines; clears on hover. */
+pre.astro-code.has-focused .line:not(.focused) {
+	opacity: 0.45;
+	filter: blur(0.25px);
+	transition: opacity 0.2s ease, filter 0.2s ease;
+}
+pre.astro-code.has-focused:hover .line:not(.focused) {
+	opacity: 1;
+	filter: none;
+}
+
+/* Error / warning lines — use muted tokens for theme-tuned tints. */
+pre.astro-code .line.highlighted.error {
+	background: var(--nb-danger-muted);
+	box-shadow: inset 2px 0 0 var(--nb-danger);
+}
+pre.astro-code .line.highlighted.warning {
+	background: var(--nb-warning-muted);
+	box-shadow: inset 2px 0 0 var(--nb-warning);
+}
+
+/* Word highlight (`// [!code word:foo]` and meta `/foo/`). */
+pre.astro-code .highlighted-word {
+	padding: 0.0625rem 0.25rem;
+	margin: -0.0625rem -0.125rem;
+	border-radius: 0.25rem;
+	background: color-mix(in oklch, var(--nb-info) 18%, transparent);
+	box-shadow: 0 0 0 1px color-mix(in oklch, var(--nb-info) 30%, transparent);
+}
+
+/* ---- Mobile sidebar toggle ---- */
+
+/* Hide hamburger on pages without a sidebar dialog. */
+body:not(:has([data-mobile-sidebar])) [data-menu-btn] {
+	display: none;
+}
+
+/* ---- View transitions ---- */
+
+/* Scoped to <main transition:name="nb-content"> only — chrome snap-swaps
+   via the root rule below so the visual field doesn't shift on nav. */
+@media (prefers-reduced-motion: no-preference) {
+	::view-transition-old(nb-content) {
+		animation: nb-content-out 100ms cubic-bezier(0.32, 0.72, 0, 1) both;
+	}
+	::view-transition-new(nb-content) {
+		animation: nb-content-in 100ms cubic-bezier(0.32, 0.72, 0, 1) both;
+	}
+
+	::view-transition-old(root),
+	::view-transition-new(root) {
+		animation: none;
+	}
+
+	@keyframes nb-content-out {
+		from { opacity: 1; }
+		to   { opacity: 0; }
+	}
+
+	@keyframes nb-content-in {
+		from { opacity: 0; transform: translateY(4px); }
+		to   { opacity: 1; transform: translateY(0); }
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	::view-transition-old(nb-content),
+	::view-transition-new(nb-content),
+	::view-transition-old(root),
+	::view-transition-new(root) {
+		animation: none;
+	}
+}
+
+/* Inline code inside the landing's feature copy. The prose sheet only
+   reaches .docs-content, and this paragraph is built from segments rather
+   than from markdown. */
+.feature__body code {
+	padding: 0.05em 0.3em;
+	border-radius: var(--radius-sm);
+	background: var(--canvas-1);
+	border: 1px solid var(--line-soft);
+	font-size: 0.85em;
+	color: var(--ink-1);
+}

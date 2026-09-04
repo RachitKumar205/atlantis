@@ -1,0 +1,19 @@
+{
+  // Static assets only: no `main`, and no Astro adapter in astro.config.ts.
+  // The site is `output: "static"`, so Workers serves ./dist directly and
+  // there is no server-side entrypoint for a request to reach.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "atlantis-docs",
+  "compatibility_date": "2026-09-03",
+  "assets": {
+    "directory": "./dist",
+    // Serves the built 404 page rather than Workers' own plain-text one.
+    "not_found_handling": "404-page"
+  },
+  "routes": [
+    {
+      "pattern": "docs.tryatlantis.dev",
+      "custom_domain": true
+    }
+  ]
+}

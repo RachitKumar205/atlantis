@@ -1,0 +1,30 @@
+---
+title: "Guides"
+description: "The guides cover entities, database adoption, approvals, CI, membership, sandboxes, jobs, row TTL, schema history, and dropped-table recovery."
+sidebar:
+  order: 0
+---
+- [Add a new entity](/guides/add-a-new-entity/). Declare, plan, apply, generate —
+  with auto-touch, soft delete, and tenant partitioning.
+- [Adopt an existing database](/guides/adopt-an-existing-database/). Generate
+  declarations from live tables and baseline without DDL.
+- [Approve a schema change](/guides/approve-a-schema-change/). Rehearse, decide,
+  override; from exit 2 to applied.
+- [Set up CI](/guides/set-up-ci/). Plan on pull requests, apply on merge, no
+  repository secrets.
+- [Manage members and callers](/guides/manage-members-and-callers/). Roles,
+  registration, enrolment, apply policies.
+- [Use the sandbox](/guides/use-the-sandbox/). Boot, seed, checkpoint, diff,
+  fork — in the console or from an agent.
+- [Declare a background job](/guides/declarative-jobs/). Typed jobs with handlers
+  in your own service.
+- [Operate jobs and workflows](/guides/operate-jobs-and-workflows/). Monitoring,
+  the dead-letter queue, workflows, backfills.
+- [Write a long-running handler](/guides/long-running-handlers/). Idempotency,
+  leases, checkpoints, resume-from-progress.
+- [Expire rows automatically](/guides/row-ttl/). Row TTL, and chunk-drop expiry
+  on tenant-isolated tables.
+- [Inspect schema history](/guides/schema-history/). History, diff, blame,
+  owners, rollback.
+- [Recover a dropped table](/guides/recover-a-dropped-table/). The 30-day parking
+  window and how to use it.

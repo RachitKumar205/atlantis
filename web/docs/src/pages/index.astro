@@ -1,0 +1,572 @@
+---
+import { Code } from "../components/ui/code";
+import DocsLayout from "../layouts/DocsLayout.astro";
+import Icon from "@cloudflare/nimbus-docs/components/Icon.astro";
+import { getSidebar } from "@cloudflare/nimbus-docs/runtime";
+import { Tabs, TabItem } from "../components/ui/tabs";
+import { config } from "virtual:nimbus/config";
+import { atl } from "../shiki/atl";
+import { datumCodeTheme } from "../shiki/datum-theme";
+
+export const prerender = true;
+
+// The same tree every docs page renders, so the landing is not the one page
+// with no way into the rest of the site.
+const sidebar = await getSidebar("/", { collection: "docs" });
+
+// Splits a body on `backticks` so the identifiers in it render as code
+// rather than as literal backticks in a paragraph.
+const segments = (text: string) =>
+  text.split(/(`[^`]+`)/).map((part) =>
+    part.startsWith("`") && part.endsWith("`")
+      ? { code: part.slice(1, -1) }
+      : { text: part },
+  );
+
+/* Every block below is verbatim from the page that documents it. Nothing here
+   is a mock-up of syntax the parser does not accept. */
+const capabilities = [
+  {
+    label: "Entities",
+    tone: "accent",
+    icon: "ph:stack",
+    title: "Declare a table once",
+    body: "Apply it and atlantis writes the migration. `tide generate` writes the typed client.",
+    href: "/guides/add-a-new-entity/",
+    cta: "Add an entity",
+    links: [{ label: "Schema as code", href: "/concepts/schema-as-code/" }, { label: "DSL grammar", href: "/reference/dsl-grammar/" }, { label: "DSL types", href: "/reference/dsl-types/" }],
+    code: `entity Order in shop {
+  id          bigint primary serial
+  customer_id varchar(8) not null references shop.Customer.id
+  total       numeric(10, 2) not null
+  created_at  timestamptz not null default now()
+}`,
+  },
+  {
+    label: "Rehearse",
+    tone: "slate",
+    icon: "ph:shield-chevron",
+    title: "Rehearse against real rows",
+    body: "Atlantis clones the real database and runs your migration against it. A migration your rows would break fails here, not in production.",
+    href: "/guides/approve-a-schema-change/",
+    cta: "Rehearse a change",
+    links: [{ label: "tide rehearse", href: "/reference/cli-tide/#tide-rehearse" }, { label: "Change approval", href: "/concepts/change-approval/" }, { label: "The sandbox", href: "/concepts/sandbox/" }],
+    lang: "bash" as const,
+    code: `tide rehearse
+tide apply --wait-for-approval=30m`,
+  },
+  {
+    label: "Jobs",
+    tone: "sage",
+    icon: "ph:lightning",
+    title: "Run work in the background",
+    body: "Retries and timeouts live in the schema. The handler stays in your own service.",
+    href: "/guides/declarative-jobs/",
+    cta: "Declare a job",
+    links: [{ label: "Jobs and workflows", href: "/concepts/jobs-and-workflows/" }, { label: "Long-running handlers", href: "/guides/long-running-handlers/" }, { label: "Operate jobs", href: "/guides/operate-jobs-and-workflows/" }],
+    code: `job ImportContacts in directory {
+  args {
+    account_id      varchar(64) not null
+    import_strategy varchar(20) not null default "skip"
+  }
+  retries  3
+  timeout  30m
+  queue    "contacts"
+  visible_to "directory"
+}`,
+  },
+  {
+    label: "Queries",
+    tone: "warn",
+    icon: "ph:function",
+    title: "Write your own SQL",
+    body: "Write the SQL the predicate language cannot express. `touches()` keeps the cache correct.",
+    href: "/getting-started/your-first-custom-query/",
+    cta: "Add a query",
+    links: [{ label: "Custom queries", href: "/concepts/custom-queries-and-procedures/" }, { label: "Caching", href: "/concepts/caching-and-invalidation/" }, { label: "Typed queries", href: "/concepts/the-typed-query-surface/" }],
+    code: `query NoteCountByMonth for Note {
+  input  { since: timestamptz }
+  output { month: timestamptz, count: bigint }
+  sql touches(Note) {
+    SELECT date_trunc('month', created_at) AS month,
+           COUNT(*)                        AS count
+    FROM app.note
+    WHERE created_at >= $since
+    GROUP BY 1
+    ORDER BY 1
+  }
+}`,
+  },
+  {
+    label: "Expiry",
+    tone: "coral",
+    icon: "ph:clock-countdown",
+    title: "Expire rows automatically",
+    body: "Name a `timestamptz` column and atlantis deletes expired rows every five minutes.",
+    href: "/guides/row-ttl/",
+    cta: "Set a row TTL",
+    links: [{ label: "Ephemeral data", href: "/concepts/ephemeral-data/" }, { label: "DSL grammar", href: "/reference/dsl-grammar/" }],
+    code: `entity Session in consumer {
+  id            varchar(8) primary
+  consumer_id   varchar(8) not null references consumer.Account.id
+  session_token varchar(255) not null unique
+  expires_at    timestamptz not null
+  created_at    timestamptz not null default now()
+
+  ttl_field expires_at
+}`,
+  },
+];
+
+const sections = [
+  {
+    href: "/getting-started/",
+    tone: "accent",
+    icon: "ph:rocket-launch",
+    title: "Get started",
+    body: "Install tide and apply your first entity.",
+  },
+  {
+    href: "/concepts/",
+    tone: "slate",
+    icon: "ph:compass",
+    title: "Concepts",
+    body: "Schema as code, versioning, approval, caching, isolation.",
+  },
+  {
+    href: "/guides/",
+    tone: "sage",
+    icon: "ph:list-checks",
+    title: "Guides",
+    body: "Add an entity, adopt a database, recover a dropped table.",
+  },
+  {
+    href: "/reference/",
+    tone: "warn",
+    icon: "ph:book-open-text",
+    title: "Reference",
+    body: "Grammar, types, the tide CLI, the console, the sandbox.",
+  },
+];
+---
+
+<DocsLayout
+  title={config.title}
+  description={config.description}
+  sidebar={sidebar}
+  headings={false}
+  breadcrumbs={[]}
+  prevNext={{ prev: undefined, next: undefined }}
+>
+  <Fragment slot="page-title">
+    <section class="hero">
+        <h1 class="hero__title">Atlantis documentation</h1>
+        <p class="hero__lead">
+          Atlantis Cloud serves schema declared as <code>.atl</code> files in
+          your repositories: applied through the <code>tide</code> CLI, exposed
+          as a typed gRPC API, with approvals, rehearsals, and history on every
+          change. These docs assume a Go service against PostgreSQL.
+        </p>
+        <div class="hero__actions">
+          <a class="btn btn--primary" href="/getting-started/">
+            Get started
+            <Icon name="ph:arrow-right" class="btn__icon" />
+          </a>
+          <a class="btn" href="/reference/dsl-grammar/">
+            <Icon name="ph:code" class="btn__icon" />
+            Read the grammar
+          </a>
+      </div>
+    </section>
+  </Fragment>
+
+  <section class="band">
+        <h2 class="band__title">What a schema declares</h2>
+        <Tabs class="band__tabs">
+          {
+            capabilities.map((c) => (
+              <TabItem label={c.label}>
+                <div class="feature">
+                  <div class="feature__head">
+                    <span class={`tile tile--${c.tone}`} aria-hidden="true">
+                      <Icon name={c.icon} />
+                    </span>
+                    <div>
+                      <h3 class="feature__title">{c.title}</h3>
+                      <p class="feature__body">
+                        {segments(c.body).map((seg) =>
+                          seg.code ? <code>{seg.code}</code> : seg.text,
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                  <Code code={c.code} lang={c.lang ?? atl} theme={datumCodeTheme} />
+                  <div class="feature__foot">
+                    <a class="feature__cta" href={c.href}>
+                      {c.cta}
+                      <Icon name="ph:arrow-right" />
+                    </a>
+                    <p class="feature__links">
+                      {c.links.map((l) => (
+                        <a href={l.href}>{l.label}</a>
+                      ))}
+                    </p>
+                  </div>
+                </div>
+              </TabItem>
+            ))
+          }
+        </Tabs>
+      </section>
+
+      <nav class="cards" aria-label="Documentation sections">
+        {
+          sections.map((s) => (
+            <a class={`card card--${s.tone}`} href={s.href}>
+              <span class={`tile tile--${s.tone}`} aria-hidden="true">
+                <Icon name={s.icon} />
+              </span>
+              <span class="card__title">{s.title}</span>
+              <span class="card__body">{s.body}</span>
+            </a>
+          ))
+    }
+  </nav>
+</DocsLayout>
+
+<style>
+  /* The layout's content column centres and pads this page, so the sections
+     only set their own rhythm. --nb-content-max is a reading measure, which
+     the four-card grid and the tabbed band are not; widened here, and the
+     rule reaches no other page because this stylesheet loads only with the
+     landing. */
+  :global(:root) {
+    --nb-content-max: 64rem;
+  }
+
+  .hero {
+    padding-block: 3.5rem 3rem;
+  }
+
+  .hero__title {
+    margin: 0;
+    font-family: var(--display);
+    font-size: clamp(2.25rem, 1.3rem + 3.8vw, 3.5rem);
+    font-weight: 600;
+    line-height: 1.08;
+    letter-spacing: var(--track-display);
+    color: var(--ink-0);
+    text-wrap: balance;
+  }
+
+  .hero__lead {
+    margin: 1.25rem 0 0;
+    max-width: 58ch;
+    font-size: 1.0625rem;
+    line-height: 1.6;
+    color: var(--ink-2);
+  }
+
+  .hero__lead code {
+    font-family: var(--mono);
+    font-size: 0.9em;
+    color: var(--accent);
+  }
+
+  .hero__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 2rem;
+  }
+
+  /* The filled control, as Cloud draws it: background-color and
+     background-image set separately, because a gradient cannot be
+     interpolated — a hover that swapped one for another snapped while the
+     colour underneath eased. The sheen is constant, so only the colour moves. */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: var(--control-h);
+    padding: 0 18px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background-color: var(--canvas-2);
+    color: var(--ink-1);
+    font-size: 13.5px;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+    box-shadow: var(--drop);
+    transition:
+      background-color var(--med) var(--ease),
+      border-color var(--med) var(--ease),
+      color var(--med) var(--ease),
+      box-shadow var(--med) var(--ease);
+  }
+
+  .btn:hover {
+    background-color: var(--canvas-3);
+    border-color: var(--line-strong);
+    color: var(--ink-0);
+  }
+
+  .btn--primary {
+    background-color: var(--accent);
+    background-image: var(--sheen);
+    color: var(--accent-ink);
+    border-color: var(--accent-ring);
+    box-shadow:
+      inset 0 1px 0 var(--accent-hi),
+      inset 0 -1px 0 var(--accent-shade),
+      var(--drop-lg);
+  }
+
+  .btn--primary:hover {
+    background-color: var(--accent-hover);
+    color: var(--accent-ink);
+    border-color: var(--accent-ring);
+  }
+
+  .btn :global(svg) {
+    width: 15px;
+    height: 15px;
+    flex: none;
+  }
+
+  /* ---- Capabilities ---- */
+
+  .band {
+    padding-block: 2rem 3rem;
+  }
+
+  .band__title {
+    margin: 0 0 1.5rem;
+    font-family: var(--display);
+    font-size: clamp(1.5rem, 1.1rem + 1.6vw, 2rem);
+    font-weight: 600;
+    line-height: 1.15;
+    letter-spacing: var(--track-tight);
+    color: var(--ink-0);
+    text-wrap: balance;
+  }
+
+  .feature__head {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.875rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .feature__title {
+    margin: 0;
+    font-family: var(--display);
+    font-size: 1.0625rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--ink-0);
+  }
+
+  .feature__body {
+    margin: 0.35rem 0 0;
+    max-width: 62ch;
+    font-size: var(--size-data);
+    line-height: 1.6;
+    color: var(--ink-2);
+  }
+
+  /* The command, then the pages around it — the row under a capability does
+     the same job as the one under a Cloudflare primitive: one action, then
+     the neighbours. */
+  .feature__foot {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.25rem;
+    margin-top: 1.25rem;
+  }
+
+  .feature__cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 34px;
+    padding: 0 14px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--canvas-2);
+    box-shadow: var(--drop);
+    font-size: var(--size-data);
+    font-weight: 600;
+    color: var(--ink-0);
+    text-decoration: none;
+    white-space: nowrap;
+    transition:
+      border-color var(--fast) var(--ease),
+      box-shadow var(--fast) var(--ease);
+  }
+
+  .feature__cta:hover {
+    border-color: var(--line-strong);
+    box-shadow: var(--drop-lg);
+  }
+
+  .feature__cta :global(svg) {
+    width: 14px;
+    height: 14px;
+    transition: transform var(--fast) var(--ease);
+  }
+
+  .feature__cta:hover :global(svg) {
+    transform: translateX(2px);
+  }
+
+  .feature__links {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem 0.75rem;
+    margin: 0;
+    font-size: var(--size-data);
+  }
+
+  .feature__links a {
+    color: var(--ink-2);
+    text-decoration: none;
+  }
+
+  .feature__links a:hover {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  /* A middot between neighbours, as a separator rather than a character in
+     the link text. */
+  .feature__links a + a::before {
+    content: "·";
+    margin-right: 0.75rem;
+    color: var(--ink-3);
+    text-decoration: none;
+    display: inline-block;
+  }
+
+  /* ---- The coloured tile ----
+     One role per capability, drawn from the five colours the palette supplies
+     rather than a hue invented for this page. Tint behind, full strength on
+     the glyph, and a ring at the tint's own opacity. */
+  .tile {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    flex: none;
+    border-radius: var(--radius-sm);
+    /* currentColor, so the ring is the glyph's own colour by construction.
+       The tints these carried are 10-12% alpha and read as grey. */
+    box-shadow: inset 0 0 0 1px currentColor;
+  }
+
+  .tile :global(svg) {
+    width: 18px;
+    height: 18px;
+  }
+
+  .tile--accent {
+    background: var(--accent-tint);
+    color: var(--accent);
+  }
+
+  .tile--sage {
+    background: var(--sage-tint);
+    color: var(--sage);
+  }
+
+  .tile--slate {
+    background: var(--slate-tint);
+    color: var(--slate);
+  }
+
+  .tile--warn {
+    background: var(--warn-tint);
+    color: var(--warn-ink);
+  }
+
+  .tile--coral {
+    background: var(--coral-tint);
+    color: var(--coral);
+  }
+
+  /* ---- Section cards ---- */
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    gap: 0.875rem;
+    padding-bottom: 5rem;
+  }
+
+  .card {
+    display: grid;
+    gap: 0.4rem;
+    padding: 1.25rem;
+    border: 1px solid var(--line-soft);
+    border-radius: var(--radius-lg);
+    background: var(--canvas-2);
+    box-shadow: var(--drop);
+    text-decoration: none;
+    position: relative;
+    overflow: hidden;
+    transition:
+      border-color var(--fast) var(--ease),
+      box-shadow var(--fast) var(--ease);
+  }
+
+  .card .tile {
+    margin-bottom: 0.4rem;
+  }
+
+  /* The 2px bar the console slides in on a row hover, in the card's own
+     colour rather than one accent for all four. */
+  .card::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 2px;
+    transform: scaleY(0);
+    transform-origin: top;
+    transition: transform var(--fast) var(--ease);
+  }
+
+  .card--accent::before { background: var(--accent); }
+  .card--sage::before   { background: var(--sage-bright); }
+  .card--slate::before  { background: var(--slate); }
+  .card--warn::before   { background: var(--warn); }
+  .card--coral::before  { background: var(--coral); }
+
+  .card:hover,
+  .card:focus-visible {
+    border-color: var(--line);
+    box-shadow: var(--drop-lg);
+  }
+
+  .card:hover::before,
+  .card:focus-visible::before {
+    transform: scaleY(1);
+  }
+
+  .card__title {
+    font-family: var(--display);
+    font-size: 1rem;
+    font-weight: 600;
+    letter-spacing: var(--track-tight);
+    color: var(--ink-0);
+  }
+
+  .card__body {
+    font-size: var(--size-data);
+    line-height: 1.55;
+    color: var(--ink-2);
+  }
+</style>
