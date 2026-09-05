@@ -9,6 +9,7 @@ package schema
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -303,4 +304,86 @@ func QualifiedEnumName(id string) string {
 		return QuoteIdent("atlantis") + "." + QuoteIdent(SnakeCase(id))
 	}
 	return QuoteIdent("atlantis") + "." + QuoteIdent(ns+"_"+SnakeCase(name))
+}
+
+// ScreamingSnake turns "AccountOrderField" into "ACCOUNT_ORDER_FIELD".
+//
+// The rule is buf's ENUM_VALUE_PREFIX heuristic, which the lint compares
+// against: insert `_` before an uppercase character when the previous character
+// is lowercase or the next one is. That renders `OAuthProvider` as
+// `O_AUTH_PROVIDER`, and matching buf is what keeps the emitted proto lint-clean.
+func ScreamingSnake(camel string) string {
+	rs := []rune(camel)
+	var b strings.Builder
+	for i, r := range rs {
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			prevLower := rs[i-1] >= 'a' && rs[i-1] <= 'z'
+			nextLower := i+1 < len(rs) && rs[i+1] >= 'a' && rs[i+1] <= 'z'
+			if prevLower || nextLower {
+				b.WriteByte('_')
+			}
+		}
+		if r >= 'a' && r <= 'z' {
+			b.WriteRune(r - 32)
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// InboundRef captures a foreign key pointing AT some entity X — used to
+// drive XInclude enum variant generation and the include slot fields on
+// the target entity message.
+type InboundRef struct {
+	// FromEntityID is the entity that declares the FK (e.g. "consumer.Session").
+	FromEntityID string
+	// FromField is the column on FromEntityID holding the FK value.
+	FromField string
+	// FromEntity is a pointer back to the source entity so handlers can
+	// reach its table name, PK type, and column list when emitting the
+	// include attach helper. nil for cross-IR resolution failures.
+	FromEntity *dsl.Entity
+}
+
+// InboundRefs scans every entity for `references` fields pointing AT each
+// other entity, and returns a map keyed by target entity ID.
+//
+// The variant numbering of the XInclude enum is the slice index, so the sort
+// is what keeps a number bound to the same reference across runs.
+//
+// One call before an emitter's main loop; cheap (O(entities × fields)).
+//
+// Shared by the codegen emitters and the runtime dispatcher's descriptor
+// builder. A second copy is how the two come to disagree about which include
+// variant carries which number, at which point a client's request selects a
+// relation the server does not think it asked for.
+func InboundRefs(ir *dsl.IR) map[string][]InboundRef {
+	if ir == nil {
+		return nil
+	}
+	out := map[string][]InboundRef{}
+	for i := range ir.Entities {
+		e := &ir.Entities[i]
+		for _, f := range e.Fields {
+			if f.Ref == nil || f.Ref.TargetID == "" {
+				continue
+			}
+			out[f.Ref.TargetID] = append(out[f.Ref.TargetID], InboundRef{
+				FromEntityID: e.ID(),
+				FromField:    f.Name,
+				FromEntity:   e,
+			})
+		}
+	}
+	for k := range out {
+		sort.Slice(out[k], func(i, j int) bool {
+			a, b := out[k][i], out[k][j]
+			if a.FromEntityID != b.FromEntityID {
+				return a.FromEntityID < b.FromEntityID
+			}
+			return a.FromField < b.FromField
+		})
+	}
+	return out
 }

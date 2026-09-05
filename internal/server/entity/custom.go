@@ -102,15 +102,13 @@ func buildCustomProcedureDescs(cp *dsl.CustomProcedure, ns string) (protoreflect
 	// Request message: one optional field per declared input, numbered
 	// from 1 — identical shaping to buildCustomQueryDescs.
 	reqMsg := &descriptorpb.DescriptorProto{Name: strPtr(cp.Name + "Request")}
-	needsTimestamp := false
+	colTypes := make([]dsl.FieldType, 0, len(cp.Inputs))
 	for i, input := range cp.Inputs {
 		num := int32(i + 1)
 		fd := &descriptorpb.FieldDescriptorProto{Name: strPtr(input.Name), Number: &num}
 		applyProtoFieldType(fd, input.Type)
 		reqMsg.Field = append(reqMsg.Field, fd)
-		if input.Type.Name == "timestamptz" || input.Type.Name == "date" {
-			needsTimestamp = true
-		}
+		colTypes = append(colTypes, input.Type)
 	}
 	file.MessageType = append(file.MessageType, reqMsg)
 
@@ -127,9 +125,8 @@ func buildCustomProcedureDescs(cp *dsl.CustomProcedure, ns string) (protoreflect
 	})
 	file.MessageType = append(file.MessageType, respMsg)
 
-	if needsTimestamp {
-		file.Dependency = append(file.Dependency, "google/protobuf/timestamp.proto")
-	}
+	// The response is a bare int64, so only the inputs can name a message.
+	file.Dependency = append(file.Dependency, protoDependenciesFor(colTypes)...)
 
 	fd, err := buildFileDescriptor(file)
 	if err != nil {
@@ -346,25 +343,15 @@ func buildCustomQueryDescs(cq *dsl.CustomQuery, ns string) (protoreflect.FileDes
 	}
 	file.MessageType = append(file.MessageType, respMsg)
 
-	// Check for timestamp dependencies.
-	needsTimestamp := false
+	// Both directions: an input and an output column can each name a message.
+	colTypes := make([]dsl.FieldType, 0, len(cq.Inputs)+len(cq.Output.Columns))
 	for _, input := range cq.Inputs {
-		if input.Type.Name == "timestamptz" || input.Type.Name == "date" {
-			needsTimestamp = true
-			break
-		}
+		colTypes = append(colTypes, input.Type)
 	}
-	if !needsTimestamp {
-		for _, col := range cq.Output.Columns {
-			if col.Type.Name == "timestamptz" || col.Type.Name == "date" {
-				needsTimestamp = true
-				break
-			}
-		}
+	for _, col := range cq.Output.Columns {
+		colTypes = append(colTypes, col.Type)
 	}
-	if needsTimestamp {
-		file.Dependency = append(file.Dependency, "google/protobuf/timestamp.proto")
-	}
+	file.Dependency = append(file.Dependency, protoDependenciesFor(colTypes)...)
 
 	fd, err := buildFileDescriptor(file)
 	if err != nil {

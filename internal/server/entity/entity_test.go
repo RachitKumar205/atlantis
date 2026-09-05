@@ -246,7 +246,7 @@ func TestBuildEntityMeta_CompositePK(t *testing.T) {
 
 func TestBuildProtoDescriptors(t *testing.T) {
 	e := testAccount()
-	fd, err := buildProtoDescriptors(e)
+	fd, err := buildProtoDescriptors(e, nil)
 	if err != nil {
 		t.Fatalf("buildProtoDescriptors: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestBuildProtoDescriptors(t *testing.T) {
 
 func TestBuildProtoDescriptors_CompositePK(t *testing.T) {
 	e := testCompositeEntity()
-	fd, err := buildProtoDescriptors(e)
+	fd, err := buildProtoDescriptors(e, nil)
 	if err != nil {
 		t.Fatalf("buildProtoDescriptors: %v", err)
 	}

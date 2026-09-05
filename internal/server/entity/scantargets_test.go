@@ -69,7 +69,7 @@ func TestScanTargetsMatchGoValueFromProto(t *testing.T) {
 				},
 			}
 			meta := entityMetaFor(e, &dsl.IR{Version: 1})
-			fd, err := buildProtoDescriptors(e)
+			fd, err := buildProtoDescriptors(e, nil)
 			if err != nil {
 				t.Fatalf("buildProtoDescriptors: %v", err)
 			}
@@ -216,7 +216,7 @@ func TestBuildPKArrayTypesEveryPrimaryKey(t *testing.T) {
 				},
 			}
 			meta := entityMetaFor(e, &dsl.IR{Version: 1})
-			fd, err := buildProtoDescriptors(e)
+			fd, err := buildProtoDescriptors(e, nil)
 			if err != nil {
 				t.Fatalf("buildProtoDescriptors: %v", err)
 			}
@@ -250,7 +250,7 @@ func TestBuildPKArrayRefusesWhatItCannotType(t *testing.T) {
 		},
 	}
 	meta := entityMetaFor(e, &dsl.IR{Version: 1})
-	fd, err := buildProtoDescriptors(e)
+	fd, err := buildProtoDescriptors(e, nil)
 	if err != nil {
 		t.Fatalf("buildProtoDescriptors: %v", err)
 	}

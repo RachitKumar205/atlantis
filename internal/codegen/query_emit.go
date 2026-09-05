@@ -8,6 +8,7 @@ import (
 
 	"github.com/rachitkumar205/atlantis/internal/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/schema"
 )
 
 // Proto emission for the per-entity query surface: Filter, OrderField/OrderBy,
@@ -137,19 +138,9 @@ func orderableType(t dsl.FieldType) bool {
 	return coltype.Orderable(t)
 }
 
-// inboundRef captures a foreign key pointing AT some entity X — used to
-// drive XInclude enum variant generation and the include slot fields on
-// the target entity message.
-type inboundRef struct {
-	// FromEntityID is the entity that declares the FK (e.g. "consumer.Session").
-	FromEntityID string
-	// FromField is the column on FromEntityID holding the FK value.
-	FromField string
-	// FromEntity is a pointer back to the source entity so handlers can
-	// reach its table name, PK type, and column list when emitting the
-	// include attach helper. nil for cross-IR resolution failures.
-	FromEntity *dsl.Entity
-}
+// inboundRef is schema.InboundRef, which the runtime dispatcher's descriptor
+// builder reads from as well.
+type inboundRef = schema.InboundRef
 
 // includableSource reports whether an inbound FK can drive a real
 // include slot on the target entity's message.
@@ -173,63 +164,16 @@ func includableSource(ref inboundRef, target *dsl.Entity) bool {
 	return refNS == target.Namespace
 }
 
-// computeInboundRefs scans every entity for `references` fields pointing
-// AT each other entity, and returns a map keyed by target entity ID.
+// computeInboundRefs forwards to schema.InboundRefs, which the runtime
+// dispatcher's descriptor builder also calls.
 //
 // One call before EmitProto's main loop; cheap (O(entities × fields)).
 func computeInboundRefs(ir *dsl.IR) map[string][]inboundRef {
-	if ir == nil {
-		return nil
-	}
-	out := map[string][]inboundRef{}
-	for i := range ir.Entities {
-		e := &ir.Entities[i]
-		for _, f := range e.Fields {
-			if f.Ref == nil || f.Ref.TargetID == "" {
-				continue
-			}
-			out[f.Ref.TargetID] = append(out[f.Ref.TargetID], inboundRef{
-				FromEntityID: e.ID(),
-				FromField:    f.Name,
-				FromEntity:   e,
-			})
-		}
-	}
-	// Stable order for deterministic enum value numbering.
-	for k := range out {
-		sort.Slice(out[k], func(i, j int) bool {
-			a, b := out[k][i], out[k][j]
-			if a.FromEntityID != b.FromEntityID {
-				return a.FromEntityID < b.FromEntityID
-			}
-			return a.FromField < b.FromField
-		})
-	}
-	return out
+	return schema.InboundRefs(ir)
 }
 
-// screamingSnake turns "AccountOrderField" into "ACCOUNT_ORDER_FIELD".
-//
-// The rule is buf's ENUM_VALUE_PREFIX heuristic, which the lint compares
-// against: insert `_` before an uppercase character when the previous character
-// is lowercase or the next one is. That renders `OAuthProvider` as
-// `O_AUTH_PROVIDER`, and matching buf is what keeps the emitted proto lint-clean.
+// screamingSnake forwards to schema.ScreamingSnake. The runtime dispatcher
+// names the same enum values, so one implementation renders both.
 func screamingSnake(camel string) string {
-	rs := []rune(camel)
-	var b strings.Builder
-	for i, r := range rs {
-		if i > 0 && r >= 'A' && r <= 'Z' {
-			prevLower := rs[i-1] >= 'a' && rs[i-1] <= 'z'
-			nextLower := i+1 < len(rs) && rs[i+1] >= 'a' && rs[i+1] <= 'z'
-			if prevLower || nextLower {
-				b.WriteByte('_')
-			}
-		}
-		if r >= 'a' && r <= 'z' {
-			b.WriteRune(r - 32)
-		} else {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
+	return schema.ScreamingSnake(camel)
 }

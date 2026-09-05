@@ -79,7 +79,7 @@ func TestBuiltDescriptorsCarryPresence(t *testing.T) {
 			{Name: "hits", Type: dsl.FieldType{Name: "bigint"}, ProtoNumber: 4},
 		},
 	}
-	fd, err := buildProtoDescriptors(e)
+	fd, err := buildProtoDescriptors(e, nil)
 	if err != nil {
 		t.Fatalf("buildProtoDescriptors: %v", err)
 	}

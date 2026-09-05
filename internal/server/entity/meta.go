@@ -6,6 +6,7 @@ package entity
 
 import (
 	"github.com/rachitkumar205/atlantis/internal/codegen/query"
+	"github.com/rachitkumar205/atlantis/internal/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/schema"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -98,6 +99,35 @@ type entityMeta struct {
 	insertCols []columnMeta
 	updateCols []columnMeta
 	pkCols     []columnMeta
+
+	// orderCols resolves an <Entity>OrderField enum number to the column it
+	// names. The enum carries each field's proto number, so the key is the
+	// proto number and no second numbering exists to drift.
+	//
+	// A variant absent from this map is one the caller invented; handleQuery
+	// rejects it rather than dropping it, because a dropped ORDER BY returns
+	// rows in a different order than asked for and says nothing.
+	orderCols map[protoreflect.EnumNumber]orderColumn
+
+	// pkOrderCols are the primary key's columns, in declaration order. Any of
+	// them the caller's ORDER BY does not already name is appended to it, so
+	// the keyset always ends on a total order and every page advances.
+	pkOrderCols []orderColumn
+}
+
+// orderColumn is one column a caller may sort on.
+type orderColumn struct {
+	quotedIdent string
+	// nullable reads the DSL declaration, not schema.IsEffectivelyNullable.
+	//
+	// The two disagree on a column with a default, which that function reports
+	// as nullable because it is describing the write path. Here the flag
+	// selects the SHAPE of the keyset predicate, and the answer wanted is
+	// whether Postgres can store a NULL in the column.
+	nullable bool
+	// protoNum locates the column on the entity message when the boundary
+	// row's cursor coordinates are read back out.
+	protoNum protoreflect.FieldNumber
 }
 
 // columnMeta is per-column metadata used by scan and bind helpers.
@@ -155,6 +185,17 @@ func buildEntityMeta(e *dsl.Entity, ir *dsl.IR, inbound map[string][]inboundRule
 
 	// FilterSpec for TranslateFilter.
 	meta.filterSpec = buildFilterSpec(e)
+
+	meta.orderCols = buildOrderColumns(e)
+	for _, pk := range meta.pkCols {
+		meta.pkOrderCols = append(meta.pkOrderCols, orderColumn{
+			quotedIdent: schema.QuoteIdent(pk.sqlName),
+			// Never nullable, and not because the DSL says so — PRIMARY KEY
+			// implies NOT NULL in Postgres whatever the declaration carries.
+			nullable: false,
+			protoNum: pk.protoNum,
+		})
+	}
 
 	meta.sqlGet = buildGetSQL(e)
 	meta.sqlWriteBack = buildWriteBackSQL(e)
@@ -225,6 +266,28 @@ func buildColumnMeta(e *dsl.Entity) []columnMeta {
 		}
 	}
 	return cols
+}
+
+// buildOrderColumns indexes the orderable columns by the <Entity>OrderField
+// enum number that names them, which is the field's proto number.
+//
+// Keyed on the number rather than the variant name so a renamed column keeps
+// working for a client compiled against the old proto — the same property the
+// entity message itself has.
+func buildOrderColumns(e *dsl.Entity) map[protoreflect.EnumNumber]orderColumn {
+	out := make(map[protoreflect.EnumNumber]orderColumn, len(e.Fields))
+	for i := range e.Fields {
+		f := &e.Fields[i]
+		if !coltype.Orderable(f.Type) {
+			continue
+		}
+		out[protoreflect.EnumNumber(f.ProtoNumber)] = orderColumn{
+			quotedIdent: schema.QuoteIdent(f.Name),
+			nullable:    !f.NotNull,
+			protoNum:    protoreflect.FieldNumber(f.ProtoNumber),
+		}
+	}
+	return out
 }
 
 // buildFilterSpec mirrors the codegen's emitFilterSpec.

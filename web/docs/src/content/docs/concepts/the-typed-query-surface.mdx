@@ -20,18 +20,50 @@ The request takes a structured filter expression built from per-entity
 predicate messages generated from the schema:
 
 ```go
-&app.QueryNoteRequest{
-    Filter: &app.NoteFilter{
-        Title:     &app.StringPredicate{Like: proto.String("%draft%")},
-        CreatedAt: &app.TimePredicate{Gte: timestamppb.New(after)},
+&pb.QueryNoteRequest{
+    Filter: &pb.NoteFilter{
+        Title: &commonpb.StringPredicate{
+            Op: &commonpb.StringPredicate_Contains{Contains: "draft"},
+        },
+        CreatedAt: &commonpb.TimestampPredicate{
+            Op: &commonpb.TimestampPredicate_Gte{Gte: timestamppb.New(after)},
+        },
     },
-    OrderBy: &app.NoteOrderBy{CreatedAt: app.SortOrder_DESC},
-    Limit:   100,
+    Order: []*pb.NoteOrderBy{
+        {Field: pb.NoteOrderField_NOTE_ORDER_FIELD_CREATED_AT, Desc: true},
+    },
+    Limit: 100,
 }
 ```
 
-Each scalar field type has a corresponding predicate. The full operator
-set is in [the DSL grammar reference](/reference/dsl-grammar/).
+Each scalar field type has a corresponding predicate. A predicate holds one
+operator, so `Op` takes a single wrapper value; combine operators with the
+filter's `And`, `Or` and `Not` arms. The full operator set is in [the DSL
+grammar reference](/reference/dsl-grammar/).
+
+## Ordering and pages
+
+`Order` is a list, applied left to right. atlantis appends the entity's
+primary key to whatever you name, so the ordering is always total — two rows
+holding the same `created_at` still have a defined position, and a page
+boundary that falls between them advances.
+
+Pages are keyset-based. A response that has more rows returns a
+`NextPageToken`; echo it in the next request to continue. The token records
+the last row's position in the columns you ordered by, so **send the same
+`Order` with the token**. Changing the ordering part-way through invalidates
+the token: the server rejects one that names a different number of columns,
+and one that names the same number of different columns resumes from a
+position in the wrong columns.
+
+Stop when `NextPageToken` is empty. Do not stop on a short page: `Limit` is
+clamped to 1000, so a request for more returns fewer rows than it asked for
+while more remain.
+
+`Fields` and `Includes` are declared on the request and not yet served — the
+server answers `Unimplemented` rather than returning a row set that quietly
+ignores them. Read the columns you need from the full row, and fetch a
+related entity with its own `Query`.
 
 ## Properties of a predicate tree
 

@@ -21,16 +21,15 @@ import (
 // returns no rows. Shorter than the limit, it emits no next token, leaving rows
 // 3 and 4 unreachable with nothing said to the caller.
 //
-// This drives the SQL rather than a handler. The dynamic dispatcher orders by
-// the primary key alone (buildDefaultKeysetCols) and cannot reach the case; the
-// generated server builds keyset columns from the request's order_by, and
-// driving it means generating a proto and compiling it, which nothing in this
-// repo does.
+// This drives the SQL rather than a handler. Both servers reach the case — the
+// dynamic dispatcher builds its keyset columns from the request's `order`
+// (buildKeysetCols), and the generated one from `order_by` — and driving
+// either needs a wired server on top of the database this test already needs.
 //
 // KeysetPredicate and OrderByClauseFromKeyset produce what decides the outcome,
-// so this supplies the columns and cursor the generated server would and
-// executes the result. Asserting over the strings would assert the SQL this
-// test itself wrote.
+// so this supplies the columns and cursor a server would and executes the
+// result. Asserting over the strings would assert the SQL this test itself
+// wrote.
 func TestPagingReachesEveryRowWhenTheOrderColumnIsNullable(t *testing.T) {
 	url := os.Getenv("ATLANTIS_TEST_PG")
 	if url == "" {

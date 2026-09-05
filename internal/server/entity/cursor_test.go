@@ -8,7 +8,6 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
-	"github.com/rachitkumar205/atlantis/internal/runtime"
 )
 
 // cursorEntity pairs the two cases that decide protoValueForCursor:
@@ -34,9 +33,15 @@ func cursorEntity() *dsl.Entity {
 
 func cursorMeta(t *testing.T) *entityMeta {
 	t.Helper()
-	e := cursorEntity()
+	return keysetMeta(t, cursorEntity())
+}
+
+// keysetMeta is cursorMeta over a caller-supplied entity, for the tests that
+// vary the fixture.
+func keysetMeta(t *testing.T, e *dsl.Entity) *entityMeta {
+	t.Helper()
 	meta := entityMetaFor(e, &dsl.IR{Version: 1})
-	fd, err := buildProtoDescriptors(e)
+	fd, err := buildProtoDescriptors(e, nil)
 	if err != nil {
 		t.Fatalf("buildProtoDescriptors: %v", err)
 	}
@@ -126,18 +131,18 @@ func TestProtoValueForCursor_NotNullZeroKeyIsNotNull(t *testing.T) {
 	}
 }
 
-// The dynamic path orders by primary key, and a PK is NOT NULL in Postgres
-// whatever the declaration says.
+// A request naming no order falls back to the primary key, and a PK is NOT
+// NULL in Postgres whatever the declaration says.
 //
 // The tempting source for this flag is columnMeta.nullable, which holds
 // schema.IsEffectivelyNullable — true for any column with a DEFAULT, so a
 // serial PK would come through as nullable. That is the right answer for the
 // write path it was built for and the wrong one here: it would push every
 // default query onto the expanded predicate for no reason.
-func TestBuildDefaultKeysetCols_PKIsNeverNullable(t *testing.T) {
+func TestBuildKeysetCols_PKIsNeverNullable(t *testing.T) {
 	e := cursorEntity()
 	e.Fields[0].Default = &dsl.Default{Kind: dsl.DefaultIRNow}
-	meta := entityMetaFor(e, &dsl.IR{Version: 1})
+	meta := keysetMeta(t, e)
 
 	var pk columnMeta
 	for _, cm := range meta.columns {
@@ -150,7 +155,10 @@ func TestBuildDefaultKeysetCols_PKIsNeverNullable(t *testing.T) {
 			"this test cannot tell the two sources apart")
 	}
 
-	cols := buildDefaultKeysetCols(meta)
+	cols, _, err := buildKeysetCols(meta, dynamicpb.NewMessage(meta.queryRequestDesc))
+	if err != nil {
+		t.Fatalf("buildKeysetCols: %v", err)
+	}
 	if len(cols) != 1 {
 		t.Fatalf("keyset cols = %d, want 1", len(cols))
 	}
@@ -172,7 +180,7 @@ func TestExtractCursorValues_UnknownColumnErrors(t *testing.T) {
 	meta := cursorMeta(t)
 	msg := dynamicpb.NewMessage(meta.msgDesc)
 
-	cols := []runtime.KeysetColumn{{QuotedIdent: `"not_a_column"`}}
+	cols := []orderColumn{{quotedIdent: `"not_a_column"`, protoNum: 404}}
 	got, err := extractCursorValues(meta, msg, cols)
 	if err == nil {
 		t.Fatalf("extractCursorValues returned (%v, nil) for a column with no "+
@@ -195,7 +203,7 @@ func TestNextPageToken_ReturnsTheEncodeError(t *testing.T) {
 	meta.entityID = ""
 	msg := dynamicpb.NewMessage(meta.msgDesc)
 
-	tok, err := nextPageToken(meta, msg, buildDefaultKeysetCols(meta))
+	tok, err := nextPageToken(meta, msg, meta.pkOrderCols)
 	if err == nil {
 		t.Fatalf("nextPageToken returned (%q, nil) when the encode fails; an "+
 			"empty token reads as 'no more pages' and the caller stops with rows "+

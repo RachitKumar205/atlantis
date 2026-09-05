@@ -6,6 +6,7 @@ import (
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/dsl/sqlparams"
+	"github.com/rachitkumar205/atlantis/internal/schema"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
@@ -36,6 +37,9 @@ func buildSnapshot(ir *dsl.IR, contentHash string) (*entitySnapshot, error) {
 	// O(entities x rules) for a result that never varies.
 	inbound := buildInboundIndex(ir)
 	procWritten := procedureWrittenEntities(ir)
+	// Distinct from `inbound` above: those are the cache-invalidation rules,
+	// these are the foreign keys the <Entity>Include enum is numbered from.
+	includeRefs := schema.InboundRefs(ir)
 
 	for i := range ir.Entities {
 		e := &ir.Entities[i]
@@ -48,7 +52,7 @@ func buildSnapshot(ir *dsl.IR, contentHash string) (*entitySnapshot, error) {
 		}
 		meta := buildEntityMeta(e, ir, inbound, procWritten)
 
-		fd, err := buildProtoDescriptors(e)
+		fd, err := buildProtoDescriptors(e, includeRefs[e.ID()])
 		if err != nil {
 			return nil, fmt.Errorf("entity %s: %w", e.ID(), err)
 		}

@@ -66,9 +66,8 @@ func makeHandler(s *Server, entityID string, op string, ns string, name string) 
 	}
 }
 
-// handleGet delegates to handleQuery with a PK equality filter. This
-// matches the generated code pattern where GetX is a thin wrapper
-// around QueryX with a PK-eq filter.
+// handleGet reads one row by primary key, through the read cache when the
+// entity is cacheable and a reader is configured.
 func (s *Server) handleGet(ctx context.Context, meta *entityMeta, dec func(any) error) (any, error) {
 	ctx, cancel := runtime.Deadline(ctx, meta.timeoutMS)
 	defer cancel()
@@ -571,14 +570,25 @@ func (s *Server) handleQuery(ctx context.Context, meta *entityMeta, dec func(any
 		filterMsg = req.Get(filterFD).Message()
 	}
 
-	// Build keyset columns: default to PK ascending (no custom order
-	// support in the dynamic path yet — the generated code has typed
-	// order enums; the dynamic server defaults to PK order).
-	keysetCols := buildDefaultKeysetCols(meta)
+	// A projection or an eager-load the dispatcher cannot perform is refused
+	// here. Both fields are declared on the request, so a caller that sets one
+	// gets this error; leaving them off the descriptor instead would drop them
+	// as unknown fields and return a full row set that looks like an answer.
+	if err := rejectUnsupportedQueryOptions(meta, req); err != nil {
+		return nil, err
+	}
+
+	keysetCols, orderCols, err := buildKeysetCols(meta, req)
+	if err != nil {
+		return nil, err
+	}
 
 	// Decode cursor.
 	cursorVals, err := runtime.DecodePageToken(pageToken, meta.entityID)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkCursorArity(cursorVals, keysetCols); err != nil {
 		return nil, err
 	}
 
@@ -658,7 +668,7 @@ func (s *Server) handleQuery(ctx context.Context, meta *entityMeta, dec func(any
 		// Trim to limit.
 		entities.Truncate(int(limit))
 
-		nextToken, err := nextPageToken(meta, boundaryEntity, keysetCols)
+		nextToken, err := nextPageToken(meta, boundaryEntity, orderCols)
 		if err != nil {
 			return nil, err
 		}
@@ -671,23 +681,120 @@ func (s *Server) handleQuery(ctx context.Context, meta *entityMeta, dec func(any
 	return resp, nil
 }
 
-func buildDefaultKeysetCols(meta *entityMeta) []runtime.KeysetColumn {
-	cols := make([]runtime.KeysetColumn, 0, len(meta.pkCols))
-	for _, pk := range meta.pkCols {
-		cols = append(cols, runtime.KeysetColumn{
-			QuotedIdent: schema.QuoteIdent(pk.sqlName),
-			Desc:        false,
-			// Never nullable, and not because the DSL says so — PRIMARY KEY
-			// implies NOT NULL in Postgres whatever the declaration carries.
-			// columnMeta.nullable would be the wrong source here: it holds
-			// schema.IsEffectivelyNullable, which reports TRUE for any column
-			// with a default, so a serial PK would come through as nullable.
-			// That is the right answer for the write path it was built for and
-			// the wrong one for ordering.
-			Nullable: false,
-		})
+// buildKeysetCols renders the request's ORDER BY as a keyset column list,
+// returning it alongside the orderColumn for each entry so the boundary row's
+// cursor can be read back without a second lookup.
+//
+// Every primary-key column the request does not already name is appended.
+// Ordering by a non-unique column alone gives no total order, so two rows
+// sharing the boundary value straddle the page break: without the tiebreaker
+// the cursor cannot say which of them was already returned, and the next page
+// either repeats them or skips them.
+//
+// A variant the entity does not declare is rejected. Skipping it would serve
+// a different ORDER BY than the one asked for and report success.
+func buildKeysetCols(meta *entityMeta, req *dynamicpb.Message) ([]runtime.KeysetColumn, []orderColumn, error) {
+	orderFD := meta.queryRequestDesc.Fields().ByName("order")
+
+	var reqOrder protoreflect.List
+	if orderFD != nil && req.Has(orderFD) {
+		reqOrder = req.Get(orderFD).List()
 	}
-	return cols
+	n := 0
+	if reqOrder != nil {
+		n = reqOrder.Len()
+	}
+
+	cols := make([]runtime.KeysetColumn, 0, n+len(meta.pkOrderCols))
+	ordered := make([]orderColumn, 0, n+len(meta.pkOrderCols))
+	named := make(map[string]bool, n)
+
+	for i := range n {
+		ob := reqOrder.Get(i).Message()
+		fieldFD := ob.Descriptor().Fields().ByName("field")
+		descFD := ob.Descriptor().Fields().ByName("desc")
+		if fieldFD == nil {
+			continue
+		}
+		num := ob.Get(fieldFD).Enum()
+		// UNSPECIFIED is the proto3 zero, so it is also what an OrderBy with
+		// no field set reads as. Treated as "no column", not as an error: the
+		// entry names nothing to sort by and dropping it changes no ordering.
+		if num == 0 {
+			continue
+		}
+		oc, ok := meta.orderCols[num]
+		if !ok {
+			return nil, nil, status.Errorf(codes.InvalidArgument,
+				"entity %s: order field %d is not an orderable column", meta.entityID, num)
+		}
+		desc := descFD != nil && ob.Get(descFD).Bool()
+		cols = append(cols, runtime.KeysetColumn{
+			QuotedIdent: oc.quotedIdent,
+			Desc:        desc,
+			Nullable:    oc.nullable,
+		})
+		ordered = append(ordered, oc)
+		named[oc.quotedIdent] = true
+	}
+
+	for _, pk := range meta.pkOrderCols {
+		if named[pk.quotedIdent] {
+			continue
+		}
+		cols = append(cols, runtime.KeysetColumn{
+			QuotedIdent: pk.quotedIdent,
+			Desc:        false,
+			Nullable:    false,
+		})
+		ordered = append(ordered, pk)
+	}
+	return cols, ordered, nil
+}
+
+// checkCursorArity refuses a page token holding a different number of
+// coordinates than the query has ordering columns.
+//
+// A cursor is positional: KeysetPredicate pairs value i with column i. The
+// reachable cause is a caller changing `order` while paging, which invalidates
+// the token it is still echoing.
+//
+// KeysetPredicate rejects the same mismatch further down, so this is the
+// status code and the message rather than the detection: that error reads
+// "runtime: KeysetPredicate: 2 cols vs 3 cursor values", which names an
+// internal function and reaches the caller as Unknown.
+//
+// It does not catch a token replayed under a DIFFERENT ordering of the same
+// length. Those coordinates are compared against columns they did not come
+// from — an error from Postgres where the types disagree, and a page starting
+// at the wrong row where they happen to match.
+func checkCursorArity(cursor []any, cols []runtime.KeysetColumn) error {
+	if len(cursor) == 0 || len(cursor) == len(cols) {
+		return nil
+	}
+	return status.Errorf(codes.InvalidArgument,
+		"page_token carries %d ordering values but the query has %d ordering columns; "+
+			"a page_token is only valid with the `order` it was issued under",
+		len(cursor), len(cols))
+}
+
+// rejectUnsupportedQueryOptions refuses a request naming a query option the
+// dispatcher does not implement.
+//
+// `fields` would project a subset of columns and `includes` would eager-load a
+// related entity. Both are declared on QueryXRequest and neither is served.
+func rejectUnsupportedQueryOptions(meta *entityMeta, req *dynamicpb.Message) error {
+	fieldsFD := meta.queryRequestDesc.Fields().ByName("fields")
+	if fieldsFD != nil && req.Has(fieldsFD) {
+		return status.Errorf(codes.Unimplemented,
+			"entity %s: query field mask is not supported; omit `fields` to read every column", meta.entityID)
+	}
+	includesFD := meta.queryRequestDesc.Fields().ByName("includes")
+	if includesFD != nil && req.Get(includesFD).List().Len() > 0 {
+		return status.Errorf(codes.Unimplemented,
+			"entity %s: query includes are not supported; read the related entity with its own query", meta.entityID)
+	}
+	return nil
 }
 
 // nextPageToken renders the cursor for the boundary row of a page.
@@ -699,7 +806,7 @@ func buildDefaultKeysetCols(meta *entityMeta) []runtime.KeysetColumn {
 // stopped early believing it had read everything, and nothing — not a log line,
 // not a metric, not a status code — said otherwise. Returning the error makes
 // one request fail loudly instead of every request after it lying quietly.
-func nextPageToken(meta *entityMeta, boundary *dynamicpb.Message, cols []runtime.KeysetColumn) (string, error) {
+func nextPageToken(meta *entityMeta, boundary *dynamicpb.Message, cols []orderColumn) (string, error) {
 	vals, err := extractCursorValues(meta, boundary, cols)
 	if err != nil {
 		return "", err
@@ -707,21 +814,20 @@ func nextPageToken(meta *entityMeta, boundary *dynamicpb.Message, cols []runtime
 	return runtime.EncodePageToken(meta.entityID, vals)
 }
 
-// extractCursorValues extracts cursor values for keyset pagination.
+// extractCursorValues reads the boundary row's coordinate for each keyset
+// column, in the order the ORDER BY names them.
 //
-// A keyset column with no matching entry in meta.columns is an error rather
-// than a skip. Silently emitting a shorter slice produces a token whose arity
-// does not match the column list, and nothing rejects that until the NEXT
-// request decodes it — at which point the failure names KeysetPredicate and
-// points nowhere near the entity whose metadata is inconsistent.
-func extractCursorValues(meta *entityMeta, entity *dynamicpb.Message, keysetCols []runtime.KeysetColumn) ([]any, error) {
-	out := make([]any, 0, len(keysetCols))
-	for _, kc := range keysetCols {
-		// Strip quotes from the ident to match column names.
-		colName := strings.Trim(kc.QuotedIdent, `"`)
+// A column with no matching entry in meta.columns is an error rather than a
+// skip. Silently emitting a shorter slice produces a token whose arity does not
+// match the column list, and nothing rejects that until the NEXT request
+// decodes it — at which point the failure names KeysetPredicate and points
+// nowhere near the entity whose metadata is inconsistent.
+func extractCursorValues(meta *entityMeta, entity *dynamicpb.Message, cols []orderColumn) ([]any, error) {
+	out := make([]any, 0, len(cols))
+	for _, oc := range cols {
 		found := false
 		for _, cm := range meta.columns {
-			if cm.sqlName == colName {
+			if cm.protoNum == oc.protoNum {
 				fd := meta.msgDesc.Fields().ByNumber(cm.protoNum)
 				out = append(out, protoValueForCursor(entity, fd, cm))
 				found = true
@@ -729,7 +835,7 @@ func extractCursorValues(meta *entityMeta, entity *dynamicpb.Message, keysetCols
 			}
 		}
 		if !found {
-			return nil, fmt.Errorf("entity %s: keyset column %q has no column metadata", meta.entityID, colName)
+			return nil, fmt.Errorf("entity %s: keyset column %s has no column metadata", meta.entityID, oc.quotedIdent)
 		}
 	}
 	return out, nil

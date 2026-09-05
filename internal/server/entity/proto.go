@@ -2,6 +2,10 @@ package entity
 
 import (
 	"fmt"
+	"maps"
+	"slices"
+	"sort"
+	"strings"
 
 	"github.com/rachitkumar205/atlantis/internal/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
@@ -10,6 +14,12 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
+
+	// QueryXRequest.fields is a google.protobuf.FieldMask, resolved through
+	// protoregistry.GlobalFiles. Nothing else here links the package, so
+	// without this import the descriptor fails to build with "file not
+	// found: google/protobuf/field_mask.proto".
+	_ "google.golang.org/protobuf/types/known/fieldmaskpb"
 )
 
 // buildProtoDescriptors constructs protoreflect descriptors for an entity
@@ -17,8 +27,18 @@ import (
 // the same field numbers the codegen assigns (Field.ProtoNumber), so
 // callers sending compiled proto messages produce identical wire bytes.
 //
+// includeRefs are the foreign keys pointing at this entity, in the order
+// schema.InboundRefs returns them — the same order codegen numbers the
+// <Entity>Include enum from.
+//
+// A field the emitted .proto declares and this builder omits is not a
+// compatible subset: it arrives as an unknown field and is discarded without
+// an error, so the request the caller wrote and the request the server serves
+// differ silently. TestDynamicDescriptorMatchesEmittedProto holds the two
+// declarations together.
+//
 // Returns the file descriptor containing all messages and services for this entity.
-func buildProtoDescriptors(e *dsl.Entity) (protoreflect.FileDescriptor, error) {
+func buildProtoDescriptors(e *dsl.Entity, includeRefs []schema.InboundRef) (protoreflect.FileDescriptor, error) {
 	// A field left at 0 collides with every other field left at 0, and
 	// protodesc reports that as "conflicting fields" naming two columns that
 	// do not conflict. The fault is a checkpoint written without
@@ -39,14 +59,17 @@ func buildProtoDescriptors(e *dsl.Entity) (protoreflect.FileDescriptor, error) {
 		Syntax:  strPtr("proto3"),
 	}
 
-	// Whether the Timestamp import is needed. Asked of the class, so a type
-	// added to it publishes a message field the descriptor can resolve.
-	needsTimestamp := false
+	// The files declaring the message types this entity's columns resolve to.
+	//
+	// Read out of the same coltype.ProtoType that decides the field's type,
+	// so a column cannot name a message the descriptor does not import. Asking
+	// the type class instead covered timestamps and missed `interval`, whose
+	// wire form is atlantis.common.v1.Interval: protodesc refused the whole
+	// file with "cannot resolve type", so an entity declaring one interval
+	// column took every entity in the schema down with it at startup.
+	colTypes := make([]dsl.FieldType, 0, len(e.Fields))
 	for _, f := range e.Fields {
-		if c, ok := coltype.ClassOf(f.Type); ok && c == coltype.ClassTime {
-			needsTimestamp = true
-			break
-		}
+		colTypes = append(colTypes, f.Type)
 	}
 
 	// Entity message.
@@ -83,22 +106,25 @@ func buildProtoDescriptors(e *dsl.Entity) (protoreflect.FileDescriptor, error) {
 	filterMsg := buildFilterMessage(e)
 	file.MessageType = append(file.MessageType, filterMsg)
 
+	// The query surface's two enums and the message wrapping one of them.
+	file.EnumType = append(file.EnumType,
+		buildOrderFieldEnum(e),
+		buildIncludeEnum(e, includeRefs),
+	)
+	file.MessageType = append(file.MessageType, buildOrderByMessage(e))
+
 	// Service definition.
 	svc := buildServiceDescriptor(e)
 	file.Service = append(file.Service, svc)
 
-	// Declare dependencies. The Timestamp well-known type and the
-	// common predicates proto are needed if this entity uses timestamps
-	// or has filterable fields (the filter message references predicate
-	// message types from atlantis.common.v1).
-	if needsTimestamp {
-		file.Dependency = append(file.Dependency, "google/protobuf/timestamp.proto")
-	}
-	// The filter message always references predicates from
-	// atlantis/common/v1/predicates.proto (unless no fields are
-	// filterable, which is degenerate). Add the dependency
-	// unconditionally — protodesc tolerates unused deps.
-	file.Dependency = append(file.Dependency, "atlantis/common/v1/predicates.proto")
+	file.Dependency = append(file.Dependency, protoDependenciesFor(colTypes)...)
+	// The filter message references predicates from
+	// atlantis/common/v1/predicates.proto (unless no field is filterable,
+	// which is degenerate) and QueryXRequest.fields is a FieldMask. Both are
+	// added unconditionally — protodesc tolerates an unused dependency.
+	file.Dependency = append(file.Dependency,
+		"atlantis/common/v1/predicates.proto",
+		"google/protobuf/field_mask.proto")
 
 	fd, err := buildFileDescriptor(file)
 	if err != nil {
@@ -323,6 +349,43 @@ func setProtoType(fd *descriptorpb.FieldDescriptorProto, t dsl.FieldType) {
 	}
 }
 
+// protoDependencyFor names the file declaring a column's wire type, and ""
+// for a scalar, which needs no import.
+//
+// Keyed on coltype.ProtoType so it answers for exactly the message types
+// setProtoType resolves. TestEveryDocumentedTypeBuildsADescriptor builds one
+// entity per documented type and holds the two switches to the same set.
+func protoDependencyFor(t dsl.FieldType) string {
+	pt, err := coltype.ProtoType(t)
+	if err != nil {
+		return ""
+	}
+	switch pt {
+	case "google.protobuf.Timestamp":
+		return "google/protobuf/timestamp.proto"
+	case "atlantis.common.v1.Interval":
+		return "atlantis/common/v1/interval.proto"
+	}
+	return ""
+}
+
+// protoDependenciesFor names the files these columns' wire types are declared
+// in, deduplicated and sorted.
+//
+// All three descriptor builders here call it. Each previously carried its own
+// test — `Name == "timestamptz" || Name == "date"` — which named two of the
+// three types coltype maps to a message and none of the aliases: an `interval`
+// column failed to resolve and protodesc refused the whole file.
+func protoDependenciesFor(types []dsl.FieldType) []string {
+	deps := map[string]bool{}
+	for _, t := range types {
+		if dep := protoDependencyFor(t); dep != "" {
+			deps[dep] = true
+		}
+	}
+	return slices.Sorted(maps.Keys(deps))
+}
+
 func buildPKMessage(e *dsl.Entity, pkCols []*dsl.Field) *descriptorpb.DescriptorProto {
 	msg := &descriptorpb.DescriptorProto{
 		Name: strPtr(e.Name + "PK"),
@@ -439,6 +502,113 @@ func buildBatchGetResponse(e *dsl.Entity) *descriptorpb.DescriptorProto {
 	return wrapRepeatedEntityResponse("BatchGet"+e.Name+"Response", e)
 }
 
+// orderFields returns the entity's fields that may sit in an ORDER BY, in
+// proto-number order — the order the <Entity>OrderField enum numbers them in.
+//
+// Declaration order is not proto-number order once a field has been added
+// after a retirement, so the sort is what keeps this enum and the emitted one
+// listing the same variants.
+func orderFields(e *dsl.Entity) []*dsl.Field {
+	out := make([]*dsl.Field, 0, len(e.Fields))
+	for i := range e.Fields {
+		if !coltype.Orderable(e.Fields[i].Type) {
+			continue
+		}
+		out = append(out, &e.Fields[i])
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ProtoNumber < out[j].ProtoNumber })
+	return out
+}
+
+// buildOrderFieldEnum builds <Entity>OrderField: UNSPECIFIED at 0, then one
+// variant per orderable field carrying that field's proto number.
+//
+// Sharing the numbering with the entity message is what lets buildKeysetCols
+// resolve a variant to a column through the existing column metadata rather
+// than through a second table.
+func buildOrderFieldEnum(e *dsl.Entity) *descriptorpb.EnumDescriptorProto {
+	name := e.Name + "OrderField"
+	prefix := schema.ScreamingSnake(name)
+	zero := int32(0)
+	enum := &descriptorpb.EnumDescriptorProto{
+		Name: strPtr(name),
+		Value: []*descriptorpb.EnumValueDescriptorProto{
+			{Name: strPtr(prefix + "_UNSPECIFIED"), Number: &zero},
+		},
+	}
+	for _, f := range orderFields(e) {
+		n := int32(f.ProtoNumber)
+		enum.Value = append(enum.Value, &descriptorpb.EnumValueDescriptorProto{
+			Name:   strPtr(prefix + "_" + strings.ToUpper(f.Name)),
+			Number: &n,
+		})
+	}
+	return enum
+}
+
+// buildOrderByMessage builds <Entity>OrderBy: which column, and which way.
+func buildOrderByMessage(e *dsl.Entity) *descriptorpb.DescriptorProto {
+	ns := goNamespace(e.Namespace)
+	one, two := int32(1), int32(2)
+	enumType := descriptorpb.FieldDescriptorProto_TYPE_ENUM
+	boolType := descriptorpb.FieldDescriptorProto_TYPE_BOOL
+	optLabel := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
+	return &descriptorpb.DescriptorProto{
+		Name: strPtr(e.Name + "OrderBy"),
+		Field: []*descriptorpb.FieldDescriptorProto{
+			{
+				Name:     strPtr("field"),
+				Number:   &one,
+				Label:    &optLabel,
+				Type:     &enumType,
+				TypeName: strPtr(fmt.Sprintf(".atlantis.%s.v1.%sOrderField", ns, e.Name)),
+			},
+			{
+				Name:   strPtr("desc"),
+				Number: &two,
+				Label:  &optLabel,
+				Type:   &boolType,
+			},
+		},
+	}
+}
+
+// buildIncludeEnum builds <Entity>Include: UNSPECIFIED at 0, then one variant
+// per foreign key pointing at this entity, numbered by position.
+//
+// The dispatcher serves no include, so every variant past UNSPECIFIED names
+// something handleQuery refuses. They are declared anyway: an undeclared
+// repeated field is dropped as unknown, which is the difference between a
+// caller learning includes are unimplemented and a caller receiving rows with
+// the relation silently absent.
+func buildIncludeEnum(e *dsl.Entity, refs []schema.InboundRef) *descriptorpb.EnumDescriptorProto {
+	name := e.Name + "Include"
+	prefix := schema.ScreamingSnake(name)
+	zero := int32(0)
+	enum := &descriptorpb.EnumDescriptorProto{
+		Name: strPtr(name),
+		Value: []*descriptorpb.EnumValueDescriptorProto{
+			{Name: strPtr(prefix + "_UNSPECIFIED"), Number: &zero},
+		},
+	}
+	for i, ref := range refs {
+		ns, ent, ok := strings.Cut(ref.FromEntityID, ".")
+		if !ok {
+			ns, ent = "", ref.FromEntityID
+		}
+		n := int32(i + 1)
+		enum.Value = append(enum.Value, &descriptorpb.EnumValueDescriptorProto{
+			Name: strPtr(fmt.Sprintf("%s_%s_%s_BY_%s",
+				prefix,
+				schema.ScreamingSnake(goNamespace(ns)),
+				schema.ScreamingSnake(ent),
+				strings.ToUpper(ref.FromField))),
+			Number: &n,
+		})
+	}
+	return enum
+}
+
 func buildQueryRequest(e *dsl.Entity) *descriptorpb.DescriptorProto {
 	msg := &descriptorpb.DescriptorProto{
 		Name: strPtr("Query" + e.Name + "Request"),
@@ -447,23 +617,35 @@ func buildQueryRequest(e *dsl.Entity) *descriptorpb.DescriptorProto {
 	filterTypeName := fmt.Sprintf(".atlantis.%s.v1.%sFilter", ns, e.Name)
 
 	one := int32(1)
+	two := int32(2)
 	three := int32(3)
 	four := int32(4)
+	five := int32(5)
+	six := int32(6)
 	seven := int32(7)
 
-	filterType := descriptorpb.FieldDescriptorProto_TYPE_MESSAGE
+	msgType := descriptorpb.FieldDescriptorProto_TYPE_MESSAGE
+	enumType := descriptorpb.FieldDescriptorProto_TYPE_ENUM
 	int32Type := descriptorpb.FieldDescriptorProto_TYPE_INT32
 	stringType := descriptorpb.FieldDescriptorProto_TYPE_STRING
 	boolType := descriptorpb.FieldDescriptorProto_TYPE_BOOL
 	optLabel := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
+	repLabel := descriptorpb.FieldDescriptorProto_LABEL_REPEATED
 
 	msg.Field = append(msg.Field,
 		&descriptorpb.FieldDescriptorProto{
 			Name:     strPtr("filter"),
 			Number:   &one,
 			Label:    &optLabel,
-			Type:     &filterType,
+			Type:     &msgType,
 			TypeName: strPtr(filterTypeName),
+		},
+		&descriptorpb.FieldDescriptorProto{
+			Name:     strPtr("order"),
+			Number:   &two,
+			Label:    &repLabel,
+			Type:     &msgType,
+			TypeName: strPtr(fmt.Sprintf(".atlantis.%s.v1.%sOrderBy", ns, e.Name)),
 		},
 		&descriptorpb.FieldDescriptorProto{
 			Name:   strPtr("limit"),
@@ -476,6 +658,20 @@ func buildQueryRequest(e *dsl.Entity) *descriptorpb.DescriptorProto {
 			Number: &four,
 			Label:  &optLabel,
 			Type:   &stringType,
+		},
+		&descriptorpb.FieldDescriptorProto{
+			Name:     strPtr("fields"),
+			Number:   &five,
+			Label:    &optLabel,
+			Type:     &msgType,
+			TypeName: strPtr(".google.protobuf.FieldMask"),
+		},
+		&descriptorpb.FieldDescriptorProto{
+			Name:     strPtr("includes"),
+			Number:   &six,
+			Label:    &repLabel,
+			Type:     &enumType,
+			TypeName: strPtr(fmt.Sprintf(".atlantis.%s.v1.%sInclude", ns, e.Name)),
 		},
 		&descriptorpb.FieldDescriptorProto{
 			Name:   strPtr("cache_skip"),
@@ -535,10 +731,24 @@ func buildFilterMessage(e *dsl.Entity) *descriptorpb.DescriptorProto {
 		Name: strPtr(e.Name + "Filter"),
 	}
 
-	// Filter fields use field numbers starting at 1, in proto number order
-	// of the entity fields. Only filterable fields get a slot.
-	num := int32(1)
-	for _, f := range e.Fields {
+	// A filter field carries the entity field's own proto number, which is
+	// what the emitted .proto assigns it.
+	//
+	// Numbering these 1..n instead — one slot per filterable column, in order
+	// — agrees only while every column is filterable and the numbers are
+	// contiguous. A vector, interval or array column occupies a number and
+	// takes no filter slot, so every filterable column after it shifts down by
+	// one against the client's. Measured on id(1) / embedding(2) / title(3) /
+	// note(4): the client's `title` predicate is field 3, the dispatcher reads
+	// field 3 as `note`, both are StringPredicate so it decodes without error,
+	// and the server filters a column the caller did not name.
+	//
+	// TestDynamicDescriptorMatchesEmittedProto compares the two numberings.
+	fields := slices.Clone(e.Fields)
+	sort.Slice(fields, func(i, j int) bool {
+		return fields[i].ProtoNumber < fields[j].ProtoNumber
+	})
+	for _, f := range fields {
 		predMsg, ok := predicateMessageForField(f.Type)
 		if !ok {
 			continue
@@ -546,7 +756,7 @@ func buildFilterMessage(e *dsl.Entity) *descriptorpb.DescriptorProto {
 		msgType := descriptorpb.FieldDescriptorProto_TYPE_MESSAGE
 		optLabel := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
 		typeName := fmt.Sprintf(".atlantis.common.v1.%s", predMsg)
-		n := num
+		n := int32(f.ProtoNumber)
 		msg.Field = append(msg.Field, &descriptorpb.FieldDescriptorProto{
 			Name:     strPtr(f.Name),
 			Number:   &n,
@@ -554,7 +764,6 @@ func buildFilterMessage(e *dsl.Entity) *descriptorpb.DescriptorProto {
 			Type:     &msgType,
 			TypeName: strPtr(typeName),
 		})
-		num++
 	}
 
 	// Composition arms: and, or, not (standard filter composition fields).
