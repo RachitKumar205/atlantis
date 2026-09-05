@@ -49,10 +49,11 @@ func TestEmittersMatchGolden(t *testing.T) {
 
 	got := map[string]string{}
 
-	// The same emitter set cmd/tidectl/codegen.go drives, at the same client
-	// prefix, so the golden files are the artifact that command produces. A new
-	// emitter added there and not here is the one gap this test cannot see,
-	// which is what TestGoldenCoversEveryEmitter below is for.
+	// Every emitter cmd/tidectl/codegen.go and cmd/tide/generate.go drive, at
+	// the same client prefix, so the golden files are the artifact those
+	// commands produce. An emitter added to a command and not here is the one
+	// gap this test cannot see, which is what TestGoldenCoversEveryEmitter
+	// below is for.
 	clientCfg := GenConfig{ModulePrefix: InRepoModulePrefix}
 	goEmitters := []struct {
 		name string
@@ -64,6 +65,10 @@ func TestEmittersMatchGolden(t *testing.T) {
 		{"go custom server", func() ([]GoFile, error) { return EmitCustomServer(ir, GenConfig{}) }},
 		{"go custom client", func() ([]GoFile, error) { return EmitCustomClient(ir, clientCfg) }},
 		{"go jobs handlers", func() ([]GoFile, error) { return EmitJobsHandlers(ir) }},
+		// The caller's copy, written to clients/go/client/<ns>/jobs.go. Same
+		// body as the server's, a different jobs import and a different path,
+		// and it is the one that lands in a caller's repository.
+		{"go caller jobs handlers", func() ([]GoFile, error) { return EmitCallerJobsHandlers(ir) }},
 		{"go workflows", func() ([]GoFile, error) { return EmitWorkflows(ir) }},
 		{"go ephemerals", func() ([]GoFile, error) { return EmitEphemerals(ir) }},
 	}
@@ -157,45 +162,69 @@ func TestEmittersMatchGolden(t *testing.T) {
 	}
 }
 
-// The golden set has to cover every emitter cmd/tidectl/codegen.go runs.
+// commandsRunningEmitters are the commands that call a codegen emitter.
 //
-// TestEmittersMatchGolden lists the emitters by hand, so an emitter added to the
+// Both are needed. `tide generate` is the one a caller runs and it calls
+// EmitCallerJobsHandlers, which tidectl does not; scanning one command covers
+// only that command's emitters, so an artifact reaching a caller's repository
+// from the other has nothing holding it to a golden file.
+var commandsRunningEmitters = []string{
+	filepath.Join("..", "..", "cmd", "tidectl", "codegen.go"),
+	filepath.Join("..", "..", "cmd", "tide", "generate.go"),
+}
+
+// The golden set has to cover every emitter a command runs.
+//
+// TestEmittersMatchGolden lists the emitters by hand, so an emitter added to a
 // command and not to the list is invisible to it — the golden files would stay
-// green while an entire artifact went unreviewed. This reads the command's
+// green while an entire artifact went unreviewed. This reads the commands'
 // source and checks the two lists agree.
 func TestGoldenCoversEveryEmitter(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("..", "..", "cmd", "tidectl", "codegen.go"))
-	if err != nil {
-		t.Fatalf("read codegen.go: %v", err)
-	}
 	golden, err := os.ReadFile("golden_test.go")
 	if err != nil {
 		t.Fatalf("read golden_test.go: %v", err)
 	}
 
-	// Every codegen.EmitX referenced by the command.
+	// Every codegen.EmitX referenced by a command.
 	var missing []string
-	for _, line := range strings.Split(string(src), "\n") {
-		idx := strings.Index(line, "codegen.Emit")
-		if idx < 0 {
-			continue
+	for _, cmdPath := range commandsRunningEmitters {
+		src, err := os.ReadFile(cmdPath)
+		if err != nil {
+			t.Fatalf("read %s: %v", cmdPath, err)
 		}
-		rest := line[idx+len("codegen."):]
-		end := strings.IndexAny(rest, "(")
-		if end < 0 {
-			continue
+		found := 0
+		for _, line := range strings.Split(string(src), "\n") {
+			idx := strings.Index(line, "codegen.Emit")
+			if idx < 0 {
+				continue
+			}
+			rest := line[idx+len("codegen."):]
+			end := strings.IndexAny(rest, "(")
+			if end < 0 {
+				continue
+			}
+			found++
+			name := rest[:end]
+			// The `(ir` suffix is what makes this a call rather than a mention:
+			// naming the emitter in a comment would otherwise satisfy it. A new
+			// emitter must therefore be added to the golden list as
+			// `EmitX(ir, …)`.
+			if !strings.Contains(string(golden), name+"(ir") {
+				missing = append(missing, name)
+			}
 		}
-		name := rest[:end]
-		if !strings.Contains(string(golden), name+"(ir") {
-			missing = append(missing, name)
+		if found == 0 {
+			t.Errorf("%s calls no codegen.EmitX. Either the command stopped "+
+				"generating or it was renamed, and this test is now scanning a "+
+				"file that can never fail it", cmdPath)
 		}
 	}
 	sort.Strings(missing)
 	missing = dedupeStrings(missing)
 	if len(missing) > 0 {
-		t.Errorf("cmd/tidectl/codegen.go runs these emitters but "+
-			"TestEmittersMatchGolden does not, so their output is never "+
-			"reviewed: %s", strings.Join(missing, ", "))
+		t.Errorf("these emitters run in a command but TestEmittersMatchGolden "+
+			"does not, so their output reaches callers unreviewed: %s",
+			strings.Join(missing, ", "))
 	}
 }
 

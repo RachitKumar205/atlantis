@@ -63,6 +63,9 @@ var compilecheckTrees = []compilecheckTree{
 		emitters: []compilecheckEmitter{
 			{"EmitGoServer", EmitGoServer},
 			{"EmitCustomServer", EmitCustomServer},
+			{"EmitJobsHandlers", func(ir *dsl.IR, _ GenConfig) ([]GoFile, error) {
+				return EmitJobsHandlers(ir)
+			}},
 		},
 	},
 	{
@@ -71,6 +74,14 @@ var compilecheckTrees = []compilecheckTree{
 		emitters: []compilecheckEmitter{
 			{"EmitGoClient", EmitGoClient},
 			{"EmitCustomClient", EmitCustomClient},
+			// The two jobs emitters differ only in their path and their jobs
+			// import, and the import is the half a parse cannot check: one
+			// names github.com/…/atlantis/jobs and the other
+			// github.com/…/atlantis/clients/go/jobs, which are different
+			// packages with separately declared Registry and Handler types.
+			{"EmitCallerJobsHandlers", func(ir *dsl.IR, _ GenConfig) ([]GoFile, error) {
+				return EmitCallerJobsHandlers(ir)
+			}},
 		},
 	},
 	{
@@ -124,11 +135,19 @@ func compilecheckTreeFor(path string) (compilecheckTree, string, bool) {
 	return compilecheckTree{}, "", false
 }
 
-// Every Go file the emitters produce must be compiled by one of the trees.
+// compiledSuffixes are the emitted file extensions a compile fixture must
+// claim.
+//
+// This list decides whether a file is checked at all, so an extension missing
+// from it is emitted code that nothing type-checks and nothing reports. `.py`
+// is here ahead of any Python emitter for that reason.
+var compiledSuffixes = []string{".go", ".py"}
+
+// Every source file the emitters produce must be compiled by one of the trees.
 //
 // The check is derived rather than listed: the golden set already holds every
-// emitter's output for the fixture, so a golden .go file with no counterpart in
-// a compile fixture is a hole, whatever emitter produced it.
+// emitter's output for the fixture, so a golden file with no counterpart in a
+// compile fixture is a hole, whatever emitter produced it.
 func TestCompilecheckCoversEveryEmittedTree(t *testing.T) {
 	goldenDir := filepath.Join("testdata", "golden")
 
@@ -139,7 +158,14 @@ func TestCompilecheckCoversEveryEmittedTree(t *testing.T) {
 
 	checked := 0
 	for path := range want {
-		if !strings.HasSuffix(path, ".go") {
+		compiled := false
+		for _, suffix := range compiledSuffixes {
+			if strings.HasSuffix(path, suffix) {
+				compiled = true
+				break
+			}
+		}
+		if !compiled {
 			continue
 		}
 		tree, rel, ok := compilecheckTreeFor(path)
@@ -155,8 +181,9 @@ func TestCompilecheckCoversEveryEmittedTree(t *testing.T) {
 		}
 	}
 	if checked == 0 {
-		t.Fatal("the golden set holds no emitted .go files, so this test is " +
-			"comparing two empty sets and proving nothing")
+		t.Fatalf("the golden set holds no emitted %s files, so this test is "+
+			"comparing two empty sets and proving nothing",
+			strings.Join(compiledSuffixes, "/"))
 	}
 }
 

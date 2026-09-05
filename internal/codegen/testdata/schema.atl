@@ -15,6 +15,9 @@
 //   - `interval`, deliberately: it is the type whose emitted code did not
 //     compile, so a fixture without it would leave the compile check blind to
 //     the one case it was built for
+//   - a `job`, because both jobs emitters return nil for an IR declaring none,
+//     and an emitter producing nothing is indistinguishable here from one
+//     producing the right thing
 //
 // Adding a field here changes the golden files. That is the point: the diff is
 // the review. Regenerate with `go test ./internal/codegen -run Golden -update`.
@@ -65,4 +68,18 @@ procedure RetireAuthor for Author {
   steps {
     update Author set bio = "retired" where id = $author_id
   }
+}
+
+// The three args cross the paths the jobs emitters branch on: a not-null
+// scalar, a nullable one (a pointer in the Args struct), and a timestamptz,
+// which is what adds the `time` import the emitter otherwise prunes.
+job ReindexAuthor in library {
+  args {
+    author_id  bigint not null
+    reason     text
+    not_before timestamptz not null
+  }
+  retries 3
+  timeout 30s
+  queue "maintenance"
 }
