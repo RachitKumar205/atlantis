@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "atlantis-client"
+version = "0.1.0"
+description = "Runtime for the typed Python client tide generates."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "LicenseRef-Proprietary" }
+
+# grpcio is the transport. protobuf's floor is not a preference: generated
+# code calls ValidateProtobufRuntimeVersion with the gencode's own version, so
+# a runtime older than the plugin that produced the code fails at import.
+# 7.36.1 is what buf.build/protocolbuffers/python emits against.
+dependencies = [
+    "grpcio>=1.60",
+    "protobuf>=7.36.1",
+]
+
+[project.optional-dependencies]
+# types-grpcio is not optional for the type check: grpcio ships no annotations,
+# and grpc.Channel and grpc.ChannelCredentials appear in this package's public
+# signatures. A caller running mypy over their generated tree needs it too.
+dev = ["pytest>=8", "mypy>=1.11", "ruff>=0.6", "types-grpcio>=1.60"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/atlantis_client"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["src/atlantis_client"]
+
+[tool.ruff]
+line-length = 100
+src = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# A run that collects nothing exits 5, so a renamed directory or a broken
+# import fails CI rather than reporting success over zero tests. That is
+# pytest's own behaviour and needs no flag; --strict-markers is separate, and
+# refuses an unregistered marker instead of silently skipping what it guards.
+addopts = "--strict-markers"

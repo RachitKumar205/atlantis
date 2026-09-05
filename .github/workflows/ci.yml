@@ -237,6 +237,46 @@ jobs:
           # design). Same scoping the go-vet and go-test steps use.
           args: ./cmd/server/... ./cmd/tide/... ./cmd/tidectl/... ./cmd/cloud/... ./cmd/console/... ./cmd/signer/... ./cmd/provisioner/... ./internal/...
 
+  python:
+    name: python client runtime
+    runs-on: ubuntu-latest
+
+    # The runtime for the typed Python client, in clients/python. No Go and no
+    # database: it is a pure library over grpcio, and the Go jobs above neither
+    # build nor lint it.
+    #
+    # pytest exits 5 when it collects nothing, so a renamed tests/ directory or
+    # an import that stops resolving fails here rather than reporting success
+    # over zero tests.
+    defaults:
+      run:
+        working-directory: clients/python
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # The floor pyproject declares. Running only the newest Python would
+          # let a 3.11+ construct through and break every caller still on 3.10.
+          python-version: "3.10"
+
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: ruff
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: mypy
+        run: mypy
+
+      - name: pytest
+        run: pytest -q
+
   migration-safety:
     name: migrate up/down/up
     runs-on: ubuntu-latest

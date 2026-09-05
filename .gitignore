@@ -150,3 +150,13 @@ atlantis.dev.yaml
 # tsc --build incremental state. Checked in by accident; `npm run typecheck`
 # rewrites it on every run, so tracking it makes a clean tree impossible.
 *.tsbuildinfo
+
+# Python build and environment state under clients/python. The package source
+# and its tests are tracked; the virtualenv, the editable-install metadata and
+# the bytecode caches are per-machine.
+.venv/
+__pycache__/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
