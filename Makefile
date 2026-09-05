@@ -367,6 +367,67 @@ docs-deploy: docs-image ## Push the docs image and deploy it to Cloud Run
 	  --port 8080 \
 	  --quiet
 
+# ---- release host ------------------------------------------------------------
+#
+# A proxy in front of the Cloud Storage bucket, not a copy of it. The image
+# carries no artifacts, so it is deployed once and every release after that is
+# an upload — see release-publish below.
+RELEASES_BUCKET  ?= atlantis-releases
+RELEASES_SERVICE ?= atlantis-releases
+
+.PHONY: releases-image
+releases-image: ## Build the release-host image
+	@docker version >/dev/null 2>&1 || { \
+	  echo "docker daemon is not running. Start it with:  open -a Docker"; \
+	  exit 1; \
+	}
+	docker build --platform $(DOCS_PLATFORM) --file deploy/releases/Dockerfile \
+	  -t atlantis-releases:local deploy/releases
+
+.PHONY: releases-deploy
+releases-deploy: releases-image ## Push the release-host image and deploy it to Cloud Run
+	@project=$$(gcloud config get-value project 2>/dev/null); \
+	if [ -z "$$project" ] || [ "$$project" = "(unset)" ]; then \
+	  echo "no gcloud project set — run: gcloud config set project <id>"; exit 1; \
+	fi; \
+	image="$(DOCS_REGION)-docker.pkg.dev/$$project/docs/atlantis-releases:$$(git rev-parse --short HEAD)"; \
+	echo "deploying $$image"; \
+	gcloud auth configure-docker $(DOCS_REGION)-docker.pkg.dev --quiet && \
+	docker tag atlantis-releases:local "$$image" && \
+	docker push "$$image" && \
+	gcloud run deploy $(RELEASES_SERVICE) \
+	  --image "$$image" \
+	  --region $(DOCS_REGION) \
+	  --platform managed \
+	  --allow-unauthenticated \
+	  --min-instances 0 \
+	  --port 8080 \
+	  --set-env-vars RELEASES_BUCKET=$(RELEASES_BUCKET) \
+	  --quiet
+
+# Uploads what `make release-tide VERSION=vX.Y.Z` built. latest.txt goes last,
+# once everything it names is in place: a reader that resolves "latest" must
+# never be pointed at a version whose tarballs are still uploading.
+.PHONY: release-publish
+release-publish: ## Publish a built release to the bucket: make release-publish VERSION=v0.5.0
+	@if [ "$(origin VERSION)" != "command line" ]; then \
+	  echo "release-publish needs an explicit version:"; \
+	  echo "    make release-publish VERSION=v0.5.0"; \
+	  echo "(VERSION otherwise defaults to git describe — '$(VERSION)' — which"; \
+	  echo " matches the v[0-9] guard and would publish a commit as a release)"; \
+	  exit 1; \
+	fi
+	@case "$(VERSION)" in v[0-9]*.[0-9]*.[0-9]*) : ;; *) \
+	  echo "VERSION must look like v0.5.0 (got '$(VERSION)')"; exit 1 ;; esac
+	@test -f $(RELEASE_DIR)/checksums.txt || { \
+	  echo "no build found — run: make release-tide VERSION=$(VERSION)"; exit 1; \
+	}
+	gcloud storage cp $(RELEASE_DIR)/tide-$(VERSION)-*.tar.gz $(RELEASE_DIR)/checksums.txt \
+	  "gs://$(RELEASES_BUCKET)/$(VERSION)/"
+	gcloud storage cp scripts/install-tide.sh "gs://$(RELEASES_BUCKET)/install.sh"
+	printf '%s\n' "$(VERSION)" | gcloud storage cp - "gs://$(RELEASES_BUCKET)/latest.txt"
+
+
 # If a build dies in the `proto` stage with
 #
 #   lookup proxy.golang.org on 192.168.64.1:53: read: connection refused

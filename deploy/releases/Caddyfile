@@ -1,0 +1,57 @@
+# Serves the release bucket at releases.tryatlantis.dev.
+#
+# The bucket is the source of truth and this image never changes between
+# releases: `make release-publish` uploads tarballs, checksums, install.sh and
+# latest.txt, and the proxy serves whatever is there. Baking artifacts into
+# the image would mean rebuilding and redeploying to cut a release.
+#
+# Cloud Run terminates TLS and proxies plain HTTP/1 to the container, so
+# automatic HTTPS is off; the port comes from Cloud Run's injected PORT and
+# the bind address is unqualified so it listens on 0.0.0.0.
+{
+	auto_https off
+	admin off
+	persist_config off
+}
+
+# Cloud Storage's public endpoint addresses an object as /BUCKET/OBJECT, so
+# the bucket name becomes the first path segment and the rest of the URI
+# passes through: /latest.txt -> /<bucket>/latest.txt
+#
+# header_down replaces Cloud Storage's own Cache-Control rather than adding a
+# second one. `header` alone runs on the request and leaves the upstream's
+# `private, max-age=0` in place beside it, and a response carrying two
+# Cache-Control values is honoured differently by different caches.
+(bucket) {
+	rewrite * /{$RELEASES_BUCKET}{uri}
+
+	reverse_proxy https://storage.googleapis.com {
+		# Cloud Storage routes by Host like any virtual host. Without this it
+		# receives releases.tryatlantis.dev and has no bucket by that name.
+		header_up Host storage.googleapis.com
+
+		# The upstream is HTTPS; Caddy would otherwise dial it in plaintext.
+		transport http {
+			tls
+		}
+
+		header_down >Cache-Control {args[0]}
+	}
+}
+
+:{$PORT:8080} {
+	# What install-tide.sh reads to resolve "latest", and the script itself.
+	# Both change on every release and must not be held.
+	handle /latest.txt {
+		import bucket "no-cache"
+	}
+	handle /install.sh {
+		import bucket "no-cache"
+	}
+
+	# Everything else is a versioned artifact whose bytes never change: the
+	# version is in the path and in the filename.
+	handle {
+		import bucket "public, max-age=31536000, immutable"
+	}
+}
