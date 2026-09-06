@@ -1,10 +1,14 @@
 ---
 title: "Type mapping"
-description: "How each supported .atl field type maps to PostgreSQL, protobuf, and Go."
+description: "How each supported .atl field type maps to PostgreSQL, protobuf, Go, and Python."
 sidebar:
   order: 2
 ---
-How each supported `.atl` field type maps to PostgreSQL, protobuf, and Go.
+How each supported `.atl` field type maps to PostgreSQL, protobuf, Go, and Python.
+
+The Go and Python columns are the types on the generated client's protobuf
+messages, so they follow the Proto column rather than the PostgreSQL one. A
+`numeric` reaches both as a string; `atlantis_client.to_decimal` parses one.
 
 ## Scope
 
@@ -12,34 +16,34 @@ This page covers the types atlantis currently supports. The following PostgreSQL
 
 ## Scalars
 
-| `.atl` type | PostgreSQL | Proto | Go |
-|---|---|---|---|
-| `bigint` | `BIGINT` | `int64` | `int64` |
-| `int` | `INTEGER` | `int32` | `int32` |
-| `smallint` | `SMALLINT` | `int32` | `int32` |
-| `real` | `REAL` | `float` | `float32` |
-| `double` | `DOUBLE PRECISION` | `double` | `float64` |
-| `boolean` | `BOOLEAN` | `bool` | `bool` |
-| `varchar(N)` | `VARCHAR(N)` | `string` | `string` |
-| `varchar` | `VARCHAR` | `string` | `string` |
-| `text` | `TEXT` | `string` | `string` |
-| `citext` | `CITEXT` | `string` | `string` |
-| `jsonb` | `JSONB` | `bytes` | `[]byte` |
-| `bytea` | `BYTEA` | `bytes` | `[]byte` |
-| `uuid` | `UUID` | `string` | `string` |
-| `numeric(p, s)` | `NUMERIC(p,s)` | `string` | `string` |
-| `char(N)` | `CHAR(N)` | `string` | `string` |
-| `char` | `CHAR` | `string` | `string` |
-| `name` | `NAME` | `string` | `string` |
-| `money` | `MONEY` | `string` | `string` |
-| `xml` | `XML` | `string` | `string` |
-| `tsquery` | `TSQUERY` | `string` | `string` |
-| `json` | `JSON` | `bytes` | `[]byte` |
-| `bit(N)` | `BIT(N)` | `string` | `string` |
-| `bit` | `BIT` | `string` | `string` |
-| `varbit(N)` | `BIT VARYING(N)` | `string` | `string` |
-| `varbit` | `BIT VARYING` | `string` | `string` |
-| `tsvector` | `TSVECTOR` | `string` | `string` |
+| `.atl` type | PostgreSQL | Proto | Go | Python |
+|---|---|---|---|---|
+| `bigint` | `BIGINT` | `int64` | `int64` | `int` |
+| `int` | `INTEGER` | `int32` | `int32` | `int` |
+| `smallint` | `SMALLINT` | `int32` | `int32` | `int` |
+| `real` | `REAL` | `float` | `float32` | `float` |
+| `double` | `DOUBLE PRECISION` | `double` | `float64` | `float` |
+| `boolean` | `BOOLEAN` | `bool` | `bool` | `bool` |
+| `varchar(N)` | `VARCHAR(N)` | `string` | `string` | `str` |
+| `varchar` | `VARCHAR` | `string` | `string` | `str` |
+| `text` | `TEXT` | `string` | `string` | `str` |
+| `citext` | `CITEXT` | `string` | `string` | `str` |
+| `jsonb` | `JSONB` | `bytes` | `[]byte` | `bytes` |
+| `bytea` | `BYTEA` | `bytes` | `[]byte` | `bytes` |
+| `uuid` | `UUID` | `string` | `string` | `str` |
+| `numeric(p, s)` | `NUMERIC(p,s)` | `string` | `string` | `str` |
+| `char(N)` | `CHAR(N)` | `string` | `string` | `str` |
+| `char` | `CHAR` | `string` | `string` | `str` |
+| `name` | `NAME` | `string` | `string` | `str` |
+| `money` | `MONEY` | `string` | `string` | `str` |
+| `xml` | `XML` | `string` | `string` | `str` |
+| `tsquery` | `TSQUERY` | `string` | `string` | `str` |
+| `json` | `JSON` | `bytes` | `[]byte` | `bytes` |
+| `bit(N)` | `BIT(N)` | `string` | `string` | `str` |
+| `bit` | `BIT` | `string` | `string` | `str` |
+| `varbit(N)` | `BIT VARYING(N)` | `string` | `string` | `str` |
+| `varbit` | `BIT VARYING` | `string` | `string` | `str` |
+| `tsvector` | `TSVECTOR` | `string` | `string` | `str` |
 
 Notes:
 
@@ -61,14 +65,14 @@ Notes:
 
 ## Time
 
-| `.atl` type | PostgreSQL | Proto | Go |
-|---|---|---|---|
-| `timestamptz` | `TIMESTAMPTZ` | `google.protobuf.Timestamp` | `*timestamppb.Timestamp` |
-| `date` | `DATE` | `google.protobuf.Timestamp` | `*timestamppb.Timestamp` |
-| `timestamp` | `TIMESTAMP` | `google.protobuf.Timestamp` | `*timestamppb.Timestamp` |
-| `time` | `TIME` | `string` | `string` |
-| `timetz` | `TIMETZ` | `string` | `string` |
-| `interval` | `INTERVAL` | `atlantis.common.v1.Interval` | `*commonpb.Interval` |
+| `.atl` type | PostgreSQL | Proto | Go | Python |
+|---|---|---|---|---|
+| `timestamptz` | `TIMESTAMPTZ` | `google.protobuf.Timestamp` | `*timestamppb.Timestamp` | `timestamp_pb2.Timestamp` |
+| `date` | `DATE` | `google.protobuf.Timestamp` | `*timestamppb.Timestamp` | `timestamp_pb2.Timestamp` |
+| `timestamp` | `TIMESTAMP` | `google.protobuf.Timestamp` | `*timestamppb.Timestamp` | `timestamp_pb2.Timestamp` |
+| `time` | `TIME` | `string` | `string` | `str` |
+| `timetz` | `TIMETZ` | `string` | `string` | `str` |
+| `interval` | `INTERVAL` | `atlantis.common.v1.Interval` | `*commonpb.Interval` | `interval_pb2.Interval` |
 
 - `timestamp` is PostgreSQL's `timestamp without time zone`. `google.protobuf.Timestamp` is anchored to UTC, so a value crossing the wire is read as UTC. Declare `timestamptz` for a new column; `timestamp` exists so an existing column can be described exactly.
 - `time` and `timetz` travel as strings, in PostgreSQL's own text form: `03:04:05.000000` and `03:04:05+00`. proto has no wall-clock-time well-known type to carry them.
@@ -77,21 +81,21 @@ Notes:
 
 ## Network
 
-| `.atl` type | PostgreSQL | Proto | Go |
-|---|---|---|---|
-| `inet` | `INET` | `string` | `string` |
-| `cidr` | `CIDR` | `string` | `string` |
-| `macaddr` | `MACADDR` | `string` | `string` |
-| `macaddr8` | `MACADDR8` | `string` | `string` |
+| `.atl` type | PostgreSQL | Proto | Go | Python |
+|---|---|---|---|---|
+| `inet` | `INET` | `string` | `string` | `str` |
+| `cidr` | `CIDR` | `string` | `string` | `str` |
+| `macaddr` | `MACADDR` | `string` | `string` | `str` |
+| `macaddr8` | `MACADDR8` | `string` | `string` | `str` |
 
 - All four travel as PostgreSQL's own text form.
 - `inet` normalises on write: `10.0.0.1` reads back as `10.0.0.1/32`, because PostgreSQL stores the netmask alongside the address.
 
 ## Vectors
 
-| `.atl` type | PostgreSQL | Proto | Go |
-|---|---|---|---|
-| `vector(N)` | `vector(N)` (pgvector) | `repeated float` | `[]float32` |
+| `.atl` type | PostgreSQL | Proto | Go | Python |
+|---|---|---|---|---|
+| `vector(N)` | `vector(N)` (pgvector) | `repeated float` | `[]float32` | `Sequence[float]` |
 
 - Requires the `pgvector` extension. The operator must `CREATE EXTENSION vector` once per database.
 - `N` is the dimension. pgvector caps `vector` at 16,000 dimensions; the lexer does not enforce this but Postgres rejects creation past the cap.
@@ -111,9 +115,9 @@ entity Person in app {
 }
 ```
 
-| `.atl` type | PostgreSQL | Proto | Go |
-|---|---|---|---|
-| a declared enum | `<namespace>_<name>` in the `atlantis` schema | `string` | `string` |
+| `.atl` type | PostgreSQL | Proto | Go | Python |
+|---|---|---|---|---|
+| a declared enum | `<namespace>_<name>` in the `atlantis` schema | `string` | `string` | `str` |
 
 - The column carries the **label**, as a string. PostgreSQL enforces the set: a label the type does not list is refused at write time with `invalid input value for enum`.
 - A label is an identifier, or a quoted string when it is not — `"in progress"` is a legal PostgreSQL label and has no bare spelling.
@@ -126,14 +130,14 @@ entity Person in app {
 
 ## Ranges
 
-| `.atl` type | PostgreSQL | Proto | Go |
-|---|---|---|---|
-| `int4range` | `INT4RANGE` | `string` | `string` |
-| `int8range` | `INT8RANGE` | `string` | `string` |
-| `numrange` | `NUMRANGE` | `string` | `string` |
-| `tsrange` | `TSRANGE` | `string` | `string` |
-| `tstzrange` | `TSTZRANGE` | `string` | `string` |
-| `daterange` | `DATERANGE` | `string` | `string` |
+| `.atl` type | PostgreSQL | Proto | Go | Python |
+|---|---|---|---|---|
+| `int4range` | `INT4RANGE` | `string` | `string` | `str` |
+| `int8range` | `INT8RANGE` | `string` | `string` | `str` |
+| `numrange` | `NUMRANGE` | `string` | `string` | `str` |
+| `tsrange` | `TSRANGE` | `string` | `string` | `str` |
+| `tstzrange` | `TSTZRANGE` | `string` | `string` | `str` |
+| `daterange` | `DATERANGE` | `string` | `string` | `str` |
 
 - Each travels as PostgreSQL's own text form, bounds included: `[1,5)` is inclusive of 1 and exclusive of 5.
 - PostgreSQL normalises on write. A `tsrange` written as `[2024-01-01,2024-02-01)` reads back as `["2024-01-01 00:00:00","2024-02-01 00:00:00")`.
@@ -141,15 +145,15 @@ entity Person in app {
 
 ## Geometric
 
-| `.atl` type | PostgreSQL | Proto | Go |
-|---|---|---|---|
-| `point` | `POINT` | `string` | `string` |
-| `line` | `LINE` | `string` | `string` |
-| `lseg` | `LSEG` | `string` | `string` |
-| `box` | `BOX` | `string` | `string` |
-| `path` | `PATH` | `string` | `string` |
-| `polygon` | `POLYGON` | `string` | `string` |
-| `circle` | `CIRCLE` | `string` | `string` |
+| `.atl` type | PostgreSQL | Proto | Go | Python |
+|---|---|---|---|---|
+| `point` | `POINT` | `string` | `string` | `str` |
+| `line` | `LINE` | `string` | `string` | `str` |
+| `lseg` | `LSEG` | `string` | `string` | `str` |
+| `box` | `BOX` | `string` | `string` | `str` |
+| `path` | `PATH` | `string` | `string` | `str` |
+| `polygon` | `POLYGON` | `string` | `string` | `str` |
+| `circle` | `CIRCLE` | `string` | `string` | `str` |
 
 - Each travels as PostgreSQL's own text form: `(1,2)` for a point, `<(0,0),1>` for a circle.
 - **None is filterable or orderable.** PostgreSQL sorts none of the seven and defines `=` on only five, so a filter, primary key or `ORDER BY` on one could not be executed.
@@ -158,9 +162,9 @@ entity Person in app {
 
 ## Arrays
 
-| `.atl` type | PostgreSQL | Proto | Go |
-|---|---|---|---|
-| `[]T` | `T[]` | `repeated <T-proto>` | `[]<T-Go>` |
+| `.atl` type | PostgreSQL | Proto | Go | Python |
+|---|---|---|---|---|
+| `[]T` | `T[]` | `repeated <T-proto>` | `[]<T-Go>` | `Sequence[T]` |
 
 - Only one-dimensional arrays. `[][]T` is rejected at parse time.
 - Element type `T` is any scalar above except `vector` and the types atlantis carries as text: `inet`, `cidr`, `bit`, `varbit`, `tsvector`, the range types and the geometric types. `tide plan` refuses an array of one of those. pgx decodes an array with its element's codec, so `inet[]` would read back as the binary array body reinterpreted as characters — a wrong answer rather than an error. Declare `text[]` and cast in a custom query.

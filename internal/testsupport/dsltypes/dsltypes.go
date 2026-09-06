@@ -40,16 +40,20 @@ const DocPath = "web/docs/src/content/docs/reference/dsl-types.mdx"
 // concrete element type instead of substituting into this row.
 const ArrayRowSpelling = "[]T"
 
-// Row is one line of a four-column type table.
+// columns is the width of a type table: .atl, PostgreSQL, Proto, Go, Python.
+const columns = 5
+
+// Row is one line of a five-column type table.
 //
-// The page's Go column holds the proto-generated type —
-// `*timestamppb.Timestamp` for a timestamp — which is not what coltype.GoType
-// returns for the scan side.
+// The page's Go and Python columns hold the proto-generated types —
+// `*timestamppb.Timestamp` and `timestamp_pb2.Timestamp` for a timestamp —
+// which is not what coltype.GoType returns for the scan side.
 type Row struct {
-	ATL   string
-	PG    string
-	Proto string
-	Go    string
+	ATL    string
+	PG     string
+	Proto  string
+	Go     string
+	Python string
 }
 
 var (
@@ -80,15 +84,21 @@ func Rows() ([]Row, error) {
 			continue
 		}
 		cells := cellSplit.Split(strings.Trim(line, "|"), -1)
-		if len(cells) != 4 {
+		if len(cells) != columns {
 			// The nullability table is three columns and describes generated
 			// Go rather than the mapping, so column count skips it.
+			//
+			// Exactly five, not four-or-five: a row that lost its Go cell
+			// would still have five neighbours' worth of content shifted left,
+			// and Go would be read as the Python annotation. Skipping it
+			// instead leaves its type unmatched, which the reverse check in
+			// TestEveryDocumentedTypeIsImplemented reports by name.
 			continue
 		}
 		// A cell carries prose outside the backticks — "`vector(N)` (pgvector)"
 		// — so the backticked span is the value and the rest is commentary. A
 		// cell with no backticks at all is a header or separator row.
-		vals := make([]string, 4)
+		vals := make([]string, columns)
 		ok := true
 		for i, c := range cells {
 			m := backticked.FindStringSubmatch(c)
@@ -101,7 +111,13 @@ func Rows() ([]Row, error) {
 		if !ok {
 			continue
 		}
-		out = append(out, Row{ATL: vals[0], PG: vals[1], Proto: vals[2], Go: vals[3]})
+		out = append(out, Row{
+			ATL:    vals[0],
+			PG:     vals[1],
+			Proto:  vals[2],
+			Go:     vals[3],
+			Python: vals[4],
+		})
 	}
 
 	// A floor: every failure mode of the parser above returns fewer rows, and an

@@ -85,7 +85,7 @@ Each path is walked recursively; every file with extension `.atl` is included, a
 | `tide rehearse` | Execute the migration against a clone of the real database | `20m` |
 | `tide inspect` | Report drift between the database and the declarations | `2m` |
 | `tide pull` | Refresh the local `.tide-cache/` mirror | `30s` |
-| `tide generate` | Write the typed Go client (`--check` verifies it) | `30s` |
+| `tide generate` | Write the typed client (`--check` verifies it) | `30s` |
 | `tide list` / `tide show` | Print the merged schema's files | `30s` |
 | `tide history` / `tide diff` / `tide blame` / `tide owners` | Version registry reads | `10s` |
 | `tide rollback` | Preview a rollback (`--dry-run`) | `30s` |
@@ -123,7 +123,7 @@ The first command in a new repository; `tide login` is the second.
 
 ### `tide apply`
 
-Submits the local `.atl` files to the server, runs the migration, and prints a hint for the caller to regenerate the typed Go client. There is no endpoint override — `apply` targets the address the credential store holds for this caller.
+Submits the local `.atl` files to the server, runs the migration, and prints a hint for the caller to regenerate the typed client. There is no endpoint override — `apply` targets the address the credential store holds for this caller.
 
 ```
 tide apply [--backfill] [--dry-run] [--no-pull] [--wait-for-approval <duration>]
@@ -272,7 +272,7 @@ tide pull [--force]
 |---|---|
 | `--force` | Pull even if the local cache version equals the server's. |
 
-`.tide-cache/` mirrors every caller's currently-registered `.atl` files. It is a local cache, distinct from the generated Go client, and belongs in `.gitignore`.
+`.tide-cache/` mirrors every caller's currently-registered `.atl` files. It is a local cache, distinct from the generated client, and belongs in `.gitignore`.
 
 ### `tide generate`
 

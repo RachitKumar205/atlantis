@@ -1,0 +1,266 @@
+---
+title: "Use the Python client"
+description: "Generate a typed Python client, connect with mTLS, query and page, and run a jobs worker."
+sidebar:
+  order: 10
+---
+Generate a typed Python client, connect with mTLS, query and page, and run
+a jobs worker.
+
+<Aside type="note" title="Prerequisites">
+
+- A caller set up with `tide` ([Get started](/getting-started/)),
+  and a repository with `tide.yaml`.
+- Python 3.10 or newer.
+
+</Aside>
+
+## 1. Ask for Python
+
+```bash
+tide init --caller orders --output-dir src --language python
+```
+
+In an existing repository, add the line by hand:
+
+```yaml
+output_dir: src
+language: python
+generate:
+  - shop
+```
+
+`output_dir` must be a Python source root, because the generated code
+imports `atlantis.<namespace>.v1` and protoc fixes that path. Declare it
+as a package:
+
+```toml
+[tool.hatch.build.targets.wheel]
+packages = ["src/atlantis"]
+```
+
+Nothing else about the repository changes. There is no `go.mod`, and
+`tide generate` does not look for one.
+
+## 2. Install the runtime
+
+```bash
+pip install atlantis-client
+```
+
+The generated code imports `atlantis_client`; the two names differ because
+the generated tree owns the top-level `atlantis` package. Add
+`types-grpcio` and `types-protobuf` if you run `mypy --strict` — grpcio
+ships no annotations and protobuf ships no stubs, so the generated
+`_pb2.pyi` files need both.
+
+## 3. Generate
+
+```bash
+tide generate
+```
+
+This writes `atlantis/` under `output_dir` and commits like any other
+generated code. `tide generate --check` verifies it offline, with no
+server, no credentials, and no `buf`.
+
+## 4. Connect
+
+`tide login` stores this machine's credentials under `~/.atlantis/<org>/<caller>/`.
+`connect_from_store` reads them and uses the endpoint recorded there:
+
+```python
+from atlantis_client import connect_from_store
+
+with connect_from_store("acme", "orders") as channel:
+    ...
+```
+
+In a container, where the credentials are mounted rather than enrolled,
+`connect` reads three environment variables — `ATL_TLS_CERT`,
+`ATL_TLS_KEY` and `ATL_TLS_CA`. All three are required, and there is no
+insecure mode:
+
+```python
+from atlantis_client import connect
+
+with connect("atlantis.example.com:8443") as channel:
+    ...
+```
+
+## 5. Read and write
+
+Requests and responses are protobuf messages, and methods are snake_case
+with the entity name dropped. Each namespace package re-exports its
+clients, and each entity's message module under the entity's own name:
+
+```python
+from atlantis.shop.v1 import CustomerClient, customer
+
+customers = CustomerClient(channel)
+
+row = customers.get(customer.GetCustomerRequest(id=7)).entity
+customers.create(customer.CreateCustomerRequest(entity=customer.Customer(name="Ada")))
+```
+
+The message modules are re-exported by name rather than with a star
+import: two entities in one namespace both declare a `QueryXRequest`, and
+a star import would make which one you get depend on module order.
+
+An entity declaring `partition by` takes its tenant on the constructor,
+not per call:
+
+```python
+customers = CustomerClient(channel, tenant="acme")
+```
+
+`batch_get` refuses more than 200 ids before opening a connection, so the
+error names how many were passed.
+
+## 6. Page through a query
+
+`query_all` follows `next_page_token` for you:
+
+```python
+from atlantis.shop.v1 import customer
+
+request = customer.QueryCustomerRequest(
+    order=[
+        customer.CustomerOrderBy(
+            field=customer.CUSTOMER_ORDER_FIELD_CREATED_AT, desc=True
+        )
+    ],
+    limit=500,
+)
+
+for row in customers.query_all(request):
+    ...
+```
+
+It stops only on an empty token. A page shorter than `limit` does **not**
+end the walk: the server clamps `limit` to 1000, so a large result set
+arrives short with more still to read. Send the same `order` for the whole
+walk — a page token is valid only under the ordering it was issued for.
+
+`fields` and `includes` are declared on the request but not served. Setting
+either raises `UnsupportedQueryOption`, which is a `ValueError` rather than
+an `AtlantisError`: the request is refused before a connection is used, so
+there is no status to carry.
+
+## 7. Handle errors
+
+Every RPC raises a subclass of `AtlantisError`. One `except` covers both
+flavours, which matters because `grpc.RpcError` and `grpc.aio.AioRpcError`
+are unrelated types:
+
+```python
+from atlantis_client import Conflict, NotFound
+
+try:
+    row = customers.get(customer.GetCustomerRequest(id=7)).entity
+except NotFound:
+    ...
+except Conflict:
+    ...
+```
+
+## 8. Read the types protobuf cannot carry
+
+A `numeric` column travels as a decimal string, because proto's `double`
+and `int64` both lose digits it holds. An `interval` travels as
+`atlantis.common.v1.Interval`, which carries months, days and microseconds
+separately:
+
+```python
+from atlantis_client import interval_to_timedelta, to_decimal
+
+total = to_decimal(row.total)            # Decimal("100.00")
+window = interval_to_timedelta(row.window)
+```
+
+`interval_to_timedelta` raises when the interval carries months. A month is
+28 to 31 days, so no fixed `timedelta` represents one; the calling code has
+the date to resolve it against and this layer does not.
+
+## 9. Run a jobs worker
+
+A namespace declaring jobs gets a `jobs.py` with a frozen args dataclass
+and a `register_<job>` per job. The worker opens one bidi stream and runs
+handlers on a thread pool:
+
+```python
+from atlantis_client import connect_from_store
+from atlantis_client.jobs import DispatchedWorker, Registry, WorkerConfig, checkpoint
+from atlantis.shop.v1 import ReindexOrderArgs, register_reindex_order
+
+
+def handle(args: ReindexOrderArgs) -> None:
+    checkpoint(50, "halfway")
+    ...
+
+
+registry = Registry()
+register_reindex_order(registry, handle)
+
+with connect_from_store("acme", "orders") as channel:
+    DispatchedWorker(channel, registry, WorkerConfig(queue="maintenance")).run()
+```
+
+`run()` blocks until `stop()`, reconnecting with backoff. `checkpoint()`
+reports progress without waiting for the next heartbeat, and does nothing
+when called outside a handler — so a function that reports progress stays
+callable from a test with no worker attached.
+
+Job args are JSON, not protobuf, so their types follow Go's JSON
+projection rather than the proto one. A `timestamptz` arg is an RFC 3339
+`str`; `bytea` and `jsonb` are both base64 `str`. The
+[type mapping](/reference/dsl-types/) lists the proto side, and
+`atlantis_client.jobs.argjson` carries the decoders for the JSON one.
+
+## The async flavour
+
+Every generated client has an `Async` twin over a `grpc.aio.Channel`, with
+the same method names:
+
+```python
+from atlantis_client.aio import connect_from_store
+from atlantis.shop.v1 import AsyncCustomerClient
+
+async with connect_from_store("acme", "orders") as channel:
+    customers = AsyncCustomerClient(channel)
+    async for row in customers.query_all(request):
+        ...
+```
+
+They are separate classes rather than one class that returns either, so
+`mypy --strict` can tell an awaited call from a blocking one.
+
+## Verify
+
+```bash
+tide generate --check
+python -m compileall -q src
+```
+
+`--check` compares the tree against `tide.manifest.json` and reports
+hand-edited, missing and leftover files.
+
+## Known limits
+
+- **TLS 1.3 cannot be pinned client-side.** `grpc.ssl_channel_credentials`
+  takes no minimum-version argument, so the Python client cannot pin what
+  the Go client pins. The server's floor still refuses anything lower.
+- **A long-lived channel keeps its certificate.** grpc-python snapshots
+  credentials when the channel is built. A certificate renewed by `tide` is
+  not picked up until the channel is rebuilt. The jobs worker gets this for
+  free by reconnecting; the data plane does not.
+- **The direct-Postgres jobs worker is not ported.** It needs a driver and
+  a second set of credentials for a path the dispatcher already covers.
+
+## Related
+
+- [The generated client](/concepts/the-generated-client/) — what `generate` writes and why it is committed.
+- [The typed query surface](/concepts/the-typed-query-surface/) — what `Query` can express.
+- [Declare a background job](/guides/declarative-jobs/) — declaring the job the worker runs.
+- [Type mapping](/reference/dsl-types/) — each `.atl` type's PostgreSQL, proto, Go and Python form.
+- [`tide generate`](/reference/cli-tide/#tide-generate) — flags, exit codes, and what each language owns.

@@ -155,6 +155,20 @@ func TestEveryDocumentedTypeIsImplemented(t *testing.T) {
 			if gotNullable != wantNullable {
 				t.Errorf("GoType(nullable) = %q, want %q", gotNullable, wantNullable)
 			}
+
+			// PyType has no nullable form, and the page has no nullable
+			// Python column: protobuf-python returns the field's default for
+			// an unset field and reports absence through HasField, so a
+			// nullable column's annotation is the same as a not-null one's.
+			gotPy, err := coltype.PyType(s.ft)
+			if err != nil {
+				t.Fatalf("PyType: %v — a documented type the Python emitter "+
+					"cannot annotate fails `tide generate` for a caller whose "+
+					"tide.yaml says language: python", err)
+			}
+			if gotPy != r.Python {
+				t.Errorf("PyType = %q, the reference page promises %q", gotPy, r.Python)
+			}
 		})
 	}
 
@@ -184,6 +198,13 @@ func TestDocumentedArrayMapping(t *testing.T) {
 	}
 	if got := coltype.GoType(ft, true); got != "[]string" {
 		t.Errorf("GoType = %q, want []string", got)
+	}
+	gotPy, err := coltype.PyType(ft)
+	if err != nil {
+		t.Fatalf("PyType: %v", err)
+	}
+	if gotPy != "Sequence[str]" {
+		t.Errorf("PyType = %q, want Sequence[str]", gotPy)
 	}
 }
 

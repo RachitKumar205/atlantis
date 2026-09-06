@@ -8,6 +8,12 @@ from atlantis.library.v1.author_client import AsyncAuthorClient, AuthorClient
 from atlantis.library.v1 import book_pb2 as book
 from atlantis.library.v1.book_client import AsyncBookClient, BookClient
 from atlantis.library.v1.custom_client import AsyncCustomClient, CustomClient
+from atlantis.library.v1.jobs import (
+    REINDEX_AUTHOR_JOB_NAME,
+    ReindexAuthorArgs,
+    ReindexAuthorHandler,
+    register_reindex_author,
+)
 
 __all__ = [
     "AsyncAuthorClient",
@@ -16,6 +22,10 @@ __all__ = [
     "AuthorClient",
     "BookClient",
     "CustomClient",
+    "REINDEX_AUTHOR_JOB_NAME",
+    "ReindexAuthorArgs",
+    "ReindexAuthorHandler",
     "author",
     "book",
+    "register_reindex_author",
 ]

@@ -68,19 +68,37 @@ The override is symmetric: `heartbeat 30s` narrows the window so a dead worker i
 
 ## 3. Checkpointing progress
 
-The auto-heartbeat keeps the lease alive but says nothing about what the handler has accomplished. For that, call `jobs.Checkpoint`:
+The auto-heartbeat keeps the lease alive but says nothing about what the handler has accomplished. For that, checkpoint:
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
 
 ```go
 jobs.Checkpoint(ctx, pct, msg)
 ```
 
-- `pct` is 0–100; clamped server-side, so an out-of-range value won't error.
-- `msg` is a short human-readable label, truncated server-side at 256 characters. Operators see it in `tide job status <id>` and on the console session detail.
-- The return error is advisory; handlers typically `_ = jobs.Checkpoint(...)`.
+The return error is advisory; handlers typically `_ = jobs.Checkpoint(...)`.
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from atlantis_client.jobs import checkpoint
+
+checkpoint(pct, msg)
+```
+
+It reaches the worker through a ContextVar rather than an argument, so a helper several frames deep reports without threading a parameter through every one. Outside a handler it does nothing and returns — a function that reports progress stays callable from a unit test with no worker attached.
+
+</TabItem>
+</Tabs>
+
+- `pct` is 0–100; clamped client- and server-side, so an out-of-range value won't error.
+- `msg` is a short human-readable label, truncated at 256 characters. Operators see it in `tide job status <id>` and on the console session detail.
 
 Each call bumps the lease and persists progress to the `progress_pct`, `progress_msg`, and `progress_at` columns on `atlantis.jobs`. A handler that checkpoints every minute needs no extended `heartbeat` modifier, because the manual calls keep the lease fresh.
 
-Call it when each meaningful unit of work finishes — a page fetched, a thousand rows imported, an epoch trained — and right before a long blocking call. Do not call it from a tight loop millions of iterations deep, or from a goroutine the handler has forked.
+Call it when each meaningful unit of work finishes — a page fetched, a thousand rows imported, an epoch trained — and right before a long blocking call. Do not call it from a tight loop millions of iterations deep, or from a goroutine or thread the handler has forked — the Python ContextVar is not visible there either.
 
 For resume, store the cursor in your state table from section 1 — that's the source of truth. `progress_msg` is for operators reading a live job; relying on it for resume couples the handler to a column it was never meant to own.
 
@@ -197,3 +215,4 @@ A crash mid-import becomes a non-event: the lease expires after 10 minutes, the 
 - [Declarative jobs](/guides/declarative-jobs/) — end-to-end recipe for declaring a job and registering a handler.
 - [Jobs and workflows](/concepts/jobs-and-workflows/) — runtime model, including the lease, DLQ, and workflow compensations.
 - [DSL grammar reference](/reference/dsl-grammar/) — full grammar for `job` modifiers.
+- [Use the Python client](/guides/use-the-python-client/) — the Python worker, end to end.

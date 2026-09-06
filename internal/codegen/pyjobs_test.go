@@ -232,3 +232,67 @@ func kindOf(raw string) jsonKind {
 	// int wherever a float is annotated, so the annotation stays "float".
 	return jsonInt
 }
+
+// TestAJobsOnlyNamespaceStillGetsItsPackage covers the same hole the
+// custom-only case already had: EmitPyPackages built its namespace list from
+// entities and custom SQL, so a namespace declaring only jobs got a jobs.py
+// in a directory with no __init__.py and no py.typed coverage.
+func TestAJobsOnlyNamespaceStillGetsItsPackage(t *testing.T) {
+	ir := &dsl.IR{Jobs: []dsl.Job{{
+		Namespace: "ops",
+		Name:      "Reindex",
+		Args:      []dsl.Field{{Name: "since", Type: dsl.FieldType{Name: "bigint"}, NotNull: true}},
+	}}}
+	files, err := EmitPyPackages(ir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := map[string]string{}
+	for _, f := range files {
+		paths[f.Path] = f.Content
+	}
+	for _, want := range []string{"atlantis/ops/__init__.py", "atlantis/ops/v1/__init__.py"} {
+		if _, ok := paths[want]; !ok {
+			t.Errorf("%s was not emitted; jobs.py would land in a directory "+
+				"the package does not cover", want)
+		}
+	}
+}
+
+// TestTheNamespacePackageExportsItsJobs keeps the job surface reachable the
+// way the clients are. Without it a caller imports entities from
+// atlantis.<ns>.v1 and jobs from atlantis.<ns>.v1.jobs, for no stated reason.
+func TestTheNamespacePackageExportsItsJobs(t *testing.T) {
+	ir := &dsl.IR{Jobs: []dsl.Job{{
+		Namespace: "ops",
+		Name:      "ReindexAuthor",
+		Args:      []dsl.Field{{Name: "since", Type: dsl.FieldType{Name: "bigint"}, NotNull: true}},
+	}}}
+	files, err := EmitPyPackages(ir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var init string
+	for _, f := range files {
+		if f.Path == "atlantis/ops/v1/__init__.py" {
+			init = f.Content
+		}
+	}
+	for _, want := range []string{
+		"from atlantis.ops.v1.jobs import (\n    REINDEX_AUTHOR_JOB_NAME,\n" +
+			"    ReindexAuthorArgs,\n    ReindexAuthorHandler,\n    register_reindex_author,\n)",
+		`"register_reindex_author",`,
+	} {
+		if !strings.Contains(init, want) {
+			t.Errorf("__init__.py does not contain %q:\n%s", want, init)
+		}
+	}
+
+	// The caller's own linter reads this file, and 100 is the limit the
+	// runtime's own ruff config uses.
+	for _, line := range strings.Split(init, "\n") {
+		if len(line) > 100 {
+			t.Errorf("emitted line is %d characters: %s", len(line), line)
+		}
+	}
+}

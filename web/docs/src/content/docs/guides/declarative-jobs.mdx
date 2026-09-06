@@ -53,9 +53,13 @@ The declaration is additive. The server enforces `retries`, `timeout`, and
 tide generate
 ```
 
-Alongside the entity clients, `tide generate` writes `client/<ns>/jobs.go`
-with a typed `Args` struct, a handler interface, and a `Register<Job>`
+Alongside the entity clients, `tide generate` writes a jobs module per
+namespace — `client/<ns>/jobs.go` for Go, `atlantis/<ns>/v1/jobs.py` for
+Python — with a typed args type, a handler type, and a `Register<Job>`
 helper per declared job. Handlers run in your service's binary:
+
+<Tabs syncKey="lang">
+<TabItem label="Go">
 
 ```go
 type importContactsHandler struct{ crm *crm.Client }
@@ -70,10 +74,35 @@ registry := jobs.NewRegistry()
 directory.RegisterImportContacts(registry, &importContactsHandler{crm: crmClient})
 ```
 
-The helper decodes the row's args JSON into the typed struct before
-invoking `Handle`. (Registering under the raw id
-`"directory.ImportContacts"` with `jobs.HandlerFunc` and your own
-`json.Unmarshal` works the same way.)
+</TabItem>
+<TabItem label="Python">
+
+```python
+from atlantis.directory.v1 import ImportContactsArgs, register_import_contacts
+from atlantis_client.jobs import Registry, checkpoint
+
+
+def handle(args: ImportContactsArgs) -> None:
+    checkpoint(10, "fetching contacts")
+    # ... your import logic, reading args.account_id ...
+
+
+registry = Registry()
+register_import_contacts(registry, handle)
+```
+
+Python raises rather than returning an error, and the args arrive as a
+frozen dataclass built from the row's JSON. A `timestamptz` arg is an
+RFC 3339 `str` there, not a datetime — job args follow the JSON
+projection, which the [type mapping](/reference/dsl-types/) and
+`atlantis_client.jobs.argjson` cover.
+
+</TabItem>
+</Tabs>
+
+The helper decodes the row's args JSON into the typed value before invoking
+your handler. (Registering under the raw id `"directory.ImportContacts"`
+and decoding yourself works the same way.)
 
 A non-nil return retries the attempt up to the declared `retries`, then
 dead-letters it. `jobs.Checkpoint(ctx, pct, msg)` reports progress and
@@ -84,6 +113,9 @@ extends the attempt's lease; long-running handlers call it as they go.
 The worker holds a gRPC session to your organisation's server and receives
 dispatched work over it — your service needs no database access:
 
+<Tabs syncKey="lang">
+<TabItem label="Go">
+
 ```go
 w := jobs.NewDispatchedWorker(conn, registry, "contacts", jobs.ServerConfig{
     Logger: slog.Default(),
@@ -92,11 +124,29 @@ go w.Run(ctx)
 ```
 
 `conn` is your service's authenticated `*grpc.ClientConn` to atlantis.
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from atlantis_client import connect_from_store
+from atlantis_client.jobs import DispatchedWorker, WorkerConfig
+
+with connect_from_store("acme", "directory") as channel:
+    DispatchedWorker(channel, registry, WorkerConfig(queue="contacts")).run()
+```
+
+`run()` blocks; `stop()` from another thread ends it. Handlers run on a
+thread pool sized by `WorkerConfig.max_in_flight`.
+
+</TabItem>
+</Tabs>
+
 The queue must be one a declared job runs on (`"default"` when no job
-names one) — an unknown queue is refused at session open. `Run`
-reconnects on stream errors
-with backoff; work in flight when a worker dies is re-dispatched to another
-worker after its lease expires, so handlers must be idempotent.
+names one) — an unknown queue is refused at session open. Both workers
+reconnect on stream errors with backoff; work in flight when a worker dies
+is re-dispatched to another worker after its lease expires, so handlers
+must be idempotent.
 
 ## 5. Submit
 
