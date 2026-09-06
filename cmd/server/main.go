@@ -691,6 +691,11 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 			BaseContext: workerCtx,
 		})
 		jobsdispatcher.Register(srv, dispatcher)
+		// The same dispatcher, reached over a service that wraps each JSON
+		// envelope in a protobuf message. A worker whose gRPC library cannot
+		// select a content-subtype — grpc-python cannot — opens this one
+		// instead; everything past the wire adapter is shared.
+		jobsdispatcher.RegisterFramed(srv, dispatcher)
 		adminSvc.SetDispatcher(newDispatcherAdapter(dispatcher))
 		for _, queue := range cfg.JobsDispatcherQueues {
 			queue := queue

@@ -124,11 +124,14 @@ atlantis.dev.yaml
 /gen/
 /clients/go/client/
 /clients/go/pb/
-# Per-namespace proto dirs are generated. atlantis/common/ and
-# atlantis/admin/ are hand-written and stay tracked; ignore everything else.
+# Per-namespace proto dirs are generated: one appears under atlantis/ for
+# every namespace a caller's .atl files declare, and `make codegen` rewrites
+# them. The three below are hand-written and stay tracked — they describe
+# atlantis's own surfaces rather than any caller's schema.
 /atlantis/*/
 !/atlantis/common/
 !/atlantis/admin/
+!/atlantis/workerdispatch/
 
 # migrations/tidectl/ is also derived — populated by operators running
 # tidectl plan/approve against their own workspace. (See note above on .dev/.)
