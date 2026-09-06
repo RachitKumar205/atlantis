@@ -82,6 +82,27 @@ func TestEmittersMatchGolden(t *testing.T) {
 		}
 	}
 
+	// The Python client. `tide generate --language python` writes these into
+	// the caller's repository the same way the Go ones go in, so the same
+	// review applies.
+	pyEmitters := []struct {
+		name string
+		fn   func() ([]PyFile, error)
+	}{
+		{"py client", func() ([]PyFile, error) { return EmitPyClient(ir, GenConfig{}) }},
+		{"py custom client", func() ([]PyFile, error) { return EmitPyCustomClient(ir) }},
+		{"py packages", func() ([]PyFile, error) { return EmitPyPackages(ir) }},
+	}
+	for _, e := range pyEmitters {
+		files, ferr := e.fn()
+		if ferr != nil {
+			t.Fatalf("%s: %v", e.name, ferr)
+		}
+		for _, pf := range files {
+			got[pf.Path] = pf.Content
+		}
+	}
+
 	protos, err := EmitProto(ir)
 	if err != nil {
 		t.Fatalf("EmitProto: %v", err)

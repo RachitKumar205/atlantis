@@ -25,15 +25,25 @@ SERVER_MAX_LIMIT = 1000
 Row = TypeVar("Row")
 
 
-class _Page(Protocol):
+class Page(Protocol):
     """The shape every Query response shares."""
 
     next_page_token: str
 
 
+# The page type is a variable, not the protocol itself.
+#
+# With `rows_of: Callable[[Page], ...]` the lambda's parameter is the protocol,
+# which declares only next_page_token, so `lambda page: page.entities` fails
+# under mypy --strict with "Page has no attribute entities" — in the caller's
+# generated code, where the annotation cannot be changed. Binding the variable
+# to the concrete response type keeps `.entities` visible.
+PageT = TypeVar("PageT", bound=Page)
+
+
 def iterate_pages(
-    fetch: Callable[[str], _Page],
-    rows_of: Callable[[_Page], Sequence[Row]],
+    fetch: Callable[[str], PageT],
+    rows_of: Callable[[PageT], Sequence[Row]],
 ) -> Iterator[Row]:
     """Yield every row across every page.
 
@@ -61,8 +71,8 @@ def iterate_pages(
 
 
 async def aiterate_pages(
-    fetch: Callable[[str], Awaitable[_Page]],
-    rows_of: Callable[[_Page], Sequence[Row]],
+    fetch: Callable[[str], Awaitable[PageT]],
+    rows_of: Callable[[PageT], Sequence[Row]],
 ) -> AsyncIterator[Row]:
     """:func:`iterate_pages` over an async ``fetch``."""
     token = ""

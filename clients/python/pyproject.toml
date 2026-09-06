@@ -20,10 +20,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# types-grpcio is not optional for the type check: grpcio ships no annotations,
-# and grpc.Channel and grpc.ChannelCredentials appear in this package's public
-# signatures. A caller running mypy over their generated tree needs it too.
-dev = ["pytest>=8", "mypy>=1.11", "ruff>=0.6", "types-grpcio>=1.60"]
+# Both stub packages are required for the type check, not conveniences.
+#
+# grpcio ships no annotations and grpc.Channel / grpc.ChannelCredentials appear
+# in this package's public signatures. protobuf ships neither py.typed nor
+# stubs, so google.protobuf.message.Message resolves to Any and every generated
+# _pb2.pyi fails `mypy --strict` with "Class cannot subclass Message".
+#
+# A caller type-checking their own generated tree needs both for the same
+# reasons; see guides/use-the-python-client.
+dev = [
+    "pytest>=8",
+    "mypy>=1.11",
+    "ruff>=0.6",
+    "types-grpcio>=1.60",
+    "types-protobuf>=5",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/atlantis_client"]

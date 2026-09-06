@@ -16,6 +16,18 @@ type GoFile struct {
 	Content string
 }
 
+// PyFile is one emitted Python source file.
+//
+// A distinct type from GoFile rather than a shared one carrying a language
+// field. cmd/tide's planSDKFiles runs go/format.Source over every GoFile it
+// plans, and format.Source on Python returns a parse error naming a line
+// number in a file the caller never wrote. Separate types make that call
+// impossible to write rather than something a branch has to remember.
+type PyFile struct {
+	Path    string
+	Content string
+}
+
 // EmitGoServer renders one server file per entity in newIR. Each file
 // satisfies the buf-generated `<Entity>ServiceServer` interface from
 // `gen/go/pb/<ns>/`, so the resulting tree can be mounted on a real
