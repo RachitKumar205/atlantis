@@ -264,11 +264,15 @@ func planPythonFiles(ir *dsl.IR, out map[string]string) error {
 	if err != nil {
 		return fmt.Errorf("emit python custom client: %w", err)
 	}
+	jobsHandlers, err := codegen.EmitPyJobsHandlers(ir)
+	if err != nil {
+		return fmt.Errorf("emit python jobs handlers: %w", err)
+	}
 	packages, err := codegen.EmitPyPackages(ir)
 	if err != nil {
 		return fmt.Errorf("emit python packages: %w", err)
 	}
-	for _, pf := range append(append(clientFiles, customClient...), packages...) {
+	for _, pf := range append(append(append(clientFiles, customClient...), jobsHandlers...), packages...) {
 		out[filepath.ToSlash(pf.Path)] = pf.Content
 	}
 	return nil

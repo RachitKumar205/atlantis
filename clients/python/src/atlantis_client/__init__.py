@@ -20,6 +20,7 @@ The async flavour is :mod:`atlantis_client.aio`, whose ``connect`` returns a
 
 from __future__ import annotations
 
+from .convert import Interval, interval_to_timedelta, to_decimal
 from .credentials import CredentialsError, NoCredentials, StoredCredentials, load, store_root
 from .errors import (
     AlreadyExists,
@@ -62,6 +63,7 @@ __all__ = [
     "CredentialsError",
     "DeadlineExceeded",
     "Internal",
+    "Interval",
     "InvalidArgument",
     "NoCredentials",
     "NotFound",
@@ -79,9 +81,11 @@ __all__ = [
     "channel_credentials_from_store",
     "connect",
     "connect_from_store",
+    "interval_to_timedelta",
     "iterate_pages",
     "load",
     "metadata_for",
     "store_root",
+    "to_decimal",
     "translate",
 ]

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/rachitkumar205/atlantis/jobs"
 )
 
@@ -23,6 +24,9 @@ type ReindexAuthorArgs struct {
 	AuthorId                       int64 `json:"author_id"`
 	Reason                         *string `json:"reason"`
 	NotBefore                      time.Time `json:"not_before"`
+	Backoff                        pgtype.Interval `json:"backoff"`
+	Weights                        []float32 `json:"weights"`
+	Payload                        []byte `json:"payload"`
 }
 
 // ReindexAuthorHandler is the typed handler interface for the library.ReindexAuthor job.

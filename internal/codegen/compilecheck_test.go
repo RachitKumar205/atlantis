@@ -151,6 +151,7 @@ var compilecheckTrees = []compilecheckTree{
 				return EmitPyClient(ir, GenConfig{})
 			})},
 			{"EmitPyCustomClient", pyEmitter(EmitPyCustomClient)},
+			{"EmitPyJobsHandlers", pyEmitter(EmitPyJobsHandlers)},
 			{"EmitPyPackages", pyEmitter(EmitPyPackages)},
 		},
 	},

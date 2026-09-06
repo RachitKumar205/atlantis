@@ -78,6 +78,9 @@ job ReindexAuthor in library {
     author_id  bigint not null
     reason     text
     not_before timestamptz not null
+    backoff    interval not null
+    weights    vector(3)
+    payload    bytea
   }
   retries 3
   timeout 30s

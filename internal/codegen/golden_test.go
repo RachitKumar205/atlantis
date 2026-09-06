@@ -91,6 +91,7 @@ func TestEmittersMatchGolden(t *testing.T) {
 	}{
 		{"py client", func() ([]PyFile, error) { return EmitPyClient(ir, GenConfig{}) }},
 		{"py custom client", func() ([]PyFile, error) { return EmitPyCustomClient(ir) }},
+		{"py jobs handlers", func() ([]PyFile, error) { return EmitPyJobsHandlers(ir) }},
 		{"py packages", func() ([]PyFile, error) { return EmitPyPackages(ir) }},
 	}
 	for _, e := range pyEmitters {
