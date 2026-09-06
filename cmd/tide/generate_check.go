@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/rachitkumar205/atlantis/internal/cliout"
@@ -40,12 +39,23 @@ const (
 //
 // TideVersion is not compared. main.go defaults version to "dev", so a release
 // binary and `go run ./cmd/tide` would disagree on every run.
-func checkGenerated(m *generateManifest, disk map[string]string, caller, modulePrefix string, fresh map[string]string) checkOutcome {
+func checkGenerated(m *generateManifest, disk map[string]string, caller, modulePrefix string, lang sdkLanguage, fresh map[string]string) checkOutcome {
 	if m.Caller != "" && m.Caller != caller {
 		return checkOutcome{
 			Code: checkUnknown,
 			Message: fmt.Sprintf("the manifest was written for caller %q and this is %q",
 				m.Caller, caller),
+		}
+	}
+	// A tree generated in another language is stale, not unanswerable: running
+	// `tide generate` produces the right thing. Reported before the hashes are
+	// compared, since every path would differ and the delta list would be the
+	// whole tree twice over.
+	if m.language() != lang {
+		return checkOutcome{
+			Code: checkStale,
+			Message: fmt.Sprintf("the committed client is %s and tide.yaml now asks for %s",
+				m.language(), lang),
 		}
 	}
 	if m.ModulePrefix != "" && m.ModulePrefix != modulePrefix {
@@ -64,14 +74,19 @@ func checkGenerated(m *generateManifest, disk map[string]string, caller, moduleP
 	if fresh == nil {
 		return checkOutcome{Code: checkCurrent}
 	}
-	// Everything the manifest records except pb/, which buf produced and the
+	// Everything the manifest records except what buf produced, which the
 	// emitters do not render. Filtering by the manifest's paths rather than by
 	// fresh's keys: a recorded file the emitters no longer render is an entity
 	// the schema dropped, and a subset built from fresh would never compare it.
+	//
+	// codegen.ProducedByBuf rather than a `pb/` prefix: Python's buf output
+	// lands inside atlantis/ beside the clients, so a prefix test reports every
+	// _pb2.py as a file the emitters dropped and --check fails on a tree that
+	// is current.
 	recorded := manifestHashes(m)
 	subset := make(map[string]string, len(recorded))
 	for p, h := range recorded {
-		if !strings.HasPrefix(p, "pb/") {
+		if !codegen.ProducedByBuf(p) {
 			subset[p] = h
 		}
 	}
@@ -83,7 +98,7 @@ func checkGenerated(m *generateManifest, disk map[string]string, caller, moduleP
 }
 
 // runCheck reads the tree and reports. Writes nothing.
-func runCheck(cfg *tideConfig, outDir, modulePrefix string, againstServer bool, timeout time.Duration) int {
+func runCheck(cfg *tideConfig, outDir, modulePrefix string, lang sdkLanguage, againstServer bool, timeout time.Duration) int {
 	m, err := readManifest(outDir)
 	if os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "tide generate: %s has no %s — run `tide generate`\n",
@@ -95,7 +110,7 @@ func runCheck(cfg *tideConfig, outDir, modulePrefix string, againstServer bool, 
 		return checkUnknown
 	}
 
-	disk, err := hashOwnedTree(outDir)
+	disk, err := hashOwnedTree(outDir, lang)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide generate:", err)
 		return checkUnknown
@@ -111,7 +126,7 @@ func runCheck(cfg *tideConfig, outDir, modulePrefix string, againstServer bool, 
 			fmt.Fprintln(os.Stderr, "tide generate:", err)
 			return checkUnknown
 		}
-		planned, err := planSDKFiles(codegen.FilterIR(ir, cfg.Generate), modulePrefix)
+		planned, err := planSDKFiles(codegen.FilterIR(ir, cfg.Generate), lang, modulePrefix)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "tide generate:", err)
 			return checkUnknown
@@ -119,7 +134,7 @@ func runCheck(cfg *tideConfig, outDir, modulePrefix string, againstServer bool, 
 		fresh = hashContents(planned)
 	}
 
-	out := checkGenerated(m, disk, cfg.Caller, modulePrefix, fresh)
+	out := checkGenerated(m, disk, cfg.Caller, modulePrefix, lang, fresh)
 	switch out.Code {
 	case checkCurrent:
 		return 0

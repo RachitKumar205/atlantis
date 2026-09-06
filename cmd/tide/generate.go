@@ -60,15 +60,27 @@ func cmdGenerate(args []string) int {
 		return 3
 	}
 
-	modulePath, err := callerModulePath()
+	lang, err := resolveLanguage(cfg.Language)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide generate:", err)
 		return 3
 	}
-	modulePrefix := modulePath + "/" + filepath.ToSlash(outDir)
+
+	// go.mod is read only when generating Go. A Python repository has none,
+	// and reading it regardless fails before anything is generated with an
+	// error naming a file that repository has no reason to contain.
+	modulePrefix := ""
+	if lang.needsGoModule() {
+		modulePath, merr := callerModulePath()
+		if merr != nil {
+			fmt.Fprintln(os.Stderr, "tide generate:", merr)
+			return 3
+		}
+		modulePrefix = modulePath + "/" + filepath.ToSlash(outDir)
+	}
 
 	if *check {
-		return runCheck(cfg, outDir, modulePrefix, *againstServer, *timeout)
+		return runCheck(cfg, outDir, modulePrefix, lang, *againstServer, *timeout)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -86,29 +98,40 @@ func cmdGenerate(args []string) int {
 		return 3
 	}
 
-	// Refuse a tree another caller generated. Two callers sharing an
-	// output_dir accreted both their namespaces while generate only wrote;
-	// now that it clears what it owns, the second would delete the first.
-	if prev, err := readManifest(outDir); err == nil && prev.Caller != "" && prev.Caller != cfg.Caller {
-		fmt.Fprintf(os.Stderr, "tide generate: %s holds a client generated for caller %q, "+
-			"and this is %q. Give each caller its own output_dir.\n",
-			outDir, prev.Caller, cfg.Caller)
-		return 3
+	// What is already in output_dir decides whether this run may write there.
+	// Generate clears what it owns, so a tree belonging to another caller or
+	// another language would be partly deleted and partly left behind.
+	if prev, perr := readManifest(outDir); perr == nil {
+		if prev.Caller != "" && prev.Caller != cfg.Caller {
+			fmt.Fprintf(os.Stderr, "tide generate: %s holds a client generated for caller %q, "+
+				"and this is %q. Give each caller its own output_dir.\n",
+				outDir, prev.Caller, cfg.Caller)
+			return 3
+		}
+		// The two languages share the atlantis/ root, so the previous
+		// language's files under it survive a sweep that no longer knows to
+		// remove them, under a manifest that no longer records them.
+		if prev.language() != lang {
+			fmt.Fprintf(os.Stderr, "tide generate: %s holds a %s client and this run generates %s. "+
+				"Delete it, or give each language its own output_dir.\n",
+				outDir, prev.language(), lang)
+			return 3
+		}
 	}
 
-	if _, err := generateSDK(scoped, outDir, modulePrefix); err != nil {
+	if _, err := generateSDK(scoped, outDir, lang, modulePrefix); err != nil {
 		fmt.Fprintln(os.Stderr, "tide generate:", err)
 		return 3
 	}
 
 	// The manifest is built from what is on disk rather than from the plan,
-	// so it records the .pb.go files buf produced as well.
-	hashes, err := hashOwnedTree(outDir)
+	// so it records the files buf produced as well.
+	hashes, err := hashOwnedTree(outDir, lang)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide generate:", err)
 		return 3
 	}
-	m := buildManifest(cfg.Caller, modulePrefix, version, cfg.Generate, hashes)
+	m := buildManifest(cfg.Caller, modulePrefix, version, lang, cfg.Generate, hashes)
 	if err := writeManifest(outDir, m); err != nil {
 		fmt.Fprintln(os.Stderr, "tide generate:", err)
 		return 3
@@ -162,9 +185,11 @@ func fetchCanonicalIR(ctx context.Context, cfg *tideConfig) (*dsl.IR, string, er
 // below, and a .pb.go is a function of its .proto plus the plugin versions
 // pinned in buf.gen.yaml — so proto equality implies pb equality, and --check
 // need not invoke buf to know it.
-func planSDKFiles(ir *dsl.IR, modulePrefix string) (map[string]string, error) {
+func planSDKFiles(ir *dsl.IR, lang sdkLanguage, modulePrefix string) (map[string]string, error) {
 	out := map[string]string{}
 
+	// The protos are the same whatever language reads them: they are the wire
+	// contract, and only the plugins buf runs over them differ.
 	protoFiles, err := codegen.EmitProto(ir)
 	if err != nil {
 		return nil, fmt.Errorf("emit proto: %w", err)
@@ -181,18 +206,35 @@ func planSDKFiles(ir *dsl.IR, modulePrefix string) (map[string]string, error) {
 		return nil, err
 	}
 
+	switch lang {
+	case langPython:
+		err = planPythonFiles(ir, out)
+	default:
+		err = planGoFiles(ir, modulePrefix, out)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	bufGen, bufYAML := bufConfigs(lang, modulePrefix)
+	out["buf.gen.yaml"] = bufGen
+	out["buf.yaml"] = bufYAML
+	return out, nil
+}
+
+func planGoFiles(ir *dsl.IR, modulePrefix string, out map[string]string) error {
 	cfg := codegen.GenConfig{ModulePrefix: modulePrefix}
 	clientFiles, err := codegen.EmitGoClient(ir, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("emit go client: %w", err)
+		return fmt.Errorf("emit go client: %w", err)
 	}
 	customClient, err := codegen.EmitCustomClient(ir, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("emit custom client: %w", err)
+		return fmt.Errorf("emit custom client: %w", err)
 	}
 	jobsFiles, err := codegen.EmitCallerJobsHandlers(ir)
 	if err != nil {
-		return nil, fmt.Errorf("emit jobs handlers: %w", err)
+		return fmt.Errorf("emit jobs handlers: %w", err)
 	}
 	for _, gf := range append(append(clientFiles, customClient...), jobsFiles...) {
 		// Emitter paths are repo-relative (clients/go/client/<ns>/...);
@@ -200,15 +242,36 @@ func planSDKFiles(ir *dsl.IR, modulePrefix string) (map[string]string, error) {
 		rel := filepath.ToSlash(strings.TrimPrefix(gf.Path, "clients/go/"))
 		src, err := format.Source([]byte(gf.Content))
 		if err != nil {
-			return nil, fmt.Errorf("format %s: %w", rel, err)
+			return fmt.Errorf("format %s: %w", rel, err)
 		}
 		out[rel] = string(src)
 	}
+	return nil
+}
 
-	bufGen, bufYAML := bufConfigs(modulePrefix)
-	out["buf.gen.yaml"] = bufGen
-	out["buf.yaml"] = bufYAML
-	return out, nil
+// planPythonFiles renders the Python client at the paths the emitters already
+// produce — atlantis/<ns>/v1/... — with no remapping.
+//
+// format.Source is not called here and cannot be: it is Go's formatter, and
+// PyFile is a distinct type from GoFile so that handing it one does not
+// type-check. Python arrives already formatted by the emitters.
+func planPythonFiles(ir *dsl.IR, out map[string]string) error {
+	clientFiles, err := codegen.EmitPyClient(ir, codegen.GenConfig{})
+	if err != nil {
+		return fmt.Errorf("emit python client: %w", err)
+	}
+	customClient, err := codegen.EmitPyCustomClient(ir)
+	if err != nil {
+		return fmt.Errorf("emit python custom client: %w", err)
+	}
+	packages, err := codegen.EmitPyPackages(ir)
+	if err != nil {
+		return fmt.Errorf("emit python packages: %w", err)
+	}
+	for _, pf := range append(append(clientFiles, customClient...), packages...) {
+		out[filepath.ToSlash(pf.Path)] = pf.Content
+	}
+	return nil
 }
 
 // sweepOwned removes the trees generate rewrites, so an entity dropped from
@@ -217,8 +280,8 @@ func planSDKFiles(ir *dsl.IR, modulePrefix string) (map[string]string, error) {
 // Scoped to ownedRoots rather than output_dir itself: a caller may keep
 // anything else in that directory. outDir must already have passed
 // validateOutputDir — this deletes.
-func sweepOwned(outDir string) error {
-	for _, root := range ownedRoots() {
+func sweepOwned(outDir string, lang sdkLanguage) error {
+	for _, root := range lang.ownedRoots() {
 		if err := os.RemoveAll(filepath.Join(outDir, root)); err != nil {
 			return fmt.Errorf("clear %s: %w", root, err)
 		}
@@ -229,15 +292,15 @@ func sweepOwned(outDir string) error {
 // generateSDK writes the planned files into outDir, then runs buf for the
 // wire types. Layout under outDir: atlantis/<ns>/v1/*.proto (sources),
 // pb/atlantis/<ns>/v1/*.pb.go (buf output), client/<ns>/*.go (wrappers).
-func generateSDK(ir *dsl.IR, outDir, modulePrefix string) (map[string]string, error) {
-	planned, err := planSDKFiles(ir, modulePrefix)
+func generateSDK(ir *dsl.IR, outDir string, lang sdkLanguage, modulePrefix string) (map[string]string, error) {
+	planned, err := planSDKFiles(ir, lang, modulePrefix)
 	if err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return nil, err
 	}
-	if err := sweepOwned(outDir); err != nil {
+	if err := sweepOwned(outDir, lang); err != nil {
 		return nil, err
 	}
 	for rel, content := range planned {
@@ -275,7 +338,10 @@ func commonProtos(out map[string]string) error {
 //
 // Plugin versions are pinned here. They decide the content of every .pb.go,
 // which is why --check can compare protos alone.
-func bufConfigs(modulePrefix string) (bufGen, bufYAML string) {
+func bufConfigs(lang sdkLanguage, modulePrefix string) (bufGen, bufYAML string) {
+	if lang == langPython {
+		return pythonBufGen, "version: v2\n"
+	}
 	bufGen = fmt.Sprintf(`# Generated by tide generate. DO NOT EDIT.
 version: v2
 managed:
@@ -296,6 +362,44 @@ plugins:
 `, modulePrefix)
 	return bufGen, "version: v2\n"
 }
+
+// pythonBufGen is the Python plugin set.
+//
+// Four differences from the Go config, each forced:
+//
+//   - `out: .` rather than a subdirectory. protoc derives a module path from
+//     the proto path, so atlantis/library/v1/book.proto must produce
+//     atlantis/library/v1/book_pb2.py for `from atlantis.library.v1 import
+//     book_pb2` to resolve. There is no M-flag equivalent to redirect it.
+//   - no `managed:` block and no `paths=source_relative`. Both configure the
+//     Go plugin's package naming, which Python has no analogue of.
+//   - the two mypy plugins, which are not optional. Measured on the fixture:
+//     with the first two alone, `mypy --strict` over the generated tree
+//     reports 186 errors; with all four plus types-protobuf and types-grpcio
+//     it reports none. protobuf ships neither py.typed nor stubs, so without
+//     them google.protobuf.message.Message resolves to Any and every _pb2.pyi
+//     fails with "Class cannot subclass Message".
+//
+// Versions are pinned, as the Go plugins are, because planSDKFiles's
+// --check story rests on it: the .proto files are compared and the generated
+// wire types are not, which holds only while the same protos produce the same
+// output.
+//
+// The mypy pins have a floor. nipunn1313-mypy v3.6.0 and v3.7.0 refuse the
+// build with "does not support feature supports editions", which
+// atlantis/common/v1/predicates.proto requires — it opens `edition = "2023"`.
+const pythonBufGen = `# Generated by tide generate. DO NOT EDIT.
+version: v2
+plugins:
+  - remote: buf.build/protocolbuffers/python:v36.1
+    out: .
+  - remote: buf.build/grpc/python:v1.83.1
+    out: .
+  - remote: buf.build/community/nipunn1313-mypy:v5.1.0
+    out: .
+  - remote: buf.build/community/nipunn1313-mypy-grpc:v5.1.0
+    out: .
+`
 
 func runBuf(outDir string) error {
 	if _, err := exec.LookPath("buf"); err != nil {

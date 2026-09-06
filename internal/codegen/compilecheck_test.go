@@ -248,25 +248,11 @@ func TestCompilecheckCoversEveryEmittedTree(t *testing.T) {
 	}
 }
 
-// producedByBuf reports whether a path in a compile fixture is protobuf output
-// rather than emitter output.
-//
-// The Go trees keep their pb in compilecheck/pb, a directory no tree owns, so
-// clearing a tree cannot reach it. The Python tree cannot be arranged that way:
-// protoc derives a module path from the proto path, so its _pb2 modules have to
-// sit inside the same `atlantis` package as the clients that import them.
-// Clearing the directory wholesale therefore deletes them, and the next run
-// type-checks a tree whose imports resolve to nothing.
-func producedByBuf(path string) bool {
-	for _, suffix := range []string{"_pb2.py", "_pb2.pyi", "_pb2_grpc.py", "_pb2_grpc.pyi"} {
-		if strings.HasSuffix(path, suffix) {
-			return true
-		}
-	}
-	return false
-}
-
 // clearEmitted removes a tree's emitter-written files, leaving buf's alone.
+//
+// ProducedByBuf is the same predicate `tide generate --check` filters with, so
+// the set this fixture preserves and the set --check declines to compare
+// cannot come apart.
 func clearEmitted(t *testing.T, dir string) {
 	t.Helper()
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
@@ -276,7 +262,7 @@ func clearEmitted(t *testing.T, dir string) {
 			}
 			return err
 		}
-		if info.IsDir() || producedByBuf(path) {
+		if info.IsDir() || ProducedByBuf(path) {
 			return nil
 		}
 		return os.Remove(path)

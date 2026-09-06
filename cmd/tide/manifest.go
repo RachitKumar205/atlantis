@@ -37,13 +37,28 @@ const manifestSchema = 1
 //
 // TideVersion is recorded and never compared. main.go defaults it to "dev", so
 // a release binary and `go run ./cmd/tide` disagree for ever.
+// Language is optional at schema 1 rather than a reason to bump to 2.
+//
+// A manifest written before Python existed has no `language` and means Go,
+// which is what the zero value reads as. Bumping the schema would make every
+// committed manifest in every caller repository unreadable to the next tide,
+// for a field that changes nothing about the ones already written.
 type generateManifest struct {
 	Schema       int            `json:"schema"`
 	Caller       string         `json:"caller"`
 	Namespaces   []string       `json:"namespaces"`
 	ModulePrefix string         `json:"module_prefix"`
+	Language     string         `json:"language,omitempty"`
 	TideVersion  string         `json:"tide_version"`
 	Files        []manifestFile `json:"files"`
+}
+
+// language reports what produced this manifest, reading an absent value as Go.
+func (m *generateManifest) language() sdkLanguage {
+	if m.Language == "" {
+		return defaultLanguage
+	}
+	return sdkLanguage(m.Language)
 }
 
 type manifestFile struct {
@@ -51,19 +66,15 @@ type manifestFile struct {
 	SHA256 string `json:"sha256"`
 }
 
-// ownedRoots are the directories generate writes and may therefore remove.
-// Anything else under output_dir belongs to the caller.
-func ownedRoots() []string { return []string{"atlantis", "pb", "client"} }
-
-// ownedFiles are the files generate writes at the top of output_dir. The
-// manifest is not among them: it records the others and cannot record itself.
-func ownedFiles() []string { return []string{"buf.gen.yaml", "buf.yaml"} }
+// The owned set is per-language and lives on sdkLanguage; see language.go.
+// The manifest is not among the owned files: it records the others and cannot
+// record itself.
 
 // buildManifest assembles the record from a hashed tree.
 //
 // Namespaces and Files are sorted so the file is stable across runs whatever
 // order the caller listed namespaces in or the walk returned paths.
-func buildManifest(caller, modulePrefix, tideVersion string, namespaces []string, hashes map[string]string) generateManifest {
+func buildManifest(caller, modulePrefix, tideVersion string, lang sdkLanguage, namespaces []string, hashes map[string]string) generateManifest {
 	ns := append([]string(nil), namespaces...)
 	sort.Strings(ns)
 
@@ -73,11 +84,20 @@ func buildManifest(caller, modulePrefix, tideVersion string, namespaces []string
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 
+	// Go is written as the empty string so a Go manifest is byte-identical to
+	// one written before this field existed. Regenerating an untouched Go tree
+	// then produces no diff, which is the property the whole manifest rests on.
+	recorded := string(lang)
+	if lang == defaultLanguage {
+		recorded = ""
+	}
+
 	return generateManifest{
 		Schema:       manifestSchema,
 		Caller:       caller,
 		Namespaces:   ns,
 		ModulePrefix: modulePrefix,
+		Language:     recorded,
 		TideVersion:  tideVersion,
 		Files:        files,
 	}
@@ -133,10 +153,10 @@ func writeManifest(outDir string, m generateManifest) error {
 //
 // A missing owned root is not an error: a schema with no custom queries emits
 // no client package, and a tree that was never generated has none of them.
-func hashOwnedTree(outDir string) (map[string]string, error) {
+func hashOwnedTree(outDir string, lang sdkLanguage) (map[string]string, error) {
 	out := map[string]string{}
 
-	for _, root := range ownedRoots() {
+	for _, root := range lang.ownedRoots() {
 		dir := filepath.Join(outDir, root)
 		err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -164,7 +184,7 @@ func hashOwnedTree(outDir string) (map[string]string, error) {
 		}
 	}
 
-	for _, name := range ownedFiles() {
+	for _, name := range lang.ownedFiles() {
 		h, err := hashFile(filepath.Join(outDir, name))
 		if os.IsNotExist(err) {
 			continue

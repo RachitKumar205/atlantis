@@ -323,7 +323,7 @@ func TestCheckGeneratedExitCodes(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := checkGenerated(tc.m, tc.disk, caller, prefix, tc.fresh)
+			got := checkGenerated(tc.m, tc.disk, caller, prefix, langGo, tc.fresh)
 			if got.Code != tc.want {
 				t.Errorf("code = %d, want %d (%s)", got.Code, tc.want, got.Message)
 			}
@@ -359,7 +359,7 @@ func TestReadManifestRefusesWhatItCannotTrust(t *testing.T) {
 
 func TestManifestRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	m := buildManifest("shop-api", "example.com/app/gen", "v0.4.0",
+	m := buildManifest("shop-api", "example.com/app/gen", "v0.4.0", langGo,
 		[]string{"vendorpkg", "consumer"},
 		map[string]string{"client/b.go": "2", "client/a.go": "1"})
 
@@ -404,7 +404,7 @@ func TestSweepOwnedLeavesForeignFiles(t *testing.T) {
 	mustWrite("README.md")
 	mustWrite("notes/design.md")
 
-	if err := sweepOwned(dir); err != nil {
+	if err := sweepOwned(dir, langGo); err != nil {
 		t.Fatal(err)
 	}
 
@@ -459,7 +459,7 @@ func TestPlanSDKFilesIgnoresInputOrder(t *testing.T) {
 	const prefix = "example.com/app/internal/gen"
 
 	forward := planSDKFilesFixture(t, planFixture)
-	want, err := planSDKFiles(forward, prefix)
+	want, err := planSDKFiles(forward, langGo, prefix)
 	if err != nil {
 		t.Fatalf("planSDKFiles: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestPlanSDKFilesIgnoresInputOrder(t *testing.T) {
 	reverse(reversed.Workflows)
 	reverse(reversed.Ephemerals)
 
-	got, err := planSDKFiles(reversed, prefix)
+	got, err := planSDKFiles(reversed, langGo, prefix)
 	if err != nil {
 		t.Fatalf("planSDKFiles reversed: %v", err)
 	}
@@ -503,7 +503,7 @@ func reverse[T any](s []T) {
 // The emitted client is what the manifest hashes, so it has to be gofmt-clean
 // as written. generate no longer shells out to gofmt.
 func TestPlanSDKFilesEmitsFormattedGo(t *testing.T) {
-	files, err := planSDKFiles(planSDKFilesFixture(t, planFixture), "example.com/app/internal/gen")
+	files, err := planSDKFiles(planSDKFilesFixture(t, planFixture), langGo, "example.com/app/internal/gen")
 	if err != nil {
 		t.Fatalf("planSDKFiles: %v", err)
 	}

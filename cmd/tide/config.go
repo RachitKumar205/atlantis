@@ -56,6 +56,11 @@ type tideConfig struct {
 	// Generate lists the namespaces `tide generate` emits a typed client
 	// for — the caller's own namespace plus any it consumes cross-namespace.
 	Generate []string `yaml:"generate"`
+	// Language is the client `tide generate` writes: "go" or "python".
+	//
+	// Absent means Go, so a tide.yaml written before Python existed keeps
+	// generating exactly what it did.
+	Language string `yaml:"language"`
 
 	// storeDir and storeEnrollURL are set when the credentials came from the
 	// credential store. They scope automatic renewal: tide renews only what tide
@@ -133,6 +138,9 @@ func applyEnvOverrides(c *tideConfig) {
 				c.Generate = append(c.Generate, ns)
 			}
 		}
+	}
+	if v := os.Getenv("ATL_LANGUAGE"); v != "" {
+		c.Language = v
 	}
 }
 

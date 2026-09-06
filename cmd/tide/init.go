@@ -22,8 +22,14 @@ func cmdInit(args []string) int {
 	schemaPath := fs.String("schema-path", ".", "where the .atl files live")
 	outputDir := fs.String("output-dir", "", "where `tide generate` writes the typed client")
 	generate := fs.String("generate", "", "comma-separated namespaces `tide generate` covers (defaults to the caller name when --output-dir is set)")
+	language := fs.String("language", "", "client language: go (default) or python")
 	if err := fs.Parse(args); err != nil {
 		return 3
+	}
+	lang, err := resolveLanguage(*language)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "tide init:", err)
+		return 2
 	}
 	if *caller == "" {
 		fmt.Fprintln(os.Stderr, "tide init: --caller is required — it names this repository at atlantis")
@@ -43,7 +49,7 @@ func cmdInit(args []string) int {
 		return 2
 	}
 
-	content := renderTideYAML(*caller, *org, *schemaPath, *outputDir, *generate)
+	content := renderTideYAML(*caller, *org, *schemaPath, *outputDir, *generate, lang)
 	if err := os.WriteFile("tide.yaml", []byte(content), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "tide init:", err)
 		return 3
@@ -54,16 +60,39 @@ func cmdInit(args []string) int {
 	cliout.Row(os.Stdout, "muted", "schema", *schemaPath)
 	if *outputDir != "" {
 		cliout.Row(os.Stdout, "muted", "client", *outputDir)
+		cliout.Row(os.Stdout, "muted", "language", string(lang))
 	}
 	fmt.Println()
+	if lang == langPython && *outputDir != "" {
+		printPythonSourceRootNote(*outputDir)
+	}
 	fmt.Println("Next: `tide login`, then declare an entity and `tide plan`.")
 	return 0
+}
+
+// printPythonSourceRootNote says what output_dir has to be for Python.
+//
+// protoc derives a module path from the proto path, so the generated
+// `atlantis` package is importable only when output_dir is itself on the
+// Python path. There is no flag that changes this, and the failure without it
+// is a ModuleNotFoundError in the caller's own code rather than anything
+// `tide generate` reports — so it is said once, here, while the path is being
+// chosen.
+func printPythonSourceRootNote(outputDir string) {
+	fmt.Printf("%s must be a Python source root: the generated code imports\n", outputDir)
+	fmt.Println("`atlantis.<namespace>.v1`, and protoc fixes that path. In pyproject.toml:")
+	fmt.Println()
+	fmt.Println("    [tool.hatch.build.targets.wheel]")
+	fmt.Printf("    packages = [\"%s/atlantis\"]\n", outputDir)
+	fmt.Println()
+	fmt.Println("Install the runtime with: pip install atlantis-client")
+	fmt.Println()
 }
 
 // renderTideYAML builds the file. Optional fields are written as commented
 // guidance rather than omitted, so the file itself says what else it can
 // carry.
-func renderTideYAML(caller, org, schemaPath, outputDir, generate string) string {
+func renderTideYAML(caller, org, schemaPath, outputDir, generate string, lang sdkLanguage) string {
 	var b strings.Builder
 	b.WriteString("# This repository, as atlantis sees it. The address and the credential are\n")
 	b.WriteString("# not configured here — `tide login` collects both.\n")
@@ -82,10 +111,16 @@ func renderTideYAML(caller, org, schemaPath, outputDir, generate string) string 
 		b.WriteString("# output_dir: internal/atlantis\n")
 		b.WriteString("# generate:\n")
 		fmt.Fprintf(&b, "#   - %s\n", caller)
+		b.WriteString("# language: go         # or python\n")
 		return b.String()
 	}
 
 	fmt.Fprintf(&b, "output_dir: %s\n", outputDir)
+	// Written only for Python. Go is the default, so spelling it out would put
+	// a line in every existing shape of this file that changes nothing.
+	if lang != defaultLanguage {
+		fmt.Fprintf(&b, "language: %s\n", lang)
+	}
 	b.WriteString("generate:\n")
 	namespaces := strings.Split(generate, ",")
 	if generate == "" {

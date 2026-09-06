@@ -28,9 +28,25 @@ output_dir: internal/atlantis # required for `tide generate`
 generate:                     # required for `tide generate` — namespaces to emit
   - consumer
   - vendor
+language: go                  # go (default) or python
 ```
 
-`output_dir` is the directory inside the caller's own Go module where `tide generate` writes the typed client. `generate` lists the namespaces the caller consumes (its own plus any it reads cross-namespace). Both are only required for `tide generate`; the other commands ignore them.
+`output_dir` is where `tide generate` writes the typed client. `generate` lists the namespaces the caller consumes (its own plus any it reads cross-namespace). Both are only required for `tide generate`; the other commands ignore them.
+
+`language` selects the client. Unset means `go`, so a `tide.yaml` written before Python was supported keeps generating exactly what it did.
+
+For `go`, `output_dir` sits inside the caller's own Go module, and the import prefix is `<module>/<output_dir>` — read from `go.mod`.
+
+For `python`, `output_dir` must be a **Python source root**: the generated code imports `atlantis.<namespace>.v1`, and protoc derives that path from the proto path. Add it to your packaging, for example:
+
+```toml
+[tool.hatch.build.targets.wheel]
+packages = ["src/atlantis"]
+```
+
+A Python caller needs no `go.mod`; `tide generate` does not read one. Install the runtime the generated code imports with `pip install atlantis-client`.
+
+One `output_dir` holds one language. Regenerating over a tree written in the other is refused, because the two share the `atlantis/` root and the previous language's files would be left behind under a manifest that no longer records them.
 
 The server address and the TLS material are not held in `tide.yaml`. `tide login`
 collects both into the credential store at `~/.atlantis/<org>/<caller>/`,
@@ -49,6 +65,7 @@ Each path is walked recursively; every file with extension `.atl` is included, a
 | `ATL_CALLER` | `caller` | |
 | `ATL_ORG` | `org` | Which organisation this repository's caller belongs to. Needed only when more than one is enrolled. |
 | `ATL_GENERATE` | `generate` | Comma-separated namespace list; replaces the `generate:` field for `tide generate`. |
+| `ATL_LANGUAGE` | `language` | `go` or `python`. |
 | `ATLANTIS_HOME` | — | Where the credential store lives. Defaults to `~/.atlantis`. |
 | `ATL_CLOUD_URL` | — | Where Atlantis Cloud is, for `tide login`'s browser flow. Release builds carry the address; a development build needs this. |
 | `ATL_ENROLL_URL` | — | The organisation's enrolment listener, for `tide login --oidc` in CI. The browser flow discovers it and never needs this. |
@@ -90,12 +107,17 @@ neither flag.
 ```
 tide init --caller NAME [--org ORG] [--schema-path DIR]
           [--output-dir DIR] [--generate ns1,ns2]
+          [--language go|python]
 ```
 
 Writes `tide.yaml` — the caller name, where the `.atl` files live, and
 optionally where a generated client goes. Refuses to overwrite one that
 exists. The optional half is written as commented guidance until asked for,
 so the file says what else it can carry.
+
+`--language python` writes `language: python` and prints the packaging stanza
+that puts `output_dir` on the Python path, which the generated imports need.
+`--language go` is the default and writes no `language:` line.
 
 The first command in a new repository; `tide login` is the second.
 
@@ -254,7 +276,7 @@ tide pull [--force]
 
 ### `tide generate`
 
-Generates the typed Go client SDK into the caller's own repo, scoped to the namespaces in `generate:`.
+Generates the typed client SDK into the caller's own repo, scoped to the namespaces in `generate:`, in the language `language:` names.
 
 ```
 tide generate
@@ -264,20 +286,31 @@ The flow:
 
 1. Fetch the canonical IR from the server (the `GetCanonicalIR` admin RPC). The canonical IR is the server's persisted schema checkpoint, with proto field numbers already assigned. Pulling those numbers from the server means the generated wire format matches it exactly — the caller never re-derives numbers locally.
 2. Filter the IR to the `generate:` namespaces. The caller gets typed clients only for what it consumes, not every caller's entities.
-3. Read the caller's `go.mod` to compute the package prefix `<module>/<output_dir>`.
-4. Emit proto sources (the scoped namespaces plus the embedded `atlantis/common/v1` protos) and the typed Go wrappers into `output_dir`, then shell out to `buf generate` for the `.pb.go` wire types and format the Go sources.
+3. For Go only, read the caller's `go.mod` to compute the package prefix `<module>/<output_dir>`. Python has no equivalent and no `go.mod` is read.
+4. Emit proto sources (the scoped namespaces plus the embedded `atlantis/common/v1` protos) and the typed client into `output_dir`, then shell out to `buf generate` for the wire types.
+
+The protos are the same for both languages — they are the wire contract, and only the plugins `buf` runs over them differ.
 
 Requirements:
 
 - `output_dir` and a non-empty `generate:` list in `tide.yaml`.
 - [`buf`](https://buf.build/docs/installation) on `PATH`.
-- A readable `go.mod` at the caller repo root, which is where `generate` runs.
+- For Go, a readable `go.mod` at the caller repo root, which is where `generate` runs.
 
-The generated tree lives in the caller's module and is imported with the caller's own import path — the caller's source, committed like any other generated code, not a shared artifact. There is no dependency on a shared SDK for the generated types; the hand-written `clients/go/jobs` runtime is a normal library dependency for callers that run job workers.
+The generated tree lives in the caller's repository and is imported with the caller's own path — the caller's source, committed like any other generated code, not a shared artifact. The hand-written runtimes are ordinary library dependencies: `clients/go/jobs` for Go callers running job workers, `atlantis-client` from PyPI for Python.
 
-Generate rewrites `atlantis/`, `pb/` and `client/` under `output_dir`, plus `buf.gen.yaml` and `buf.yaml` at its top, and leaves anything else there alone, so an entity dropped from the schema does not leave its client behind. `output_dir` must name a directory inside the repository; `.`, an absolute path, and anything reaching upward through `..` are refused, because that value decides what is removed.
+What `generate` rewrites under `output_dir`, and therefore removes:
 
-Beside the code it writes `tide.manifest.json`, recording the caller, the namespaces, the module prefix and a hash per generated file. It is committed with them; `--check` compares against it.
+| `language` | Directories | Files |
+|---|---|---|
+| `go` | `atlantis/`, `pb/`, `client/` | `buf.gen.yaml`, `buf.yaml` |
+| `python` | `atlantis/` | `buf.gen.yaml`, `buf.yaml` |
+
+Python has one directory because protoc writes its `_pb2` modules beside the clients that import them, inside `atlantis/`, rather than into a separate root.
+
+Anything else in `output_dir` is left alone, so an entity dropped from the schema does not leave its client behind. `output_dir` must name a directory inside the repository; `.`, an absolute path, and anything reaching upward through `..` are refused, because that value decides what is removed.
+
+Beside the code it writes `tide.manifest.json`, recording the caller, the namespaces, the module prefix, the language and a hash per generated file. It is committed with them; `--check` compares against it. A Go manifest records no language, so a tree generated before Python existed regenerates byte-identically.
 
 ### `tide generate --check`
 
