@@ -8,6 +8,7 @@ import (
 	"time"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
@@ -33,7 +34,7 @@ func cmdPlan(args []string) int {
 	timeout := fs.Duration("timeout", 30*time.Second, "RPC timeout")
 	noPull := fs.Bool("no-pull", false, "Skip the pre-plan refresh of .tide-cache/")
 	format := fs.String("format", "table", "Output format: table or json")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 3
 	}
 

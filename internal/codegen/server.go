@@ -306,15 +306,10 @@ func emitGoServerEntity(e *dsl.Entity, inbound []inboundRef, cfg GenConfig) (GoF
 		e.Name, table, strings.Join(quoteAll(insertCols), ", "), insertPlaceholders, spec.ReturningCols())
 
 	if updateSets != "" {
-		nSetCols := 0
-		for _, f := range e.Fields {
-			if spec.IsPKColumn(f.Name) || f.Identity || f.Serial {
-				continue
-			}
-			nSetCols++
-		}
 		fmt.Fprintf(&b, "const sqlUpdate%s = `UPDATE %s SET %s WHERE %s`\n",
-			e.Name, table, updateSets, spec.WhereClause(nSetCols+1))
+			e.Name, table, updateSets, spec.WhereClause(updateParamCount(e, spec)+1))
+		fmt.Fprintf(&b, "var updatable%sFields = []string{%s}\n",
+			e.Name, strings.Join(quoteAll(updatableFieldNames(e, spec)), ", "))
 	}
 
 	if e.SoftDeleteField != "" {
@@ -766,6 +761,9 @@ func (s *%s) Update%s(ctx context.Context, req *pb.Update%sRequest) (*pb.Update%
 		return nil, fmt.Errorf("Update%s: entity is required")
 	}
 	id := []any{%s}
+	if err := runtime.CheckFieldMask(req.GetUpdateMask().GetPaths(), updatable%sFields); err != nil {
+		return nil, err
+	}
 
 	tx, err := s.DB.BeginTx(ctx)
 	if err != nil {
@@ -781,7 +779,7 @@ func (s *%s) Update%s(ctx context.Context, req *pb.Update%sRequest) (*pb.Update%
 		return nil, err
 	}
 
-	args := bindFor%sUpdate(in, id...)
+	args := bindFor%sUpdate(in, req.GetUpdateMask().GetPaths(), id...)
 	tag, err := tx.Exec(ctx, sqlUpdate%s, args...)
 	if err != nil {
 		return nil, err
@@ -816,6 +814,7 @@ func (s *%s) Update%s(ctx context.Context, req *pb.Update%sRequest) (*pb.Update%
 		lowerFirst(e.Name),
 		e.Name, // Update<E>: entity is required
 		pkEntityAccess(spec),
+		e.Name,                 // updatable<E>Fields
 		e.PartitionField != "", // BindWrite
 		e.Name, e.Name,         // bindFor<E>Update, sqlUpdate<E>
 		e.ID(), e.ID(), e.ID(),
@@ -1053,17 +1052,39 @@ func emitBindForInsert(b *strings.Builder, e *dsl.Entity, insertCols []string) {
 // order, which is the same order the SQL emitter used when building the
 // WHERE clause.
 func emitBindForUpdate(b *strings.Builder, e *dsl.Entity, spec *pkSpec) {
-	fmt.Fprintf(b, `func bindFor%sUpdate(in *pb.%s, pk ...any) []any {
+	fmt.Fprintf(b, `func bindFor%sUpdate(in *pb.%s, mask []string, pk ...any) []any {
 	args := []any{
 `, e.Name, e.Name)
 
-	for _, f := range e.Fields {
+	for idx := range e.Fields {
+		f := &e.Fields[idx]
 		if spec.IsPKColumn(f.Name) || f.Identity || f.Serial {
 			continue
 		}
-		fmt.Fprintf(b, "\t\t%s,\n", protoBindExpr(f))
+		// The write flag precedes the value; runtime.FieldSet folds the
+		// update_mask in with the field's presence.
+		fmt.Fprintf(b, "\t\truntime.FieldSet(mask, %q, %s),\n", f.Name, presentExpr(f))
+		fmt.Fprintf(b, "\t\t%s,\n", protoBindExpr(*f))
 	}
 	b.WriteString("\t}\n\treturn append(args, pk...)\n}\n\n")
+}
+
+// presentExpr is the Go expression reporting whether the caller set field f
+// on the request message, the presence bindFor<E>Update feeds to
+// runtime.FieldSet. It mirrors the dispatcher's rule in bindForUpdate: a
+// repeated field is present when it has elements, a pointer field (a
+// proto3-optional scalar or a message) when it is non-nil, and a field with
+// implicit presence always.
+func presentExpr(f *dsl.Field) string {
+	name := "in." + goFieldName(f.Name)
+	c, _ := coltype.ClassOf(f.Type)
+	switch {
+	case f.Type.Array || c == coltype.ClassVector:
+		return fmt.Sprintf("len(%s) > 0", name)
+	case c == coltype.ClassTime || c == coltype.ClassInterval || schema.IsEffectivelyNullable(f):
+		return name + " != nil"
+	}
+	return "true"
 }
 
 // protoBindExpr returns the Go expression that turns a proto field on
@@ -1234,20 +1255,54 @@ func insertPlaceholdersFor(e *dsl.Entity, insertCols []string) string {
 func updateAssignments(e *dsl.Entity, spec *pkSpec) string {
 	parts := []string{}
 	i := 0
-	for _, f := range e.Fields {
+	for idx := range e.Fields {
+		f := &e.Fields[idx]
 		if spec.IsPKColumn(f.Name) {
 			continue
 		}
 		if f.Identity || f.Serial {
 			continue
 		}
-		i++
-		parts = append(parts, fmt.Sprintf("%s = $%d", quoteIdent(f.Name), i))
+		col := quoteIdent(f.Name)
+		// Two parameters per column: the write flag, then the value. The
+		// value carries no cast; the CASE unifies it with the column, and a
+		// cast to VARCHAR(n) would truncate where the assignment raises 22001.
+		// bindFor<E>Update lays the arguments out in this order.
+		parts = append(parts, fmt.Sprintf("%s = CASE WHEN $%d THEN $%d ELSE %s END", col, i+1, i+2, col))
+		i += 2
 	}
 	if len(parts) == 0 {
 		return ""
 	}
 	return strings.Join(parts, ", ")
+}
+
+// updatableFieldNames lists the columns updateAssignments writes, in order:
+// the set an update_mask path must belong to.
+func updatableFieldNames(e *dsl.Entity, spec *pkSpec) []string {
+	var names []string
+	for idx := range e.Fields {
+		f := &e.Fields[idx]
+		if spec.IsPKColumn(f.Name) || f.Identity || f.Serial {
+			continue
+		}
+		names = append(names, f.Name)
+	}
+	return names
+}
+
+// updateParamCount is the number of SET parameters updateAssignments
+// renders, which is where the primary-key placeholders start.
+func updateParamCount(e *dsl.Entity, spec *pkSpec) int {
+	n := 0
+	for idx := range e.Fields {
+		f := &e.Fields[idx]
+		if spec.IsPKColumn(f.Name) || f.Identity || f.Serial {
+			continue
+		}
+		n += 2
+	}
+	return n
 }
 
 // quoteAll delegates to the shared schema package.

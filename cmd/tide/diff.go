@@ -11,6 +11,7 @@ import (
 	"time"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 )
@@ -26,19 +27,20 @@ func cmdDiff(args []string) int {
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
 	format := fs.String("format", "table", "Output format: table or json")
 	timeout := fs.Duration("timeout", 10*time.Second, "RPC timeout")
-	if err := fs.Parse(args); err != nil {
+	pos, err := cliflag.Parse(fs, args)
+	if err != nil {
 		return 3
 	}
-	if fs.NArg() < 2 {
+	if len(pos) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: tide diff <from-version> <to-version>")
 		return 2
 	}
-	from, err := strconv.ParseInt(fs.Arg(0), 10, 64)
+	from, err := strconv.ParseInt(pos[0], 10, 64)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tide diff: invalid from-version: %v\n", err)
 		return 2
 	}
-	to, err := strconv.ParseInt(fs.Arg(1), 10, 64)
+	to, err := strconv.ParseInt(pos[1], 10, 64)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tide diff: invalid to-version: %v\n", err)
 		return 2

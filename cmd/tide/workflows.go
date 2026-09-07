@@ -9,6 +9,7 @@ import (
 	"time"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
@@ -40,14 +41,15 @@ func cmdWorkflowStart(args []string) int {
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
 	stateJSON := fs.String("state", "{}", "State as a JSON object")
 	timeout := fs.Duration("timeout", 10*time.Second, "RPC timeout")
-	if err := fs.Parse(args); err != nil {
+	pos, err := cliflag.Parse(fs, args)
+	if err != nil {
 		return 3
 	}
-	if fs.NArg() < 1 {
+	if len(pos) < 1 {
 		fmt.Fprintln(os.Stderr, "tide workflow start: missing workflow-name")
 		return 2
 	}
-	wfName := fs.Arg(0)
+	wfName := pos[0]
 
 	cfg, err := loadPCConfig(*configPath)
 	if err != nil {
@@ -96,14 +98,15 @@ func cmdWorkflowStatus(args []string) int {
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
 	format := fs.String("format", "table", "Output format: table or json")
 	timeout := fs.Duration("timeout", 10*time.Second, "RPC timeout")
-	if err := fs.Parse(args); err != nil {
+	pos, err := cliflag.Parse(fs, args)
+	if err != nil {
 		return 3
 	}
-	if fs.NArg() < 1 {
+	if len(pos) < 1 {
 		fmt.Fprintln(os.Stderr, "tide workflow status: missing workflow-id")
 		return 2
 	}
-	wfID := fs.Arg(0)
+	wfID := pos[0]
 
 	cfg, err := loadPCConfig(*configPath)
 	if err != nil {

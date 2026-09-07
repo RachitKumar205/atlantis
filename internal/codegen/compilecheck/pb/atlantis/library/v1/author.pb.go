@@ -404,6 +404,7 @@ func (x *CreateAuthorResponse) GetEntity() *Author {
 type UpdateAuthorRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Entity        *Author                `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
+	UpdateMask    *fieldmaskpb.FieldMask `protobuf:"bytes,2,opt,name=update_mask,json=updateMask,proto3" json:"update_mask,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -441,6 +442,13 @@ func (*UpdateAuthorRequest) Descriptor() ([]byte, []int) {
 func (x *UpdateAuthorRequest) GetEntity() *Author {
 	if x != nil {
 		return x.Entity
+	}
+	return nil
+}
+
+func (x *UpdateAuthorRequest) GetUpdateMask() *fieldmaskpb.FieldMask {
+	if x != nil {
+		return x.UpdateMask
 	}
 	return nil
 }
@@ -986,9 +994,11 @@ const file_atlantis_library_v1_author_proto_rawDesc = "" +
 	"\x13CreateAuthorRequest\x123\n" +
 	"\x06entity\x18\x01 \x01(\v2\x1b.atlantis.library.v1.AuthorR\x06entity\"K\n" +
 	"\x14CreateAuthorResponse\x123\n" +
-	"\x06entity\x18\x01 \x01(\v2\x1b.atlantis.library.v1.AuthorR\x06entity\"J\n" +
+	"\x06entity\x18\x01 \x01(\v2\x1b.atlantis.library.v1.AuthorR\x06entity\"\x87\x01\n" +
 	"\x13UpdateAuthorRequest\x123\n" +
-	"\x06entity\x18\x01 \x01(\v2\x1b.atlantis.library.v1.AuthorR\x06entity\"K\n" +
+	"\x06entity\x18\x01 \x01(\v2\x1b.atlantis.library.v1.AuthorR\x06entity\x12;\n" +
+	"\vupdate_mask\x18\x02 \x01(\v2\x1a.google.protobuf.FieldMaskR\n" +
+	"updateMask\"K\n" +
 	"\x14UpdateAuthorResponse\x123\n" +
 	"\x06entity\x18\x01 \x01(\v2\x1b.atlantis.library.v1.AuthorR\x06entity\"%\n" +
 	"\x13DeleteAuthorRequest\x12\x0e\n" +
@@ -1087,11 +1097,11 @@ var file_atlantis_library_v1_author_proto_goTypes = []any{
 	(*v1.Interval)(nil),            // 17: atlantis.common.v1.Interval
 	(*timestamppb.Timestamp)(nil),  // 18: google.protobuf.Timestamp
 	(*Book)(nil),                   // 19: atlantis.library.v1.Book
-	(*v1.Int64Predicate)(nil),      // 20: atlantis.common.v1.Int64Predicate
-	(*v1.StringPredicate)(nil),     // 21: atlantis.common.v1.StringPredicate
-	(*v1.DoublePredicate)(nil),     // 22: atlantis.common.v1.DoublePredicate
-	(*v1.TimestampPredicate)(nil),  // 23: atlantis.common.v1.TimestampPredicate
-	(*fieldmaskpb.FieldMask)(nil),  // 24: google.protobuf.FieldMask
+	(*fieldmaskpb.FieldMask)(nil),  // 20: google.protobuf.FieldMask
+	(*v1.Int64Predicate)(nil),      // 21: atlantis.common.v1.Int64Predicate
+	(*v1.StringPredicate)(nil),     // 22: atlantis.common.v1.StringPredicate
+	(*v1.DoublePredicate)(nil),     // 23: atlantis.common.v1.DoublePredicate
+	(*v1.TimestampPredicate)(nil),  // 24: atlantis.common.v1.TimestampPredicate
 }
 var file_atlantis_library_v1_author_proto_depIdxs = []int32{
 	17, // 0: atlantis.library.v1.Author.tenure:type_name -> atlantis.common.v1.Interval
@@ -1101,39 +1111,40 @@ var file_atlantis_library_v1_author_proto_depIdxs = []int32{
 	2,  // 4: atlantis.library.v1.CreateAuthorRequest.entity:type_name -> atlantis.library.v1.Author
 	2,  // 5: atlantis.library.v1.CreateAuthorResponse.entity:type_name -> atlantis.library.v1.Author
 	2,  // 6: atlantis.library.v1.UpdateAuthorRequest.entity:type_name -> atlantis.library.v1.Author
-	2,  // 7: atlantis.library.v1.UpdateAuthorResponse.entity:type_name -> atlantis.library.v1.Author
-	2,  // 8: atlantis.library.v1.BatchGetAuthorResponse.entities:type_name -> atlantis.library.v1.Author
-	20, // 9: atlantis.library.v1.AuthorFilter.id:type_name -> atlantis.common.v1.Int64Predicate
-	21, // 10: atlantis.library.v1.AuthorFilter.name:type_name -> atlantis.common.v1.StringPredicate
-	21, // 11: atlantis.library.v1.AuthorFilter.bio:type_name -> atlantis.common.v1.StringPredicate
-	22, // 12: atlantis.library.v1.AuthorFilter.rating:type_name -> atlantis.common.v1.DoublePredicate
-	23, // 13: atlantis.library.v1.AuthorFilter.created_at:type_name -> atlantis.common.v1.TimestampPredicate
-	13, // 14: atlantis.library.v1.AuthorFilter.and:type_name -> atlantis.library.v1.AuthorFilter
-	13, // 15: atlantis.library.v1.AuthorFilter.or:type_name -> atlantis.library.v1.AuthorFilter
-	13, // 16: atlantis.library.v1.AuthorFilter.not:type_name -> atlantis.library.v1.AuthorFilter
-	0,  // 17: atlantis.library.v1.AuthorOrderBy.field:type_name -> atlantis.library.v1.AuthorOrderField
-	13, // 18: atlantis.library.v1.QueryAuthorRequest.filter:type_name -> atlantis.library.v1.AuthorFilter
-	14, // 19: atlantis.library.v1.QueryAuthorRequest.order:type_name -> atlantis.library.v1.AuthorOrderBy
-	24, // 20: atlantis.library.v1.QueryAuthorRequest.fields:type_name -> google.protobuf.FieldMask
-	1,  // 21: atlantis.library.v1.QueryAuthorRequest.includes:type_name -> atlantis.library.v1.AuthorInclude
-	2,  // 22: atlantis.library.v1.QueryAuthorResponse.entities:type_name -> atlantis.library.v1.Author
-	3,  // 23: atlantis.library.v1.AuthorService.GetAuthor:input_type -> atlantis.library.v1.GetAuthorRequest
-	5,  // 24: atlantis.library.v1.AuthorService.CreateAuthor:input_type -> atlantis.library.v1.CreateAuthorRequest
-	7,  // 25: atlantis.library.v1.AuthorService.UpdateAuthor:input_type -> atlantis.library.v1.UpdateAuthorRequest
-	9,  // 26: atlantis.library.v1.AuthorService.DeleteAuthor:input_type -> atlantis.library.v1.DeleteAuthorRequest
-	11, // 27: atlantis.library.v1.AuthorService.BatchGetAuthor:input_type -> atlantis.library.v1.BatchGetAuthorRequest
-	15, // 28: atlantis.library.v1.AuthorService.QueryAuthor:input_type -> atlantis.library.v1.QueryAuthorRequest
-	4,  // 29: atlantis.library.v1.AuthorService.GetAuthor:output_type -> atlantis.library.v1.GetAuthorResponse
-	6,  // 30: atlantis.library.v1.AuthorService.CreateAuthor:output_type -> atlantis.library.v1.CreateAuthorResponse
-	8,  // 31: atlantis.library.v1.AuthorService.UpdateAuthor:output_type -> atlantis.library.v1.UpdateAuthorResponse
-	10, // 32: atlantis.library.v1.AuthorService.DeleteAuthor:output_type -> atlantis.library.v1.DeleteAuthorResponse
-	12, // 33: atlantis.library.v1.AuthorService.BatchGetAuthor:output_type -> atlantis.library.v1.BatchGetAuthorResponse
-	16, // 34: atlantis.library.v1.AuthorService.QueryAuthor:output_type -> atlantis.library.v1.QueryAuthorResponse
-	29, // [29:35] is the sub-list for method output_type
-	23, // [23:29] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	20, // 7: atlantis.library.v1.UpdateAuthorRequest.update_mask:type_name -> google.protobuf.FieldMask
+	2,  // 8: atlantis.library.v1.UpdateAuthorResponse.entity:type_name -> atlantis.library.v1.Author
+	2,  // 9: atlantis.library.v1.BatchGetAuthorResponse.entities:type_name -> atlantis.library.v1.Author
+	21, // 10: atlantis.library.v1.AuthorFilter.id:type_name -> atlantis.common.v1.Int64Predicate
+	22, // 11: atlantis.library.v1.AuthorFilter.name:type_name -> atlantis.common.v1.StringPredicate
+	22, // 12: atlantis.library.v1.AuthorFilter.bio:type_name -> atlantis.common.v1.StringPredicate
+	23, // 13: atlantis.library.v1.AuthorFilter.rating:type_name -> atlantis.common.v1.DoublePredicate
+	24, // 14: atlantis.library.v1.AuthorFilter.created_at:type_name -> atlantis.common.v1.TimestampPredicate
+	13, // 15: atlantis.library.v1.AuthorFilter.and:type_name -> atlantis.library.v1.AuthorFilter
+	13, // 16: atlantis.library.v1.AuthorFilter.or:type_name -> atlantis.library.v1.AuthorFilter
+	13, // 17: atlantis.library.v1.AuthorFilter.not:type_name -> atlantis.library.v1.AuthorFilter
+	0,  // 18: atlantis.library.v1.AuthorOrderBy.field:type_name -> atlantis.library.v1.AuthorOrderField
+	13, // 19: atlantis.library.v1.QueryAuthorRequest.filter:type_name -> atlantis.library.v1.AuthorFilter
+	14, // 20: atlantis.library.v1.QueryAuthorRequest.order:type_name -> atlantis.library.v1.AuthorOrderBy
+	20, // 21: atlantis.library.v1.QueryAuthorRequest.fields:type_name -> google.protobuf.FieldMask
+	1,  // 22: atlantis.library.v1.QueryAuthorRequest.includes:type_name -> atlantis.library.v1.AuthorInclude
+	2,  // 23: atlantis.library.v1.QueryAuthorResponse.entities:type_name -> atlantis.library.v1.Author
+	3,  // 24: atlantis.library.v1.AuthorService.GetAuthor:input_type -> atlantis.library.v1.GetAuthorRequest
+	5,  // 25: atlantis.library.v1.AuthorService.CreateAuthor:input_type -> atlantis.library.v1.CreateAuthorRequest
+	7,  // 26: atlantis.library.v1.AuthorService.UpdateAuthor:input_type -> atlantis.library.v1.UpdateAuthorRequest
+	9,  // 27: atlantis.library.v1.AuthorService.DeleteAuthor:input_type -> atlantis.library.v1.DeleteAuthorRequest
+	11, // 28: atlantis.library.v1.AuthorService.BatchGetAuthor:input_type -> atlantis.library.v1.BatchGetAuthorRequest
+	15, // 29: atlantis.library.v1.AuthorService.QueryAuthor:input_type -> atlantis.library.v1.QueryAuthorRequest
+	4,  // 30: atlantis.library.v1.AuthorService.GetAuthor:output_type -> atlantis.library.v1.GetAuthorResponse
+	6,  // 31: atlantis.library.v1.AuthorService.CreateAuthor:output_type -> atlantis.library.v1.CreateAuthorResponse
+	8,  // 32: atlantis.library.v1.AuthorService.UpdateAuthor:output_type -> atlantis.library.v1.UpdateAuthorResponse
+	10, // 33: atlantis.library.v1.AuthorService.DeleteAuthor:output_type -> atlantis.library.v1.DeleteAuthorResponse
+	12, // 34: atlantis.library.v1.AuthorService.BatchGetAuthor:output_type -> atlantis.library.v1.BatchGetAuthorResponse
+	16, // 35: atlantis.library.v1.AuthorService.QueryAuthor:output_type -> atlantis.library.v1.QueryAuthorResponse
+	30, // [30:36] is the sub-list for method output_type
+	24, // [24:30] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_atlantis_library_v1_author_proto_init() }

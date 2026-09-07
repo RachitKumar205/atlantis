@@ -53,13 +53,11 @@ tide show NoteCountByMonth
 `tide show` prints the query's SQL and `touches` set as the server holds
 them.
 
-## A brand-new query becomes callable at the next server restart
+## The query is callable at once
 
-A custom query's gRPC method is registered at server startup. A brand-new
-query is persisted and visible to `tide show` immediately, but its RPC
-answers `Unimplemented` until your organisation's server next restarts.
-Editing the SQL of an existing query hot-reloads on `tide apply` with no
-restart. The same rule applies to `procedure` blocks.
+`tide apply` hot-reloads the server: a brand-new query answers from the
+next request, and so does an edit to the SQL of an existing one. The same
+holds for `procedure` blocks.
 
 Calling `NoteCountByMonth` from a Go program needs the typed client. Run
 `tide generate` from your caller repo to write it into the module declared

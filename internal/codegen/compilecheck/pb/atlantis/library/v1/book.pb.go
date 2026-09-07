@@ -426,6 +426,7 @@ func (x *CreateBookResponse) GetEntity() *Book {
 type UpdateBookRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Entity        *Book                  `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
+	UpdateMask    *fieldmaskpb.FieldMask `protobuf:"bytes,2,opt,name=update_mask,json=updateMask,proto3" json:"update_mask,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -463,6 +464,13 @@ func (*UpdateBookRequest) Descriptor() ([]byte, []int) {
 func (x *UpdateBookRequest) GetEntity() *Book {
 	if x != nil {
 		return x.Entity
+	}
+	return nil
+}
+
+func (x *UpdateBookRequest) GetUpdateMask() *fieldmaskpb.FieldMask {
+	if x != nil {
+		return x.UpdateMask
 	}
 	return nil
 }
@@ -1046,9 +1054,11 @@ const file_atlantis_library_v1_book_proto_rawDesc = "" +
 	"\x11CreateBookRequest\x121\n" +
 	"\x06entity\x18\x01 \x01(\v2\x19.atlantis.library.v1.BookR\x06entity\"G\n" +
 	"\x12CreateBookResponse\x121\n" +
-	"\x06entity\x18\x01 \x01(\v2\x19.atlantis.library.v1.BookR\x06entity\"F\n" +
+	"\x06entity\x18\x01 \x01(\v2\x19.atlantis.library.v1.BookR\x06entity\"\x83\x01\n" +
 	"\x11UpdateBookRequest\x121\n" +
-	"\x06entity\x18\x01 \x01(\v2\x19.atlantis.library.v1.BookR\x06entity\"G\n" +
+	"\x06entity\x18\x01 \x01(\v2\x19.atlantis.library.v1.BookR\x06entity\x12;\n" +
+	"\vupdate_mask\x18\x02 \x01(\v2\x1a.google.protobuf.FieldMaskR\n" +
+	"updateMask\"G\n" +
 	"\x12UpdateBookResponse\x121\n" +
 	"\x06entity\x18\x01 \x01(\v2\x19.atlantis.library.v1.BookR\x06entity\"#\n" +
 	"\x11DeleteBookRequest\x12\x0e\n" +
@@ -1163,12 +1173,12 @@ var file_atlantis_library_v1_book_proto_goTypes = []any{
 	(*QueryBookRequest)(nil),      // 15: atlantis.library.v1.QueryBookRequest
 	(*QueryBookResponse)(nil),     // 16: atlantis.library.v1.QueryBookResponse
 	(*timestamppb.Timestamp)(nil), // 17: google.protobuf.Timestamp
-	(*v1.Int64Predicate)(nil),     // 18: atlantis.common.v1.Int64Predicate
-	(*v1.StringPredicate)(nil),    // 19: atlantis.common.v1.StringPredicate
-	(*v1.FloatPredicate)(nil),     // 20: atlantis.common.v1.FloatPredicate
-	(*v1.Int32Predicate)(nil),     // 21: atlantis.common.v1.Int32Predicate
-	(*v1.TimestampPredicate)(nil), // 22: atlantis.common.v1.TimestampPredicate
-	(*fieldmaskpb.FieldMask)(nil), // 23: google.protobuf.FieldMask
+	(*fieldmaskpb.FieldMask)(nil), // 18: google.protobuf.FieldMask
+	(*v1.Int64Predicate)(nil),     // 19: atlantis.common.v1.Int64Predicate
+	(*v1.StringPredicate)(nil),    // 20: atlantis.common.v1.StringPredicate
+	(*v1.FloatPredicate)(nil),     // 21: atlantis.common.v1.FloatPredicate
+	(*v1.Int32Predicate)(nil),     // 22: atlantis.common.v1.Int32Predicate
+	(*v1.TimestampPredicate)(nil), // 23: atlantis.common.v1.TimestampPredicate
 }
 var file_atlantis_library_v1_book_proto_depIdxs = []int32{
 	17, // 0: atlantis.library.v1.Book.expires_at:type_name -> google.protobuf.Timestamp
@@ -1177,43 +1187,44 @@ var file_atlantis_library_v1_book_proto_depIdxs = []int32{
 	2,  // 3: atlantis.library.v1.CreateBookRequest.entity:type_name -> atlantis.library.v1.Book
 	2,  // 4: atlantis.library.v1.CreateBookResponse.entity:type_name -> atlantis.library.v1.Book
 	2,  // 5: atlantis.library.v1.UpdateBookRequest.entity:type_name -> atlantis.library.v1.Book
-	2,  // 6: atlantis.library.v1.UpdateBookResponse.entity:type_name -> atlantis.library.v1.Book
-	2,  // 7: atlantis.library.v1.BatchGetBookResponse.entities:type_name -> atlantis.library.v1.Book
-	18, // 8: atlantis.library.v1.BookFilter.id:type_name -> atlantis.common.v1.Int64Predicate
-	19, // 9: atlantis.library.v1.BookFilter.tenant:type_name -> atlantis.common.v1.StringPredicate
-	19, // 10: atlantis.library.v1.BookFilter.title:type_name -> atlantis.common.v1.StringPredicate
-	18, // 11: atlantis.library.v1.BookFilter.author_id:type_name -> atlantis.common.v1.Int64Predicate
-	20, // 12: atlantis.library.v1.BookFilter.score:type_name -> atlantis.common.v1.FloatPredicate
-	21, // 13: atlantis.library.v1.BookFilter.page_count:type_name -> atlantis.common.v1.Int32Predicate
-	19, // 14: atlantis.library.v1.BookFilter.summary:type_name -> atlantis.common.v1.StringPredicate
-	22, // 15: atlantis.library.v1.BookFilter.expires_at:type_name -> atlantis.common.v1.TimestampPredicate
-	22, // 16: atlantis.library.v1.BookFilter.created_at:type_name -> atlantis.common.v1.TimestampPredicate
-	13, // 17: atlantis.library.v1.BookFilter.and:type_name -> atlantis.library.v1.BookFilter
-	13, // 18: atlantis.library.v1.BookFilter.or:type_name -> atlantis.library.v1.BookFilter
-	13, // 19: atlantis.library.v1.BookFilter.not:type_name -> atlantis.library.v1.BookFilter
-	0,  // 20: atlantis.library.v1.BookOrderBy.field:type_name -> atlantis.library.v1.BookOrderField
-	13, // 21: atlantis.library.v1.QueryBookRequest.filter:type_name -> atlantis.library.v1.BookFilter
-	14, // 22: atlantis.library.v1.QueryBookRequest.order:type_name -> atlantis.library.v1.BookOrderBy
-	23, // 23: atlantis.library.v1.QueryBookRequest.fields:type_name -> google.protobuf.FieldMask
-	1,  // 24: atlantis.library.v1.QueryBookRequest.includes:type_name -> atlantis.library.v1.BookInclude
-	2,  // 25: atlantis.library.v1.QueryBookResponse.entities:type_name -> atlantis.library.v1.Book
-	3,  // 26: atlantis.library.v1.BookService.GetBook:input_type -> atlantis.library.v1.GetBookRequest
-	5,  // 27: atlantis.library.v1.BookService.CreateBook:input_type -> atlantis.library.v1.CreateBookRequest
-	7,  // 28: atlantis.library.v1.BookService.UpdateBook:input_type -> atlantis.library.v1.UpdateBookRequest
-	9,  // 29: atlantis.library.v1.BookService.DeleteBook:input_type -> atlantis.library.v1.DeleteBookRequest
-	11, // 30: atlantis.library.v1.BookService.BatchGetBook:input_type -> atlantis.library.v1.BatchGetBookRequest
-	15, // 31: atlantis.library.v1.BookService.QueryBook:input_type -> atlantis.library.v1.QueryBookRequest
-	4,  // 32: atlantis.library.v1.BookService.GetBook:output_type -> atlantis.library.v1.GetBookResponse
-	6,  // 33: atlantis.library.v1.BookService.CreateBook:output_type -> atlantis.library.v1.CreateBookResponse
-	8,  // 34: atlantis.library.v1.BookService.UpdateBook:output_type -> atlantis.library.v1.UpdateBookResponse
-	10, // 35: atlantis.library.v1.BookService.DeleteBook:output_type -> atlantis.library.v1.DeleteBookResponse
-	12, // 36: atlantis.library.v1.BookService.BatchGetBook:output_type -> atlantis.library.v1.BatchGetBookResponse
-	16, // 37: atlantis.library.v1.BookService.QueryBook:output_type -> atlantis.library.v1.QueryBookResponse
-	32, // [32:38] is the sub-list for method output_type
-	26, // [26:32] is the sub-list for method input_type
-	26, // [26:26] is the sub-list for extension type_name
-	26, // [26:26] is the sub-list for extension extendee
-	0,  // [0:26] is the sub-list for field type_name
+	18, // 6: atlantis.library.v1.UpdateBookRequest.update_mask:type_name -> google.protobuf.FieldMask
+	2,  // 7: atlantis.library.v1.UpdateBookResponse.entity:type_name -> atlantis.library.v1.Book
+	2,  // 8: atlantis.library.v1.BatchGetBookResponse.entities:type_name -> atlantis.library.v1.Book
+	19, // 9: atlantis.library.v1.BookFilter.id:type_name -> atlantis.common.v1.Int64Predicate
+	20, // 10: atlantis.library.v1.BookFilter.tenant:type_name -> atlantis.common.v1.StringPredicate
+	20, // 11: atlantis.library.v1.BookFilter.title:type_name -> atlantis.common.v1.StringPredicate
+	19, // 12: atlantis.library.v1.BookFilter.author_id:type_name -> atlantis.common.v1.Int64Predicate
+	21, // 13: atlantis.library.v1.BookFilter.score:type_name -> atlantis.common.v1.FloatPredicate
+	22, // 14: atlantis.library.v1.BookFilter.page_count:type_name -> atlantis.common.v1.Int32Predicate
+	20, // 15: atlantis.library.v1.BookFilter.summary:type_name -> atlantis.common.v1.StringPredicate
+	23, // 16: atlantis.library.v1.BookFilter.expires_at:type_name -> atlantis.common.v1.TimestampPredicate
+	23, // 17: atlantis.library.v1.BookFilter.created_at:type_name -> atlantis.common.v1.TimestampPredicate
+	13, // 18: atlantis.library.v1.BookFilter.and:type_name -> atlantis.library.v1.BookFilter
+	13, // 19: atlantis.library.v1.BookFilter.or:type_name -> atlantis.library.v1.BookFilter
+	13, // 20: atlantis.library.v1.BookFilter.not:type_name -> atlantis.library.v1.BookFilter
+	0,  // 21: atlantis.library.v1.BookOrderBy.field:type_name -> atlantis.library.v1.BookOrderField
+	13, // 22: atlantis.library.v1.QueryBookRequest.filter:type_name -> atlantis.library.v1.BookFilter
+	14, // 23: atlantis.library.v1.QueryBookRequest.order:type_name -> atlantis.library.v1.BookOrderBy
+	18, // 24: atlantis.library.v1.QueryBookRequest.fields:type_name -> google.protobuf.FieldMask
+	1,  // 25: atlantis.library.v1.QueryBookRequest.includes:type_name -> atlantis.library.v1.BookInclude
+	2,  // 26: atlantis.library.v1.QueryBookResponse.entities:type_name -> atlantis.library.v1.Book
+	3,  // 27: atlantis.library.v1.BookService.GetBook:input_type -> atlantis.library.v1.GetBookRequest
+	5,  // 28: atlantis.library.v1.BookService.CreateBook:input_type -> atlantis.library.v1.CreateBookRequest
+	7,  // 29: atlantis.library.v1.BookService.UpdateBook:input_type -> atlantis.library.v1.UpdateBookRequest
+	9,  // 30: atlantis.library.v1.BookService.DeleteBook:input_type -> atlantis.library.v1.DeleteBookRequest
+	11, // 31: atlantis.library.v1.BookService.BatchGetBook:input_type -> atlantis.library.v1.BatchGetBookRequest
+	15, // 32: atlantis.library.v1.BookService.QueryBook:input_type -> atlantis.library.v1.QueryBookRequest
+	4,  // 33: atlantis.library.v1.BookService.GetBook:output_type -> atlantis.library.v1.GetBookResponse
+	6,  // 34: atlantis.library.v1.BookService.CreateBook:output_type -> atlantis.library.v1.CreateBookResponse
+	8,  // 35: atlantis.library.v1.BookService.UpdateBook:output_type -> atlantis.library.v1.UpdateBookResponse
+	10, // 36: atlantis.library.v1.BookService.DeleteBook:output_type -> atlantis.library.v1.DeleteBookResponse
+	12, // 37: atlantis.library.v1.BookService.BatchGetBook:output_type -> atlantis.library.v1.BatchGetBookResponse
+	16, // 38: atlantis.library.v1.BookService.QueryBook:output_type -> atlantis.library.v1.QueryBookResponse
+	33, // [33:39] is the sub-list for method output_type
+	27, // [27:33] is the sub-list for method input_type
+	27, // [27:27] is the sub-list for extension type_name
+	27, // [27:27] is the sub-list for extension extendee
+	0,  // [0:27] is the sub-list for field type_name
 }
 
 func init() { file_atlantis_library_v1_book_proto_init() }

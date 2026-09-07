@@ -8,6 +8,7 @@ import (
 	"time"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
@@ -41,7 +42,8 @@ func cmdBackfillStatus(args []string) int {
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
 	timeout := fs.Duration("timeout", 10*time.Second, "RPC timeout")
 	format := fs.String("format", "table", "Output format: table or json")
-	if err := fs.Parse(args); err != nil {
+	pos, err := cliflag.Parse(fs, args)
+	if err != nil {
 		return 3
 	}
 
@@ -52,10 +54,10 @@ func cmdBackfillStatus(args []string) int {
 	}
 
 	req := &adminpb.GetBackfillStatusRequest{}
-	if fs.NArg() == 0 {
+	if len(pos) == 0 {
 		req.LatestForCaller = cfg.Caller
 	} else {
-		req.PlanHash = fs.Arg(0)
+		req.PlanHash = pos[0]
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)

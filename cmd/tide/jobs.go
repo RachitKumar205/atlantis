@@ -10,6 +10,7 @@ import (
 	"time"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
@@ -57,14 +58,15 @@ func cmdJobSubmit(args []string) int {
 	argsJSON := fs.String("args", "{}", "Args as a JSON object")
 	scheduledAt := fs.String("scheduled-at", "", "Defer execution until this RFC3339 time")
 	timeout := fs.Duration("timeout", 10*time.Second, "RPC timeout")
-	if err := fs.Parse(args); err != nil {
+	pos, err := cliflag.Parse(fs, args)
+	if err != nil {
 		return 3
 	}
-	if fs.NArg() < 1 {
+	if len(pos) < 1 {
 		fmt.Fprintln(os.Stderr, "tide job submit: missing job-name")
 		return 2
 	}
-	jobName := fs.Arg(0)
+	jobName := pos[0]
 
 	// Validate args parses as JSON before sending — surfacing the
 	// error here gives a precise position the caller can fix.
@@ -113,14 +115,15 @@ func cmdJobStatus(args []string) int {
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
 	format := fs.String("format", "table", "Output format: table or json")
 	timeout := fs.Duration("timeout", 10*time.Second, "RPC timeout")
-	if err := fs.Parse(args); err != nil {
+	pos, err := cliflag.Parse(fs, args)
+	if err != nil {
 		return 3
 	}
-	if fs.NArg() < 1 {
+	if len(pos) < 1 {
 		fmt.Fprintln(os.Stderr, "tide job status: missing job-id")
 		return 2
 	}
-	jobID := fs.Arg(0)
+	jobID := pos[0]
 
 	cfg, err := loadPCConfig(*configPath)
 	if err != nil {
@@ -174,7 +177,7 @@ func cmdJobDead(args []string) int {
 	limit := fs.Int("limit", 25, "Max rows to return")
 	format := fs.String("format", "table", "Output format: table or json")
 	timeout := fs.Duration("timeout", 10*time.Second, "RPC timeout")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 3
 	}
 
@@ -219,14 +222,15 @@ func cmdJobRetry(args []string) int {
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
 	timeout := fs.Duration("timeout", 10*time.Second, "RPC timeout")
-	if err := fs.Parse(args); err != nil {
+	pos, err := cliflag.Parse(fs, args)
+	if err != nil {
 		return 3
 	}
-	if fs.NArg() < 1 {
+	if len(pos) < 1 {
 		fmt.Fprintln(os.Stderr, "tide job retry: missing dead-job-id")
 		return 2
 	}
-	jobID := fs.Arg(0)
+	jobID := pos[0]
 
 	cfg, err := loadPCConfig(*configPath)
 	if err != nil {

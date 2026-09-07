@@ -8,6 +8,7 @@ import (
 	"time"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
@@ -22,14 +23,15 @@ func cmdBlame(args []string) int {
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
 	format := fs.String("format", "table", "Output format: table or json")
 	timeout := fs.Duration("timeout", 10*time.Second, "RPC timeout")
-	if err := fs.Parse(args); err != nil {
+	pos, err := cliflag.Parse(fs, args)
+	if err != nil {
 		return 3
 	}
-	if fs.NArg() < 1 {
+	if len(pos) < 1 {
 		fmt.Fprintln(os.Stderr, "usage: tide blame <entity-id>")
 		return 2
 	}
-	entityID := fs.Arg(0)
+	entityID := pos[0]
 
 	cfg, err := loadPCConfig(*configPath)
 	if err != nil {

@@ -111,22 +111,30 @@ func buildInsertSQL(e *dsl.Entity, extraReturning []string) string {
 
 // buildUpdateSQL renders:
 //
-//	UPDATE "schema"."table" SET "col1" = $1, "col2" = $2, ... WHERE "pk" = $N
+//	UPDATE "schema"."table"
+//	   SET "a" = CASE WHEN $1 THEN $2 ELSE "a" END, "b" = CASE WHEN $3 THEN $4 ELSE "b" END, ...
+//	 WHERE "pk" = $N
 //
-// PK, identity, and serial columns are excluded from the SET list.
-// PK placeholder numbers start after the SET columns.
+// PK, identity, and serial columns are excluded from the SET list. Every
+// other column takes two parameters, the write flag then the value, and the
+// PK placeholders start after them. bindForUpdate lays the arguments out in
+// the same order; the flag is runtime.FieldSet over the request's
+// update_mask and the field's presence.
+//
+// The value carries no cast: the CASE unifies it with the column, and a cast
+// to VARCHAR(n) would truncate where the assignment raises 22001.
 func buildUpdateSQL(e *dsl.Entity, extraReturning []string) string {
 	table := schema.QualifiedTable(e)
 
-	// SET assignments: non-PK, non-identity, non-serial columns.
 	var sets []string
 	idx := 0
 	for _, f := range e.Fields {
 		if schema.IsPKColumn(e, f.Name) || f.Identity || f.Serial {
 			continue
 		}
-		idx++
-		sets = append(sets, fmt.Sprintf("%s = $%d", schema.QuoteIdent(f.Name), idx))
+		col := schema.QuoteIdent(f.Name)
+		sets = append(sets, fmt.Sprintf("%s = CASE WHEN $%d THEN $%d ELSE %s END", col, idx+1, idx+2, col))
+		idx += 2
 	}
 
 	if len(sets) == 0 {

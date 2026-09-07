@@ -8,6 +8,7 @@ import (
 	"time"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
@@ -27,7 +28,7 @@ func cmdParked(args []string) int {
 	all := fs.Bool("all", false, "Include objects that have already been reaped")
 	limit := fs.Int("limit", 100, "Maximum rows to return")
 	timeout := fs.Duration("timeout", 10*time.Second, "RPC timeout")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 3
 	}
 

@@ -174,8 +174,8 @@ procedure ConnectAccount for directory.Account {
 ```
 
 The enqueue shares the procedure's transaction: if the procedure rolls
-back, the job is never enqueued. A brand-new procedure's RPC becomes
-callable at the next server restart — see
+back, the job is never enqueued. The procedure's RPC answers from the next
+request after `tide apply` — see
 [Custom queries and procedures](/concepts/custom-queries-and-procedures/#adding-vs-editing).
 
 ## Verify

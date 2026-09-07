@@ -42,10 +42,10 @@ The checkpoint commit notifies the server, which reloads its entity
 metadata: in-flight requests finish on the old schema, and new requests
 see the new one moments after the commit. No restart, no redeploy.
 
-One exception: a brand-new entity, custom query, or procedure adds a gRPC
-method, and methods register at server startup. The declaration is
-persisted and visible to `tide show` at once; its RPC becomes callable when
-your organisation's server next restarts.
+A brand-new entity, custom query, or procedure is served from the same
+reload: the server routes every schema RPC from the current snapshot, so
+its methods answer from the next request. Callers need `tide generate` to
+get the typed client for it.
 
 ## Migration ownership
 

@@ -1,6 +1,7 @@
 package entity
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 	_ "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/common/v1"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/schema"
 )
 
 // testAccount returns a representative entity with several field types,
@@ -123,12 +125,34 @@ func TestBuildUpdateSQL(t *testing.T) {
 		t.Errorf("buildUpdateSQL has PK in SET clause: %s", sql)
 	}
 	// Non-PK columns should appear in SET.
-	if !strings.Contains(sql, `"email" = $1`) {
+	if !strings.Contains(sql, `"email" = CASE WHEN $1 THEN $2 ELSE "email" END`) {
 		t.Errorf("buildUpdateSQL missing email in SET: %s", sql)
 	}
 	// PK should appear in WHERE.
 	if !strings.Contains(sql, `WHERE "id" = $`) {
 		t.Errorf("buildUpdateSQL missing PK in WHERE: %s", sql)
+	}
+
+	// Every non-key column takes the two-parameter CASE form, in field order;
+	// the primary key follows the last of them.
+	nonKey := 0
+	for _, f := range e.Fields {
+		if schema.IsPKColumn(e, f.Name) || f.Identity || f.Serial {
+			continue
+		}
+		nonKey++
+	}
+	for _, want := range []string{
+		`"email" = CASE WHEN $1 THEN $2 ELSE "email" END`,
+		`"name" = CASE WHEN $3 THEN $4 ELSE "name" END`,
+		`"is_active" = CASE WHEN $5 THEN $6 ELSE "is_active" END`,
+		`"created_at" = CASE WHEN $7 THEN $8 ELSE "created_at" END`,
+		`"deleted_at" = CASE WHEN $9 THEN $10 ELSE "deleted_at" END`,
+		fmt.Sprintf(`WHERE "id" = $%d`, 2*nonKey+1),
+	} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("buildUpdateSQL lacks %q:\n%s", want, sql)
+		}
 	}
 }
 

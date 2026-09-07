@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"google.golang.org/grpc"
-
 	"github.com/rachitkumar205/atlantis/internal/cache/queryresult"
 	"github.com/rachitkumar205/atlantis/internal/cache/read"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
@@ -52,32 +50,6 @@ func NewServer(pool runtime.Pool, cache runtime.Cache, outbox runtime.Outbox, qc
 	return s
 }
 
-// Register reads the IR, builds the initial entity snapshot, and
-// registers one gRPC service per entity plus per-namespace
-// CustomService descriptors for custom queries.
-func (s *Server) Register(grpcSrv *grpc.Server, ir *dsl.IR) error {
-	if ir == nil {
-		return fmt.Errorf("entity.Register: nil IR")
-	}
-
-	snap, err := buildSnapshot(ir, "")
-	if err != nil {
-		return err
-	}
-	s.snapshot.Store(snap)
-
-	for _, meta := range snap.entities {
-		desc := buildGRPCServiceDesc(s, meta)
-		grpcSrv.RegisterService(&desc, nil)
-	}
-
-	if len(ir.Queries) > 0 || len(ir.Procedures) > 0 {
-		s.registerCustomServices(grpcSrv, snap)
-	}
-
-	return nil
-}
-
 // Reload builds a new snapshot from the IR and swaps it atomically.
 // In-flight requests on the old snapshot complete unaffected.
 //
@@ -94,8 +66,7 @@ func (s *Server) Reload(ir *dsl.IR, contentHash string) error {
 			return fmt.Errorf("entity.Reload: refusing the new schema: %w", err)
 		}
 	}
-	s.snapshot.Store(snap)
-	return nil
+	return s.install(snap)
 }
 
 // SetOnReload installs a hook called with the new IR before the snapshot is
@@ -127,85 +98,4 @@ func (s *Server) ContentHash() string {
 		return ""
 	}
 	return snap.contentHash
-}
-
-// buildGRPCServiceDesc constructs the grpc.ServiceDesc for one entity.
-// Handlers capture the entity ID and look up metadata from the current
-// snapshot at request time, enabling hot-reload.
-func buildGRPCServiceDesc(s *Server, meta *entityMeta) grpc.ServiceDesc {
-	ns := goNamespace(meta.entity.Namespace)
-	entityID := meta.entityID
-	name := meta.entity.Name
-	serviceName := fmt.Sprintf("atlantis.%s.v1.%sService", ns, name)
-
-	methods := []grpc.MethodDesc{
-		{MethodName: "Get" + name, Handler: makeHandler(s, entityID, "Get", ns, name)},
-		{MethodName: "Create" + name, Handler: makeHandler(s, entityID, "Create", ns, name)},
-		{MethodName: "Update" + name, Handler: makeHandler(s, entityID, "Update", ns, name)},
-		{MethodName: "Delete" + name, Handler: makeHandler(s, entityID, "Delete", ns, name)},
-		{MethodName: "BatchGet" + name, Handler: makeHandler(s, entityID, "BatchGet", ns, name)},
-		{MethodName: "Query" + name, Handler: makeHandler(s, entityID, "Query", ns, name)},
-	}
-
-	return grpc.ServiceDesc{
-		ServiceName: serviceName,
-		HandlerType: nil,
-		Methods:     methods,
-		Streams:     []grpc.StreamDesc{},
-		Metadata:    fmt.Sprintf("atlantis/%s/v1/%s.proto", ns, name),
-	}
-}
-
-// registerCustomServices registers one gRPC CustomService per namespace
-// from the pre-built snapshot. Both custom queries AND procedures share
-// the same per-namespace CustomService (the codegen emits them into one
-// `service CustomService`), so their method descriptors MUST be merged
-// into a single ServiceDesc per namespace — registering two ServiceDescs
-// with the same ServiceName panics a live grpc.Server. Handlers capture
-// the key and look up metadata from the current snapshot at request time.
-func (s *Server) registerCustomServices(grpcSrv *grpc.Server, snap *entitySnapshot) {
-	type nsGroup struct {
-		ns      string
-		methods []grpc.MethodDesc
-	}
-	groups := make(map[string]*nsGroup)
-
-	groupFor := func(ns string) *nsGroup {
-		g, ok := groups[ns]
-		if !ok {
-			g = &nsGroup{ns: ns}
-			groups[ns] = g
-		}
-		return g
-	}
-
-	for key, cqm := range snap.customMeta {
-		ns := splitEntityID(cqm.query.Owner)[0]
-		g := groupFor(ns)
-		g.methods = append(g.methods, grpc.MethodDesc{
-			MethodName: cqm.query.Name,
-			Handler:    makeCustomHandler(s, key, ns),
-		})
-	}
-
-	for key, pm := range snap.procMeta {
-		ns := splitEntityID(pm.proc.Owner)[0]
-		g := groupFor(ns)
-		g.methods = append(g.methods, grpc.MethodDesc{
-			MethodName: pm.proc.Name,
-			Handler:    makeCustomProcedureHandler(s, key, ns),
-		})
-	}
-
-	for _, g := range groups {
-		goNS := goNamespace(g.ns)
-		desc := grpc.ServiceDesc{
-			ServiceName: fmt.Sprintf("atlantis.%s.v1.CustomService", goNS),
-			HandlerType: nil,
-			Methods:     g.methods,
-			Streams:     []grpc.StreamDesc{},
-			Metadata:    fmt.Sprintf("atlantis/%s/v1/custom.proto", goNS),
-		}
-		grpcSrv.RegisterService(&desc, nil)
-	}
 }

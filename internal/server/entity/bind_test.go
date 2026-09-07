@@ -187,7 +187,7 @@ func TestBuildCustomQueryDescs_VectorIsRepeated(t *testing.T) {
 			},
 		},
 	}
-	file, err := buildCustomQueryDescs(cq, "vendor")
+	file, err := buildCustomQueryDescs(cq, "vendor", nil)
 	if err != nil {
 		t.Fatalf("buildCustomQueryDescs: %v", err)
 	}

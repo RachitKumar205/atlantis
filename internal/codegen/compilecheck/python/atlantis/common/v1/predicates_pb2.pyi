@@ -27,8 +27,10 @@ DESCRIPTOR: _descriptor.FileDescriptor
 
 @_typing.final
 class StringPredicate(_message.Message):
-    """StringPredicate covers text / varchar / citext / uuid. The LIKE-flavored
-    arms (prefix/suffix/contains/ilike) escape `%` and `_` in caller input.
+    """StringPredicate covers text / varchar / citext / uuid.
+
+    prefix, suffix, contains and ilike take a literal, not a LIKE pattern:
+    `%`, `_` and `\\` in the value are escaped before the comparison.
     """
 
     DESCRIPTOR: _descriptor.Descriptor
@@ -46,9 +48,13 @@ class StringPredicate(_message.Message):
     eq: _builtins.str
     neq: _builtins.str
     prefix: _builtins.str
+    """The column starts with the value."""
     suffix: _builtins.str
+    """The column ends with the value."""
     contains: _builtins.str
+    """The column contains the value."""
     ilike: _builtins.str
+    """The column contains the value, compared without case."""
     is_null: _builtins.bool
     is_not_null: _builtins.bool
     @_builtins.property

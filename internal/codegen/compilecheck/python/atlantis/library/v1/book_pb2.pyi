@@ -214,16 +214,20 @@ class UpdateBookRequest(_message.Message):
     DESCRIPTOR: _descriptor.Descriptor
 
     ENTITY_FIELD_NUMBER: _builtins.int
+    UPDATE_MASK_FIELD_NUMBER: _builtins.int
     @_builtins.property
     def entity(self) -> Global___Book: ...
+    @_builtins.property
+    def update_mask(self) -> _field_mask_pb2.FieldMask: ...
     def __init__(
         self,
         *,
         entity: Global___Book | None = ...,
+        update_mask: _field_mask_pb2.FieldMask | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["entity", b"entity"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["entity", b"entity", "update_mask", b"update_mask"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["entity", b"entity"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["entity", b"entity", "update_mask", b"update_mask"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 

@@ -22,6 +22,12 @@ import (
 	_ "google.golang.org/protobuf/types/known/fieldmaskpb"
 )
 
+// entityDynamicFilePath is the path of the descriptor file built for one
+// entity, given its Go namespace. A custom query with `output as` imports it.
+func entityDynamicFilePath(goNS, entityName string) string {
+	return fmt.Sprintf("atlantis/%s/v1/%s_dynamic.proto", goNS, schema.SnakeCase(entityName))
+}
+
 // buildProtoDescriptors constructs protoreflect descriptors for an entity
 // at runtime using descriptorpb. The resulting message descriptors use
 // the same field numbers the codegen assigns (Field.ProtoNumber), so
@@ -51,7 +57,7 @@ func buildProtoDescriptors(e *dsl.Entity, includeRefs []schema.InboundRef) (prot
 
 	ns := goNamespace(e.Namespace)
 	pkg := fmt.Sprintf("atlantis.%s.v1", ns)
-	fileName := fmt.Sprintf("atlantis/%s/v1/%s_dynamic.proto", ns, schema.SnakeCase(e.Name))
+	fileName := entityDynamicFilePath(ns, e.Name)
 
 	file := &descriptorpb.FileDescriptorProto{
 		Name:    strPtr(fileName),
@@ -126,7 +132,7 @@ func buildProtoDescriptors(e *dsl.Entity, includeRefs []schema.InboundRef) (prot
 		"atlantis/common/v1/predicates.proto",
 		"google/protobuf/field_mask.proto")
 
-	fd, err := buildFileDescriptor(file)
+	fd, err := buildFileDescriptor(file, nil)
 	if err != nil {
 		return nil, fmt.Errorf("building file descriptor for %s: %w", e.ID(), err)
 	}
@@ -198,15 +204,17 @@ func dslFieldToProtoField(f *dsl.Field) *descriptorpb.FieldDescriptorProto {
 // message added to an existing one, silently does not get. Only the entity
 // builder marks fields proto3-optional today; routing every builder through
 // here is what stops that from mattering.
-func buildFileDescriptor(file *descriptorpb.FileDescriptorProto) (protoreflect.FileDescriptor, error) {
+//
+// files are the descriptors built before this one, by path; a dependency
+// on one of them resolves there, anything else through the global registry,
+// which holds the compiled Timestamp, predicates and so on from init()-time
+// registration.
+func buildFileDescriptor(file *descriptorpb.FileDescriptorProto, files map[string]protoreflect.FileDescriptor) (protoreflect.FileDescriptor, error) {
 	for _, msg := range file.MessageType {
 		materializeProto3Optional(msg)
 	}
-	// The resolver chains files built here with the global proto registry,
-	// which holds the compiled Timestamp, predicates and so on from
-	// init()-time registration.
 	resolver := &fileResolver{
-		files:  make(map[string]protoreflect.FileDescriptor),
+		files:  files,
 		global: protoregistry.GlobalFiles,
 	}
 	return protodesc.NewFile(file, resolver)
@@ -435,7 +443,20 @@ func buildCreateResponse(e *dsl.Entity) *descriptorpb.DescriptorProto {
 }
 
 func buildUpdateRequest(e *dsl.Entity) *descriptorpb.DescriptorProto {
-	return wrapEntityRequest("Update"+e.Name+"Request", e)
+	msg := wrapEntityRequest("Update"+e.Name+"Request", e)
+	// update_mask names the fields to write. Empty means the fields the caller
+	// set; naming a field writes it whether or not it was set, which is the
+	// only way to put NULL into a nullable column through Update. Field 2,
+	// matching the emitted proto.
+	two := int32(2)
+	msg.Field = append(msg.Field, &descriptorpb.FieldDescriptorProto{
+		Name:     strPtr("update_mask"),
+		Number:   &two,
+		Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+		Type:     descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(),
+		TypeName: strPtr(".google.protobuf.FieldMask"),
+	})
+	return msg
 }
 
 func buildUpdateResponse(e *dsl.Entity) *descriptorpb.DescriptorProto {
@@ -932,20 +953,41 @@ func (r *fileResolver) FindDescriptorByName(name protoreflect.FullName) (protore
 	return nil, fmt.Errorf("descriptor not found: %s", name)
 }
 
-// findInFile searches a file descriptor for a named descriptor.
+// findInFile searches a file descriptor for a named message, enum or
+// service, nested messages included.
 func findInFile(fd protoreflect.FileDescriptor, name protoreflect.FullName) protoreflect.Descriptor {
-	msgs := fd.Messages()
+	if d := findInMessages(fd.Messages(), name); d != nil {
+		return d
+	}
+	enums := fd.Enums()
+	for i := range enums.Len() {
+		if e := enums.Get(i); e.FullName() == name {
+			return e
+		}
+	}
+	svcs := fd.Services()
+	for i := range svcs.Len() {
+		if s := svcs.Get(i); s.FullName() == name {
+			return s
+		}
+	}
+	return nil
+}
+
+func findInMessages(msgs protoreflect.MessageDescriptors, name protoreflect.FullName) protoreflect.Descriptor {
 	for i := range msgs.Len() {
 		m := msgs.Get(i)
 		if m.FullName() == name {
 			return m
 		}
-	}
-	svcs := fd.Services()
-	for i := range svcs.Len() {
-		s := svcs.Get(i)
-		if s.FullName() == name {
-			return s
+		enums := m.Enums()
+		for j := range enums.Len() {
+			if e := enums.Get(j); e.FullName() == name {
+				return e
+			}
+		}
+		if d := findInMessages(m.Messages(), name); d != nil {
+			return d
 		}
 	}
 	return nil

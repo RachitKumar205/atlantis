@@ -107,7 +107,7 @@ func TestBuildCustomProcedureDescs_ResponseIsRowsAffected(t *testing.T) {
 		Owner:  "vendor.VendorSyncJob",
 		Inputs: []dsl.QueryParam{{Name: "stale_minutes", Type: dsl.FieldType{Name: "int"}}},
 	}
-	fd, err := buildCustomProcedureDescs(cp, "vendor")
+	fd, err := buildCustomProcedureDescs(cp, "vendor", nil)
 	if err != nil {
 		t.Fatalf("buildCustomProcedureDescs: %v", err)
 	}

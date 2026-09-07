@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 )
 
 // tidectl shells out to the golang-migrate `migrate` binary for actual
@@ -30,7 +32,7 @@ func runMigrate(args []string, migrateArgs ...string) int {
 	fs := flagSet("migrate")
 	migrationsDir := fs.String("migrations-dir", "migrations", "Directory containing migrations")
 	pgURL := fs.String("pg-url", os.Getenv("PG_URL"), "Postgres URL (defaults to $PG_URL)")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 2
 	}
 	if *pgURL == "" {

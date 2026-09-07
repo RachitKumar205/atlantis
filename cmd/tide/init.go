@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
@@ -23,7 +24,7 @@ func cmdInit(args []string) int {
 	outputDir := fs.String("output-dir", "", "where `tide generate` writes the typed client")
 	generate := fs.String("generate", "", "comma-separated namespaces `tide generate` covers (defaults to the caller name when --output-dir is set)")
 	language := fs.String("language", "", "client language: go (default) or python")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 3
 	}
 	lang, err := resolveLanguage(*language)

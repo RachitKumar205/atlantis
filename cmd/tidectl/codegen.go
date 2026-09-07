@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
@@ -33,7 +34,7 @@ func cmdCodegen(args []string) int {
 	out := fs.String("out", ".", "Output root for proto/ and gen/")
 	checkpoint := fs.String("ir-checkpoint", "gen/.last-ir.json", "Previous IR checkpoint for stable proto numbers")
 	dryRun := fs.Bool("dry-run", false, "Print what would be written without writing")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 2
 	}
 

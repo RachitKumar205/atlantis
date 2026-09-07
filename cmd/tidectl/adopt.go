@@ -10,6 +10,7 @@ import (
 	"time"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 	"github.com/rachitkumar205/atlantis/internal/workspace"
 )
@@ -34,7 +35,7 @@ func cmdAdopt(args []string) int {
 	allowDrift := fs.Bool("allow-drift", false, "Baseline even when introspection finds drift. Records the drift report into atlantis.adopt_history for later audit.")
 	format := fs.String("format", "table", "Output format: table or json.")
 	timeout := fs.Duration("timeout", 120*time.Second, "RPC timeout (introspection across a large schema can take a while).")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 3
 	}
 

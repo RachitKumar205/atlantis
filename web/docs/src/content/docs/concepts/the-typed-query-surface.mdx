@@ -38,8 +38,69 @@ predicate messages generated from the schema:
 
 Each scalar field type has a corresponding predicate. A predicate holds one
 operator, so `Op` takes a single wrapper value; combine operators with the
-filter's `And`, `Or` and `Not` arms. The full operator set is in [the DSL
-grammar reference](/reference/dsl-grammar/).
+filter's `And`, `Or` and `Not` arms.
+
+## Operators
+
+| Predicate | `.atl` types | Operators |
+|---|---|---|
+| `StringPredicate` | `text`, `varchar`, `citext`, `uuid`, `char`, and every type the [types table](/reference/dsl-types/) maps to proto `string` | `eq`, `neq`, `in`, `not_in`, `prefix`, `suffix`, `contains`, `ilike`, `is_null`, `is_not_null` |
+| `Int32Predicate` | `smallint`, `int` | `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `between`, `is_null`, `is_not_null` |
+| `Int64Predicate` | `bigint` | same as `Int32Predicate` |
+| `FloatPredicate`, `DoublePredicate` | `real`; `double` | `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `in`, `is_null`, `is_not_null` |
+| `NumericPredicate` | `numeric` | `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `in`, `is_null`, `is_not_null` |
+| `BoolPredicate` | `boolean` | `eq`, `is_null`, `is_not_null` |
+| `TimestampPredicate` | `timestamptz`, `timestamp`, `date` | `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `between`, `is_null`, `is_not_null` |
+| `BytesPredicate` | `bytea`, `jsonb` | `eq`, `neq`, `in`, `is_null`, `is_not_null` |
+
+Array and vector columns have no predicate and cannot be filtered on;
+vector columns are searched through the `Search` method of an HNSW index.
+
+- `prefix`, `suffix`, `contains` and `ilike` take a literal, not a `LIKE`
+  pattern. `%`, `_` and `\` in the value are escaped before the comparison,
+  so `contains: "50%"` matches rows whose column holds `50%`.
+- `ilike` is `contains` compared without case. It does not accept a pattern:
+  `ilike: "go %"` matches only a column that contains the three characters
+  `go %`.
+- `between` is inclusive at both ends; a range whose `lo` is above `hi` is
+  rejected with `InvalidArgument`.
+- `in` and `not_in` take at most 1000 values; an empty list adds no
+  condition.
+- `is_null: true` adds `IS NULL`; `is_null: false` adds nothing, and so does
+  `is_not_null: false`.
+- `NumericPredicate` carries decimal strings, compared as Postgres `numeric`.
+- `BytesPredicate` on a `jsonb` column compares the bytes against
+  Postgres's normalised rendering; there is no value-level JSON predicate.
+
+## Update
+
+`Update` writes the fields the request sets and keeps the rest. Whether a
+field counts as set depends on its shape on the wire:
+
+| Field | Set when |
+|---|---|
+| Nullable or defaulted column (`optional` scalar) | The caller assigned it, including to its zero value |
+| Timestamp, date, interval | The message is non-nil |
+| Array or vector (`repeated`) | The list has at least one element |
+| `NOT NULL` column without a default (plain scalar) | Always; an empty string is written as an empty string |
+
+An `Update` that carries only `title` does not touch `created_at`, `body`
+or `tags`.
+
+`update_mask` overrides the presence rule. A non-empty mask names the
+fields to write and nothing else: a named field is written from its wire
+value, `NULL` when unset, which is the one way to clear a nullable column
+or an array through `Update`; a field left out of the mask is kept even
+when set, a plain scalar included. A path that names no updatable column,
+the primary key among them, is refused with `InvalidArgument`.
+
+```go
+_, err := notes.UpdateNote(ctx, &pb.UpdateNoteRequest{
+    Entity:     &pb.Note{Id: 7, Title: "Draft 2"},
+    UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"title", "body"}},
+})
+// title is written; body, unset, becomes NULL; every other column is kept.
+```
 
 ## Ordering and pages
 
@@ -83,13 +144,11 @@ Typed predicates give three guarantees:
 fit; declare a `query` or `procedure` block instead. The server validates
 the SQL when you run `tide apply`, and the codegen emits a typed RPC.
 
-A brand-new custom query's RPC registers only when the server restarts;
-see [adding vs editing](/concepts/custom-queries-and-procedures/#adding-vs-editing).
 Preview the custom SQL in the [sandbox](/concepts/sandbox/) before applying.
 
 ## Related
 
 - [Custom queries and procedures](/concepts/custom-queries-and-procedures/)
 - [Caching and invalidation](/concepts/caching-and-invalidation/) — how `Query` results are cached.
-- [The DSL grammar](/reference/dsl-grammar/) — predicate types and operators.
+- [The DSL types](/reference/dsl-types/) — which proto type, and so which predicate, each column gets.
 - [The sandbox](/concepts/sandbox/) — disposable copies of the schema for testing predicates and custom SQL.

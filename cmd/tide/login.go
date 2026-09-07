@@ -37,6 +37,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
@@ -57,7 +58,7 @@ func cmdLogin(args []string) int {
 	// makes are signed by a CA that is in no system store.
 	caFile := fs.String("ca", "",
 		"local development only: PEM root that verifies the enrolment listener")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 2
 	}
 

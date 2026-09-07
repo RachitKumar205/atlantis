@@ -24,6 +24,8 @@ import (
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
+	v1reflectiongrpc "google.golang.org/grpc/reflection/grpc_reflection_v1"
+	v1alphareflectiongrpc "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/auth"
@@ -489,8 +491,23 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 	// deployment atlantis will start.
 	unary = append(unary, adminPolicy.UnaryInterceptor(adminGrants))
 	unary = append(unary, rateLimit, loggingInterceptor(log))
+	// Innermost, so the logging and metrics interceptors above record the
+	// status a client receives.
+	unary = append(unary, interceptors.NewStatus())
 
-	srv := grpc.NewServer(
+	// Entity, custom-query and procedure services are routed from the schema
+	// snapshot through the unknown-service handler, so a reload adds or
+	// removes one on the running server; grpc.Server refuses RegisterService
+	// after Serve. The handler applies the unary chain itself.
+	dynServer := entity.NewServer(pool, mc, invalidate.NewOutbox(), queryCache, reader)
+	// srv is assigned below; the handler runs only once Serve is called.
+	var srv *grpc.Server
+	knownStatic := func(service string) bool {
+		_, ok := srv.GetServiceInfo()[service]
+		return ok
+	}
+
+	srv = grpc.NewServer(
 		grpc.Creds(creds),
 		// Match the SDK's 64 MiB client receive default (atltransport):
 		// bulk entity Query reads and multi-row batch-procedure writes
@@ -498,6 +515,7 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		grpc.MaxRecvMsgSize(64<<20),
 		grpc.MaxSendMsgSize(64<<20),
 		grpc.ChainUnaryInterceptor(unary...),
+		grpc.UnknownServiceHandler(dynServer.Handler(interceptors.ChainUnary(unary...), knownStatic)),
 		// Stream chain mirrors the unary chain order for everything that
 		// applies on a per-stream basis. Rate limiting is intentionally
 		// excluded — it's an RPCs/sec concept and a long-lived stream
@@ -508,7 +526,10 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		// stream form because the Admin service declares no streaming RPC —
 		// an invariant held by TestAdminServiceDeclaresNoStreamingRPC, since
 		// nothing about adding one would fail to compile.
-		grpc.ChainStreamInterceptor(
+		//
+		// The methods dynServer serves skip it: they arrive on the
+		// unknown-service handler, which runs the unary chain above.
+		grpc.StreamInterceptor(interceptors.StreamChainUnless(dynServer.Serves,
 			recoveryStreamInterceptor(log),
 			interceptors.NewMetricsStream(),
 			resolveCallerStreamInterceptor(fwdAuth),
@@ -516,14 +537,23 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 			authChecker.Stream(),
 			interceptors.NewPartitionStream(),
 			loggingStreamInterceptor(log),
-		),
+			interceptors.NewStatusStream(),
+		)),
 	)
 
 	log.Debug("init: health + reflection")
 	healthSrv := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(srv, healthSrv)
 	healthSrv.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
-	reflection.Register(srv)
+	// reflection.ServerOptions is the one form that lists services registered
+	// outside grpc.Server; the dynamic services and their descriptors come
+	// from the current snapshot.
+	refl := reflection.ServerOptions{
+		Services:           dynServer.ServiceInfoWith(srv),
+		DescriptorResolver: dynServer,
+	}
+	v1reflectiongrpc.RegisterServerReflectionServer(srv, reflection.NewServerV1(refl))
+	v1alphareflectiongrpc.RegisterServerReflectionServer(srv, reflection.NewServer(refl))
 
 	log.Debug("init: register admin service")
 	// One service, one wire format. The hand-rolled JSON descriptor that used
@@ -816,10 +846,9 @@ func run(ctx context.Context, cfg config, log *slog.Logger, logRing *obs.LogRing
 		}
 	}
 
-	log.Debug("init: register entity services")
-	dynServer := entity.NewServer(pool, mc, invalidate.NewOutbox(), queryCache, reader)
-	if err := dynServer.Register(srv, ir); err != nil {
-		return fmt.Errorf("register entity services: %w", err)
+	log.Debug("init: load entity services")
+	if err := dynServer.Load(ir); err != nil {
+		return fmt.Errorf("load entity services: %w", err)
 	}
 
 	// The same verification on every hot reload, refusing a schema that would

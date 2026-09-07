@@ -8,6 +8,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 )
 
 // cmdDev — local development loop in one command.
@@ -46,7 +48,7 @@ func cmdDev(args []string) int {
 	binOut := fs.String("bin", "./bin/atlantis", "Output path for the atlantis-server binary.")
 	skipBuild := fs.Bool("skip-build", false, "Skip codegen + build; exec the existing binary as-is.")
 	skipBuf := fs.Bool("skip-buf", false, "Skip the buf lint + buf generate steps. Useful when the proto tree is already current.")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 2
 	}
 

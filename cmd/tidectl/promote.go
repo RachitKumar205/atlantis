@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 )
 
 // cmdPromote moves every staged migration from <stage-dir> into <migrations-dir>.
@@ -22,7 +24,7 @@ func cmdPromote(args []string) int {
 	fs := flagSet("promote")
 	stageDir := fs.String("stage-dir", "migrations/tidectl/_staged", "Source directory holding staged migration")
 	migrationsDir := fs.String("migrations-dir", "migrations/tidectl", "Target migrations directory")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 2
 	}
 

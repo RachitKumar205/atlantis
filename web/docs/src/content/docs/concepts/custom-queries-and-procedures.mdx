@@ -53,7 +53,7 @@ atlantis validates parameter references and `touches(...)` targets at apply time
 
 Editing an existing `query` or `procedure` — changing its SQL, inputs, or `touches(...)` set — hot-reloads on `tide apply`. The server swaps the schema snapshot in place and the next request runs the new definition; no restart.
 
-Adding a *brand-new* `query` or `procedure` persists it to the checkpoint, and `tide show` lists it, but a gRPC method registers only at server startup: callers invoking the new method get a gRPC `Unimplemented` error until your organisation's server next restarts.
+Adding a *brand-new* `query` or `procedure` hot-reloads the same way: the checkpoint records it, `tide show` lists it, and its gRPC method answers from the next request. A caller reaches it through the typed method `tide generate` emits.
 
 Adding, removing, or changing a custom declaration shows up in `tide plan` and `tide diff` as an additive entry. These changes carry no DDL — custom declarations are served at runtime from the checkpoint IR, not migrated — so they never raise the plan class.
 

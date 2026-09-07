@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
 
@@ -13,7 +14,7 @@ import (
 func cmdLint(args []string) int {
 	fs := flagSet("lint")
 	schemaDir := fs.String("schema-dir", "schema", "Directory containing .atl files")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 2
 	}
 

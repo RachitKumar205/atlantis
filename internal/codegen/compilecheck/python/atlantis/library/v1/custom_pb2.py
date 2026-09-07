@@ -25,13 +25,14 @@ _sym_db = _symbol_database.Default()
 from atlantis.library.v1 import book_pb2 as atlantis_dot_library_dot_v1_dot_book__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n atlantis/library/v1/custom.proto\x12\x13\x61tlantis.library.v1\x1a\x1e\x61tlantis/library/v1/book.proto\"3\n\x14\x42ooksByAuthorRequest\x12\x1b\n\tauthor_id\x18\x01 \x01(\x03R\x08\x61uthorId\"F\n\x15\x42ooksByAuthorResponse\x12-\n\x04rows\x18\x01 \x03(\x0b\x32\x19.atlantis.library.v1.BookR\x04rows\"2\n\x13RetireAuthorRequest\x12\x1b\n\tauthor_id\x18\x01 \x01(\x03R\x08\x61uthorId\";\n\x14RetireAuthorResponse\x12#\n\rrows_affected\x18\x01 \x01(\x03R\x0crowsAffected2\xdc\x01\n\rCustomService\x12\x66\n\rBooksByAuthor\x12).atlantis.library.v1.BooksByAuthorRequest\x1a*.atlantis.library.v1.BooksByAuthorResponse\x12\x63\n\x0cRetireAuthor\x12(.atlantis.library.v1.RetireAuthorRequest\x1a).atlantis.library.v1.RetireAuthorResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n atlantis/library/v1/custom.proto\x12\x13\x61tlantis.library.v1\x1a\x1e\x61tlantis/library/v1/book.proto\"3\n\x14\x42ooksByAuthorRequest\x12\x1b\n\tauthor_id\x18\x01 \x01(\x03R\x08\x61uthorId\"F\n\x15\x42ooksByAuthorResponse\x12-\n\x04rows\x18\x01 \x03(\x0b\x32\x19.atlantis.library.v1.BookR\x04rows\"2\n\x13RetireAuthorRequest\x12\x1b\n\tauthor_id\x18\x01 \x01(\x03R\x08\x61uthorId\";\n\x14RetireAuthorResponse\x12#\n\rrows_affected\x18\x01 \x01(\x03R\x0crowsAffected2\xdc\x01\n\rCustomService\x12\x66\n\rBooksByAuthor\x12).atlantis.library.v1.BooksByAuthorRequest\x1a*.atlantis.library.v1.BooksByAuthorResponse\x12\x63\n\x0cRetireAuthor\x12(.atlantis.library.v1.RetireAuthorRequest\x1a).atlantis.library.v1.RetireAuthorResponseB\xf7\x01\n\x17\x63om.atlantis.library.v1B\x0b\x43ustomProtoP\x01Zagithub.com/rachitkumar205/atlantis/internal/codegen/compilecheck/pb/atlantis/library/v1;libraryv1\xa2\x02\x03\x41LX\xaa\x02\x13\x41tlantis.Library.V1\xca\x02\x13\x41tlantis\\Library\\V1\xe2\x02\x1f\x41tlantis\\Library\\V1\\GPBMetadata\xea\x02\x15\x41tlantis::Library::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'atlantis.library.v1.custom_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
-  DESCRIPTOR._loaded_options = None
+  _globals['DESCRIPTOR']._loaded_options = None
+  _globals['DESCRIPTOR']._serialized_options = b'\n\027com.atlantis.library.v1B\013CustomProtoP\001Zagithub.com/rachitkumar205/atlantis/internal/codegen/compilecheck/pb/atlantis/library/v1;libraryv1\242\002\003ALX\252\002\023Atlantis.Library.V1\312\002\023Atlantis\\Library\\V1\342\002\037Atlantis\\Library\\V1\\GPBMetadata\352\002\025Atlantis::Library::V1'
   _globals['_BOOKSBYAUTHORREQUEST']._serialized_start=89
   _globals['_BOOKSBYAUTHORREQUEST']._serialized_end=140
   _globals['_BOOKSBYAUTHORRESPONSE']._serialized_start=142

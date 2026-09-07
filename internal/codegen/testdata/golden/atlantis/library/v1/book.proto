@@ -37,7 +37,7 @@ message GetBookResponse { Book entity = 1; }
 message CreateBookRequest { Book entity = 1; }
 message CreateBookResponse { Book entity = 1; }
 
-message UpdateBookRequest { Book entity = 1; }
+message UpdateBookRequest { Book entity = 1; google.protobuf.FieldMask update_mask = 2; }
 message UpdateBookResponse { Book entity = 1; }
 
 message DeleteBookRequest {

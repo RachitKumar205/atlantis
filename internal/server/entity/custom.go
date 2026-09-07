@@ -88,7 +88,7 @@ type customProcMeta struct {
 // the response is always a single `int64 rows_affected = 1`, matching
 // the codegen's categorical procedure response shape so existing
 // generated clients are wire-compatible.
-func buildCustomProcedureDescs(cp *dsl.CustomProcedure, ns string) (protoreflect.FileDescriptor, error) {
+func buildCustomProcedureDescs(cp *dsl.CustomProcedure, ns string, files map[string]protoreflect.FileDescriptor) (protoreflect.FileDescriptor, error) {
 	goNS := goNamespace(ns)
 	pkg := fmt.Sprintf("atlantis.%s.v1", goNS)
 	fileName := fmt.Sprintf("atlantis/%s/v1/custom_%s_dynamic.proto", goNS, cp.Name)
@@ -128,7 +128,7 @@ func buildCustomProcedureDescs(cp *dsl.CustomProcedure, ns string) (protoreflect
 	// The response is a bare int64, so only the inputs can name a message.
 	file.Dependency = append(file.Dependency, protoDependenciesFor(colTypes)...)
 
-	fd, err := buildFileDescriptor(file)
+	fd, err := buildFileDescriptor(file, files)
 	if err != nil {
 		return nil, fmt.Errorf("building custom procedure descriptors for %s: %w", cp.Name, err)
 	}
@@ -147,26 +147,25 @@ func makeCustomProcedureHandler(s *Server, procKey string, ns string) func(srv a
 	fullMethod := fmt.Sprintf("/atlantis.%s.v1.CustomService/%s", goNS, procName)
 
 	return func(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
-		snap := s.snapshot.Load()
-		pm, ok := snap.procMeta[procKey]
-		if !ok {
-			return nil, status.Errorf(codes.NotFound, "procedure %s not found in current schema", procKey)
-		}
-
-		req := dynamicpb.NewMessage(pm.requestDesc)
-		if err := dec(req); err != nil {
-			return nil, err
-		}
-
+		// The lookup and the decode run inside the intercepted handler, so a
+		// procedure the current snapshot no longer holds is refused after the
+		// chain ran.
 		execHandler := func(ctx context.Context, _ any) (any, error) {
+			pm, ok := s.snapshot.Load().procMeta[procKey]
+			if !ok {
+				return nil, status.Errorf(codes.NotFound, "procedure %s not found in current schema", procKey)
+			}
+			req := dynamicpb.NewMessage(pm.requestDesc)
+			if err := dec(req); err != nil {
+				return nil, err
+			}
 			return s.executeCustomProcedureWithReq(ctx, pm, req)
 		}
-
 		if interceptor == nil {
 			return execHandler(ctx, nil)
 		}
 		info := &grpc.UnaryServerInfo{Server: srv, FullMethod: fullMethod}
-		return interceptor(ctx, req, info, execHandler)
+		return interceptor(ctx, nil, info, execHandler)
 	}
 }
 
@@ -262,7 +261,10 @@ func (s *Server) executeCustomProcedureWithReq(ctx context.Context, pm *customPr
 
 // buildCustomQueryDescs builds proto descriptors for one custom query.
 // The response is either a repeated entity or a repeated Row sub-message.
-func buildCustomQueryDescs(cq *dsl.CustomQuery, ns string) (protoreflect.FileDescriptor, error) {
+//
+// files must hold the entity's descriptor file when the query declares
+// `output as`; the response imports it.
+func buildCustomQueryDescs(cq *dsl.CustomQuery, ns string, files map[string]protoreflect.FileDescriptor) (protoreflect.FileDescriptor, error) {
 	goNS := goNamespace(ns)
 	pkg := fmt.Sprintf("atlantis.%s.v1", goNS)
 	fileName := fmt.Sprintf("atlantis/%s/v1/custom_%s_dynamic.proto", goNS, cq.Name)
@@ -324,15 +326,15 @@ func buildCustomQueryDescs(cq *dsl.CustomQuery, ns string) (protoreflect.FileDes
 		})
 	} else {
 		// Entity-output: a repeated entity field, referencing the entity
-		// message by its fully qualified name. The entity's file descriptor
-		// must be available in the resolver.
+		// message by its fully qualified name. protodesc resolves a type only
+		// through a declared dependency, so the entity's file is imported.
 		one := int32(1)
 		repLabel := descriptorpb.FieldDescriptorProto_LABEL_REPEATED
 		msgType := descriptorpb.FieldDescriptorProto_TYPE_MESSAGE
-		// The entity's fully-qualified proto name.
 		parts := splitEntityID(cq.Output.AsEntityID)
 		entityNS := goNamespace(parts[0])
 		entityTypeName := fmt.Sprintf(".atlantis.%s.v1.%s", entityNS, parts[1])
+		file.Dependency = append(file.Dependency, entityDynamicFilePath(entityNS, parts[1]))
 		respMsg.Field = append(respMsg.Field, &descriptorpb.FieldDescriptorProto{
 			Name:     strPtr("entities"),
 			Number:   &one,
@@ -353,7 +355,7 @@ func buildCustomQueryDescs(cq *dsl.CustomQuery, ns string) (protoreflect.FileDes
 	}
 	file.Dependency = append(file.Dependency, protoDependenciesFor(colTypes)...)
 
-	fd, err := buildFileDescriptor(file)
+	fd, err := buildFileDescriptor(file, files)
 	if err != nil {
 		return nil, fmt.Errorf("building custom query descriptors for %s: %w", cq.Name, err)
 	}
@@ -372,21 +374,20 @@ func makeCustomHandler(s *Server, queryKey string, ns string) func(srv any, ctx 
 	fullMethod := fmt.Sprintf("/atlantis.%s.v1.CustomService/%s", goNS, queryName)
 
 	return func(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
-		snap := s.snapshot.Load()
-		cqm, ok := snap.customMeta[queryKey]
-		if !ok {
-			return nil, status.Errorf(codes.NotFound, "custom query %s not found in current schema", queryKey)
-		}
-
-		req := dynamicpb.NewMessage(cqm.requestDesc)
-		if err := dec(req); err != nil {
-			return nil, err
-		}
-
+		// The lookup and the decode run inside the intercepted handler, so a
+		// query the current snapshot no longer holds is refused after the
+		// chain ran.
 		execHandler := func(ctx context.Context, _ any) (any, error) {
+			cqm, ok := s.snapshot.Load().customMeta[queryKey]
+			if !ok {
+				return nil, status.Errorf(codes.NotFound, "custom query %s not found in current schema", queryKey)
+			}
+			req := dynamicpb.NewMessage(cqm.requestDesc)
+			if err := dec(req); err != nil {
+				return nil, err
+			}
 			return s.executeCustomQueryWithReq(ctx, cqm, req)
 		}
-
 		if interceptor == nil {
 			return execHandler(ctx, nil)
 		}
@@ -394,7 +395,7 @@ func makeCustomHandler(s *Server, queryKey string, ns string) func(srv any, ctx 
 			Server:     srv,
 			FullMethod: fullMethod,
 		}
-		return interceptor(ctx, req, info, execHandler)
+		return interceptor(ctx, nil, info, execHandler)
 	}
 }
 

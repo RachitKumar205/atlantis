@@ -12,6 +12,7 @@ import (
 	"time"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 )
 
 // pull / list / show wrap AdminService.GetMergedSchema. The merged-schema
@@ -50,7 +51,7 @@ func cmdPull(args []string) int {
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
 	timeout := fs.Duration("timeout", 30*time.Second, "RPC timeout")
 	force := fs.Bool("force", false, "Pull even if local cache is already current")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 3
 	}
 
@@ -94,7 +95,7 @@ func cmdList(args []string) int {
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
 	timeout := fs.Duration("timeout", 30*time.Second, "RPC timeout")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 3
 	}
 
@@ -132,10 +133,11 @@ func cmdShow(args []string) int {
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
 	timeout := fs.Duration("timeout", 30*time.Second, "RPC timeout")
-	if err := fs.Parse(args); err != nil {
+	pos, err := cliflag.Parse(fs, args)
+	if err != nil {
 		return 3
 	}
-	rest := fs.Args()
+	rest := pos
 	if len(rest) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: tide show <path-substring>")
 		return 3

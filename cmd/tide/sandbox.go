@@ -36,6 +36,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/runtime/sandbox"
 )
@@ -70,14 +71,15 @@ func cmdSandboxBoot(args []string) int {
 	seed := fs.Int64("seed", 0, "seed for StrictDeterministic mode (0 = wall clock)")
 	strict := fs.Bool("strict", false, "enable StrictDeterministic")
 	backendFlag := fs.String("backend", "auto", "sim | embedded | auto (auto picks embedded for IRs with custom query/procedure/hypertable blocks)")
-	if err := fs.Parse(args); err != nil {
+	pos, err := cliflag.Parse(fs, args)
+	if err != nil {
 		return 2
 	}
-	if fs.NArg() < 1 {
+	if len(pos) < 1 {
 		fmt.Fprintln(os.Stderr, "tide sandbox boot: missing schema path")
 		return 2
 	}
-	ir, err := loadSchemaIR(fs.Arg(0))
+	ir, err := loadSchemaIR(pos[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tide sandbox boot: %v\n", err)
 		return 1
@@ -171,14 +173,15 @@ func cmdSandboxBoot(args []string) int {
 // everything else through Pool.Exec.
 func cmdSandboxShell(args []string) int {
 	fs := flag.NewFlagSet("sandbox shell", flag.ContinueOnError)
-	if err := fs.Parse(args); err != nil {
+	pos, err := cliflag.Parse(fs, args)
+	if err != nil {
 		return 2
 	}
-	if fs.NArg() < 1 {
+	if len(pos) < 1 {
 		fmt.Fprintln(os.Stderr, "tide sandbox shell: missing schema path")
 		return 2
 	}
-	ir, err := loadSchemaIR(fs.Arg(0))
+	ir, err := loadSchemaIR(pos[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tide sandbox shell: %v\n", err)
 		return 1
@@ -239,10 +242,11 @@ func cmdSandboxSpawn(args []string) int {
 	seed := fs.Int64("seed", 0, "seed for StrictDeterministic mode (0 = wall clock)")
 	strict := fs.Bool("strict", false, "enable StrictDeterministic on the parent")
 	backendFlag := fs.String("backend", "sim", "sim only — embedded does not support fork")
-	if err := fs.Parse(args); err != nil {
+	pos, err := cliflag.Parse(fs, args)
+	if err != nil {
 		return 2
 	}
-	if fs.NArg() < 1 {
+	if len(pos) < 1 {
 		fmt.Fprintln(os.Stderr, "tide sandbox spawn: missing schema path")
 		return 2
 	}
@@ -255,7 +259,7 @@ func cmdSandboxSpawn(args []string) int {
 		return 2
 	}
 
-	ir, err := loadSchemaIR(fs.Arg(0))
+	ir, err := loadSchemaIR(pos[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "tide sandbox spawn: %v\n", err)
 		return 1

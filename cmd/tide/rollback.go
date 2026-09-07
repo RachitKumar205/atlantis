@@ -9,6 +9,7 @@ import (
 	"time"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 )
@@ -29,7 +30,7 @@ func cmdRollback(args []string) int {
 	dryRun := fs.Bool("dry-run", false, "Print the SQL without executing")
 	yes := fs.Bool("yes", false, "Skip confirmation prompt")
 	timeout := fs.Duration("timeout", 30*time.Second, "RPC timeout")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 3
 	}
 	if *toVersion <= 0 {

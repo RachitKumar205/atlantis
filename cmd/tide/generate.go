@@ -14,6 +14,7 @@ import (
 
 	atlantiscommon "github.com/rachitkumar205/atlantis/atlantis/common"
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 )
@@ -30,7 +31,7 @@ func cmdGenerate(args []string) int {
 	timeout := fs.Duration("timeout", 30*time.Second, "RPC timeout")
 	check := fs.Bool("check", false, "Verify the committed client against its manifest; write nothing")
 	againstServer := fs.Bool("against-server", false, "With --check, also compare against the server's current schema")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 3
 	}
 	if *againstServer && !*check {

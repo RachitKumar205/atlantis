@@ -352,7 +352,10 @@ func emitProtoEntity(e *dsl.Entity, inbound []inboundRef) (ProtoFile, error) {
 	fmt.Fprintf(&b, "message Create%sRequest { %s entity = 1; }\n", e.Name, e.Name)
 	fmt.Fprintf(&b, "message Create%sResponse { %s entity = 1; }\n\n", e.Name, e.Name)
 
-	fmt.Fprintf(&b, "message Update%sRequest { %s entity = 1; }\n", e.Name, e.Name)
+	// update_mask names the fields to write. Empty means the fields the caller
+	// set; naming a field writes it whether or not it was set, which is the
+	// only way to put NULL into a nullable column through Update.
+	fmt.Fprintf(&b, "message Update%sRequest { %s entity = 1; google.protobuf.FieldMask update_mask = 2; }\n", e.Name, e.Name)
 	fmt.Fprintf(&b, "message Update%sResponse { %s entity = 1; }\n\n", e.Name, e.Name)
 
 	fmt.Fprintf(&b, "message Delete%sRequest {\n", e.Name)

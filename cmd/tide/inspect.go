@@ -13,6 +13,7 @@ import (
 	"time"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/dsl/atlemit"
@@ -45,7 +46,7 @@ func cmdInspect(args []string) int {
 	format := fs.String("format", "table", "Output format: table or json")
 	generate := fs.String("generate", "", "Write .atl for tables no declaration mentions into this directory")
 	pgSchemas := fs.String("schemas", "", "With --generate: comma-separated Postgres schemas to search (default: all non-system)")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 3
 	}
 

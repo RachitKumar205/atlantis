@@ -47,20 +47,21 @@ func makeHandler(s *Server, entityID string, op string, ns string, name string) 
 	fullMethod := fmt.Sprintf("/atlantis.%s.v1.%sService/%s%s", ns, name, op, name)
 
 	return func(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
-		snap := s.snapshot.Load()
-		meta, ok := snap.entities[entityID]
-		if !ok {
-			return nil, status.Errorf(codes.NotFound, "entity %s not found in current schema", entityID)
+		// The lookup runs inside the intercepted handler, so an entity the
+		// current snapshot no longer holds is refused after the chain ran.
+		handler := func(ctx context.Context, _ any) (any, error) {
+			meta, ok := s.snapshot.Load().entities[entityID]
+			if !ok {
+				return nil, status.Errorf(codes.NotFound, "entity %s not found in current schema", entityID)
+			}
+			return s.dispatch(ctx, meta, op, dec)
 		}
 		if interceptor == nil {
-			return s.dispatch(ctx, meta, op, dec)
+			return handler(ctx, nil)
 		}
 		info := &grpc.UnaryServerInfo{
 			Server:     srv,
 			FullMethod: fullMethod,
-		}
-		handler := func(ctx context.Context, _ any) (any, error) {
-			return s.dispatch(ctx, meta, op, dec)
 		}
 		return interceptor(ctx, nil, info, handler)
 	}
@@ -267,7 +268,11 @@ func (s *Server) handleUpdate(ctx context.Context, meta *entityMeta, dec func(an
 		return nil, fmt.Errorf("Update%s: entity is not a dynamic message", meta.entity.Name)
 	}
 
-	args := bindForUpdate(meta, entityMsg)
+	mask := updateMaskPaths(req)
+	if err := runtime.CheckFieldMask(mask, meta.updateColNames); err != nil {
+		return nil, err
+	}
+	args := bindForUpdate(meta, entityMsg, mask)
 	pkValues := extractPKValues(meta, entityMsg)
 
 	tx, err := s.pool.BeginTx(ctx)
@@ -1055,4 +1060,27 @@ func readScanTargets(cols []columnMeta, targets []any) []any {
 		}
 	}
 	return out
+}
+
+// updateMaskPaths reads update_mask.paths off an Update request.
+//
+// The mask is a nested dynamic message, since dynamicpb builds nested
+// messages from the descriptor too; a *fieldmaskpb.FieldMask assertion on
+// it fails. Nil when the mask is absent.
+func updateMaskPaths(req *dynamicpb.Message) []string {
+	fd := req.Descriptor().Fields().ByName("update_mask")
+	if fd == nil || !req.Has(fd) {
+		return nil
+	}
+	mask := req.Get(fd).Message()
+	pathsFD := mask.Descriptor().Fields().ByName("paths")
+	if pathsFD == nil {
+		return nil
+	}
+	list := mask.Get(pathsFD).List()
+	paths := make([]string, 0, list.Len())
+	for i := 0; i < list.Len(); i++ {
+		paths = append(paths, list.Get(i).String())
+	}
+	return paths
 }

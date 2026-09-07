@@ -20,6 +20,16 @@ type entitySnapshot struct {
 	customMeta  map[string]*customQueryMeta
 	procMeta    map[string]*customProcMeta
 	contentHash string
+
+	// files holds every descriptor file built for this snapshot by path, for
+	// reflection.
+	files map[string]protoreflect.FileDescriptor
+
+	// routes maps a full gRPC method name to its handler and services lists
+	// what routes serves by service name. Server.install fills both; the
+	// handlers close over the Server.
+	routes   map[string]methodHandler
+	services map[string]*serviceRoute
 }
 
 // buildSnapshot constructs a complete snapshot from an IR. Pure
@@ -30,6 +40,7 @@ func buildSnapshot(ir *dsl.IR, contentHash string) (*entitySnapshot, error) {
 		customMeta:  make(map[string]*customQueryMeta, len(ir.Queries)),
 		procMeta:    make(map[string]*customProcMeta, len(ir.Procedures)),
 		contentHash: contentHash,
+		files:       make(map[string]protoreflect.FileDescriptor),
 	}
 
 	// Built once, not once per entity. buildInboundIndex walks every entity's
@@ -57,6 +68,7 @@ func buildSnapshot(ir *dsl.IR, contentHash string) (*entitySnapshot, error) {
 			return nil, fmt.Errorf("entity %s: %w", e.ID(), err)
 		}
 		resolveProtoDescriptors(meta, fd)
+		snap.files[fd.Path()] = fd
 
 		if meta.msgDesc == nil {
 			return nil, fmt.Errorf("entity %s: entity message descriptor not built", e.ID())
@@ -102,11 +114,12 @@ func buildSnapshot(ir *dsl.IR, contentHash string) (*entitySnapshot, error) {
 			cqm.outputCols = cq.Output.Columns
 		}
 
-		fd, err := buildCustomQueryDescs(cq, ns)
+		fd, err := buildCustomQueryDescs(cq, ns, snap.files)
 		if err != nil {
 			return nil, fmt.Errorf("custom query %s: %w", cq.Name, err)
 		}
 
+		snap.files[fd.Path()] = fd
 		cqm.requestDesc = fd.Messages().ByName(protoreflect.Name(cq.Name + "Request"))
 		cqm.responseDesc = fd.Messages().ByName(protoreflect.Name(cq.Name + "Response"))
 
@@ -161,10 +174,11 @@ func buildSnapshot(ir *dsl.IR, contentHash string) (*entitySnapshot, error) {
 		pm.invalidateParents = parentsOf(inbound, pm.touched)
 		pm.partitioned = touchesPartitioned(ir, pm.touched)
 
-		fd, err := buildCustomProcedureDescs(cp, ns)
+		fd, err := buildCustomProcedureDescs(cp, ns, snap.files)
 		if err != nil {
 			return nil, fmt.Errorf("procedure %s: %w", cp.Name, err)
 		}
+		snap.files[fd.Path()] = fd
 		pm.requestDesc = fd.Messages().ByName(protoreflect.Name(cp.Name + "Request"))
 		pm.responseDesc = fd.Messages().ByName(protoreflect.Name(cp.Name + "Response"))
 

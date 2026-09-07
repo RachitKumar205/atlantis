@@ -37,7 +37,7 @@ message GetAuthorResponse { Author entity = 1; }
 message CreateAuthorRequest { Author entity = 1; }
 message CreateAuthorResponse { Author entity = 1; }
 
-message UpdateAuthorRequest { Author entity = 1; }
+message UpdateAuthorRequest { Author entity = 1; google.protobuf.FieldMask update_mask = 2; }
 message UpdateAuthorResponse { Author entity = 1; }
 
 message DeleteAuthorRequest {

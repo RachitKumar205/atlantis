@@ -20,6 +20,7 @@ import (
 	"time"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 )
 
 func cmdCaller(args []string) int {
@@ -67,14 +68,15 @@ func cmdCallerAliasList(args []string) int {
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
 	timeout := fs.Duration("timeout", 10*time.Second, "RPC timeout")
-	if err := fs.Parse(args); err != nil {
+	pos, err := cliflag.Parse(fs, args)
+	if err != nil {
 		return 2
 	}
-	if fs.NArg() != 1 {
+	if len(pos) != 1 {
 		fmt.Fprintln(os.Stderr, "usage: tide caller alias list <caller>")
 		return 2
 	}
-	caller := fs.Arg(0)
+	caller := pos[0]
 
 	cfg, err := loadPCConfig(*configPath)
 	if err != nil {
@@ -113,14 +115,15 @@ func cmdCallerAliasAdd(args []string) int {
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
 	timeout := fs.Duration("timeout", 10*time.Second, "RPC timeout")
-	if err := fs.Parse(args); err != nil {
+	pos, err := cliflag.Parse(fs, args)
+	if err != nil {
 		return 2
 	}
-	if fs.NArg() != 2 {
+	if len(pos) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: tide caller alias add <caller> <alias>")
 		return 2
 	}
-	caller, alias := fs.Arg(0), fs.Arg(1)
+	caller, alias := pos[0], pos[1]
 	return cmdCallerAliasMutate(*configPath, *timeout, caller, func(existing []string) []string {
 		// Insertion-order-preserving append + dedup, then normalize sort.
 		for _, a := range existing {
@@ -140,14 +143,15 @@ func cmdCallerAliasRemove(args []string) int {
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
 	timeout := fs.Duration("timeout", 10*time.Second, "RPC timeout")
-	if err := fs.Parse(args); err != nil {
+	pos, err := cliflag.Parse(fs, args)
+	if err != nil {
 		return 2
 	}
-	if fs.NArg() != 2 {
+	if len(pos) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: tide caller alias rm <caller> <alias>")
 		return 2
 	}
-	caller, alias := fs.Arg(0), fs.Arg(1)
+	caller, alias := pos[0], pos[1]
 	return cmdCallerAliasMutate(*configPath, *timeout, caller, func(existing []string) []string {
 		out := make([]string, 0, len(existing))
 		for _, a := range existing {

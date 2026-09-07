@@ -51,7 +51,8 @@ const bookQueryTimeoutMS = 2000
 const sqlGetBook = `SELECT "id", "tenant", "title", "author_id", "score", "page_count", "summary", "expires_at", "created_at" FROM "atlantis"."library_book" WHERE "id" = $1`
 const sqlBatchGetBook = `SELECT "id", "tenant", "title", "author_id", "score", "page_count", "summary", "expires_at", "created_at" FROM "atlantis"."library_book" WHERE "id" = ANY($1)`
 const sqlInsertBook = `INSERT INTO "atlantis"."library_book" ("id", "tenant", "title", "author_id", "score", "page_count", "summary", "expires_at", "created_at") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9::TIMESTAMPTZ, now())) RETURNING "id"`
-const sqlUpdateBook = `UPDATE "atlantis"."library_book" SET "tenant" = $1, "title" = $2, "author_id" = $3, "score" = $4, "page_count" = $5, "summary" = $6, "expires_at" = $7, "created_at" = $8 WHERE "id" = $9`
+const sqlUpdateBook = `UPDATE "atlantis"."library_book" SET "tenant" = CASE WHEN $1 THEN $2 ELSE "tenant" END, "title" = CASE WHEN $3 THEN $4 ELSE "title" END, "author_id" = CASE WHEN $5 THEN $6 ELSE "author_id" END, "score" = CASE WHEN $7 THEN $8 ELSE "score" END, "page_count" = CASE WHEN $9 THEN $10 ELSE "page_count" END, "summary" = CASE WHEN $11 THEN $12 ELSE "summary" END, "expires_at" = CASE WHEN $13 THEN $14 ELSE "expires_at" END, "created_at" = CASE WHEN $15 THEN $16 ELSE "created_at" END WHERE "id" = $17`
+var updatableBookFields = []string{"tenant", "title", "author_id", "score", "page_count", "summary", "expires_at", "created_at"}
 const sqlDeleteBook = `DELETE FROM "atlantis"."library_book" WHERE "id" = $1`
 
 var bookFilterSpec = query.FilterSpec{
@@ -173,6 +174,9 @@ func (s *BookServer) UpdateBook(ctx context.Context, req *pb.UpdateBookRequest) 
 		return nil, fmt.Errorf("UpdateBook: entity is required")
 	}
 	id := []any{in.GetId()}
+	if err := runtime.CheckFieldMask(req.GetUpdateMask().GetPaths(), updatableBookFields); err != nil {
+		return nil, err
+	}
 
 	tx, err := s.DB.BeginTx(ctx)
 	if err != nil {
@@ -188,7 +192,7 @@ func (s *BookServer) UpdateBook(ctx context.Context, req *pb.UpdateBookRequest) 
 		return nil, err
 	}
 
-	args := bindForBookUpdate(in, id...)
+	args := bindForBookUpdate(in, req.GetUpdateMask().GetPaths(), id...)
 	tag, err := tx.Exec(ctx, sqlUpdateBook, args...)
 	if err != nil {
 		return nil, err
@@ -662,15 +666,23 @@ func bindForBookInsert(in *pb.Book) []any {
 	}
 }
 
-func bindForBookUpdate(in *pb.Book, pk ...any) []any {
+func bindForBookUpdate(in *pb.Book, mask []string, pk ...any) []any {
 	args := []any{
+		runtime.FieldSet(mask, "tenant", true),
 		in.GetTenant(),
+		runtime.FieldSet(mask, "title", true),
 		in.GetTitle(),
+		runtime.FieldSet(mask, "author_id", true),
 		in.GetAuthorId(),
+		runtime.FieldSet(mask, "score", in.Score != nil),
 		runtime.NullableFloat32(in.Score),
+		runtime.FieldSet(mask, "page_count", in.PageCount != nil),
 		runtime.NullableInt32(in.PageCount),
+		runtime.FieldSet(mask, "summary", in.Summary != nil),
 		runtime.NullableString(in.Summary),
+		runtime.FieldSet(mask, "expires_at", in.ExpiresAt != nil),
 		runtime.ProtoToTimePtr(in.ExpiresAt),
+		runtime.FieldSet(mask, "created_at", in.CreatedAt != nil),
 		runtime.ProtoToTimePtr(in.CreatedAt),
 	}
 	return append(args, pk...)

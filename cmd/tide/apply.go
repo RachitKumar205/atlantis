@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
@@ -51,7 +52,7 @@ func cmdApply(args []string) int {
 	// exit, and let the pipeline be re-run once somebody has decided.
 	waitForApproval := fs.Duration("wait-for-approval", 0,
 		"Wait up to this long for a human to approve the change, retrying the apply (e.g. 30m). Default: do not wait")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 3
 	}
 

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/codegen"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
 	"github.com/rachitkumar205/atlantis/internal/dsl/sqlvalidate"
@@ -32,7 +33,7 @@ func cmdPlan(args []string) int {
 	stageDir := fs.String("stage-dir", "migrations/tidectl/_staged", "Where to write the staged migration")
 	migrationsDir := fs.String("migrations-dir", "migrations/tidectl", "Existing migrations (for sequence number)")
 	allowDestructive := fs.Bool("destructive", false, "Allow backfill-required / breaking changes")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 2
 	}
 

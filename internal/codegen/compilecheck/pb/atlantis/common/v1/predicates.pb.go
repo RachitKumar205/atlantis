@@ -29,8 +29,10 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// StringPredicate covers text / varchar / citext / uuid. The LIKE-flavored
-// arms (prefix/suffix/contains/ilike) escape `%` and `_` in caller input.
+// StringPredicate covers text / varchar / citext / uuid.
+//
+// prefix, suffix, contains and ilike take a literal, not a LIKE pattern:
+// `%`, `_` and `\` in the value are escaped before the comparison.
 type StringPredicate struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Op:
@@ -198,18 +200,22 @@ type StringPredicate_NotIn struct {
 }
 
 type StringPredicate_Prefix struct {
+	// The column starts with the value.
 	Prefix string `protobuf:"bytes,5,opt,name=prefix,oneof"`
 }
 
 type StringPredicate_Suffix struct {
+	// The column ends with the value.
 	Suffix string `protobuf:"bytes,6,opt,name=suffix,oneof"`
 }
 
 type StringPredicate_Contains struct {
+	// The column contains the value.
 	Contains string `protobuf:"bytes,7,opt,name=contains,oneof"`
 }
 
 type StringPredicate_Ilike struct {
+	// The column contains the value, compared without case.
 	Ilike string `protobuf:"bytes,8,opt,name=ilike,oneof"`
 }
 

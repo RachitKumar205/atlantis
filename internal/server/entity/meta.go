@@ -98,7 +98,10 @@ type entityMeta struct {
 	columns    []columnMeta
 	insertCols []columnMeta
 	updateCols []columnMeta
-	pkCols     []columnMeta
+	// updateColNames are updateCols' column names, the set an update_mask
+	// path must belong to.
+	updateColNames []string
+	pkCols         []columnMeta
 
 	// orderCols resolves an <Entity>OrderField enum number to the column it
 	// names. The enum carries each field's proto number, so the key is the
@@ -170,6 +173,7 @@ func buildEntityMeta(e *dsl.Entity, ir *dsl.IR, inbound map[string][]inboundRule
 			continue
 		}
 		meta.updateCols = append(meta.updateCols, *cm)
+		meta.updateColNames = append(meta.updateColNames, cm.field.Name)
 	}
 
 	// PK columns.

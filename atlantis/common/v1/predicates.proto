@@ -13,17 +13,23 @@ option features.field_presence = IMPLICIT;
 
 import "google/protobuf/timestamp.proto";
 
-// StringPredicate covers text / varchar / citext / uuid. The LIKE-flavored
-// arms (prefix/suffix/contains/ilike) escape `%` and `_` in caller input.
+// StringPredicate covers text / varchar / citext / uuid.
+//
+// prefix, suffix, contains and ilike take a literal, not a LIKE pattern:
+// `%`, `_` and `\` in the value are escaped before the comparison.
 message StringPredicate {
   oneof op {
     string eq = 1;
     string neq = 2;
     StringList in = 3;
     StringList not_in = 4;
+    // The column starts with the value.
     string prefix = 5;
+    // The column ends with the value.
     string suffix = 6;
+    // The column contains the value.
     string contains = 7;
+    // The column contains the value, compared without case.
     string ilike = 8;
     bool is_null = 9;
     bool is_not_null = 10;

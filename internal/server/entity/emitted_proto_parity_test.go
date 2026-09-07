@@ -121,7 +121,7 @@ func TestEveryDocumentedTypeBuildsACustomDescriptor(t *testing.T) {
 				Inputs: []dsl.QueryParam{{Name: "in", Type: ft}},
 				Output: dsl.CustomOutput{Columns: []dsl.QueryParam{{Name: "out", Type: ft}}},
 			}
-			if _, err := buildCustomQueryDescs(cq, "probe"); err != nil {
+			if _, err := buildCustomQueryDescs(cq, "probe", nil); err != nil {
 				t.Errorf("a custom query over %s cannot be served: %v", name, err)
 			}
 
@@ -129,7 +129,7 @@ func TestEveryDocumentedTypeBuildsACustomDescriptor(t *testing.T) {
 				Name: "Probe", Owner: "probe.Thing",
 				Inputs: []dsl.QueryParam{{Name: "in", Type: ft}},
 			}
-			if _, err := buildCustomProcedureDescs(cp, "probe"); err != nil {
+			if _, err := buildCustomProcedureDescs(cp, "probe", nil); err != nil {
 				t.Errorf("a custom procedure taking %s cannot be served: %v", name, err)
 			}
 		})

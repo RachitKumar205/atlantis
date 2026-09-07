@@ -52,7 +52,8 @@ const authorQueryTimeoutMS = 2000
 const sqlGetAuthor = `SELECT "id", "name", "bio", "rating", "tenure", "created_at" FROM "atlantis"."library_author" WHERE "id" = $1`
 const sqlBatchGetAuthor = `SELECT "id", "name", "bio", "rating", "tenure", "created_at" FROM "atlantis"."library_author" WHERE "id" = ANY($1)`
 const sqlInsertAuthor = `INSERT INTO "atlantis"."library_author" ("id", "name", "bio", "rating", "tenure", "created_at") VALUES ($1, $2, $3, $4, $5, COALESCE($6::TIMESTAMPTZ, now())) RETURNING "id"`
-const sqlUpdateAuthor = `UPDATE "atlantis"."library_author" SET "name" = $1, "bio" = $2, "rating" = $3, "tenure" = $4, "created_at" = $5 WHERE "id" = $6`
+const sqlUpdateAuthor = `UPDATE "atlantis"."library_author" SET "name" = CASE WHEN $1 THEN $2 ELSE "name" END, "bio" = CASE WHEN $3 THEN $4 ELSE "bio" END, "rating" = CASE WHEN $5 THEN $6 ELSE "rating" END, "tenure" = CASE WHEN $7 THEN $8 ELSE "tenure" END, "created_at" = CASE WHEN $9 THEN $10 ELSE "created_at" END WHERE "id" = $11`
+var updatableAuthorFields = []string{"name", "bio", "rating", "tenure", "created_at"}
 const sqlDeleteAuthor = `DELETE FROM "atlantis"."library_author" WHERE "id" = $1`
 
 var authorFilterSpec = query.FilterSpec{
@@ -170,6 +171,9 @@ func (s *AuthorServer) UpdateAuthor(ctx context.Context, req *pb.UpdateAuthorReq
 		return nil, fmt.Errorf("UpdateAuthor: entity is required")
 	}
 	id := []any{in.GetId()}
+	if err := runtime.CheckFieldMask(req.GetUpdateMask().GetPaths(), updatableAuthorFields); err != nil {
+		return nil, err
+	}
 
 	tx, err := s.DB.BeginTx(ctx)
 	if err != nil {
@@ -185,7 +189,7 @@ func (s *AuthorServer) UpdateAuthor(ctx context.Context, req *pb.UpdateAuthorReq
 		return nil, err
 	}
 
-	args := bindForAuthorUpdate(in, id...)
+	args := bindForAuthorUpdate(in, req.GetUpdateMask().GetPaths(), id...)
 	tag, err := tx.Exec(ctx, sqlUpdateAuthor, args...)
 	if err != nil {
 		return nil, err
@@ -652,12 +656,17 @@ func bindForAuthorInsert(in *pb.Author) []any {
 	}
 }
 
-func bindForAuthorUpdate(in *pb.Author, pk ...any) []any {
+func bindForAuthorUpdate(in *pb.Author, mask []string, pk ...any) []any {
 	args := []any{
+		runtime.FieldSet(mask, "name", true),
 		in.GetName(),
+		runtime.FieldSet(mask, "bio", in.Bio != nil),
 		runtime.NullableString(in.Bio),
+		runtime.FieldSet(mask, "rating", in.Rating != nil),
 		runtime.NullableFloat64(in.Rating),
+		runtime.FieldSet(mask, "tenure", in.Tenure != nil),
 		pgtype.Interval{Months: in.GetTenure().GetMonths(), Days: in.GetTenure().GetDays(), Microseconds: in.GetTenure().GetMicroseconds(), Valid: in.GetTenure() != nil},
+		runtime.FieldSet(mask, "created_at", in.CreatedAt != nil),
 		runtime.ProtoToTimePtr(in.CreatedAt),
 	}
 	return append(args, pk...)

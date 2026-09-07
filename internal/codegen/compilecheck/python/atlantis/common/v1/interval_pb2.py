@@ -24,14 +24,14 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!atlantis/common/v1/interval.proto\x12\x12\x61tlantis.common.v1\"Z\n\x08Interval\x12\x16\n\x06months\x18\x01 \x01(\x05R\x06months\x12\x12\n\x04\x64\x61ys\x18\x02 \x01(\x05R\x04\x64\x61ys\x12\"\n\x0cmicroseconds\x18\x03 \x01(\x03R\x0cmicrosecondsB\x05\x92\x03\x02\x08\x02\x62\x08\x65\x64itionsp\xe8\x07')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!atlantis/common/v1/interval.proto\x12\x12\x61tlantis.common.v1\"Z\n\x08Interval\x12\x16\n\x06months\x18\x01 \x01(\x05R\x06months\x12\x12\n\x04\x64\x61ys\x18\x02 \x01(\x05R\x04\x64\x61ys\x12\"\n\x0cmicroseconds\x18\x03 \x01(\x03R\x0cmicrosecondsB\xf7\x01\n\x16\x63om.atlantis.common.v1B\rIntervalProtoP\x01Z_github.com/rachitkumar205/atlantis/internal/codegen/compilecheck/pb/atlantis/common/v1;commonv1\xa2\x02\x03\x41\x43X\xaa\x02\x12\x41tlantis.Common.V1\xca\x02\x12\x41tlantis\\Common\\V1\xe2\x02\x1e\x41tlantis\\Common\\V1\\GPBMetadata\xea\x02\x14\x41tlantis::Common::V1\x92\x03\x02\x08\x02\x62\x08\x65\x64itionsp\xe8\x07')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'atlantis.common.v1.interval_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
-  _globals['DESCRIPTOR']._serialized_options = b'\222\003\002\010\002'
+  _globals['DESCRIPTOR']._serialized_options = b'\n\026com.atlantis.common.v1B\rIntervalProtoP\001Z_github.com/rachitkumar205/atlantis/internal/codegen/compilecheck/pb/atlantis/common/v1;commonv1\242\002\003ACX\252\002\022Atlantis.Common.V1\312\002\022Atlantis\\Common\\V1\342\002\036Atlantis\\Common\\V1\\GPBMetadata\352\002\024Atlantis::Common::V1\222\003\002\010\002'
   _globals['_INTERVAL']._serialized_start=57
   _globals['_INTERVAL']._serialized_end=147
 # @@protoc_insertion_point(module_scope)

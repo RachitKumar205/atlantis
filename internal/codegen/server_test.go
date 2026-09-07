@@ -150,7 +150,7 @@ func TestEmitGoServer_BakedSQLStatements(t *testing.T) {
 	// double-quoted (defense-in-depth against PG reserved words).
 	assertContains(t, c, `SELECT "id", "email" FROM "atlantis"."consumer_account" WHERE "id" = $1`)
 	assertContains(t, c, `INSERT INTO "atlantis"."consumer_account" ("id", "email") VALUES ($1, $2) RETURNING "id"`)
-	assertContains(t, c, `UPDATE "atlantis"."consumer_account" SET "email" = $1 WHERE "id" = $2`)
+	assertContains(t, c, `UPDATE "atlantis"."consumer_account" SET "email" = CASE WHEN $1 THEN $2 ELSE "email" END WHERE "id" = $3`)
 	assertContains(t, c, `DELETE FROM "atlantis"."consumer_account" WHERE "id" = $1`)
 	assertContains(t, c, `SELECT "id", "email" FROM "atlantis"."consumer_account" WHERE "id" = ANY($1)`)
 }
@@ -236,12 +236,12 @@ func TestEmitGoServer_ScanIntoAndBindForHelpers(t *testing.T) {
 		"func scanIntoAccount(src interface{ Scan(dest ...any) error }, out *pb.Account) error",
 		"func scanIntoAccountWithTotal(",
 		"func bindForAccountInsert(in *pb.Account) []any",
-		// bindForUpdate takes the PK as variadic so one signature serves
-		// single-PK (one $N placeholder) and composite-PK (N placeholders)
-		// entities. The caller splats a []any holding PK columns in DSL
-		// declaration order, which is the same order the SQL emitter used
-		// when building the WHERE clause.
-		"func bindForAccountUpdate(in *pb.Account, pk ...any) []any",
+		// bindForUpdate takes the request's update_mask paths, then the PK
+		// as variadic so one signature serves single-PK (one $N placeholder)
+		// and composite-PK (N placeholders) entities. The caller splats a
+		// []any holding PK columns in DSL declaration order, which is the
+		// same order the SQL emitter used when building the WHERE clause.
+		"func bindForAccountUpdate(in *pb.Account, mask []string, pk ...any) []any",
 	} {
 		assertContains(t, c, sig)
 	}
@@ -903,4 +903,35 @@ entity Account in consumer {
 	// list it explicitly, and never nullable — that is what guarantees the
 	// predicate ends in a strict comparison over a total order.
 	assertContains(t, c, `cols = append(cols, runtime.KeysetColumn{QuotedIdent: "\"id\"", Desc: false, Nullable: false})`)
+}
+
+// TestEmitGoServer_UpdateKeepsUnsetOptionalColumns pins the update shape on
+// the emitted server: a column the proto marks optional — nullable or
+// defaulted — is written only when the caller set it, and a column with
+// implicit presence is written from its value. The bind list carries the
+// presence flag ahead of the value for exactly the CASE columns, and the
+// primary key follows the last SET parameter.
+func TestEmitGoServer_UpdateKeepsUnsetOptionalColumns(t *testing.T) {
+	ir := lower(t, `
+entity Thing in consumer {
+  id          bigint primary
+  name        text not null
+  note        text
+  created_at  timestamptz not null default now()
+  seen_at     timestamptz not null
+  tags        []text
+}
+`)
+	files, _ := EmitGoServer(ir, GenConfig{})
+	c := entityServerFile(t, files)
+	assertContains(t, c, `SET "name" = CASE WHEN $1 THEN $2 ELSE "name" END, "note" = CASE WHEN $3 THEN $4 ELSE "note" END, "created_at" = CASE WHEN $5 THEN $6 ELSE "created_at" END, "seen_at" = CASE WHEN $7 THEN $8 ELSE "seen_at" END, "tags" = CASE WHEN $9 THEN $10 ELSE "tags" END WHERE "id" = $11`)
+	// Presence per field kind: implicit for a NOT NULL scalar, a nil check
+	// for an optional scalar and for a message, a length check for a list.
+	assertContains(t, c, "\t\truntime.FieldSet(mask, \"name\", true),\n\t\tin.GetName(),\n"+
+		"\t\truntime.FieldSet(mask, \"note\", in.Note != nil),\n\t\truntime.NullableString(in.Note),\n"+
+		"\t\truntime.FieldSet(mask, \"created_at\", in.CreatedAt != nil),\n\t\truntime.ProtoToTimePtr(in.CreatedAt),\n"+
+		"\t\truntime.FieldSet(mask, \"seen_at\", in.SeenAt != nil),\n\t\truntime.ProtoToTime(in.GetSeenAt()),\n"+
+		"\t\truntime.FieldSet(mask, \"tags\", len(in.Tags) > 0),\n")
+	assertContains(t, c, `var updatableThingFields = []string{"name", "note", "created_at", "seen_at", "tags"}`)
+	assertContains(t, c, "if err := runtime.CheckFieldMask(req.GetUpdateMask().GetPaths(), updatableThingFields); err != nil {")
 }

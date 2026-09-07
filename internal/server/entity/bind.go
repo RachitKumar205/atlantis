@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/rachitkumar205/atlantis/internal/coltype"
+	"github.com/rachitkumar205/atlantis/internal/runtime"
 )
 
 // bindForInsert returns values ordered to match meta.insertCols
@@ -22,12 +23,22 @@ func bindForInsert(meta *entityMeta, msg *dynamicpb.Message) []any {
 	return args
 }
 
-// bindForUpdate returns SET columns first (meta.updateCols), then PK
-// columns (for the WHERE clause placeholders).
-func bindForUpdate(meta *entityMeta, msg *dynamicpb.Message) []any {
-	args := make([]any, 0, len(meta.updateCols)+len(meta.pkCols))
+// bindForUpdate returns the SET parameters (meta.updateCols, a write flag
+// then the value for each), then the PK columns for the WHERE clause.
+//
+// The flag is runtime.FieldSet over the request's update_mask and the field's
+// presence. A proto3-optional or message-typed field is present when the
+// caller set it, including to its zero value; a repeated field is present
+// when it has elements; a field with implicit presence is always present.
+func bindForUpdate(meta *entityMeta, msg *dynamicpb.Message, mask []string) []any {
+	args := make([]any, 0, 2*len(meta.updateCols)+len(meta.pkCols))
 	for _, cm := range meta.updateCols {
-		args = append(args, bindColumnValue(meta, cm, msg))
+		fd := meta.msgDesc.Fields().ByNumber(cm.protoNum)
+		present := true
+		if fd != nil && (fd.IsList() || fd.HasPresence()) {
+			present = msg.Has(fd)
+		}
+		args = append(args, runtime.FieldSet(mask, cm.field.Name, present), bindColumnValue(meta, cm, msg))
 	}
 	for _, cm := range meta.pkCols {
 		args = append(args, bindPKValue(meta, cm, msg))

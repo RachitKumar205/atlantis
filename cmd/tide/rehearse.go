@@ -8,6 +8,7 @@ import (
 	"time"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/cliflag"
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
 
@@ -29,7 +30,7 @@ func cmdRehearse(args []string) int {
 	configPath := fs.String("config", "tide.yaml", "Path to tide.yaml")
 	timeout := fs.Duration("timeout", 20*time.Minute, "RPC timeout; a rehearsal clones the database first")
 	format := fs.String("format", "table", "Output format: table or json")
-	if err := fs.Parse(args); err != nil {
+	if err := cliflag.ParseNoArgs(fs, args); err != nil {
 		return 3
 	}
 
