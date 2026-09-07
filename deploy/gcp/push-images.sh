@@ -2,9 +2,9 @@
 # push-images.sh — build every platform image for linux/amd64 and push it to
 # Artifact Registry, tagged with the commit.
 #
-# GKE nodes run amd64. The Dockerfiles pin their build stages to
-# $BUILDPLATFORM, so a build from an arm64 machine runs the compilers natively
-# and only the final stages are cross-built.
+# GKE nodes run amd64. The proto and SPA stages run natively on the build
+# machine; the Go stages need cgo and so run as amd64, under emulation on an
+# arm64 machine, which is slow the first time and cached after.
 #
 #   PROJECT=my-project ./deploy/gcp/push-images.sh
 #
@@ -30,14 +30,39 @@ R="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}"
 if ! gcloud artifacts repositories describe "$REPO" --location "$REGION" --project "$PROJECT" >/dev/null 2>&1; then
     gcloud artifacts repositories create "$REPO" --repository-format=docker --location "$REGION" --project "$PROJECT"
 fi
-gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+# Docker when its daemon answers; Apple's `container` otherwise. Both build
+# BuildKit Dockerfiles for linux/amd64; `container` runs the amd64 stages
+# under Rosetta.
+if docker version >/dev/null 2>&1; then
+    gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+    build() { docker buildx build --platform linux/amd64 --file "$1" ${2:+--target "$2"} -t "$3" --push .; }
+else
+    echo "docker is not running; building with Apple container under Rosetta"
+    # A builder that is already running is used as it is, whatever size it was
+    # started at.
+    container builder status >/dev/null 2>&1 || container builder start --cpus 4 --memory 6144MB --dns 1.1.1.1
+    # --dns: the build network's own resolver answers only .test and refuses
+    # public names, so go install and apk fail without it.
+    #
+    # The login is per image: the access token lasts an hour and six emulated
+    # builds can take longer, so one taken up front expires before the last
+    # push.
+    #
+    # The builder's disk is a sparse file on the host that keeps every block
+    # the guest ever wrote; a trim after each image hands the freed ones back.
+    build() {
+        container build --platform linux/amd64 --dns 1.1.1.1 --file "$1" ${2:+--target "$2"} -t "$3" . || return
+        gcloud auth print-access-token | container registry login --username oauth2accesstoken --password-stdin "${REGION}-docker.pkg.dev" || return
+        container image push --platform linux/amd64 "$3" || return
+        container exec buildkit fstrim / >/dev/null 2>&1 || true
+    }
+fi
 
 for target in server provisioner console cloud; do
-    docker buildx build --platform linux/amd64 --file Dockerfile --target "$target" \
-        -t "$R/atlantis-$target:$SHA" --push .
+    build Dockerfile "$target" "$R/atlantis-$target:$SHA"
 done
-docker buildx build --platform linux/amd64 --file Dockerfile.signer -t "$R/atlantis-signer:$SHA" --push .
-docker buildx build --platform linux/amd64 --file Dockerfile.pg -t "$R/atlantis-pg:$PG_IMAGE_TAG" --push .
+build Dockerfile.signer "" "$R/atlantis-signer:$SHA"
+build Dockerfile.pg "" "$R/atlantis-pg:$PG_IMAGE_TAG"
 
 cat <<REFS
 

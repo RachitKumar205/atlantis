@@ -8,9 +8,10 @@
 #
 #   PROJECT=my-project ./deploy/gcp/bootstrap.sh
 #
-# Run push-images.sh first: the control-plane database runs the atlantis-pg
-# image. What this does not do is deploy Cloud, the console and the
-# provisioner; those need the platform secrets and come after.
+# Run step 1 first (build-images.sh or push-images.sh): the control-plane
+# database runs the atlantis-pg image. What this does not do is deploy Cloud,
+# the console and the provisioner; those need the platform secrets and come
+# after.
 set -euo pipefail
 # VERBOSE=1 echoes every command before it runs.
 [ -n "${VERBOSE:-}" ] && set -x
@@ -38,6 +39,12 @@ fi
 cd "$(dirname "$0")"
 
 say() { echo; echo "==> $*"; }
+
+# ---------- 0. APIs ----------
+say "APIs"
+gcloud services enable container.googleapis.com artifactregistry.googleapis.com \
+    secretmanager.googleapis.com compute.googleapis.com iam.googleapis.com \
+    --project "$PROJECT" >/dev/null
 
 # ---------- 1. the cluster ----------
 #

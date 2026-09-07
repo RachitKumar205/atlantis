@@ -1,0 +1,76 @@
+# Builds the six platform images on Cloud Build and pushes them to Artifact
+# Registry. Cloud Build workers are amd64, the platform the images run on.
+# Every step shares one Docker daemon, so the proto, SPA and Go stages are
+# built once for the four Dockerfile targets.
+#
+#   ./deploy/gcp/build-images.sh          # tags with the commit
+#
+# BuildKit is required for the cache mounts the Dockerfiles use.
+substitutions:
+  _R: us-central1-docker.pkg.dev/${PROJECT_ID}/atlantis
+  _TAG: dev
+  _PG_TAG: "17.11"
+options:
+  logging: CLOUD_LOGGING_ONLY
+  # _R's default reads ${PROJECT_ID}; a substitution referring to another is
+  # expanded only with this set.
+  dynamicSubstitutions: true
+timeout: 3600s
+steps:
+  - name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args:
+      - build
+      - --file=Dockerfile
+      - --target=server
+      - --build-arg=VERSION=${_TAG}
+      - --tag=${_R}/atlantis-server:${_TAG}
+      - .
+  - name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args:
+      - build
+      - --file=Dockerfile
+      - --target=provisioner
+      - --build-arg=VERSION=${_TAG}
+      - --tag=${_R}/atlantis-provisioner:${_TAG}
+      - .
+  - name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args:
+      - build
+      - --file=Dockerfile
+      - --target=console
+      - --build-arg=VERSION=${_TAG}
+      - --tag=${_R}/atlantis-console:${_TAG}
+      - .
+  - name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args:
+      - build
+      - --file=Dockerfile
+      - --target=cloud
+      - --build-arg=VERSION=${_TAG}
+      - --tag=${_R}/atlantis-cloud:${_TAG}
+      - .
+  - name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args:
+      - build
+      - --file=Dockerfile.signer
+      - --tag=${_R}/atlantis-signer:${_TAG}
+      - .
+  - name: gcr.io/cloud-builders/docker
+    env: ["DOCKER_BUILDKIT=1"]
+    args:
+      - build
+      - --file=Dockerfile.pg
+      - --tag=${_R}/atlantis-pg:${_PG_TAG}
+      - .
+images:
+  - "${_R}/atlantis-server:${_TAG}"
+  - "${_R}/atlantis-provisioner:${_TAG}"
+  - "${_R}/atlantis-console:${_TAG}"
+  - "${_R}/atlantis-cloud:${_TAG}"
+  - "${_R}/atlantis-signer:${_TAG}"
+  - "${_R}/atlantis-pg:${_PG_TAG}"

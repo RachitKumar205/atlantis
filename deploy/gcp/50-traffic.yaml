@@ -7,10 +7,9 @@
 #     40-control-plane.yaml) and every organisation's gRPC NodePort. These
 #     get passthrough TCP load balancers, created by 50-traffic.sh.
 #
-# The enrolment listener's certificate comes from Let's Encrypt through
-# cert-manager, proven by DNS-01 at Cloudflare, where the domain's zone is.
+# The enrolment listener's certificate is 51-enroll-cert.yaml.
 #
-# Placeholders, filled by 50-traffic.sh: __DOMAIN__ __ACME_EMAIL__
+# Placeholder, filled by 50-traffic.sh: __DOMAIN__
 ---
 apiVersion: networking.gke.io/v1
 kind: ManagedCertificate
@@ -37,11 +36,13 @@ metadata:
   name: atlantis-web
   namespace: atlantis-system
   annotations:
+    # The GKE controller selects an Ingress by this annotation only; one
+    # carrying spec.ingressClassName instead is never programmed.
+    kubernetes.io/ingress.class: gce
     kubernetes.io/ingress.global-static-ip-name: atlantis-web
     networking.gke.io/managed-certificates: atlantis-web
     networking.gke.io/v1beta1.FrontendConfig: atlantis-web
 spec:
-  ingressClassName: gce
   rules:
     - host: platform.__DOMAIN__
       http:
@@ -63,33 +64,3 @@ spec:
                 name: atlantis-console
                 port:
                   number: 3000
----
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
-metadata:
-  name: letsencrypt
-spec:
-  acme:
-    server: https://acme-v02.api.letsencrypt.org/directory
-    email: __ACME_EMAIL__
-    privateKeySecretRef:
-      name: letsencrypt-account
-    solvers:
-      - dns01:
-          cloudflare:
-            apiTokenSecretRef:
-              name: cloudflare-api-token
-              key: api-token
----
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: atlantis-console-enroll
-  namespace: atlantis-system
-spec:
-  secretName: atlantis-console-enroll
-  dnsNames:
-    - enroll.__DOMAIN__
-  issuerRef:
-    name: letsencrypt
-    kind: ClusterIssuer

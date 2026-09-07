@@ -10,7 +10,7 @@
 # Placeholders, filled by bootstrap.sh from its environment:
 #   __PROJECT__   the Google project id
 #   __BUCKET__    the backup bucket
-#   __PG_IMAGE__  the atlantis-pg image push-images.sh pushed
+#   __PG_IMAGE__  the atlantis-pg image step 1 pushed
 apiVersion: barmancloud.cnpg.io/v1
 kind: ObjectStore
 metadata:

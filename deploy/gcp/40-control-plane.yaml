@@ -268,7 +268,7 @@ spec:
             - name: tmp
               mountPath: /tmp
       volumes:
-        # Issued by cert-manager (50-traffic.yaml). The pod waits for it.
+        # Issued by cert-manager (51-enroll-cert.yaml). The pod waits for it.
         - name: enroll
           secret:
             secretName: atlantis-console-enroll

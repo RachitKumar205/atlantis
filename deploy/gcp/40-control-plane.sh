@@ -3,7 +3,7 @@
 #
 #   PROJECT=my-project DOMAIN=example.dev SHA=<commit> ./deploy/gcp/40-control-plane.sh
 #
-# SHA is the tag push-images.sh used; it defaults to the current commit.
+# SHA is the tag step 1 used; it defaults to the current commit.
 # The console pod stays in ContainerCreating until 50-traffic.sh has issued
 # its enrolment certificate, which is expected on the first pass.
 set -euo pipefail

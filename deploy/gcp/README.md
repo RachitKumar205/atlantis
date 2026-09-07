@@ -10,15 +10,17 @@ Every step is a file here. Run them in order from the repository root, with
 
 | Step | Command or file | What it leaves behind |
 |---|---|---|
-| 1 | `./deploy/gcp/push-images.sh` | six images in Artifact Registry, tagged with the commit |
+| 1 | `./deploy/gcp/build-images.sh` | six images in Artifact Registry, tagged with the commit, built on Cloud Build (amd64). `push-images.sh` builds the same images on this machine, under emulation for the Go stages, and is the fallback |
 | 2 | `./deploy/gcp/bootstrap.sh` | the cluster, `pd-csi` StorageClass, CloudNativePG, cert-manager, the Barman Cloud plugin, the backup bucket and identity, memcached, the control-plane database with two roles, the provisioner's RBAC |
 | 3 | `./deploy/gcp/30-secrets.sh` | the data keys, signing key, session secret, connection strings and Resend key in Secret Manager; the `atlantis-cloud`, `atlantis-console` and `atlantis-provisioner` Secrets in the cluster |
 | 4 | `./deploy/gcp/40-control-plane.sh` | Cloud, the console and the provisioner Deployments from `40-control-plane.yaml`, with the images, domain and pod range filled in |
-| 5 | `./deploy/gcp/50-traffic.sh` | three static addresses, the Ingress with a Google-managed certificate for `platform.` and `console.`, the Let's Encrypt certificate for `enroll.`, the passthrough load balancer every organisation's port is reached through, firewall rules; prints the DNS records |
+| 5 | `./deploy/gcp/50-traffic.sh` | three static addresses, the Ingress with a Google-managed certificate for `platform.` and `console.`, the Let's Encrypt certificate for `enroll.`, the passthrough load balancer every organisation's port is reached through, firewall rules; the four A records at Cloudflare |
 
-Step 5 needs two inputs once: `ACME_EMAIL` and a Cloudflare API token with
-`Zone:DNS:Edit` on the domain's zone (`CLOUDFLARE_API_TOKEN`). The token is
-stored in Secret Manager on first use. The domain's DNS is at Cloudflare;
+Step 5 takes `ACME_EMAIL` on every run and a Cloudflare API token
+(`CLOUDFLARE_API_TOKEN`) once, stored in Secret Manager on first use. The
+token needs `Zone:Zone:Read` and `Zone:DNS:Edit` on the domain's zone, the
+first for the zone lookup and cert-manager's DNS-01 challenge, the second to
+write records. `WRITE_DNS=no` prints the records instead of writing them. The domain's DNS is at Cloudflare;
 every record must be "DNS only" (proxy off), because Google validates the
 managed certificate at the address itself and the other two listeners carry
 TLS end to end.
@@ -57,7 +59,7 @@ Values that differ from the local cluster, from `ops/configuration.md`:
 | `PROVISIONER_STORAGE_CLASS` | `pd-csi` |
 | `PROVISIONER_POD_CIDR` | the cluster's pod range, from the bootstrap output |
 | `PROVISIONER_POSTGRES_STORAGE` | `10Gi` |
-| `PROVISIONER_*_IMAGE` | the references `push-images.sh` prints |
+| `PROVISIONER_*_IMAGE` | the references step 1 prints |
 
 Secrets, generated once and kept in Secret Manager: `CLOUD_DATA_KEY`
 (`atlantis-cloud data-key`), `CONSOLE_DATA_KEY`, the Cloud signing key

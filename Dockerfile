@@ -65,11 +65,10 @@ RUN npm run build --workspace web/console && \
     npm run build --workspace web/cloud
 
 # ---------- build ----------
-# Use BUILDPLATFORM so the compiler runs natively on the host (ARM64 on Apple
-# Silicon, amd64 on CI). pg_query_go's vendored C parser compiles fine on both
-# architectures with musl + build-base. For a forced amd64 production image,
-# pass --platform linux/amd64 to docker build or use a CI runner.
-FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine AS build
+# cgo (pg_query_go's vendored C parser) needs a C toolchain for the target
+# platform, so this stage runs as the target, under emulation on a machine of
+# another architecture.
+FROM golang:1.26.4-alpine AS build
 
 # CGO toolchain for pg_query_go (vendored C parser, statically linked).
 RUN apk add --no-cache build-base
