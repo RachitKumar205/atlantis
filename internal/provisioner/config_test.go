@@ -40,8 +40,30 @@ func setProvisionerEnv(t *testing.T) {
 		"PROVISIONER_NAMESPACE_PREFIX", "PROVISIONER_STORAGE_CLASS", "PROVISIONER_PULL_POLICY",
 		"PROVISIONER_POD_CIDR", "PROVISIONER_OPERATOR_NAMESPACE",
 		"PROVISIONER_POSTGRES_STORAGE", "PROVISIONER_POSTGRES_INSTANCES",
+		"PROVISIONER_ORG_DOMAIN",
 	} {
 		t.Setenv(k, "")
+	}
+}
+
+// An organisation domain stands in for the shared host, and the two are not
+// combined.
+func TestAnOrganisationDomainReplacesTheSharedHost(t *testing.T) {
+	setProvisionerEnv(t)
+	t.Setenv("PROVISIONER_EXTERNAL_HOST", "")
+	t.Setenv("PROVISIONER_ORG_DOMAIN", "example.dev")
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("a domain without a shared host was refused: %v", err)
+	}
+	if got := cfg.Provision.Host("acme"); got != "acme.example.dev" {
+		t.Errorf("Host(acme) = %q, want acme.example.dev", got)
+	}
+
+	setProvisionerEnv(t)
+	t.Setenv("PROVISIONER_ORG_DOMAIN", "example.dev")
+	if _, err := ConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "both set") {
+		t.Errorf("a shared host and a domain together: err = %v, want a refusal naming both", err)
 	}
 }
 

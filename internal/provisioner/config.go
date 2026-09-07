@@ -170,6 +170,7 @@ func ConfigFromEnv() (Config, error) {
 			// that cannot start; a guessed cache address is a pod that never
 			// becomes Ready.
 			ExternalHost: os.Getenv("PROVISIONER_EXTERNAL_HOST"),
+			OrgDomain:    os.Getenv("PROVISIONER_ORG_DOMAIN"),
 
 			// Defaults true: a hosted console runs in the cluster and dials a
 			// Service name. False for a console on a developer's machine, which
@@ -220,7 +221,6 @@ func (c Config) validate() error {
 		{"CONSOLE_PG_URL", c.ConsolePGURL},
 		{"CONSOLE_DATA_KEY", c.ConsoleDataKey},
 		{"CLOUD_AUDIENCE", c.ConsoleURL},
-		{"PROVISIONER_EXTERNAL_HOST", c.Provision.ExternalHost},
 		{"PROVISIONER_SERVER_IMAGE", c.Provision.ServerImage},
 		{"PROVISIONER_SIGNER_IMAGE", c.Provision.SignerImage},
 		{"PROVISIONER_POSTGRES_IMAGE", c.Provision.PostgresImage},
@@ -230,9 +230,17 @@ func (c Config) validate() error {
 			missing = append(missing, r.name)
 		}
 	}
+	host, domain := strings.TrimSpace(c.Provision.ExternalHost), strings.TrimSpace(c.Provision.OrgDomain)
+	if host == "" && domain == "" {
+		missing = append(missing, "PROVISIONER_EXTERNAL_HOST or PROVISIONER_ORG_DOMAIN")
+	}
 	if len(missing) > 0 {
 		return fmt.Errorf("the provisioner needs these and they are unset: %s",
 			strings.Join(missing, ", "))
+	}
+	if host != "" && domain != "" {
+		return fmt.Errorf("PROVISIONER_EXTERNAL_HOST (%q) and PROVISIONER_ORG_DOMAIN (%q) are both set; "+
+			"organisations share one name or each get their own", host, domain)
 	}
 
 	// CLOUD_AUDIENCE ends up in cloud.orgs.console_url, which carries a CHECK

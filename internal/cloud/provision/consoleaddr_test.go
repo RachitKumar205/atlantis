@@ -64,11 +64,65 @@ func statusFor(t *testing.T, inCluster bool) Status {
 	if err != nil {
 		t.Fatalf("ensureCerts: %v", err)
 	}
-	st, err := k.addresses(context.Background(), ns, b)
+	st, err := k.addresses(context.Background(), ns, "acme", b)
 	if err != nil {
 		t.Fatalf("addresses: %v", err)
 	}
 	return st
+}
+
+// With an organisation domain, each organisation is named on its own
+// subdomain in the addresses a caller is given and in the certificate it
+// verifies.
+func TestAnOrganisationDomainNamesEachOrganisation(t *testing.T) {
+	const ns = "org-acme"
+	k := newTestKube(t, svcWithNodePorts(ns)...)
+	k.cfg.ExternalHost = ""
+	k.cfg.OrgDomain = "example.dev"
+
+	b, err := k.ensureCerts(context.Background(), ns, "acme")
+	if err != nil {
+		t.Fatalf("ensureCerts: %v", err)
+	}
+	st, err := k.addresses(context.Background(), ns, "acme", b)
+	if err != nil {
+		t.Fatalf("addresses: %v", err)
+	}
+	if st.PublicEndpoint != "acme.example.dev:31111" {
+		t.Errorf("PublicEndpoint is %q, want acme.example.dev:31111", st.PublicEndpoint)
+	}
+	if !strings.HasPrefix(st.SignerAddr, "https://acme.example.dev:") {
+		t.Errorf("SignerAddr is %q, want the organisation's own name", st.SignerAddr)
+	}
+	for _, c := range []struct {
+		what string
+		pem  []byte
+	}{{"server", b.Server.CertPEM}, {"signer", b.SignerServer.CertPEM}} {
+		blk, _ := pem.Decode(c.pem)
+		if blk == nil {
+			t.Fatalf("%s: no PEM block", c.what)
+		}
+		cert, perr := x509.ParseCertificate(blk.Bytes)
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		if err := cert.VerifyHostname("acme.example.dev"); err != nil {
+			t.Errorf("the %s certificate does not name acme.example.dev: %v", c.what, err)
+		}
+	}
+}
+
+// Both names, or neither, is refused.
+func TestOneHostSettingIsRequired(t *testing.T) {
+	base := Config{ServerImage: "s", SignerImage: "g", PostgresImage: "p", MemcachedAddr: "m:11211"}
+	if err := base.validate(); err == nil || !strings.Contains(err.Error(), "ExternalHost or OrgDomain") {
+		t.Errorf("neither host: err = %v", err)
+	}
+	both := base
+	both.ExternalHost, both.OrgDomain = "atl-dev.test", "example.dev"
+	if err := both.validate(); err == nil || !strings.Contains(err.Error(), "both set") {
+		t.Errorf("both hosts: err = %v", err)
+	}
 }
 
 // An in-cluster console is given Service names; a caller is still given the node.
@@ -129,7 +183,7 @@ func TestTheConsolesAddressIsCoveredByTheServerCertificate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := k.addresses(context.Background(), ns, b)
+	st, err := k.addresses(context.Background(), ns, "acme", b)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +255,7 @@ func TestNoAddressIsReportedBeforeItsPortIsAllocated(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		st, err := k.addresses(context.Background(), ns, b)
+		st, err := k.addresses(context.Background(), ns, "acme", b)
 		if err != nil {
 			t.Fatal(err)
 		}

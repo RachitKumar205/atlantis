@@ -26,15 +26,23 @@ var orgNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 //
 // Not a security boundary: an organisation called `admin` holds exactly the
 // permissions any other does. A name appears in `/authorize?org=…`, in the path
-// `tide` writes credentials to, and in a certificate common name, where
-// `atlantis` or `support` reads as the product rather than a customer.
+// `tide` writes credentials to, in a certificate common name, where `atlantis`
+// or `support` reads as the product rather than a customer, and as a subdomain
+// of the product domain when the provisioner runs with an OrgDomain, where
+// `platform`, `console`, `enroll`, `docs` and `releases` are the platform's
+// own hosts.
 //
 // Kept short: every entry is a name no customer can have.
 var reservedOrgNames = map[string]bool{
 	"admin":    true,
 	"api":      true,
 	"atlantis": true,
+	"cloud":    true,
 	"console":  true,
+	"docs":     true,
+	"enroll":   true,
+	"platform": true,
+	"releases": true,
 	"support":  true,
 	"system":   true,
 	"www":      true,

@@ -155,7 +155,7 @@ func (k *Kube) Ensure(ctx context.Context, spec Spec) (Status, error) {
 		}
 	}
 
-	status, err := k.addresses(ctx, ns, bundle)
+	status, err := k.addresses(ctx, ns, spec.Org, bundle)
 	if err != nil {
 		return Status{}, err
 	}
@@ -212,13 +212,13 @@ func (k *Kube) ensureCerts(ctx context.Context, ns, org string) (*certs.Bundle, 
 		// address was used — and there are two: the in-cluster service and the
 		// external host a caller reaches.
 		ServerDNSNames: []string{
-			k.cfg.ExternalHost,
+			k.cfg.Host(org),
 			fmt.Sprintf("%s.%s.svc.cluster.local", nameAtlantis, ns),
 			fmt.Sprintf("%s.%s.svc", nameAtlantis, ns),
 			nameAtlantis,
 		},
 		SignerDNSNames: []string{
-			k.cfg.ExternalHost,
+			k.cfg.Host(org),
 			fmt.Sprintf("%s.%s.svc.cluster.local", nameSigner, ns),
 			fmt.Sprintf("%s.%s.svc", nameSigner, ns),
 			nameSigner,
@@ -473,7 +473,7 @@ func (k *Kube) apply(ctx context.Context, obj ctrlclient.Object) error {
 // Read back rather than requested: a NodePort chosen here eventually collides
 // with another organisation's. Ports never appear in a certificate, so learning
 // them after minting is not an ordering problem.
-func (k *Kube) addresses(ctx context.Context, ns string, b *certs.Bundle) (Status, error) {
+func (k *Kube) addresses(ctx context.Context, ns, org string, b *certs.Bundle) (Status, error) {
 	grpcPort, err := k.nodePort(ctx, ns, nameAtlantis, "grpc")
 	if err != nil {
 		return Status{}, err
@@ -494,7 +494,7 @@ func (k *Kube) addresses(ctx context.Context, ns string, b *certs.Bundle) (Statu
 		if port == 0 {
 			return ""
 		}
-		return fmt.Sprintf("%s:%d", k.cfg.ExternalHost, port)
+		return fmt.Sprintf("%s:%d", k.cfg.Host(org), port)
 	}
 
 	// What the console dials, which is not always what a caller dials.
@@ -601,7 +601,7 @@ func (k *Kube) RotateConsoleCredentials(
 		// Still current. The addresses are read anyway, so a caller that
 		// re-registers on every pass gets a Status describing what is deployed,
 		// and ExpiresAt without a second read.
-		status, aerr := k.addresses(ctx, ns, bundle)
+		status, aerr := k.addresses(ctx, ns, org, bundle)
 		return ConsoleRotation{Status: status, ExpiresAt: expires}, aerr
 	}
 
@@ -633,7 +633,7 @@ func (k *Kube) RotateConsoleCredentials(
 		}
 	}
 
-	status, err := k.addresses(ctx, ns, bundle)
+	status, err := k.addresses(ctx, ns, org, bundle)
 	if err != nil {
 		return stillInPlace, err
 	}

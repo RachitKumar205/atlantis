@@ -572,7 +572,8 @@ factor and the assertion signing key.
 | `CONSOLE_PG_URL` | (unset; **required**) | Where a provisioned organisation is registered. |
 | `CONSOLE_DATA_KEY` | (unset; **required**) | The keyset that seals each organisation's private key. Must be the one the console serves with. |
 | `CLOUD_AUDIENCE` | (unset; **required**) | The console's URL. Written to `cloud.orgs.console_url`, and must be an absolute `http(s)` URL. |
-| `PROVISIONER_EXTERNAL_HOST` | (unset; **required**) | The name organisations are reached at. A name, never an address — it goes in every certificate's SAN. |
+| `PROVISIONER_EXTERNAL_HOST` | (unset; one of the two is **required**) | The one name every organisation is reached at; the port tells them apart. A name, never an address — it goes in every certificate's SAN. |
+| `PROVISIONER_ORG_DOMAIN` | (unset; one of the two is **required**) | Gives each organisation its own name, `<org>.<domain>`, in its certificates and endpoints. A wildcard DNS record under the domain points them all at the same load balancer. Setting both this and `PROVISIONER_EXTERNAL_HOST` is refused. Cloud reserves the platform's own labels (`platform`, `console`, `enroll`, `docs`, `releases`) as organisation names. |
 | `PROVISIONER_SERVER_IMAGE` | (unset; **required**) | The atlantis image. |
 | `PROVISIONER_SIGNER_IMAGE` | (unset; **required**) | The signer image. |
 | `PROVISIONER_POSTGRES_IMAGE` | (unset; **required**) | The Postgres image. Its tag must read as a Postgres version — see `Dockerfile.pg`. |

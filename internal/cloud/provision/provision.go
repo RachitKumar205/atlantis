@@ -141,7 +141,17 @@ type Config struct {
 	// A name, never an address. The local cluster's node IP changes on every
 	// recreate while its name does not, so an address here would bake a
 	// certificate that stops verifying the next time the cluster is rebuilt.
+	//
+	// Exactly one of ExternalHost and OrgDomain is set.
 	ExternalHost string
+
+	// OrgDomain gives each organisation its own name, <org>.<OrgDomain>, in
+	// its certificates and endpoints. A wildcard DNS record under the domain
+	// points every one at the same load balancer; the port still tells them
+	// apart. An organisation name is a DNS label by construction (see
+	// identity.ValidateOrgName), and the platform's own names under the domain
+	// are reserved there.
+	OrgDomain string
 
 	// ConsoleInCluster reports whether the console runs beside these
 	// organisations rather than outside the cluster. It decides
@@ -235,7 +245,7 @@ func (c Config) Namespace(org string) string { return c.NamespacePrefix + org }
 
 // withDefaults fills in what a caller did not set.
 //
-// Images and ExternalHost have no default: guessing an image reference produces
+// Images and the host have no default: guessing an image reference produces
 // a pod that cannot start, and guessing a hostname produces certificates that
 // cannot verify. validate refuses both.
 func (c Config) withDefaults() Config {
@@ -267,10 +277,22 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
+// Host is the name callers reach org at.
+func (c Config) Host(org string) string {
+	if c.OrgDomain != "" {
+		return org + "." + c.OrgDomain
+	}
+	return c.ExternalHost
+}
+
 func (c Config) validate() error {
+	if c.ExternalHost != "" && c.OrgDomain != "" {
+		return fmt.Errorf("provision: ExternalHost (%q) and OrgDomain (%q) are both set; "+
+			"an organisation is reached at one name or the other", c.ExternalHost, c.OrgDomain)
+	}
 	missing := []string{}
-	if c.ExternalHost == "" {
-		missing = append(missing, "ExternalHost")
+	if c.ExternalHost == "" && c.OrgDomain == "" {
+		missing = append(missing, "ExternalHost or OrgDomain")
 	}
 	if c.ServerImage == "" {
 		missing = append(missing, "ServerImage")
