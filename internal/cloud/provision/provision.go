@@ -151,6 +151,12 @@ type Config struct {
 	// apart. An organisation name is a DNS label by construction (see
 	// identity.ValidateOrgName), and the platform's own names under the domain
 	// are reserved there.
+	//
+	// The name is written into an organisation's certificates once, at first
+	// provisioning; ensureCerts reuses a stored bundle as it is. Switching
+	// between ExternalHost and OrgDomain therefore re-provisions nothing on
+	// its own: an existing organisation keeps its old name until its PKI
+	// Secret is deleted, and every caller then enrols again.
 	OrgDomain string
 
 	// ConsoleInCluster reports whether the console runs beside these
