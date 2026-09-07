@@ -1,0 +1,102 @@
+# The control-plane database: Cloud's accounts and organisations, the
+# console's sessions and audit log, and the provisioning queue.
+#
+# Three instances, so an operator upgrade or a node drain is a switchover and
+# not an outage. WAL and base backups go to Cloud Storage through the Barman
+# Cloud plugin, authenticated by Workload Identity: the cluster's
+# ServiceAccount is bound to the Google service account bootstrap.sh creates,
+# and no key file exists.
+#
+# Placeholders, filled by bootstrap.sh from its environment:
+#   __PROJECT__   the Google project id
+#   __BUCKET__    the backup bucket
+#   __PG_IMAGE__  the atlantis-pg image push-images.sh pushed
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: control-backups
+  namespace: atlantis-system
+spec:
+  configuration:
+    destinationPath: "gs://__BUCKET__/control"
+    googleCredentials:
+      gkeEnvironment: true
+    wal:
+      compression: gzip
+  retentionPolicy: "30d"
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: control
+  namespace: atlantis-system
+spec:
+  instances: 3
+  imageName: __PG_IMAGE__
+  primaryUpdateStrategy: unsupervised
+  serviceAccountTemplate:
+    metadata:
+      annotations:
+        iam.gke.io/gcp-service-account: atlantis-backups@__PROJECT__.iam.gserviceaccount.com
+  bootstrap:
+    initdb:
+      database: atlantis
+      owner: atlantis
+  # The two application roles. Neither may be a superuser or bypass RLS:
+  # Cloud and the console each refuse to start on a role that can, because
+  # their per-organisation boundary is a row-level-security policy.
+  # Passwords come from the Secrets bootstrap.sh creates.
+  managed:
+    roles:
+      - name: atlantis_cloud
+        ensure: present
+        login: true
+        superuser: false
+        bypassrls: false
+        createdb: false
+        createrole: false
+        passwordSecret:
+          name: control-db-cloud
+      - name: atlantis_console
+        ensure: present
+        login: true
+        superuser: false
+        bypassrls: false
+        createdb: false
+        createrole: false
+        passwordSecret:
+          name: control-db-console
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: control-backups
+  storage:
+    size: 10Gi
+    storageClass: pd-csi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  postgresql:
+    parameters:
+      max_connections: "200"
+      shared_buffers: 128MB
+---
+# One base backup a day at 02:00 UTC; WAL archiving is continuous, so the
+# recovery point is the last archived segment, not the last base backup.
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: control-daily
+  namespace: atlantis-system
+spec:
+  schedule: "0 0 2 * * *"
+  backupOwnerReference: self
+  cluster:
+    name: control
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io

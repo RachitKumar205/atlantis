@@ -192,7 +192,7 @@ NATIVE_ARCH := $(shell $(GO) env GOARCH)
 .PHONY: release-tide
 # The Cloud address release builds carry. A development build has none and
 # reads ATL_CLOUD_URL instead.
-TIDE_CLOUD_URL ?= https://cloud.tryatlantis.dev
+TIDE_CLOUD_URL ?= https://platform.tryatlantis.dev
 
 release-tide: ## Cross-compile tide tarballs for every platform: make release-tide VERSION=v0.4.0
 	@case "$(VERSION)" in v[0-9]*) : ;; *) \

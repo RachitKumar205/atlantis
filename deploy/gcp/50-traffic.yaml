@@ -1,0 +1,95 @@
+# How traffic reaches the platform.
+#
+# Two kinds of listener:
+#   - HTTP behind a proxy: Cloud and the console, through a GKE Ingress with a
+#     Google-managed certificate on a global address.
+#   - TLS terminated by the workload: the enrolment listener (its Service in
+#     40-control-plane.yaml) and every organisation's gRPC NodePort. These
+#     get passthrough TCP load balancers, created by 50-traffic.sh.
+#
+# The enrolment listener's certificate comes from Let's Encrypt through
+# cert-manager, proven by DNS-01 at Cloudflare, where the domain's zone is.
+#
+# Placeholders, filled by 50-traffic.sh: __DOMAIN__ __ACME_EMAIL__
+---
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: atlantis-web
+  namespace: atlantis-system
+spec:
+  domains:
+    - platform.__DOMAIN__
+    - console.__DOMAIN__
+---
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: atlantis-web
+  namespace: atlantis-system
+spec:
+  redirectToHttps:
+    enabled: true
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: atlantis-web
+  namespace: atlantis-system
+  annotations:
+    kubernetes.io/ingress.global-static-ip-name: atlantis-web
+    networking.gke.io/managed-certificates: atlantis-web
+    networking.gke.io/v1beta1.FrontendConfig: atlantis-web
+spec:
+  ingressClassName: gce
+  rules:
+    - host: platform.__DOMAIN__
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: atlantis-cloud
+                port:
+                  number: 9500
+    - host: console.__DOMAIN__
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: atlantis-console
+                port:
+                  number: 3000
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: __ACME_EMAIL__
+    privateKeySecretRef:
+      name: letsencrypt-account
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token
+              key: api-token
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: atlantis-console-enroll
+  namespace: atlantis-system
+spec:
+  secretName: atlantis-console-enroll
+  dnsNames:
+    - enroll.__DOMAIN__
+  issuerRef:
+    name: letsencrypt
+    kind: ClusterIssuer

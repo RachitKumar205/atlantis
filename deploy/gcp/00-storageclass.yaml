@@ -1,0 +1,18 @@
+# The default StorageClass for every volume on the platform.
+#
+# The CSI driver is what matters: GKE's own default class still uses the
+# in-tree gcePersistentDisk driver, and disk clones fail silently through it.
+# The disk type is pd-balanced because the E2 node pools cannot attach
+# Hyperdisk; a move to N4 or C3 nodes adds a hyperdisk-balanced class beside
+# this one.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: pd-csi
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: pd.csi.storage.gke.io
+parameters:
+  type: pd-balanced
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true

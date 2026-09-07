@@ -1,0 +1,52 @@
+# The platform namespace and the one memcached every organisation shares.
+#
+# The address the provisioner hands each atlantis is
+# memcached.atlantis-system.svc.cluster.local:11211, the Service below.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: atlantis-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: memcached
+  namespace: atlantis-system
+  labels:
+    app.kubernetes.io/name: memcached
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: memcached
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: memcached
+    spec:
+      containers:
+        - name: memcached
+          image: docker.io/library/memcached:1.6.29-alpine
+          args: ["-m", "192"]
+          ports:
+            - name: memcached
+              containerPort: 11211
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: memcached
+  namespace: atlantis-system
+spec:
+  selector:
+    app.kubernetes.io/name: memcached
+  ports:
+    - name: memcached
+      port: 11211
+      targetPort: memcached
