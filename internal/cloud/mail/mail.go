@@ -173,7 +173,7 @@ func (l *Log) Send(_ context.Context, to, subject, body string) error {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	logger.Warn("no mail server configured — printing the message instead of sending it",
+	logger.Warn("CLOUD_MAIL_DEV is set — printing the message instead of sending it",
 		"to", to, "subject", subject, "body", body)
 	return nil
 }

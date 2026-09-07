@@ -203,12 +203,11 @@ func serve(args []string, log *slog.Logger) error {
 		log.Info("serving", "addr", cfg.Listen, "issuer", iss.Name(),
 			"jwks", issuer.JWKSPath, "kid", key.ID, "public_url", cfg.PublicURL,
 			"spa_embedded", sub != nil)
-		if cfg.SMTPAddr == "" {
-			// Said at startup as well as at every send, because this is the
-			// setting whose absence looks like everything working: accounts are
-			// created, the response says a message is on its way, and the link
-			// is in a log nobody reads.
-			log.Warn("no CLOUD_SMTP_ADDR — verification and reset links will be " +
+		if cfg.MailDev {
+			// Said at startup as well as at every send: with the logging
+			// mailer, accounts are created, the response says a message is on
+			// its way, and the link is in this log.
+			log.Warn("CLOUD_MAIL_DEV is set — verification and reset links are " +
 				"written to this log instead of emailed")
 		}
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

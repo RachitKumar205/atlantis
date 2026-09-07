@@ -127,7 +127,7 @@ func TestLogMailerWarnsOnEverySend(t *testing.T) {
 	if n := strings.Count(out, "level=WARN"); n != 2 {
 		t.Errorf("two sends produced %d warnings, want 2:\n%s", n, out)
 	}
-	if !strings.Contains(out, "no mail server configured") {
+	if !strings.Contains(out, "CLOUD_MAIL_DEV is set") {
 		t.Errorf("the warning does not say what is wrong:\n%s", out)
 	}
 	// The link has to be in there, or the development flow does not work.
