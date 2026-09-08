@@ -1294,15 +1294,23 @@ func (l *loginLimiter) allow(ip string) (bool, int) {
 // real-IP headers can be honored when configured); for the self-host
 // single-VM case RemoteAddr is the actual client.
 func clientIP(r *http.Request) string {
-	// X-Forwarded-For is "client, proxy1, proxy2" — first hop is the
-	// closest-to-client. Only trust when the deploy explicitly opts in
-	// (CONSOLE_TRUST_PROXY=true), otherwise spoofable.
+	// Only trust the header when the deploy opts in
+	// (CONSOLE_TRUST_PROXY=true); otherwise it is spoofable.
+	//
+	// Google's external load balancer APPENDS `<client>,<lb>` to whatever
+	// arrived, so the leftmost element is a value the caller chose and the
+	// client is second from the end. Anything that does not parse as an
+	// address is refused, which bounds a key in length and count.
 	if os.Getenv("CONSOLE_TRUST_PROXY") == "true" {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if i := strings.IndexByte(xff, ','); i > 0 {
-				return strings.TrimSpace(xff[:i])
+			parts := strings.Split(xff, ",")
+			i := len(parts) - 2
+			if i < 0 {
+				i = 0
 			}
-			return strings.TrimSpace(xff)
+			if ip := strings.TrimSpace(parts[i]); net.ParseIP(ip) != nil {
+				return ip
+			}
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)

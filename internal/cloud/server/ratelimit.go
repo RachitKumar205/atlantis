@@ -101,11 +101,8 @@ func (l *limiter) allow(ip string) (bool, int) {
 // keyed on it is one an attacker resets on every request by changing a string.
 func (s *Server) clientIP(r *http.Request) string {
 	if s.cfg.TrustProxy {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if i := strings.IndexByte(xff, ','); i > 0 {
-				return strings.TrimSpace(xff[:i])
-			}
-			return strings.TrimSpace(xff)
+		if ip := forwardedClientIP(r.Header.Get("X-Forwarded-For")); ip != "" {
+			return ip
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -113,6 +110,32 @@ func (s *Server) clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// forwardedClientIP returns the address the terminator observed, or "" when
+// the header carries none.
+//
+// Google's external load balancer APPENDS `<client>,<lb>` to whatever arrived,
+// so the leftmost element is a value the caller chose. Reading it makes the
+// limiter resettable per request by changing a string, which is what trusting
+// the header is supposed to prevent. The client is second from the end.
+//
+// Anything that does not parse as an address is refused, so a key is bounded
+// in both length and count.
+func forwardedClientIP(xff string) string {
+	if xff == "" {
+		return ""
+	}
+	parts := strings.Split(xff, ",")
+	i := len(parts) - 2
+	if i < 0 {
+		i = 0
+	}
+	ip := strings.TrimSpace(parts[i])
+	if net.ParseIP(ip) == nil {
+		return ""
+	}
+	return ip
 }
 
 // The latency floor. A registered address costs a database write, a token and
