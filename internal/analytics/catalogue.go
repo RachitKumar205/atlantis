@@ -29,6 +29,7 @@ const (
 	EventEmailVerified      = "account.email_verified"
 	EventSecondFactor       = "account.second_factor_enrolled"
 	EventSignedIn           = "account.signed_in"
+	EventConsoleAuthorized  = "console.authorized"
 	EventOrgCreated         = "org.created"
 	EventOrgDeleted         = "org.deleted"
 	EventOrgRestored        = "org.restored"

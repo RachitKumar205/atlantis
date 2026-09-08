@@ -11,6 +11,7 @@ import (
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 
+	"github.com/rachitkumar205/atlantis/internal/analytics"
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 )
 
@@ -456,5 +457,57 @@ func TestReauthNeedsASession(t *testing.T) {
 		url.Values{"org": {"acme"}, "code": {"123456"}}, sessionCookie, "")
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("reauth with no session: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Entering a console is an event, because for somebody who already holds a
+// Cloud session it is the whole of "logging in" — no new session is created,
+// so account.signed_in never fires.
+func TestAuthorizeReportsEnteringTheConsole(t *testing.T) {
+	f := newFixture(t)
+	rec := &analytics.Recorder{}
+	f.srv.events = rec
+
+	session := f.member(t, "viewer@example.com", "acme", testConsole, identity.RoleViewer)
+	if got := f.authorize(t, session, "org=acme"); got.Code != http.StatusSeeOther {
+		t.Fatalf("authorize: %d %s", got.Code, got.Body.String())
+	}
+
+	events := rec.Named(analytics.EventConsoleAuthorized)
+	if len(events) != 1 {
+		t.Fatalf("got %d %s events, want 1", len(events), analytics.EventConsoleAuthorized)
+	}
+	e := events[0]
+	if e.Org != "acme" {
+		t.Errorf("org %q, want acme", e.Org)
+	}
+	if e.DistinctID == "" {
+		t.Error("the event carries no actor")
+	}
+	if e.Props["role"] != identity.RoleViewer {
+		t.Errorf("role %v, want viewer", e.Props["role"])
+	}
+	// The assertion itself is a credential and the email is the person.
+	for _, v := range e.Props {
+		if s, ok := v.(string); ok && strings.Contains(s, "@") {
+			t.Errorf("an address reached the event: %v", e.Props)
+		}
+	}
+}
+
+// A refused authorize reports nothing, so the event counts entries rather than
+// attempts.
+func TestARefusedAuthorizeReportsNothing(t *testing.T) {
+	f := newFixture(t)
+	rec := &analytics.Recorder{}
+	f.srv.events = rec
+
+	session := f.member(t, "viewer@example.com", "acme", testConsole, identity.RoleViewer)
+	if got := f.authorize(t, session, "org=someone-elses"); got.Code == http.StatusSeeOther {
+		t.Fatal("a non-member was authorized")
+	}
+
+	if got := len(rec.Named(analytics.EventConsoleAuthorized)); got != 0 {
+		t.Fatalf("got %d events for a refusal, want 0", got)
 	}
 }
