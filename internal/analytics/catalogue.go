@@ -29,8 +29,6 @@ const (
 	EventEmailVerified      = "account.email_verified"
 	EventSecondFactor       = "account.second_factor_enrolled"
 	EventSignedIn           = "account.signed_in"
-	EventSignInFailed       = "account.sign_in_failed"
-	EventIdentityLinked     = "oauth.identity_linked"
 	EventOrgCreated         = "org.created"
 	EventOrgDeleted         = "org.deleted"
 	EventOrgRestored        = "org.restored"
