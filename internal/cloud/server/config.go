@@ -15,6 +15,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/rachitkumar205/atlantis/internal/analytics"
 )
 
 // Config is Cloud's configuration, from the environment.
@@ -89,6 +91,17 @@ type Config struct {
 	// request. Set it only behind a terminator that overwrites the header.
 	TrustProxy bool // CLOUD_TRUST_PROXY
 
+	// PostHogKey is the analytics project key. Empty turns off both the
+	// server-side sink and the browser ingestion route.
+	//
+	// Never in the required-values loop: a deployment boots without it.
+	PostHogKey string // CLOUD_POSTHOG_KEY
+
+	// PostHogHost is the ingestion host requests are forwarded to. Empty means
+	// analytics.DefaultEndpoint. Must be absolute; validateAnalytics refuses a
+	// value that would fail at every request instead of at boot.
+	PostHogHost string // CLOUD_POSTHOG_HOST
+
 	// DataKeyset seals each account's TOTP secret in cloud.totp_secrets.
 	//
 	// Base64 Tink keyset, required, no default. A TOTP secret is recomputed to
@@ -134,6 +147,8 @@ func ConfigFromEnv() (Config, error) {
 		SMTPPassword:  os.Getenv("CLOUD_SMTP_PASSWORD"),
 		CheckBreaches: os.Getenv("CLOUD_HIBP_CHECK") != "false",
 		TrustProxy:    os.Getenv("CLOUD_TRUST_PROXY") == "true",
+		PostHogKey:    os.Getenv("CLOUD_POSTHOG_KEY"),
+		PostHogHost:   envOr("CLOUD_POSTHOG_HOST", analytics.DefaultEndpoint),
 		DataKeyset:    os.Getenv("CLOUD_DATA_KEY"),
 		CookieSecure:  os.Getenv("CLOUD_COOKIE_SECURE") == "true",
 		SendTimeout:   10 * time.Second,
@@ -199,7 +214,30 @@ func ConfigFromEnv() (Config, error) {
 		return Config{}, err
 	}
 
+	if err := c.validateAnalytics(); err != nil {
+		return Config{}, err
+	}
+
 	return c, nil
+}
+
+// validateAnalytics refuses a host that would fail at every request rather
+// than at boot.
+//
+// Checked only when a key is set, so a deployment with analytics off is not
+// held to a rule that cannot affect it.
+func (c Config) validateAnalytics() error {
+	if c.PostHogKey == "" {
+		return nil
+	}
+	u, err := url.Parse(c.PostHogHost)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("CLOUD_POSTHOG_HOST must be an absolute http or https URL (got %q)", c.PostHogHost)
+	}
+	if u.User != nil {
+		return fmt.Errorf("CLOUD_POSTHOG_HOST must carry no userinfo (got %q)", c.PostHogHost)
+	}
+	return nil
 }
 
 // OAuthRedirect is the base the provider callback is built from: the override

@@ -55,6 +55,22 @@ if [ -n "${CLOUD_RESEND_API_KEY:-}" ]; then
     gsm_put_once atlantis-resend-api-key "$CLOUD_RESEND_API_KEY"
 fi
 resend="$(gsm_get atlantis-resend-api-key)"
+
+# Analytics. Optional: with no key the ingestion route answers 404 and every
+# server-side sink discards.
+#
+# Written on every run, unlike the data keys: this one belongs to a third party
+# and is rotated there, so gsm_put_once would keep a revoked value and report
+# success. Passing an empty CLOUD_POSTHOG_KEY does not erase it; delete the
+# secret to turn analytics off.
+if [ -n "${CLOUD_POSTHOG_KEY:-}" ]; then
+    if ! gcloud secrets describe atlantis-posthog-key --project "$PROJECT" >/dev/null 2>&1; then
+        gcloud secrets create atlantis-posthog-key --project "$PROJECT" --replication-policy=automatic >/dev/null
+    fi
+    printf '%s' "$CLOUD_POSTHOG_KEY" | gcloud secrets versions add atlantis-posthog-key --project "$PROJECT" --data-file=- >/dev/null
+fi
+posthog="$(gsm_get atlantis-posthog-key)"
+
 if [ -z "$resend" ] && [ -z "$MAIL_DEV" ]; then
     echo "no Resend key in Secret Manager. Pass CLOUD_RESEND_API_KEY=..., or MAIL_DEV=1 for the logging mailer." >&2
     exit 1
@@ -65,6 +81,7 @@ k -n atlantis-system create secret generic atlantis-cloud \
     --from-literal=CLOUD_PG_URL="$(gsm_get atlantis-cloud-pg-url)" \
     --from-literal=CLOUD_DATA_KEY="$(gsm_get atlantis-cloud-data-key)" \
     --from-literal=CLOUD_RESEND_API_KEY="$resend" \
+    --from-literal=CLOUD_POSTHOG_KEY="$posthog" \
     --from-literal=signing-key.pem="$(gsm_get atlantis-cloud-signing-key)" \
     --dry-run=client -o yaml | k apply -f - >/dev/null
 k -n atlantis-system create secret generic atlantis-console \
@@ -81,3 +98,4 @@ k -n atlantis-system get secret atlantis-cloud atlantis-console atlantis-provisi
 
 echo
 echo "secrets in place. mail: $([ -n "$resend" ] && echo "Resend" || echo "logging mailer (MAIL_DEV)")"
+echo "                 analytics: $([ -n "$posthog" ] && echo "PostHog" || echo "off (no CLOUD_POSTHOG_KEY)")"

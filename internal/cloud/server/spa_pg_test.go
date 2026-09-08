@@ -160,10 +160,27 @@ func TestNonAppRoutesKeepTheStrictPolicy(t *testing.T) {
 	f := newFixture(t)
 	f.srv.spaFS = appFS()
 
-	for _, path := range []string{"/healthz", "/api/auth/config", "/api/nope"} {
+	for _, path := range []string{"/healthz", "/api/auth/config", "/api/nope", "/api/t/e/"} {
 		got := f.get(t, path).Header().Get("Content-Security-Policy")
 		if got != strictCSP {
 			t.Errorf("%s:\n got  %q\n want %q", path, got, strictCSP)
+		}
+	}
+}
+
+// The analytics endpoint moves no policy: the page posts to this origin and
+// the server forwards, so `connect-src 'self'` already covers ingestion.
+func TestTheAppPolicyNamesNoAnalyticsHost(t *testing.T) {
+	for _, banned := range []string{
+		"posthog",
+		"blob:",      // the replay recorder's compression worker
+		"worker-src", // which it would need
+	} {
+		if strings.Contains(spaCSP, banned) {
+			t.Errorf("the sign-in app's policy carries %s:\n%s", banned, spaCSP)
+		}
+		if strings.Contains(strictCSP, banned) {
+			t.Errorf("the strict policy carries %s:\n%s", banned, strictCSP)
 		}
 	}
 }

@@ -39,6 +39,9 @@ type Server struct {
 	// cliPollLim throttles `tide login` polls per device code, not per
 	// address; see handleCLIPoll.
 	cliPollLim *limiter
+	// analyticsLim throttles the ingestion route, which has no session behind
+	// it; see handleAnalytics.
+	analyticsLim *limiter
 
 	// keys seals each account's TOTP secret. See internal/secrets for what that
 	// does and does not defend.
@@ -84,13 +87,14 @@ func New(cfg Config, db *store.Store, iss *issuer.Issuer, spaFS fs.FS, log *slog
 
 	s := &Server{
 		cfg: cfg, db: db, iss: iss, log: log,
-		keys:       keys,
-		spaFS:      spaFS,
-		providers:  configuredProviders(cfg, log),
-		lim:        newLimiter(),
-		cliPollLim: newLimiterWithMax(cliPollLimit),
-		mux:        http.NewServeMux(),
-		sleep:      realSleep,
+		keys:         keys,
+		spaFS:        spaFS,
+		providers:    configuredProviders(cfg, log),
+		lim:          newLimiter(),
+		cliPollLim:   newLimiterWithMax(cliPollLimit),
+		analyticsLim: newLimiterWithMax(analyticsRateLimit),
+		mux:          http.NewServeMux(),
+		sleep:        realSleep,
 	}
 
 	// Which transport sends the two messages that gate account recovery.
@@ -146,6 +150,10 @@ func (s *Server) routes() {
 	s.mux.Handle("GET "+issuer.JWKSPath, s.iss.Handler())
 
 	s.mux.HandleFunc("POST /api/auth/signup", s.handleSignup)
+
+	// Analytics ingestion. Unauthenticated, because the sign-up funnel is
+	// measured before a session exists; see analyticsproxy.go.
+	s.mux.HandleFunc("POST "+analyticsPathPrefix+"{rest...}", s.handleAnalytics)
 
 	// `tide login`, the device-code shape. start and poll are unauthenticated
 	// by design — see cligrant.go for what each is limited by — and lookup
