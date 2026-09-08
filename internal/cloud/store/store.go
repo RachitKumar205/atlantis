@@ -27,6 +27,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/rachitkumar205/atlantis/internal/analytics"
+
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 	"github.com/rachitkumar205/atlantis/internal/migrate"
 	"github.com/rachitkumar205/atlantis/migrations"
@@ -105,7 +107,15 @@ type Membership struct {
 type Store struct {
 	pool *pgxpool.Pool
 	log  *slog.Logger
+
+	// sink receives an event for each audit action that has a projection.
+	// Nil is the same as analytics.Discard; see LogAction.
+	sink analytics.Sink
 }
+
+// UseAnalytics sets where audited actions are reported. Called once at wiring
+// time, before the store serves a request.
+func (s *Store) UseAnalytics(sink analytics.Sink) { s.sink = sink }
 
 // New opens the pool and verifies it answers.
 func New(ctx context.Context, pgURL string, log *slog.Logger) (*Store, error) {

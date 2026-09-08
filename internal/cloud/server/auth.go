@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rachitkumar205/atlantis/internal/analytics"
 	"github.com/rachitkumar205/atlantis/internal/cloud/authn"
 	"github.com/rachitkumar205/atlantis/internal/cloud/store"
 )
@@ -103,6 +104,14 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	s.send(r.Context(), user.Email, "Verify your email address",
 		"Open this link to finish setting up your Atlantis Cloud account:\n\n"+
 			s.link("/verify", token)+"\n\nThe link is good for 24 hours.")
+
+	// Raised here rather than in the browser: this route answers identically
+	// whether or not the address was already registered, and an event the page
+	// could see would undo that.
+	s.capture(analytics.EventSignedUp, user.ID, "", map[string]any{
+		"method":   "password",
+		"has_name": req.FirstName != "" || req.LastName != "",
+	})
 
 	writeJSON(w, http.StatusOK, map[string]string{"message": checkYourEmail})
 }
@@ -275,6 +284,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.capture(analytics.EventEmailVerified, spent.UserID, "", nil)
 	page(w, http.StatusOK, "Your email address is verified.\n\nYou can close this page.")
 }
 

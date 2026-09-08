@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rachitkumar205/atlantis/internal/analytics"
 	"github.com/rachitkumar205/atlantis/internal/cloud/authn"
 	"github.com/rachitkumar205/atlantis/internal/cloud/issuer"
 	cloudmail "github.com/rachitkumar205/atlantis/internal/cloud/mail"
@@ -42,6 +43,10 @@ type Server struct {
 	// analyticsLim throttles the ingestion route, which has no session behind
 	// it; see handleAnalytics.
 	analyticsLim *limiter
+
+	// events records the account milestones that write no audit row. The
+	// audited actions are reported by the store; see store.LogAction.
+	events analytics.Sink
 
 	// keys seals each account's TOTP secret. See internal/secrets for what that
 	// does and does not defend.
@@ -125,6 +130,19 @@ func New(cfg Config, db *store.Store, iss *issuer.Issuer, spaFS fs.FS, log *slog
 		s.breach = authn.NoBreachCheck{}
 	}
 
+	// An empty key is what a development and CI build has, and Discard runs
+	// every instrumented path.
+	if cfg.PostHogKey == "" {
+		s.events = analytics.Discard{}
+	} else {
+		s.events = analytics.NewPostHog(analytics.Config{
+			APIKey:   cfg.PostHogKey,
+			Endpoint: cfg.PostHogHost,
+			Logger:   log,
+		})
+	}
+	db.UseAnalytics(s.events)
+
 	s.routes()
 	s.handler = s.securityHeaders(s.mux)
 
@@ -143,6 +161,20 @@ func (s *Server) Close() {
 	if s.bgCancel != nil {
 		s.bgCancel()
 	}
+	if s.events != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), analyticsFlushTimeout)
+		defer cancel()
+		_ = s.events.Close(ctx)
+	}
+}
+
+// capture records one account milestone. Milestones that write an audit row go
+// through the store instead.
+func (s *Server) capture(name, userID, org string, props map[string]any) {
+	if s.events == nil {
+		return
+	}
+	s.events.Capture(analytics.Event{Name: name, DistinctID: userID, Org: org, Props: props})
 }
 
 func (s *Server) routes() {

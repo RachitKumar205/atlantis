@@ -22,6 +22,9 @@ const (
 	analyticsRateLimit = 120
 
 	analyticsTimeout = 5 * time.Second
+
+	// analyticsFlushTimeout bounds the last delivery at shutdown.
+	analyticsFlushTimeout = 2 * time.Second
 )
 
 // analyticsUpstreamPaths are the ingestion paths that forward, with no leading

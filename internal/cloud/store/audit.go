@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"time"
+
+	"github.com/rachitkumar205/atlantis/internal/analytics"
 )
 
 // Cloud's audit log. Provisioning creates a namespace, mints a certificate
@@ -59,6 +61,50 @@ func (s *Store) LogAction(ctx context.Context, org, actor, actorEmail, action st
 		s.log.Warn("audit write failed",
 			"org", org, "action", action, "actor", actor, "err", err)
 	}
+
+	s.report(org, actor, action, detail)
+}
+
+// report emits the analytics event for an audited action.
+//
+// The projection decides what crosses. No path here copies detail through, so
+// a key nobody named cannot leave the process.
+//
+// An action with no projection is a gap between the audit log and the
+// catalogue; TestEveryCloudAuditActionIsProjected fails on one, and this warns
+// in a deployment where the two have drifted anyway.
+func (s *Store) report(org, actor, action string, detail map[string]any) {
+	if s.sink == nil {
+		return
+	}
+	p, ok := analytics.CloudActions[action]
+	if !ok {
+		s.log.Warn("audit action has no analytics projection", "action", action)
+		return
+	}
+	if p.Event == "" {
+		return
+	}
+	var props map[string]any
+	if p.Props != nil {
+		props = p.Props(detail)
+	}
+	s.sink.Capture(analytics.Event{
+		Name:            p.Event,
+		DistinctID:      distinctID(org, actor),
+		Org:             org,
+		Props:           props,
+		NoPersonProfile: actor == ProvisionerActor,
+	})
+}
+
+// distinctID is the actor for an event. Work the provisioner did on its own
+// initiative has no person behind it and is attributed to the organisation.
+func distinctID(org, actor string) string {
+	if actor == ProvisionerActor || actor == "" {
+		return analytics.MachineID(org)
+	}
+	return actor
 }
 
 // AuditFor reads an organisation's most recent entries, newest first.
