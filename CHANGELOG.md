@@ -13,6 +13,34 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Added
 
+#### The Python client is published
+
+`pip install atlantis-client` resolves. Two documentation pages, the CLI
+reference and `tide init --language python` all printed that line for a package
+that was on no index, so a caller who followed them got a failed install and a
+generated tree whose client, custom-query and jobs files all open by importing
+it.
+
+**The package versions independently of the platform tags**, starting at 0.1.0
+and tagged `python-v0.1.0`. A release here is not a release of the server and
+the two numbers will not line up. `make release-python PYVERSION=0.1.0` builds
+it; the version lives in `atlantis_client.__version__` and nowhere else.
+
+**The licence changed from proprietary to Apache 2.0**, which is what
+`clients/go` already carried, with the text inside the wheel. The grant is
+permanent for every copy downloaded, whatever a later version says.
+
+**`protobuf>=7.36.1` is a requirement, not a preference.** Generated code calls
+`ValidateProtobufRuntimeVersion` with the version of the plugin that produced
+it, so an older runtime fails at import rather than at a call. A test in
+`cmd/tide` holds three numbers to one: the plugin pinned in `tide generate`,
+the wire modules the package ships, and the declared floor.
+
+The package is tested on Python 3.10 through 3.14, and two tests hold its
+public surface to what the emitters import — one in Python, because Go cannot
+import the package, and one in Go, because Python cannot see a change to the
+emitter.
+
 #### Per-caller apply policies, rehearsal, and the gates around approval
 
 Every caller now carries an apply-policy tier — `sandbox_only`, `always_ask`,

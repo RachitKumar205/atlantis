@@ -246,6 +246,150 @@ release-clis-native: ## Build cgo CLI tarballs for the native host platform: mak
 	@echo "==> $(RELEASE_DIR)/ (native: $(NATIVE_OS)/$(NATIVE_ARCH))"
 	@ls -la $(RELEASE_DIR)/
 
+# atlantis-client, the Python runtime every generated client imports.
+#
+# Artefacts go under dist/python/, not dist/ itself: dist/ holds the tide
+# release tarballs, which a publish glob over dist/ would upload to the index.
+#
+# PYVERSION, never VERSION. VERSION defaults to `git describe` and the bare
+# `export` at the top of this file hands it to every recipe here.
+PY_RELEASE_DIR := $(RELEASE_DIR)/python
+PY_PROJECT     := clients/python
+UV             ?= uv
+
+# PYVERSION with every digit and dot removed. Empty means it had nothing else.
+py-strip-digits = $(subst 0,,$(subst 1,,$(subst 2,,$(subst 3,,$(subst 4,,$(subst 5,,$(subst 6,,$(subst 7,,$(subst 8,,$(subst 9,,$(1)))))))))))
+py-version-residue = $(strip $(subst .,,$(call py-strip-digits,$(PYVERSION))))
+
+# The version, given on the command line, in the index's own spelling.
+#
+# Checked by make rather than by the shell. The recipes below interpolate
+# PYVERSION into shell words, so `PYVERSION='0.1.0"; rm -rf /; echo "'` would
+# run what it names; $(error) expands no shell and stops before any recipe line.
+define py-release-guard
+$(if $(filter-out command line,$(origin PYVERSION)),$(error $@ needs an explicit version: make $@ PYVERSION=0.1.0))
+$(if $(filter v%,$(PYVERSION)),$(error PYVERSION must not carry a leading v: the build names its files from __version__, which has none, so nothing would match))
+$(if $(py-version-residue),$(error PYVERSION is digits and dots only, like 0.1.0 — got '$(PYVERSION)'))
+$(if $(filter-out 3,$(words $(subst ., ,$(PYVERSION)))),$(error PYVERSION has three fields, like 0.1.0 — got '$(PYVERSION)'))
+endef
+
+.PHONY: release-python
+release-python: ## Build the Python client: make release-python PYVERSION=0.1.0
+	$(py-release-guard)
+	@command -v $(UV) >/dev/null || { \
+	  echo "install uv: https://docs.astral.sh/uv/getting-started/installation/"; exit 1; \
+	}
+	@# The source distribution takes the working tree, so an untracked file under
+	@# clients/python reaches everyone who installs. No escape hatch.
+	@if [ -n "$$(git status --porcelain -- $(PY_PROJECT))" ]; then \
+	  echo "$(PY_PROJECT) is not clean:"; \
+	  git status --porcelain -- $(PY_PROJECT); \
+	  exit 1; \
+	fi
+	@rm -rf $(PY_RELEASE_DIR)
+	@mkdir -p $(PY_RELEASE_DIR)
+	$(UV) build $(PY_PROJECT) --out-dir $(PY_RELEASE_DIR)
+	@# The version comes from __init__.py and PYVERSION comes from the command
+	@# line. This is where they are held to each other.
+	@test -f $(PY_RELEASE_DIR)/atlantis_client-$(PYVERSION)-py3-none-any.whl || { \
+	  echo "built no wheel for $(PYVERSION); $(PY_PROJECT)/src/atlantis_client/__init__.py says:"; \
+	  grep '^__version__' $(PY_PROJECT)/src/atlantis_client/__init__.py; \
+	  exit 1; \
+	}
+	@test -f $(PY_RELEASE_DIR)/atlantis_client-$(PYVERSION).tar.gz || { \
+	  echo "built no source distribution for $(PYVERSION)"; ls $(PY_RELEASE_DIR); exit 1; \
+	}
+	$(UV) tool run --from twine twine check --strict $(PY_RELEASE_DIR)/*
+	@echo ""
+	@echo "==> $(PY_RELEASE_DIR)/"
+	@ls -la $(PY_RELEASE_DIR)/
+
+.PHONY: release-python-verify
+release-python-verify: ## Install the built wheel in a clean environment and check it
+	$(py-release-guard)
+	@test -f $(PY_RELEASE_DIR)/atlantis_client-$(PYVERSION)-py3-none-any.whl || { \
+	  echo "no build found — run: make release-python PYVERSION=$(PYVERSION)"; exit 1; \
+	}
+	@# Outside the repository, with no inherited module path, under -I. Those are
+	@# precautions; the check is that the import resolves inside the environment,
+	@# which scripts/verify-python-dist.py makes.
+	@#
+	@# The mypy run is what sees a wheel that imports perfectly and has lost
+	@# py.typed: every import of it then reports import-untyped.
+	@set -e; \
+	wheel="$(CURDIR)/$(PY_RELEASE_DIR)/atlantis_client-$(PYVERSION)-py3-none-any.whl"; \
+	sdist="$(CURDIR)/$(PY_RELEASE_DIR)/atlantis_client-$(PYVERSION).tar.gz"; \
+	ignore="$(CURDIR)/$(PY_PROJECT)/.gitignore"; \
+	contract="$(CURDIR)/$(PY_PROJECT)/tests/test_public_surface.py"; \
+	verify="$(CURDIR)/scripts/verify-python-dist.py"; \
+	work=$$(mktemp -d); \
+	trap 'rm -rf "$$work"' EXIT; \
+	$(UV) venv --python 3.10 "$$work/venv" >/dev/null; \
+	$(UV) pip install --quiet --python "$$work/venv/bin/python" \
+	  "$$wheel" pytest mypy types-grpcio types-protobuf; \
+	cp "$$contract" "$$work/test_public_surface.py"; \
+	printf '%s\n' \
+	  'from atlantis_client.tenant import metadata_for' \
+	  '' \
+	  'headers: tuple[tuple[str, str], ...] = metadata_for("acme")' \
+	  > "$$work/consumer.py"; \
+	cd "$$work"; \
+	PYTHONPATH= ./venv/bin/python -I "$$verify" --wheel "$$wheel" --sdist "$$sdist" \
+	  --gitignore "$$ignore" --require-installed --version "$(PYVERSION)"; \
+	PYTHONPATH= ./venv/bin/python -I -m pytest -q test_public_surface.py; \
+	PYTHONPATH= ./venv/bin/python -I -m mypy --strict consumer.py
+
+# Used once, and separate from the publish path.
+#
+# A failed publish that had folded the test upload in would leave the version
+# consumed on the test index, so a retry of the same number fails there while
+# the real index is still free. It also needs its own token and its own URL.
+.PHONY: release-python-testpypi
+release-python-testpypi: release-python-verify ## Upload the built artefacts to the test index
+	$(py-release-guard)
+	@test -n "$$TESTPYPI_TOKEN" || { \
+	  echo "TESTPYPI_TOKEN is not set. Mint one at"; \
+	  echo "    https://test.pypi.org/manage/account/token/"; \
+	  echo "and pass it on this command only, never in .env — the bare export at"; \
+	  echo "the top of this file would hand it to every recipe here."; \
+	  exit 1; \
+	}
+	@test -f $(PY_RELEASE_DIR)/atlantis_client-$(PYVERSION)-py3-none-any.whl || { \
+	  echo "no build found — run: make release-python PYVERSION=$(PYVERSION)"; exit 1; \
+	}
+	env -u UV_PUBLISH_INDEX -u UV_PUBLISH_URL UV_PUBLISH_TOKEN="$$TESTPYPI_TOKEN" \
+	  $(UV) publish --publish-url https://test.pypi.org/legacy/ \
+	    $(PY_RELEASE_DIR)/atlantis_client-$(PYVERSION)-py3-none-any.whl \
+	    $(PY_RELEASE_DIR)/atlantis_client-$(PYVERSION).tar.gz
+
+# The files are named rather than globbed: a stale artefact from an earlier
+# build in dist/python/ stays out of the upload.
+#
+# The token goes in the environment of the one command and not in its
+# arguments, where `ps` shows it to every local user. UV_PUBLISH_INDEX and
+# UV_PUBLISH_URL are cleared for the same command: `-include .env` plus the
+# bare `export` would otherwise let either redirect the upload.
+#
+# No --check-url. It turns "this version is already published" into a silent
+# success, and that error is the one saying the number is burned.
+.PHONY: release-python-publish
+release-python-publish: release-python-verify ## Publish the Python client to the index
+	$(py-release-guard)
+	@test -n "$$PYPI_TOKEN" || { \
+	  echo "PYPI_TOKEN is not set. Mint one at"; \
+	  echo "    https://pypi.org/manage/account/token/"; \
+	  echo "and pass it on this command only, never in .env."; \
+	  exit 1; \
+	}
+	env -u UV_PUBLISH_INDEX -u UV_PUBLISH_URL UV_PUBLISH_TOKEN="$$PYPI_TOKEN" \
+	  $(UV) publish --publish-url https://upload.pypi.org/legacy/ \
+	    $(PY_RELEASE_DIR)/atlantis_client-$(PYVERSION)-py3-none-any.whl \
+	    $(PY_RELEASE_DIR)/atlantis_client-$(PYVERSION).tar.gz
+	@echo ""
+	@echo "==> atlantis-client $(PYVERSION) is on the index. The number is now"
+	@echo "    consumed forever: a mistake is fixed by $(PYVERSION)+1, not by a"
+	@echo "    re-upload. Tag it as python-v$(PYVERSION)."
+
 # ── Binaries that carry a SPA ────────────────────────────────────────────────
 #
 # Two builds each, and the difference is the `embedspa` tag.

@@ -1,0 +1,18 @@
+# Build and environment state under clients/python.
+#
+# This file is published. The build backend force-adds the nearest .gitignore
+# to the source distribution, walking up to the repository root, so without one
+# here every release ships /.gitignore — 190 lines naming internal paths.
+#
+# uv writes uv.lock whenever it resolves the environment (uv run, uv sync).
+# The package declares floors and pins nothing, so the lock file is an input to
+# no build here; untracked and not ignored, it fails the clean-tree guard in
+# `make release-python`.
+.venv/
+__pycache__/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+dist/
+uv.lock

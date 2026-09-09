@@ -238,8 +238,15 @@ jobs:
           args: ./cmd/server/... ./cmd/tide/... ./cmd/tidectl/... ./cmd/cloud/... ./cmd/console/... ./cmd/signer/... ./cmd/provisioner/... ./internal/...
 
   python:
-    name: python client runtime
+    name: python client runtime (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+
+    strategy:
+      # The default cancels the siblings of the first failing leg, so two
+      # broken versions report as one.
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     # The runtime for the typed Python client, in clients/python. No Go and no
     # database: it is a pure library over grpcio, and the Go jobs above neither
@@ -257,9 +264,12 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          # The floor pyproject declares. Running only the newest Python would
-          # let a 3.11+ construct through and break every caller still on 3.10.
-          python-version: "3.10"
+          python-version: ${{ matrix.python-version }}
+
+          # Relative to the repository root. The default globs from there, where
+          # there is no project file, and the step fails.
+          cache: pip
+          cache-dependency-path: clients/python/pyproject.toml
 
       - name: install
         run: |
@@ -276,6 +286,22 @@ jobs:
 
       - name: pytest
         run: pytest -q
+
+      # The only place a distribution is built before the release path builds
+      # it. A metadata regression otherwise appears at `make release-python`,
+      # after the version has been decided.
+      #
+      # On every leg. A leg-specific condition here is a step that stops running
+      # when the matrix changes and reports the job green.
+      - name: build and check the distribution
+        run: |
+          pip install build twine
+          python -m build --outdir "$RUNNER_TEMP/pydist"
+          twine check --strict "$RUNNER_TEMP/pydist"/*
+          python -I "$GITHUB_WORKSPACE/scripts/verify-python-dist.py" \
+            --wheel "$RUNNER_TEMP"/pydist/atlantis_client-*-py3-none-any.whl \
+            --sdist "$RUNNER_TEMP"/pydist/atlantis_client-*.tar.gz \
+            --gitignore .gitignore
 
       # The emitted Python, type-checked the way a caller would.
       #
