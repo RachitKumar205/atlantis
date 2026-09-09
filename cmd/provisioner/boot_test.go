@@ -47,6 +47,7 @@ func clearEnv(t *testing.T) {
 		"PROVISIONER_NAMESPACE_PREFIX", "PROVISIONER_STORAGE_CLASS", "PROVISIONER_PULL_POLICY",
 		"PROVISIONER_POD_CIDR", "PROVISIONER_OPERATOR_NAMESPACE",
 		"PROVISIONER_POSTGRES_STORAGE", "PROVISIONER_POSTGRES_INSTANCES",
+		"CLOUD_POSTHOG_KEY", "CLOUD_POSTHOG_HOST",
 	} {
 		t.Setenv(k, "")
 	}
@@ -150,5 +151,46 @@ func TestALeaseThatCannotOutliveTheWaitIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "PROVISIONER_LEASE") {
 		t.Errorf("the refusal does not name the setting: %v", err)
+	}
+}
+
+// An analytics host that would fail at every request is refused at startup, and
+// the message names the setting.
+//
+// The setting is in the message because the same host reaches the sink through
+// no other name: a refusal that said only "invalid URL" would name nothing to
+// change.
+func TestABadAnalyticsHostIsRefusedByName(t *testing.T) {
+	clearEnv(t)
+	for k, v := range bootEnv {
+		t.Setenv(k, v)
+	}
+	t.Setenv("CLOUD_POSTHOG_KEY", "phc_notarealkey")
+	t.Setenv("CLOUD_POSTHOG_HOST", "us.i.posthog.com")
+
+	err := run(quietLogger())
+	if err == nil {
+		t.Fatal("the provisioner started with a host it cannot post to")
+	}
+	if !strings.Contains(err.Error(), "CLOUD_POSTHOG_HOST") {
+		t.Errorf("the refusal does not name the setting: %v", err)
+	}
+}
+
+// The same host with no key starts, because analytics is off and the rule
+// cannot affect anything.
+func TestABadAnalyticsHostWithNoKeyIsIgnored(t *testing.T) {
+	clearEnv(t)
+	for k, v := range bootEnv {
+		t.Setenv(k, v)
+	}
+	t.Setenv("CLOUD_POSTHOG_HOST", "us.i.posthog.com")
+
+	err := run(quietLogger())
+	if err == nil {
+		t.Fatal("the provisioner started against a database that does not exist")
+	}
+	if !strings.Contains(err.Error(), "cloud schema") && !strings.Contains(err.Error(), "cloud db") {
+		t.Errorf("the failure is not the database, so the host was refused with no key set: %v", err)
 	}
 }

@@ -230,14 +230,7 @@ func (c Config) validateAnalytics() error {
 	if c.PostHogKey == "" {
 		return nil
 	}
-	u, err := url.Parse(c.PostHogHost)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return fmt.Errorf("CLOUD_POSTHOG_HOST must be an absolute http or https URL (got %q)", c.PostHogHost)
-	}
-	if u.User != nil {
-		return fmt.Errorf("CLOUD_POSTHOG_HOST must carry no userinfo (got %q)", c.PostHogHost)
-	}
-	return nil
+	return analytics.CheckEndpoint("CLOUD_POSTHOG_HOST", c.PostHogHost)
 }
 
 // OAuthRedirect is the base the provider callback is built from: the override

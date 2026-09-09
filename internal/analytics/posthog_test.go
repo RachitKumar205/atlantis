@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -289,5 +290,42 @@ func TestDiscardAcceptsEverything(t *testing.T) {
 	s.GroupIdentify("acme", nil)
 	if err := s.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestCheckEndpointNamesTheSetting covers the hosts a deployment can be
+// configured with. The setting name is in the message because the same check
+// serves CLOUD_POSTHOG_HOST from two processes.
+func TestCheckEndpointNamesTheSetting(t *testing.T) {
+	ok := []string{
+		DefaultEndpoint,
+		"http://posthog.internal:8000",
+		"https://eu.i.posthog.com/",
+	}
+	for _, endpoint := range ok {
+		if err := CheckEndpoint("SETTING", endpoint); err != nil {
+			t.Errorf("CheckEndpoint(%q) = %v, want nil", endpoint, err)
+		}
+	}
+
+	bad := map[string]string{
+		"":                              "absolute",
+		"us.i.posthog.com":              "absolute",
+		"/relative":                     "absolute",
+		"ftp://us.i.posthog.com":        "absolute",
+		"https://user:pw@posthog.local": "userinfo",
+	}
+	for endpoint, want := range bad {
+		err := CheckEndpoint("SETTING", endpoint)
+		if err == nil {
+			t.Errorf("CheckEndpoint(%q) = nil, want an error", endpoint)
+			continue
+		}
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("CheckEndpoint(%q) = %v, want it to mention %q", endpoint, err, want)
+		}
+		if !strings.Contains(err.Error(), "SETTING") {
+			t.Errorf("CheckEndpoint(%q) = %v, want it to name the setting", endpoint, err)
+		}
 	}
 }

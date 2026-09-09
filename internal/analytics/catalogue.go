@@ -40,6 +40,34 @@ const (
 	EventOrgProvisionFailed = "org.provision.failed"
 	EventOrgRequeued        = "org.requeued"
 	EventOrgPurged          = "org.purged"
+	EventOrgPurgeFailed     = "org.purge.failed"
+
+	// EventOrgProvisionStep is captured by the worker. cloud.audit_log holds a
+	// handful of rows per organisation for its lifetime, and four per attempt
+	// times every retry is a different table.
+	EventOrgProvisionStep = "org.provision.step"
+)
+
+// Organisation group properties. GroupIdentify is called with these four keys,
+// so this is where a new one is reviewed.
+//
+// Each is a fact about the organisation's lifecycle that this deployment
+// produced. $group_set merges the keys it is given, so a call may send a
+// subset.
+//
+// provision_attempts counts every attempt the row has taken, including those
+// before a requeue; provisioning.go does not reset it.
+const (
+	GroupState         = "state"
+	GroupProvisionedAt = "provisioned_at"
+	GroupPurgedAt      = "purged_at"
+	GroupAttempts      = "provision_attempts"
+)
+
+// States an organisation group carries.
+const (
+	StateReady  = "ready"
+	StatePurged = "purged"
 )
 
 // CloudActions projects the actions written to cloud.audit_log.
@@ -90,16 +118,32 @@ var CloudActions = map[string]Projection{
 				"attempts":    num(d["attempts"]),
 				"error_class": ErrorClass(str(d["error"])),
 				"retry_in":    str(d["retry_in"]),
+				"phase":       str(d["phase"]),
+				"fault":       str(d["fault"]),
 			}
 		},
 	},
-	"org.requeued": {
-		Event: EventOrgRequeued,
+	// The reason is free text bound for the console's audit view, and reconcile
+	// holds no attempt count: Requeue does not touch the column.
+	"org.requeued": {Event: EventOrgRequeued},
+	"org.purged":   {Event: EventOrgPurged},
+
+	// A deletion that did not finish. The row concerns the account and outlives
+	// the organisation, which is what puts it in the audit log; purgeOne
+	// releases the claim, so one arrives per reap pass until a teardown
+	// succeeds.
+	"org.purge.failed": {
+		Event: EventOrgPurgeFailed,
+		// The error text carries cluster addresses, as org.provision.failed's
+		// does.
 		Props: func(d map[string]any) map[string]any {
-			return map[string]any{"attempts": num(d["attempts"])}
+			return map[string]any{
+				"step":        str(d["step"]),
+				"error_class": ErrorClass(str(d["error"])),
+				"fault":       str(d["fault"]),
+			}
 		},
 	},
-	"org.purged": {Event: EventOrgPurged},
 
 	"org.console_credentials_rotated": {
 		Why: "a scheduled certificate rotation, which answers no product question",

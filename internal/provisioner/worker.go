@@ -13,6 +13,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
+	"github.com/rachitkumar205/atlantis/internal/analytics"
 	"github.com/rachitkumar205/atlantis/internal/cloud/provision"
 	"github.com/rachitkumar205/atlantis/internal/cloud/store"
 	"github.com/rachitkumar205/atlantis/internal/console"
@@ -104,6 +105,21 @@ type UnregisterFunc func(ctx context.Context, pgURL, org string) error
 // credentials. See reconnect.
 type ClusterFactory func() (Cluster, error)
 
+// phase names the part of an attempt that ran. It is a property on the events
+// below and on org.provision.failed's audit detail.
+//
+// The wording each failure wraps its error with is separate: those strings
+// land in cloud.orgs.last_error, which the console shows.
+type phase string
+
+const (
+	phaseApply    phase = "apply"
+	phaseWait     phase = "wait_ready"
+	phaseReadBack phase = "read_back"
+	phaseReady    phase = "ready_check"
+	phaseRegister phase = "register"
+)
+
 // Worker claims organisations and provisions them.
 type Worker struct {
 	cfg        Config
@@ -113,6 +129,10 @@ type Worker struct {
 	log        *slog.Logger
 
 	newCluster ClusterFactory
+
+	// events receives what the audit log does not carry. Nil is the same as
+	// analytics.Discard; see capture.
+	events analytics.Sink
 
 	// mu guards cluster, which is replaced when credentials go stale.
 	mu      sync.RWMutex
@@ -423,9 +443,9 @@ func (w *Worker) provisionOne(ctx context.Context, c store.Claimed) {
 	log := w.log.With("org", c.Org, "attempt", c.Attempts)
 	log.Info("provisioning")
 
-	st, err := w.build(ctx, c.Org)
+	st, p, err := w.build(ctx, c.Org, c.Attempts)
 	if err != nil {
-		w.fail(ctx, c, err)
+		w.fail(ctx, c, p, err)
 		return
 	}
 	if !st.Ready {
@@ -433,12 +453,18 @@ func (w *Worker) provisionOne(ctx context.Context, c store.Claimed) {
 		// finished converging. Retryable, and distinguished from a failure so
 		// "slow" and "broken" do not look the same on a dashboard.
 		outcome = "not_ready"
-		w.fail(ctx, c, errors.New("the organisation applied but is not serving yet"))
+		w.fail(ctx, c, phaseReady, errors.New("the organisation applied but is not serving yet"))
 		return
 	}
 
-	if err := w.record(ctx, c.Org, st); err != nil {
-		w.fail(ctx, c, err)
+	// Bracketed here rather than inside record, which rotateConsole also calls:
+	// instrumenting it there would report every certificate rotation as a
+	// provisioning step.
+	registerStart := time.Now()
+	err = w.record(ctx, c.Org, st)
+	w.step(c.Org, c.Attempts, phaseRegister, time.Since(registerStart), err)
+	if err != nil {
+		w.fail(ctx, c, phaseRegister, err)
 		return
 	}
 
@@ -456,6 +482,11 @@ func (w *Worker) provisionOne(ctx context.Context, c store.Claimed) {
 	}
 	log.Info("provisioned", "endpoint", st.Endpoint, "signer", st.SignerAddr,
 		"took", time.Since(start).Round(time.Second))
+	w.identify(c.Org, map[string]any{
+		analytics.GroupState:         analytics.StateReady,
+		analytics.GroupProvisionedAt: time.Now().UTC().Format(time.RFC3339),
+		analytics.GroupAttempts:      c.Attempts,
+	})
 	w.audit(ctx, c.Org, "org.provisioned", map[string]any{
 		"attempts": c.Attempts,
 		"endpoint": st.Endpoint,
@@ -470,7 +501,7 @@ func (w *Worker) provisionOne(ctx context.Context, c store.Claimed) {
 // are up, and the NodePorts are allocated separately — so a first Ensure
 // legitimately returns Ready false with empty addresses rather than an error.
 // The second call is what produces a Status registration can use.
-func (w *Worker) build(ctx context.Context, org string) (provision.Status, error) {
+func (w *Worker) build(ctx context.Context, org string, attempt int) (provision.Status, phase, error) {
 	c := w.currentCluster()
 
 	// The first call is where stale credentials surface, because it is the
@@ -478,32 +509,58 @@ func (w *Worker) build(ctx context.Context, org string) (provision.Status, error
 	// rotated authority — or a development cluster recreated underneath a
 	// running provisioner — into a blip rather than every organisation failing
 	// with an x509 error that names nothing an operator would look at.
+	start := time.Now()
 	_, err := c.Ensure(ctx, provision.Spec{Org: org})
 	if err != nil && credentialError(err) && ctx.Err() == nil {
 		w.log.Warn("the cluster refused this provisioner's credentials; rebuilding them",
 			"org", org, "err", err)
 		if !w.reconnect() {
-			return provision.Status{}, fmt.Errorf("apply the organisation: %w", err)
+			w.step(org, attempt, phaseApply, time.Since(start), err)
+			return provision.Status{}, phaseApply, fmt.Errorf("apply the organisation: %w", err)
 		}
 		c = w.currentCluster()
 		_, err = c.Ensure(ctx, provision.Spec{Org: org})
 	}
+	w.step(org, attempt, phaseApply, time.Since(start), err)
 	if err != nil {
-		return provision.Status{}, fmt.Errorf("apply the organisation: %w", err)
+		return provision.Status{}, phaseApply, fmt.Errorf("apply the organisation: %w", err)
 	}
 
+	start = time.Now()
 	stop := w.heartbeat(ctx, org)
 	err = c.WaitReady(ctx, org)
 	stop()
+	w.step(org, attempt, phaseWait, time.Since(start), err)
 	if err != nil {
-		return provision.Status{}, fmt.Errorf("wait for the organisation to serve: %w", err)
+		return provision.Status{}, phaseWait, fmt.Errorf("wait for the organisation to serve: %w", err)
 	}
 
+	start = time.Now()
 	st, err := c.Ensure(ctx, provision.Spec{Org: org})
+	w.step(org, attempt, phaseReadBack, time.Since(start), err)
 	if err != nil {
-		return provision.Status{}, fmt.Errorf("read back the organisation's addresses: %w", err)
+		return provision.Status{}, phaseReadBack, fmt.Errorf("read back the organisation's addresses: %w", err)
 	}
-	return st, nil
+	return st, phaseReadBack, nil
+}
+
+// step reports one part of an attempt, on success and on failure.
+//
+// ErrorClass reduces the message to one of seven constants; the message itself
+// carries image references and cluster addresses. ErrorClass("") is ClassNone,
+// so error_class is present on a success too.
+func (w *Worker) step(org string, attempt int, p phase, took time.Duration, err error) {
+	outcome, msg := "ok", ""
+	if err != nil {
+		outcome, msg = "failed", err.Error()
+	}
+	w.capture(org, analytics.EventOrgProvisionStep, map[string]any{
+		"phase":       string(p),
+		"outcome":     outcome,
+		"error_class": analytics.ErrorClass(msg),
+		"took_ms":     took.Milliseconds(),
+		"attempts":    attempt,
+	})
 }
 
 // heartbeat extends the lease while a long wait is in progress, and returns a
@@ -610,19 +667,25 @@ func publicEndpoint(st provision.Status) string {
 }
 
 // fail records an attempt that did not finish, and schedules the next one.
-func (w *Worker) fail(ctx context.Context, c store.Claimed, cause error) {
+func (w *Worker) fail(ctx context.Context, c store.Claimed, p phase, cause error) {
 	retryIn := w.cfg.backoff(c.Attempts)
+
+	// Two of the three are this deployment's own state, and neither escalates
+	// the backoff below.
+	fault := "organisation"
 	switch {
 	case ctx.Err() != nil:
 		// A shutdown is not the organisation's fault, so it does not escalate
 		// the backoff. The attempt is still recorded as failed because it is:
 		// nothing is serving, and the row must be claimable again.
 		retryIn = w.cfg.RetryBase
+		fault = "shutdown"
 		cause = fmt.Errorf("the provisioner shut down mid-attempt: %w", cause)
 	case credentialError(cause):
 		// Nor is this. Escalating would push every queued organisation into a
 		// long backoff for a platform fault, with credentials unnamed.
 		retryIn = w.cfg.RetryBase
+		fault = "credentials"
 		cause = fmt.Errorf("the cluster refused this provisioner's credentials, "+
 			"which is a fault in the provisioner and not in this organisation: %w", cause)
 	}
@@ -644,7 +707,69 @@ func (w *Worker) fail(ctx context.Context, c store.Claimed, cause error) {
 		"attempts": c.Attempts,
 		"error":    cause.Error(),
 		"retry_in": retryIn.String(),
+		"phase":    string(p),
+		"fault":    fault,
 	})
+}
+
+// UseAnalytics sets where this worker's own events go. Called once at wiring
+// time, before Run.
+func (w *Worker) UseAnalytics(sink analytics.Sink) { w.events = sink }
+
+// capture records one event about an organisation. An action with an audit row
+// is reported by the queue, where a projection decides what crosses.
+//
+// The distinct id is the organisation, and no person profile is created: the
+// provisioner acts on no one's behalf.
+func (w *Worker) capture(org, name string, props map[string]any) {
+	if w.events == nil {
+		return
+	}
+	w.events.Capture(analytics.Event{
+		Name:            name,
+		DistinctID:      analytics.MachineID(org),
+		Org:             org,
+		Props:           props,
+		NoPersonProfile: true,
+	})
+}
+
+// purgeFailed records a teardown that did not finish.
+//
+// Detached from ctx, as fail is and for the same reason: a row issued on a
+// cancelled context does not land, and LogAction captures the event whether the
+// insert succeeded or not, which would leave a failure in the analytics that
+// the audit log has no row for.
+//
+// fault separates a teardown that failed from one this process abandoned on
+// shutdown. A count of the first is a count of deletions that did not happen.
+func (w *Worker) purgeFailed(ctx context.Context, org, step string, cause error) {
+	fault := "teardown"
+	if ctx.Err() != nil {
+		fault = "shutdown"
+	}
+	mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), markTimeout)
+	defer cancel()
+	w.audit(mctx, org, "org.purge.failed", map[string]any{
+		"step":  step,
+		"error": cause.Error(),
+		"fault": fault,
+	})
+}
+
+// identify sets the organisation's group properties. The keys are the ones
+// analytics/catalogue.go declares and no others.
+//
+// Called once per successful provision and once per purge. A requeue
+// provisions again, so the count over an organisation's life is unbounded.
+//
+// reconcile visits every ready organisation every ReconcileInterval, and a
+// call there would spend a bounded queue on properties that had not changed.
+func (w *Worker) identify(org string, props map[string]any) {
+	if w.events == nil {
+		return
+	}
+	w.events.GroupIdentify(org, props)
 }
 
 // audit writes one row to cloud.audit_log.
@@ -768,6 +893,15 @@ func (w *Worker) reap(ctx context.Context) {
 			return
 		}
 	}
+	// One attempt per organisation per pass. MarkPurgeFailed releases the claim
+	// and leaves purge_after in the past, so ClaimForPurge matches the same row
+	// again on the next iteration: a teardown that keeps failing was re-claimed
+	// at API-server latency, and because this loop only returns on an empty
+	// queue, drain never ran again.
+	//
+	// The repeat is left claimed. Its lease is the interval before another
+	// attempt, which is the backoff MarkPurgeFailed does not apply.
+	attempted := map[string]bool{}
 	for {
 		if ctx.Err() != nil || !w.Healthy() {
 			return
@@ -783,6 +917,12 @@ func (w *Worker) reap(ctx context.Context) {
 			}
 			return
 		}
+		if attempted[claimed.Org] {
+			w.log.Info("the purge queue came back to an organisation this pass already tried",
+				"org", claimed.Org, "retry_in", w.cfg.Lease)
+			return
+		}
+		attempted[claimed.Org] = true
 		w.purgeOne(ctx, claimed.Org)
 	}
 }
@@ -817,6 +957,7 @@ func (w *Worker) purgeOne(ctx context.Context, org string) {
 		if mErr := w.q.MarkPurgeFailed(ctx, org, err.Error()); mErr != nil {
 			log.Error("could not release the purge claim", "err", mErr)
 		}
+		w.purgeFailed(ctx, org, "destroy", err)
 		return
 	}
 
@@ -835,6 +976,7 @@ func (w *Worker) purgeOne(ctx context.Context, org string) {
 		if mErr := w.q.MarkPurgeFailed(ctx, org, err.Error()); mErr != nil {
 			log.Error("could not release the purge claim", "err", mErr)
 		}
+		w.purgeFailed(ctx, org, "unregister", err)
 		return
 	}
 
@@ -843,11 +985,17 @@ func (w *Worker) purgeOne(ctx context.Context, org string) {
 		// the row and Destroy succeeds against an absent namespace, so this is
 		// a log rather than a failure mark.
 		log.Error("the organisation was destroyed but its rows remain", "err", err)
+		w.purgeFailed(ctx, org, "mark", err)
 		return
 	}
 
 	outcome = "purged"
 	log.Info("purged", "took", time.Since(start).Round(time.Second))
+
+	w.identify(org, map[string]any{
+		analytics.GroupState:    analytics.StatePurged,
+		analytics.GroupPurgedAt: time.Now().UTC().Format(time.RFC3339),
+	})
 
 	// The audit log references the organisation by name and outlives it, so
 	// "what happened to acme" still has an answer after acme stops existing.

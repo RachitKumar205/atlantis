@@ -29,6 +29,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 
+	"github.com/rachitkumar205/atlantis/internal/analytics"
 	"github.com/rachitkumar205/atlantis/internal/cloud/provision"
 	"github.com/rachitkumar205/atlantis/internal/cloud/store"
 	"github.com/rachitkumar205/atlantis/internal/provisioner"
@@ -36,6 +37,14 @@ import (
 
 // shutdownGrace bounds the wait for the health listener to close.
 const shutdownGrace = 15 * time.Second
+
+// analyticsFlushTimeout bounds the last delivery at shutdown.
+//
+// Longer than the sink's own 5s per-request timeout, so a slow delivery is
+// waited out rather than abandoned a second short of it. Six plus the two
+// listeners' shutdownGrace each is inside the pod's
+// terminationGracePeriodSeconds of 40.
+const analyticsFlushTimeout = 6 * time.Second
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -78,6 +87,13 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+
+	// After the last thing that can return an error, so no path leaves the
+	// sink's goroutine running. Both readers are set here: the store reports
+	// the audited actions and the worker captures the rest.
+	events := openAnalytics(cfg, log)
+	db.UseAnalytics(events)
+	w.UseAnalytics(events)
 
 	// Readiness is both dependencies, not just the database. A provisioner that
 	// can read its queue and cannot reach Kubernetes provisions nothing, and
@@ -122,6 +138,12 @@ func run(log *slog.Logger) error {
 
 	runErr := w.Run(ctx)
 
+	// After Run, so the flush carries everything the run captured, and before
+	// the listeners, whose shutdowns can take shutdownGrace each.
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), analyticsFlushTimeout)
+	_ = events.Close(flushCtx)
+	flushCancel()
+
 	// Detached from ctx deliberately: ctx is already cancelled by the time this
 	// runs, and Shutdown on a cancelled context returns instantly without
 	// closing anything.
@@ -131,6 +153,19 @@ func run(log *slog.Logger) error {
 	_ = metrics.Shutdown(shutCtx)
 
 	return runErr
+}
+
+// openAnalytics returns where product events go. An empty key gives Discard,
+// which runs every instrumented path.
+func openAnalytics(cfg provisioner.Config, log *slog.Logger) analytics.Sink {
+	if cfg.PostHogKey == "" {
+		return analytics.Discard{}
+	}
+	return analytics.NewPostHog(analytics.Config{
+		APIKey:   cfg.PostHogKey,
+		Endpoint: cfg.PostHogHost,
+		Logger:   log,
+	})
 }
 
 // openCloud is the three-call sequence cmd/cloud uses, and all three matter.

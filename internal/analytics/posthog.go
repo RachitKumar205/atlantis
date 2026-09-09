@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,6 +17,22 @@ import (
 
 // DefaultEndpoint is PostHog Cloud's US ingestion host.
 const DefaultEndpoint = "https://us.i.posthog.com"
+
+// CheckEndpoint reports why endpoint cannot be posted to, naming setting in the
+// error. It is the caller's job to decide whether the rule applies.
+//
+// A relative URL, or one carrying userinfo, fails at every delivery rather than
+// at boot.
+func CheckEndpoint(setting, endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("%s must be an absolute http or https URL (got %q)", setting, endpoint)
+	}
+	if u.User != nil {
+		return fmt.Errorf("%s must carry no userinfo (got %q)", setting, endpoint)
+	}
+	return nil
+}
 
 const (
 	defaultQueueSize     = 1024

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rachitkumar205/atlantis/internal/analytics"
 	"github.com/rachitkumar205/atlantis/internal/cloud/provision"
 )
 
@@ -89,6 +90,18 @@ type Config struct {
 	// poll response and mints it as a cli-enroll assertion's audience.
 	EnrollURL string
 
+	// PostHogKey is the analytics project key. It is Cloud's setting, under
+	// Cloud's name, because the two processes report about the same
+	// organisation group: org.created comes from Cloud and org.provisioned
+	// from here, and a second key would split one organisation's funnel
+	// across two projects with both processes looking healthy.
+	//
+	// Empty is analytics.Discard, which is what a development build runs.
+	PostHogKey string // CLOUD_POSTHOG_KEY
+
+	// PostHogHost is the ingestion host. Empty is analytics.DefaultEndpoint.
+	PostHogHost string // CLOUD_POSTHOG_HOST
+
 	// ClaimedBy names this process in the queue. Correctness rests on the
 	// lease; this is what traces a wedged row back to a process.
 	ClaimedBy string
@@ -146,6 +159,8 @@ func ConfigFromEnv() (Config, error) {
 		ConsoleDataKey: os.Getenv("CONSOLE_DATA_KEY"),
 		ConsoleURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("CLOUD_AUDIENCE")), "/"),
 		EnrollURL:      strings.TrimRight(strings.TrimSpace(os.Getenv("PROVISIONER_ENROLL_URL")), "/"),
+		PostHogKey:     os.Getenv("CLOUD_POSTHOG_KEY"),
+		PostHogHost:    envOr("CLOUD_POSTHOG_HOST", analytics.DefaultEndpoint),
 		// Trimmed, so validate's empty check is a guard that can actually fire.
 		// envOr only rejects the empty string, so " " would otherwise sail
 		// through and put a blank-looking claimant on every row.
@@ -294,6 +309,15 @@ func (c Config) validate() error {
 	}
 	if c.ClaimedBy == "" {
 		return errors.New("PROVISIONER_NAME must not be empty")
+	}
+
+	// Last, and only when a key is set. Every refusal above is a setting that
+	// decides whether organisations are provisioned correctly; this one decides
+	// whether they are reported on.
+	if c.PostHogKey != "" {
+		if err := analytics.CheckEndpoint("CLOUD_POSTHOG_HOST", c.PostHogHost); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -16,6 +16,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -45,7 +46,7 @@ var auditEntryPoints = map[string]int{
 // Without it a parser change that stops matching anything leaves every
 // assertion below iterating an empty set and passing, which is the failure
 // mode this file exists to prevent.
-const minCloudActions = 8
+const minCloudActions = 10
 
 // TestEveryCloudAuditActionIsProjected reads the action argument of every
 // LogAction call and compares the set with analytics.CloudActions.
@@ -350,4 +351,253 @@ func TestNoUnknownAuditForwarderExists(t *testing.T) {
 			t.Fatalf("walk %s: %v", root, err)
 		}
 	}
+}
+
+// catalogueFile is the file the projections are read from.
+const catalogueFile = "../../internal/analytics/catalogue.go"
+
+// minProjectionsWithProps is the floor a broken parse of the catalogue falls
+// through.
+const minProjectionsWithProps = 4
+
+// TestEveryProjectionReadsOnlyKeysItsCallSitesWrite compares the detail keys a
+// projection reads with the keys its call sites write.
+//
+// str and num return the zero value for an absent key, so a projection reading
+// a key nobody writes emits a zero that reads as data.
+//
+// A key is required from every call site of an action, not any: one that omits
+// it emits the zero on that path.
+func TestEveryProjectionReadsOnlyKeysItsCallSitesWrite(t *testing.T) {
+	written := detailKeys(t, cloudAuditRoots)
+	read := projectionReads(t, catalogueFile)
+
+	if len(read) < minProjectionsWithProps {
+		t.Fatalf("found %d projections with properties, want at least %d — the parse is not reading what it thinks it is",
+			len(read), minProjectionsWithProps)
+	}
+
+	for _, action := range sortedKeys(read) {
+		keys, ok := written[action]
+		if !ok {
+			t.Errorf("the catalogue projects %q, which no call site writes", action)
+			continue
+		}
+		for _, key := range read[action] {
+			if !keys[key] {
+				t.Errorf("%s's projection reads %q, which its call sites do not write; the value is always the zero one",
+					action, key)
+			}
+		}
+	}
+}
+
+// detailKeys maps each action to the keys every one of its call sites writes.
+//
+// Intersected rather than unioned: a key one site omits is absent on that path,
+// which is the same defect as a key nobody writes.
+//
+// A detail argument that is neither nil nor a map literal fails the test, as an
+// unresolvable action argument does — the keys could not be read from it.
+func detailKeys(t *testing.T, roots []string) map[string]map[string]bool {
+	t.Helper()
+	found := map[string]map[string]bool{}
+
+	forEachAuditCall(t, roots, func(fn *ast.FuncDecl, call *ast.CallExpr, actionArg int, where string) {
+		if len(call.Args) <= actionArg+1 {
+			return
+		}
+		actions := resolveStrings(call.Args[actionArg], stringLocals(fn))
+		if len(actions) == 0 {
+			return
+		}
+		keys, ok := detailLiteralKeys(call.Args[actionArg+1])
+		if !ok {
+			t.Errorf("%s: the detail argument is neither nil nor a map literal, so the keys it writes cannot be read", where)
+			return
+		}
+		for _, action := range actions {
+			seen, ok := found[action]
+			if !ok {
+				// Copied: one call site resolves to two actions when its
+				// action argument is a local, and a later intersection on
+				// either would otherwise reach into the other.
+				own := make(map[string]bool, len(keys))
+				for key := range keys {
+					own[key] = true
+				}
+				found[action] = own
+				continue
+			}
+			for key := range seen {
+				if !keys[key] {
+					delete(seen, key)
+				}
+			}
+		}
+	})
+	return found
+}
+
+// detailLiteralKeys returns the string keys of a detail argument.
+func detailLiteralKeys(e ast.Expr) (map[string]bool, bool) {
+	keys := map[string]bool{}
+	if id, ok := e.(*ast.Ident); ok && id.Name == "nil" {
+		return keys, true
+	}
+	lit, ok := e.(*ast.CompositeLit)
+	if !ok {
+		return nil, false
+	}
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			return nil, false
+		}
+		key, ok := literal(kv.Key)
+		if !ok {
+			return nil, false
+		}
+		keys[key] = true
+	}
+	return keys, true
+}
+
+// projectionReads maps each action to the detail keys its Props function reads.
+func projectionReads(t *testing.T, path string) map[string][]string {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+
+	out := map[string][]string{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		spec, ok := n.(*ast.ValueSpec)
+		if !ok || len(spec.Names) == 0 || spec.Names[0].Name != "CloudActions" || len(spec.Values) == 0 {
+			return true
+		}
+		table, ok := spec.Values[0].(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		for _, elt := range table.Elts {
+			entry, ok := elt.(*ast.KeyValueExpr)
+			if !ok {
+				continue
+			}
+			action, ok := literal(entry.Key)
+			if !ok {
+				continue
+			}
+			props, ok := entry.Value.(*ast.CompositeLit)
+			if !ok {
+				continue
+			}
+			if keys, ok := propsReads(props); ok {
+				out[action] = keys
+			}
+		}
+		return false
+	})
+	return out
+}
+
+// propsReads returns the keys a Projection's Props function indexes its
+// argument with.
+func propsReads(entry *ast.CompositeLit) ([]string, bool) {
+	for _, field := range entry.Elts {
+		kv, ok := field.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		name, ok := kv.Key.(*ast.Ident)
+		if !ok || name.Name != "Props" {
+			continue
+		}
+		fn, ok := kv.Value.(*ast.FuncLit)
+		if !ok || fn.Type.Params == nil || len(fn.Type.Params.List) == 0 ||
+			len(fn.Type.Params.List[0].Names) == 0 {
+			return nil, false
+		}
+		param := fn.Type.Params.List[0].Names[0].Name
+
+		var keys []string
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			idx, ok := n.(*ast.IndexExpr)
+			if !ok {
+				return true
+			}
+			id, ok := idx.X.(*ast.Ident)
+			if !ok || id.Name != param {
+				return true
+			}
+			if key, ok := literal(idx.Index); ok {
+				keys = append(keys, key)
+			}
+			return true
+		})
+		return keys, true
+	}
+	return nil, false
+}
+
+// forEachAuditCall calls visit for every call to a declared audit entry point,
+// skipping a forwarder whose callers hold the literals.
+func forEachAuditCall(t *testing.T, roots []string, visit func(fn *ast.FuncDecl, call *ast.CallExpr, actionArg int, where string)) {
+	t.Helper()
+	for _, root := range roots {
+		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				return err
+			}
+			ast.Inspect(file, func(n ast.Node) bool {
+				fn, ok := n.(*ast.FuncDecl)
+				if !ok || fn.Body == nil {
+					return true
+				}
+				ast.Inspect(fn.Body, func(n ast.Node) bool {
+					call, ok := n.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					sel, ok := call.Fun.(*ast.SelectorExpr)
+					if !ok {
+						return true
+					}
+					actionArg, isEntry := auditEntryPoints[sel.Sel.Name]
+					if !isEntry || len(call.Args) <= actionArg || forwards(fn, call.Args[actionArg]) {
+						return true
+					}
+					visit(fn, call, actionArg, fset.Position(call.Pos()).String())
+					return true
+				})
+				return true
+			})
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+}
+
+// sortedKeys returns a map's keys in order, so a failure names them the same
+// way on every run.
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

@@ -93,6 +93,7 @@ k -n atlantis-system create secret generic atlantis-provisioner \
     --from-literal=CLOUD_PG_URL="$(gsm_get atlantis-cloud-pg-url)" \
     --from-literal=CONSOLE_PG_URL="$(gsm_get atlantis-console-pg-url)" \
     --from-literal=CONSOLE_DATA_KEY="$(gsm_get atlantis-console-data-key)" \
+    --from-literal=CLOUD_POSTHOG_KEY="$posthog" \
     --dry-run=client -o yaml | k apply -f - >/dev/null
 k -n atlantis-system get secret atlantis-cloud atlantis-console atlantis-provisioner
 

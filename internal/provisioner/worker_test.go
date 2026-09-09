@@ -2,6 +2,7 @@ package provisioner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/rachitkumar205/atlantis/internal/analytics"
 	"github.com/rachitkumar205/atlantis/internal/cloud/provision"
 	"github.com/rachitkumar205/atlantis/internal/cloud/store"
 	"github.com/rachitkumar205/atlantis/internal/console"
@@ -36,6 +38,10 @@ type auditRow struct {
 	actor  string
 	email  string
 	action string
+	// detail is what the projections in internal/analytics read. A projection
+	// reading a key no call site writes emits the zero value, and nothing can
+	// assert on that without this.
+	detail map[string]any
 }
 
 type fakeQueue struct {
@@ -68,8 +74,10 @@ type fakeQueue struct {
 	purgeQueue  []store.Claimed
 	purgeClaims int
 	purgeErr    error
-	purged      []string
-	purgeFailed []failedMark
+	// purgeReclaims models MarkPurgeFailed releasing a row that is due again.
+	purgeReclaims bool
+	purged        []string
+	purgeFailed   []failedMark
 
 	// Console credential rotation requests. rotateRequests is what the queue
 	// reports outstanding; rotateCleared records what was cleared and against
@@ -179,7 +187,7 @@ func (f *fakeQueue) SetEnrollURL(ctx context.Context, org, enrollURL string) err
 	return nil
 }
 
-func (f *fakeQueue) LogAction(ctx context.Context, org, actor, actorEmail, action string, _ map[string]any) {
+func (f *fakeQueue) LogAction(ctx context.Context, org, actor, actorEmail, action string, detail map[string]any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if ctxErr(ctx) != nil {
@@ -188,7 +196,9 @@ func (f *fakeQueue) LogAction(ctx context.Context, org, actor, actorEmail, actio
 		// the audit assertions should fail if the caller stops detaching.
 		return
 	}
-	f.audits = append(f.audits, auditRow{org: org, actor: actor, email: actorEmail, action: action})
+	f.audits = append(f.audits, auditRow{
+		org: org, actor: actor, email: actorEmail, action: action, detail: detail,
+	})
 }
 
 func (f *fakeQueue) ReadyOrgs(ctx context.Context) ([]string, error) {
@@ -1115,6 +1125,12 @@ func (f *fakeQueue) MarkPurgeFailed(ctx context.Context, org, reason string) err
 		return err
 	}
 	f.purgeFailed = append(f.purgeFailed, failedMark{org: org, reason: reason})
+	// The store sets state back to 'deleted' and clears claimed_until while
+	// leaving purge_after in the past, so ClaimForPurge matches the row again
+	// at once. Modelled, so reap's own bound is what a test observes.
+	if f.purgeReclaims {
+		f.purgeQueue = append(f.purgeQueue, store.Claimed{Org: org})
+	}
 	return nil
 }
 
@@ -1868,4 +1884,281 @@ func TestAFailedUnregistrationRetriesRatherThanMarkingPurged(t *testing.T) {
 	if !strings.Contains(failed[0].reason, "console database is down") {
 		t.Errorf("the recorded reason does not name the failure: %q", failed[0].reason)
 	}
+}
+
+// okRegister is a registration that succeeds and records nothing.
+func okRegister(context.Context, string, string, console.OrgRegistration) error { return nil }
+
+// A provisioned organisation's group carries the documented keys and no others.
+//
+// $group_set merges, so a key sent once stays on the group until something
+// overwrites it. A key here that internal/analytics does not declare is one no
+// review of that file would show.
+func TestGroupPropertiesAreTheDocumentedKeys(t *testing.T) {
+	rec := &analytics.Recorder{}
+	q := newFakeQueue(store.Claimed{Org: "acme", Attempts: 2})
+	c := &fakeCluster{statuses: []provision.Status{unallocated(), readyStatus()}}
+	w := newTestWorker(t, testConfig(), q, c, okRegister)
+	w.UseAnalytics(rec)
+
+	w.drain(context.Background())
+
+	groups := rec.Groups()
+	if len(groups) != 1 {
+		t.Fatalf("got %d group updates, want 1", len(groups))
+	}
+	if groups[0].Org != "acme" {
+		t.Errorf("group %q, want acme", groups[0].Org)
+	}
+
+	want := map[string]bool{
+		analytics.GroupState:         true,
+		analytics.GroupProvisionedAt: true,
+		analytics.GroupAttempts:      true,
+	}
+	for key := range groups[0].Props {
+		if !want[key] {
+			t.Errorf("the group carries %q, which internal/analytics does not declare", key)
+		}
+		delete(want, key)
+	}
+	for key := range want {
+		t.Errorf("the group is missing %q", key)
+	}
+	if groups[0].Props[analytics.GroupState] != analytics.StateReady {
+		t.Errorf("state is %v, want %q", groups[0].Props[analytics.GroupState], analytics.StateReady)
+	}
+	if groups[0].Props[analytics.GroupAttempts] != 2 {
+		t.Errorf("provision_attempts is %v, want the claim's 2",
+			groups[0].Props[analytics.GroupAttempts])
+	}
+	stamp, _ := groups[0].Props[analytics.GroupProvisionedAt].(string)
+	if _, err := time.Parse(time.RFC3339, stamp); err != nil {
+		t.Errorf("provisioned_at is %q, which is not RFC 3339: %v", stamp, err)
+	}
+}
+
+// A purged organisation's group says so.
+func TestAPurgedOrganisationsGroupSaysPurged(t *testing.T) {
+	rec := &analytics.Recorder{}
+	q := newFakeQueue()
+	q.purgeQueue = []store.Claimed{{Org: "gone"}}
+	w := newTestWorker(t, testConfig(), q, &fakeCluster{}, nil)
+	w.UseAnalytics(rec)
+
+	w.reap(context.Background())
+
+	groups := rec.Groups()
+	if len(groups) != 1 || groups[0].Org != "gone" {
+		t.Fatalf("groups %v, want one update for gone", groups)
+	}
+	if groups[0].Props[analytics.GroupState] != analytics.StatePurged {
+		t.Errorf("state is %v, want %q", groups[0].Props[analytics.GroupState], analytics.StatePurged)
+	}
+	want := map[string]bool{analytics.GroupState: true, analytics.GroupPurgedAt: true}
+	for key := range groups[0].Props {
+		if !want[key] {
+			t.Errorf("the group carries %q, which internal/analytics does not declare", key)
+		}
+		delete(want, key)
+	}
+	for key := range want {
+		t.Errorf("the group is missing %q", key)
+	}
+}
+
+// Nothing the worker captures carries customer text or a cluster address.
+//
+// The audit projections are held to the same rule by
+// tests/analytics.TestNoProjectionLeaksASensitiveValue, which walks CloudActions
+// and cannot see an event captured directly.
+func TestProvisionerEventsCarryNoCustomerTextOrAddress(t *testing.T) {
+	const (
+		endpoint   = "atl-dev.test:30090"
+		clusterAPI = "https://10.24.0.1:443/api/v1/namespaces"
+	)
+
+	rec := &analytics.Recorder{}
+
+	ok := newFakeQueue(store.Claimed{Org: "acme", Attempts: 1})
+	w := newTestWorker(t, testConfig(), ok,
+		&fakeCluster{statuses: []provision.Status{unallocated(), readyStatus()}}, okRegister)
+	w.UseAnalytics(rec)
+	w.drain(context.Background())
+
+	broken := newFakeQueue(store.Claimed{Org: "beta", Attempts: 3})
+	failing := &fakeCluster{
+		statuses: []provision.Status{unallocated()},
+		waitErr:  fmt.Errorf("Get %q: connection refused", clusterAPI),
+	}
+	w2 := newTestWorker(t, testConfig(), broken, failing, okRegister)
+	w2.UseAnalytics(rec)
+	w2.drain(context.Background())
+
+	if len(rec.Named(analytics.EventOrgProvisionStep)) == 0 {
+		t.Fatal("no step events were captured, so this asserts over an empty set")
+	}
+	if len(rec.Groups()) == 0 {
+		t.Fatal("no group updates were captured, so this asserts over an empty set")
+	}
+
+	encoded, err := json.Marshal(map[string]any{"events": rec.Events(), "groups": rec.Groups()})
+	if err != nil {
+		t.Fatalf("the captured events do not encode: %v", err)
+	}
+	for _, secret := range []string{endpoint, clusterAPI, "10.24.0.1"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Errorf("%q crossed:\n%s", secret, encoded)
+		}
+	}
+}
+
+// Each phase of an attempt is reported once, with the phase as a property.
+func TestEachPhaseOfAnAttemptIsReported(t *testing.T) {
+	rec := &analytics.Recorder{}
+	q := newFakeQueue(store.Claimed{Org: "acme", Attempts: 1})
+	c := &fakeCluster{statuses: []provision.Status{unallocated(), readyStatus()}}
+	w := newTestWorker(t, testConfig(), q, c, okRegister)
+	w.UseAnalytics(rec)
+
+	w.drain(context.Background())
+
+	seen := map[string]int{}
+	for _, e := range rec.Named(analytics.EventOrgProvisionStep) {
+		phase, _ := e.Props["phase"].(string)
+		seen[phase]++
+		if e.Props["outcome"] != "ok" {
+			t.Errorf("%s reported %v on a provision that succeeded", phase, e.Props["outcome"])
+		}
+		if _, ok := e.Props["took_ms"]; !ok {
+			t.Errorf("%s carries no took_ms", phase)
+		}
+	}
+	want := []phase{phaseApply, phaseWait, phaseReadBack, phaseRegister}
+	for _, p := range want {
+		if seen[string(p)] != 1 {
+			t.Errorf("phase %q reported %d times, want 1", p, seen[string(p)])
+		}
+		delete(seen, string(p))
+	}
+	for p, n := range seen {
+		t.Errorf("phase %q reported %d times and is not one of the four a provision runs", p, n)
+	}
+	if total := len(rec.Named(analytics.EventOrgProvisionStep)); total != len(want) {
+		t.Errorf("got %d step events, want %d", total, len(want))
+	}
+}
+
+// A failure names the phase it stopped in and whose fault it was.
+func TestAFailureNamesThePhaseAndTheFault(t *testing.T) {
+	q := newFakeQueue(store.Claimed{Org: "beta", Attempts: 2})
+	c := &fakeCluster{
+		statuses: []provision.Status{unallocated()},
+		waitErr:  errors.New("pod not ready within 5m0s"),
+	}
+	w := newTestWorker(t, testConfig(), q, c, okRegister)
+
+	w.drain(context.Background())
+
+	row, ok := q.auditFor("org.provision.failed")
+	if !ok {
+		t.Fatal("a failed attempt wrote no audit row")
+	}
+	if row.detail["phase"] != string(phaseWait) {
+		t.Errorf("phase is %v, want %q", row.detail["phase"], phaseWait)
+	}
+	if row.detail["fault"] != "organisation" {
+		t.Errorf("fault is %v, want organisation", row.detail["fault"])
+	}
+}
+
+// A teardown that fails is audited, so a deletion that did not happen has a
+// record beside the one that says it did.
+func TestAFailedTeardownIsAudited(t *testing.T) {
+	q := newFakeQueue()
+	q.purgeQueue = []store.Claimed{{Org: "stubborn"}}
+	c := &fakeCluster{destroyErr: errors.New("the API server said no")}
+	w := newTestWorker(t, testConfig(), q, c, nil)
+
+	w.reap(context.Background())
+
+	row, ok := q.auditFor("org.purge.failed")
+	if !ok {
+		t.Fatal("a failed teardown wrote no audit row")
+	}
+	if row.org != "stubborn" {
+		t.Errorf("the row is for %q, want stubborn", row.org)
+	}
+	if row.detail["step"] != "destroy" {
+		t.Errorf("step is %v, want destroy", row.detail["step"])
+	}
+	if text, _ := row.detail["error"].(string); text == "" {
+		t.Error("the row carries no error, so the projection has nothing to classify")
+	}
+	if row.detail["fault"] != "teardown" {
+		t.Errorf("fault is %v, want teardown", row.detail["fault"])
+	}
+}
+
+// auditFor returns the first row written for an action.
+func (f *fakeQueue) auditFor(action string) (auditRow, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, row := range f.audits {
+		if row.action == action {
+			return row, true
+		}
+	}
+	return auditRow{}, false
+}
+
+// A teardown that keeps failing does not hold the pass open.
+//
+// MarkPurgeFailed releases the claim and leaves the row due, so the queue
+// offers the same organisation again at once. reap returns only on an empty
+// queue, and drain shares its goroutine: a pass that keeps re-claiming is a
+// provisioner that stops provisioning, at API-server latency, until the
+// process is stopped.
+func TestAPurgeThatKeepsFailingStopsThePass(t *testing.T) {
+	q := newFakeQueue()
+	q.purgeQueue = []store.Claimed{{Org: "stubborn"}}
+	q.purgeReclaims = true
+	c := &fakeCluster{destroyErr: errors.New("the API server said no")}
+	w := newTestWorker(t, testConfig(), q, c, nil)
+
+	done := make(chan struct{})
+	go func() {
+		w.reap(context.Background())
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reap did not return, so it is re-claiming the same organisation")
+	}
+
+	if got := len(q.purgeFailed); got != 1 {
+		t.Errorf("the teardown was attempted %d times in one pass, want 1", got)
+	}
+	rows := 0
+	for _, row := range q.allPurgeFailures() {
+		rows++
+		_ = row
+	}
+	if rows != 1 {
+		t.Errorf("%d org.purge.failed rows for one pass, want 1", rows)
+	}
+}
+
+// allPurgeFailures returns the org.purge.failed rows written so far.
+func (f *fakeQueue) allPurgeFailures() []auditRow {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []auditRow
+	for _, row := range f.audits {
+		if row.action == "org.purge.failed" {
+			out = append(out, row)
+		}
+	}
+	return out
 }
