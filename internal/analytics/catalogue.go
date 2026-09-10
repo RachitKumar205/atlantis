@@ -48,6 +48,11 @@ const (
 	// handful of rows per organisation for its lifetime, and four per attempt
 	// times every retry is a different table.
 	EventOrgProvisionStep = "org.provision.step"
+
+	// EventCLICommand is one finished tide run. One name with a command
+	// property: PostHog breaks an event down by a property, and 22 names would
+	// be 22 insights to union.
+	EventCLICommand = "cli.command"
 )
 
 // Organisation group properties. GroupIdentify is called with these four keys,

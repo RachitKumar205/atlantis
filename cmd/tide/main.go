@@ -28,6 +28,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/rachitkumar205/atlantis/internal/cliout"
 )
@@ -39,60 +40,75 @@ import (
 var version = "dev"
 
 func main() {
+	// The report has to run before the process ends, and every arm below
+	// returns rather than exiting for exactly that reason.
+	started := time.Now()
+	command := ""
+	if len(os.Args) > 1 {
+		command = os.Args[1]
+	}
+	code := run()
+	reportRun(command, code, time.Since(started))
+	os.Exit(code)
+}
+
+// run dispatches a subcommand and returns its exit code.
+func run() int {
 	if len(os.Args) < 2 {
 		printUsage()
-		os.Exit(2)
+		return 2
 	}
 	switch os.Args[1] {
 	case "init":
-		os.Exit(cmdInit(os.Args[2:]))
+		return cmdInit(os.Args[2:])
 	case "apply":
-		os.Exit(cmdApply(os.Args[2:]))
+		return cmdApply(os.Args[2:])
 	case "plan":
-		os.Exit(cmdPlan(os.Args[2:]))
+		return cmdPlan(os.Args[2:])
 	case "rehearse":
-		os.Exit(cmdRehearse(os.Args[2:]))
+		return cmdRehearse(os.Args[2:])
 	case "inspect":
-		os.Exit(cmdInspect(os.Args[2:]))
+		return cmdInspect(os.Args[2:])
 	case "pull":
-		os.Exit(cmdPull(os.Args[2:]))
+		return cmdPull(os.Args[2:])
 	case "generate":
-		os.Exit(cmdGenerate(os.Args[2:]))
+		return cmdGenerate(os.Args[2:])
 	case "list":
-		os.Exit(cmdList(os.Args[2:]))
+		return cmdList(os.Args[2:])
 	case "show":
-		os.Exit(cmdShow(os.Args[2:]))
+		return cmdShow(os.Args[2:])
 	case "backfill":
-		os.Exit(cmdBackfill(os.Args[2:]))
+		return cmdBackfill(os.Args[2:])
 	case "job":
-		os.Exit(cmdJob(os.Args[2:]))
+		return cmdJob(os.Args[2:])
 	case "workflow":
-		os.Exit(cmdWorkflow(os.Args[2:]))
+		return cmdWorkflow(os.Args[2:])
 	case "history":
-		os.Exit(cmdHistory(os.Args[2:]))
+		return cmdHistory(os.Args[2:])
 	case "diff":
-		os.Exit(cmdDiff(os.Args[2:]))
+		return cmdDiff(os.Args[2:])
 	case "blame":
-		os.Exit(cmdBlame(os.Args[2:]))
+		return cmdBlame(os.Args[2:])
 	case "owners":
-		os.Exit(cmdOwners(os.Args[2:]))
+		return cmdOwners(os.Args[2:])
 	case "parked":
-		os.Exit(cmdParked(os.Args[2:]))
+		return cmdParked(os.Args[2:])
 	case "rollback":
-		os.Exit(cmdRollback(os.Args[2:]))
+		return cmdRollback(os.Args[2:])
 	case "sandbox":
-		os.Exit(cmdSandbox(os.Args[2:]))
+		return cmdSandbox(os.Args[2:])
 	case "caller":
-		os.Exit(cmdCaller(os.Args[2:]))
+		return cmdCaller(os.Args[2:])
 	case "login":
-		os.Exit(cmdLogin(os.Args[2:]))
+		return cmdLogin(os.Args[2:])
 	case "version":
 		cliout.Logo(os.Stdout, "tide", version)
 	default:
 		fmt.Fprintf(os.Stderr, "tide: unknown subcommand %q\n\n", os.Args[1])
 		printUsage()
-		os.Exit(2)
+		return 2
 	}
+	return 0
 }
 
 func printUsage() {

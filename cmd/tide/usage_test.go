@@ -34,7 +34,9 @@ func TestEverySubcommandAppearsInUsage(t *testing.T) {
 			continue
 		}
 		switch fn.Name.Name {
-		case "main":
+		// run holds the dispatch; main wraps it so the telemetry report can
+		// happen before the process exits.
+		case "run":
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				cc, ok := n.(*ast.CaseClause)
 				if !ok {
@@ -63,7 +65,7 @@ func TestEverySubcommandAppearsInUsage(t *testing.T) {
 	}
 
 	if len(cases) < 10 {
-		t.Fatalf("found %d subcommands in main's switch; this test is not reading "+
+		t.Fatalf("found %d subcommands in run's switch; this test is not reading "+
 			"what it thinks it is", len(cases))
 	}
 	if usageText.Len() == 0 {
