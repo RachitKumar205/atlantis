@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider, createRouter } from '@tanstack/react-router'
 import { routeTree } from './routeTree.gen'
+import { events, routeOf } from '@/lib/analytics'
 // Design CSS — Bathysphere. Pages target the global class names emitted here.
 //
 // fonts.css first, then the tokens: @import must lead a stylesheet, and the
@@ -56,6 +57,14 @@ declare module '@tanstack/react-router' {
     router: typeof router
   }
 }
+
+// One report per resolved navigation, carrying the matched route's pattern.
+//
+// onResolved fires once a navigation has settled, so a redirect from a loader
+// reports the page rendered and not the one left.
+router.subscribe('onResolved', () => {
+  events.page(routeOf(router.state.matches))
+})
 
 // ---------------------------------------------------------------------------
 // App root

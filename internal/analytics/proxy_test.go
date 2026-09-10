@@ -1,4 +1,4 @@
-package server
+package analytics
 
 import (
 	"encoding/json"
@@ -53,24 +53,41 @@ func (u *upstream) count() int {
 	return len(u.paths)
 }
 
-// proxyServer returns a Server carrying only what handleAnalytics reads, so
-// the proxy is testable without a database.
-func proxyServer(t *testing.T, host, key string) *Server {
-	t.Helper()
-	return &Server{
-		cfg:          Config{PostHogKey: key, PostHogHost: host},
-		log:          slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1})),
-		analyticsLim: newLimiterWithMax(analyticsRateLimit),
+// countingAllow is a per-address budget standing in for a deployment's rate
+// limiter, so the tests below exercise what the proxy does with the answer.
+func countingAllow(max int) func(string) (bool, int) {
+	seen := map[string]int{}
+	var mu sync.Mutex
+	return func(ip string) (bool, int) {
+		mu.Lock()
+		defer mu.Unlock()
+		seen[ip]++
+		if seen[ip] > max {
+			return false, 41
+		}
+		return true, 0
 	}
 }
 
-func postAnalytics(t *testing.T, s *Server, path, body string) *httptest.ResponseRecorder {
+// proxyServer returns a Proxy carrying only what ServeHTTP reads.
+func proxyServer(t *testing.T, host, key string) *Proxy {
+	t.Helper()
+	return NewProxy(ProxyConfig{
+		Key:      key,
+		Host:     host,
+		ClientIP: func(r *http.Request) string { return strings.Split(r.RemoteAddr, ":")[0] },
+		Allow:    countingAllow(ProxyRateLimit),
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1})),
+	})
+}
+
+func postAnalytics(t *testing.T, s *Proxy, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.RemoteAddr = "198.51.100.7:1234"
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	s.handleAnalytics(w, req)
+	s.ServeHTTP(w, req)
 	return w
 }
 
@@ -138,7 +155,7 @@ func TestAnalyticsRewritesTheHostHeader(t *testing.T) {
 
 	up.mu.Lock()
 	defer up.mu.Unlock()
-	if want := hostOf(srv.URL); up.hosts[0] != want {
+	if want := HostOf(srv.URL); up.hosts[0] != want {
 		t.Errorf("upstream Host %q, want %q", up.hosts[0], want)
 	}
 }
@@ -158,7 +175,7 @@ func TestAnalyticsStripsCredentialsAndSetsForwardedFor(t *testing.T) {
 	req.Header.Set("Referer", "https://platform.example/private")
 	req.Header.Set("User-Agent", "spoofed/1.0")
 	req.Header.Set("X-Forwarded-For", "203.0.113.9")
-	s.handleAnalytics(httptest.NewRecorder(), req)
+	s.ServeHTTP(httptest.NewRecorder(), req)
 
 	up.mu.Lock()
 	defer up.mu.Unlock()
@@ -171,8 +188,7 @@ func TestAnalyticsStripsCredentialsAndSetsForwardedFor(t *testing.T) {
 	if v := h.Get("User-Agent"); strings.Contains(v, "spoofed") {
 		t.Errorf("the caller's User-Agent crossed: %q", v)
 	}
-	// TrustProxy is off in this config, so the header the caller set is
-	// ignored and the socket address is used.
+	// The header the caller set is replaced by whatever ClientIP resolved.
 	if v := h.Get("X-Forwarded-For"); v != "198.51.100.7" {
 		t.Errorf("X-Forwarded-For %q, want the resolved address", v)
 	}
@@ -215,7 +231,7 @@ func TestAnalyticsRejectsNonPost(t *testing.T) {
 		req.RemoteAddr = "198.51.100.7:1234"
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
-		s.handleAnalytics(w, req)
+		s.ServeHTTP(w, req)
 		if w.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s answered %d, want 405", method, w.Code)
 		}
@@ -230,7 +246,7 @@ func TestAnalyticsRejectsAnOversizedBody(t *testing.T) {
 	srv := up.server(t)
 	s := proxyServer(t, srv.URL, "phc_real")
 
-	big := `{"api_key":"x","pad":"` + strings.Repeat("a", analyticsMaxBody) + `"}`
+	big := `{"api_key":"x","pad":"` + strings.Repeat("a", proxyMaxBody) + `"}`
 	w := postAnalytics(t, s, "/api/t/e/", big)
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("answered %d, want 413", w.Code)
@@ -245,7 +261,7 @@ func TestAnalyticsRejectsAnOversizedBatch(t *testing.T) {
 	srv := up.server(t)
 	s := proxyServer(t, srv.URL, "phc_real")
 
-	events := make([]string, analyticsMaxBatch+1)
+	events := make([]string, proxyMaxBatch+1)
 	for i := range events {
 		events[i] = `{"event":"a"}`
 	}
@@ -357,7 +373,7 @@ func TestAnalyticsToleratesRedundantSlashes(t *testing.T) {
 func TestAnalyticsRouteDeliversTheRestOfThePath(t *testing.T) {
 	var seen string
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST "+analyticsPathPrefix+"{rest...}", func(_ http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST "+ProxyPathPrefix+"{rest...}", func(_ http.ResponseWriter, r *http.Request) {
 		seen = r.URL.Path
 	})
 
@@ -450,7 +466,7 @@ func TestAnalyticsRequiresAJSONContentType(t *testing.T) {
 			req.Header.Set("Content-Type", ct)
 		}
 		w := httptest.NewRecorder()
-		s.handleAnalytics(w, req)
+		s.ServeHTTP(w, req)
 		if w.Code != http.StatusUnsupportedMediaType {
 			t.Errorf("content type %q answered %d, want 415", ct, w.Code)
 		}
@@ -473,7 +489,7 @@ func TestAnalyticsChecksTheOriginWhenPresent(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Origin", origin)
 		w := httptest.NewRecorder()
-		s.handleAnalytics(w, req)
+		s.ServeHTTP(w, req)
 		return w.Code
 	}
 
@@ -487,76 +503,120 @@ func TestAnalyticsChecksTheOriginWhenPresent(t *testing.T) {
 	}
 }
 
-// The limit is per address, so one exhausted caller does not refuse another.
-func TestAnalyticsRateLimitsPerAddressNotGlobally(t *testing.T) {
+// A refused address is answered here rather than forwarded, and is told when
+// to come back.
+func TestARefusedAddressIsNotForwarded(t *testing.T) {
 	up := &upstream{}
 	srv := up.server(t)
-	s := proxyServer(t, srv.URL, "phc_real")
 
-	post := func(remote string) int {
-		req := httptest.NewRequest(http.MethodPost, "/api/t/e/", strings.NewReader(`{"event":"a"}`))
-		req.RemoteAddr = remote
-		req.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
-		s.handleAnalytics(w, req)
-		return w.Code
-	}
+	s := NewProxy(ProxyConfig{
+		Key:      "phc_real",
+		Host:     srv.URL,
+		ClientIP: func(*http.Request) string { return "198.51.100.7" },
+		Allow:    func(string) (bool, int) { return false, 41 },
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/t/e/", strings.NewReader(`{"event":"a"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	before := up.count()
+	s.ServeHTTP(w, req)
 
-	var exhausted bool
-	for i := 0; i < analyticsRateLimit+5; i++ {
-		if post("198.51.100.7:1234") == http.StatusTooManyRequests {
-			exhausted = true
-			break
-		}
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("a refused address answered %d, want 429", w.Code)
 	}
-	if !exhausted {
-		t.Fatal("one address was never limited")
+	if got := w.Header().Get("Retry-After"); got != "41" {
+		t.Errorf("Retry-After %q, want 41", got)
 	}
-	if got := post("203.0.113.4:9999"); got != http.StatusOK {
-		t.Errorf("a second address answered %d, want 200", got)
+	if up.count() != before {
+		t.Error("a refused address reached the upstream")
 	}
 }
 
-// Google's load balancer appends to X-Forwarded-For, so the leftmost element
-// is whatever the caller sent. Reading it would let one caller reset the
-// limiter on every request by changing a string.
-func TestForwardedClientIPReadsTheTerminatorsValue(t *testing.T) {
-	for _, tc := range []struct {
-		xff  string
-		want string
-	}{
-		{"198.51.100.7,35.191.0.1", "198.51.100.7"},
-		{"attacker-chose-this,198.51.100.7,35.191.0.1", "198.51.100.7"},
-		{"203.0.113.9, 198.51.100.7, 35.191.0.1", "198.51.100.7"},
-		{"198.51.100.7", "198.51.100.7"},
-		{"not-an-address,also-not", ""},
-		{"", ""},
-		{strings.Repeat("a", 9000), ""},
-	} {
-		if got := forwardedClientIP(tc.xff); got != tc.want {
-			t.Errorf("forwardedClientIP(%.40q) = %q, want %q", tc.xff, got, tc.want)
-		}
+// The limit is consulted before the body is read, so an oversized body from a
+// refused address costs nothing.
+func TestTheLimitIsConsultedBeforeTheBody(t *testing.T) {
+	s := NewProxy(ProxyConfig{
+		Key:      "phc_real",
+		Host:     "http://127.0.0.1:1",
+		ClientIP: func(*http.Request) string { return "198.51.100.7" },
+		Allow:    func(string) (bool, int) { return false, 1 },
+	})
+	body := strings.NewReader(`{"pad":"` + strings.Repeat("a", proxyMaxBody) + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/t/e/", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("answered %d, want 429", w.Code)
+	}
+	if body.Len() == 0 {
+		t.Error("the body was read before the limit was consulted")
 	}
 }
 
-// With the proxy trusted, the limiter keys on the address the terminator
-// observed rather than one the caller supplied.
-func TestAnalyticsKeysOnTheTerminatorsAddress(t *testing.T) {
+// The limiter and the upstream are given the same address, and it is the one
+// ClientIP resolved.
+//
+// What resolution means — whether X-Forwarded-For is read at all — belongs to
+// the deployment. Cloud's is covered in internal/cloud/server/clientip_test.go
+// and the console's in internal/console/ratelimit_test.go.
+func TestTheProxyUsesTheResolvedAddress(t *testing.T) {
 	up := &upstream{}
 	srv := up.server(t)
-	s := proxyServer(t, srv.URL, "phc_real")
-	s.cfg.TrustProxy = true
+
+	var asked []string
+	s := NewProxy(ProxyConfig{
+		Key:      "phc_real",
+		Host:     srv.URL,
+		ClientIP: func(*http.Request) string { return "198.51.100.7" },
+		Allow: func(ip string) (bool, int) {
+			asked = append(asked, ip)
+			return true, 0
+		},
+	})
 
 	req := httptest.NewRequest(http.MethodPost, "/api/t/e/", strings.NewReader(`{"event":"a"}`))
 	req.RemoteAddr = "10.0.0.1:1234"
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Forwarded-For", "spoofed,198.51.100.7,35.191.0.1")
-	s.handleAnalytics(httptest.NewRecorder(), req)
+	req.Header.Set("X-Forwarded-For", "spoofed,203.0.113.9")
+	s.ServeHTTP(httptest.NewRecorder(), req)
 
+	if len(asked) != 1 || asked[0] != "198.51.100.7" {
+		t.Errorf("the limiter was asked about %v, want the resolved address", asked)
+	}
 	up.mu.Lock()
 	defer up.mu.Unlock()
 	if v := up.headers[0].Get("X-Forwarded-For"); v != "198.51.100.7" {
-		t.Errorf("forwarded %q, want the terminator's value", v)
+		t.Errorf("forwarded %q, want the resolved address", v)
+	}
+}
+
+// With no PublicURL the comparison is against the request's own Host, which
+// is the same comparison for a browser and the console's configuration.
+func TestTheProxyFallsBackToTheRequestHost(t *testing.T) {
+	up := &upstream{}
+	srv := up.server(t)
+	s := proxyServer(t, srv.URL, "phc_real")
+
+	post := func(origin string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/t/e/", strings.NewReader(`{"event":"a"}`))
+		req.RemoteAddr = "198.51.100.7:1234"
+		req.Host = "console.example.dev"
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", origin)
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, req)
+		return w.Code
+	}
+
+	if got := post("https://console.example.dev"); got != http.StatusOK {
+		t.Errorf("the request's own host answered %d, want 200", got)
+	}
+	for _, origin := range []string{"https://evil.example", "null", "https://console.example.dev.evil"} {
+		if got := post(origin); got != http.StatusForbidden {
+			t.Errorf("origin %q answered %d, want 403", origin, got)
+		}
 	}
 }
 
@@ -567,8 +627,79 @@ func TestHostOfKeepsThePort(t *testing.T) {
 		"http://127.0.0.1:54321":        "127.0.0.1:54321",
 		"http://127.0.0.1:54321/batch/": "127.0.0.1:54321",
 	} {
-		if got := hostOf(in); got != want {
-			t.Errorf("hostOf(%q) = %q, want %q", in, got, want)
+		if got := HostOf(in); got != want {
+			t.Errorf("HostOf(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A reserved event name is one PostHog acts on. $groupidentify writes an
+// organisation's group properties and $create_alias joins two people, and the
+// route takes no session, so a caller with curl could do either.
+func TestReservedEventNamesAreRefused(t *testing.T) {
+	up := &upstream{}
+	srv := up.server(t)
+	s := proxyServer(t, srv.URL, "phc_real")
+
+	for _, body := range []string{
+		`{"event":"$groupidentify","properties":{"$group_type":"organisation","$group_key":"acme","$group_set":{"state":"purged"}}}`,
+		`{"event":"$create_alias","properties":{"alias":"someone-else"}}`,
+		`{"event":"$set","properties":{}}`,
+		`{"batch":[{"event":"$pageview"},{"event":"$groupidentify"}]}`,
+	} {
+		w := postAnalytics(t, s, "/api/t/e/", body)
+		if w.Code != http.StatusUnsupportedMediaType {
+			t.Errorf("%s answered %d, want 415", body, w.Code)
+		}
+	}
+	if up.count() != 0 {
+		t.Errorf("%d reserved events reached the upstream", up.count())
+	}
+}
+
+// $set on an event describes the person its distinct_id names, so a caller
+// that guesses a Cloud user id writes that person's address.
+func TestPersonPropertiesAreRefused(t *testing.T) {
+	up := &upstream{}
+	srv := up.server(t)
+	s := proxyServer(t, srv.URL, "phc_real")
+
+	for _, body := range []string{
+		`{"event":"$identify","distinct_id":"user-1","properties":{"$set":{"email":"attacker@evil.example"}}}`,
+		`{"event":"$identify","distinct_id":"user-1","properties":{"$set_once":{"email":"attacker@evil.example"}}}`,
+		`{"event":"$identify","distinct_id":"user-1","properties":{"$unset":["email"]}}`,
+		`{"event":"$pageview","distinct_id":"user-1","$set":{"email":"attacker@evil.example"}}`,
+		`{"batch":[{"event":"$identify","distinct_id":"user-1","properties":{"$set":{"email":"attacker@evil.example"}}}]}`,
+	} {
+		w := postAnalytics(t, s, "/api/t/e/", body)
+		if w.Code != http.StatusUnsupportedMediaType {
+			t.Errorf("%s answered %d, want 415", body, w.Code)
+		}
+	}
+	if up.count() != 0 {
+		t.Errorf("%d person writes reached the upstream", up.count())
+	}
+}
+
+// The two names the browsers send, and the one the CLI sends, still forward.
+func TestTheEventsTheClientsSendStillForward(t *testing.T) {
+	up := &upstream{}
+	srv := up.server(t)
+	s := proxyServer(t, srv.URL, "phc_real")
+
+	for _, body := range []string{
+		`{"batch":[{"event":"$pageview","distinct_id":"a","properties":{"route":"/schema"}}]}`,
+		`{"batch":[{"event":"$identify","distinct_id":"a","properties":{"$anon_distinct_id":"b"}}]}`,
+		`{"batch":[{"event":"` + EventCLICommand + `","distinct_id":"a","properties":{"command":"apply"}}]}`,
+		// A name that is not reserved forwards whatever it is. What that costs
+		// is a wrong number in a chart, not a customer's profile.
+		`{"batch":[{"event":"console.caller_registered","distinct_id":"a"}]}`,
+	} {
+		if w := postAnalytics(t, s, "/api/t/batch/", body); w.Code != http.StatusOK {
+			t.Errorf("%s answered %d, want 200", body, w.Code)
+		}
+	}
+	if up.count() != 4 {
+		t.Errorf("upstream saw %d requests, want 4", up.count())
 	}
 }

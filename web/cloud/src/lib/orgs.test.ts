@@ -33,7 +33,15 @@ function org(over: Partial<Org> = {}): Org {
 }
 
 function me(over: Partial<Me> = {}): Me {
-  return { email: 'a@example.com', name: '', orgs: [], orgLimit: 3, orgsCreated: 0, ...over }
+  return {
+    userId: 'user-1',
+    email: 'a@example.com',
+    name: '',
+    orgs: [],
+    orgLimit: 3,
+    orgsCreated: 0,
+    ...over,
+  }
 }
 
 describe('stateLabel', () => {

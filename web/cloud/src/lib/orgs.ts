@@ -37,6 +37,7 @@ export type Org = {
 }
 
 export type Me = {
+  userId: string
   email: string
   name: string
   orgs: Org[]
@@ -210,6 +211,7 @@ export function normaliseOrg(raw: Record<string, unknown>): Org {
 export function normaliseMe(raw: Record<string, unknown>): Me {
   const orgs = Array.isArray(raw.orgs) ? raw.orgs : []
   return {
+    userId: typeof raw.user_id === 'string' ? raw.user_id : '',
     email: typeof raw.email === 'string' ? raw.email : '',
     name: typeof raw.name === 'string' ? raw.name : '',
     orgs: orgs.map(o => normaliseOrg(o as Record<string, unknown>)),

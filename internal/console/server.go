@@ -61,6 +61,12 @@ type Server struct {
 	spaFS    fs.FS
 	loginLim *loginLimiter
 
+	// tproxy forwards browser ingestion, and eventsLim throttles it. Cloud
+	// serves the same route from the same type; the console is a separate
+	// origin, so `connect-src 'self'` reaches only this one.
+	tproxy    *analytics.Proxy
+	eventsLim *loginLimiter
+
 	// cloud verifies the assertions this console accepts as identity. It is
 	// the console's only source of one — there are no local accounts.
 	cloud *cloudauth.Verifier
@@ -196,6 +202,7 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 	s := &Server{
 		cfg: cfg, db: db, log: log, spaFS: spaFS, events: events,
 		loginLim:    newLoginLimiter(),
+		eventsLim:   newLoginLimiterWithMax(analytics.ProxyRateLimit, analytics.ProxyMaxAddresses),
 		orgs:        newOrgClients(db),
 		cloud:       cloud,
 		enrollCloud: enrollCloud,
@@ -203,6 +210,15 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 		sandboxes:   newSandboxLayer(cfg.SandboxPerUserLimit, cfg.SandboxTTL),
 		bgCtx:       bgCtx, bgCancel: bgCancel,
 	}
+	// PublicURL is left empty: a console has no configured address of its own,
+	// so Origin is compared against the request's Host.
+	s.tproxy = analytics.NewProxy(analytics.ProxyConfig{
+		Key:      cfg.PostHogKey,
+		Host:     cfg.PostHogHost,
+		ClientIP: clientIP,
+		Allow:    s.eventsLim.allow,
+		Logger:   log,
+	})
 	// The fallback signer and the enrolment listener, built independently.
 	//
 	// Independently, because a hosted console has no process-wide signer
@@ -384,6 +400,10 @@ func (s *Server) buildMux() {
 
 	// Unauthenticated: a browser holding no session cookie is what reads it.
 	mux.HandleFunc("GET /api/config", s.handleConfig)
+
+	// Analytics ingestion. Unauthenticated for the same reason /api/config is:
+	// the page that reports being blocked at sign-in holds no session.
+	mux.Handle("POST "+analytics.ProxyPathPrefix+"{rest...}", s.tproxy)
 
 	// Reads a database this organisation points at and returns .atl describing
 	// it. The one route that makes this console dial an address it was given;
@@ -1263,10 +1283,27 @@ type loginLimiter struct {
 	mu      sync.Mutex
 	hits    map[string][]time.Time
 	lastSwp time.Time
+
+	// max requests per window per key. loginLimiterMax for the assertion
+	// routes; the ingestion route carries a budget sized to a page sending an
+	// event every few seconds.
+	max int
+
+	// maxIPs bounds the tracked addresses, and with max bounds the memory.
+	// The two move together: a larger budget holds more timestamps per
+	// address, so the address count comes down to keep the product bounded.
+	maxIPs int
 }
 
 func newLoginLimiter() *loginLimiter {
-	return &loginLimiter{hits: make(map[string][]time.Time), lastSwp: time.Now()}
+	return newLoginLimiterWithMax(loginLimiterMax, loginLimiterMaxIPs)
+}
+
+func newLoginLimiterWithMax(max, maxIPs int) *loginLimiter {
+	return &loginLimiter{
+		hits: make(map[string][]time.Time), lastSwp: time.Now(),
+		max: max, maxIPs: maxIPs,
+	}
 }
 
 // allow returns (ok, retryAfter). When ok is false, retryAfter is the
@@ -1290,7 +1327,7 @@ func (l *loginLimiter) allow(ip string) (bool, int) {
 
 	// Hard cap on tracked IPs: a new IP arriving at the cap is refused, rather
 	// than entries being amnestied under load.
-	if len(l.hits) >= loginLimiterMaxIPs {
+	if len(l.hits) >= l.maxIPs {
 		if _, known := l.hits[ip]; !known {
 			return false, int(loginLimiterWindow.Seconds())
 		}
@@ -1306,7 +1343,7 @@ func (l *loginLimiter) allow(ip string) (bool, int) {
 	}
 	hits = hits[idx:]
 
-	if len(hits) >= loginLimiterMax {
+	if len(hits) >= l.max {
 		l.hits[ip] = hits
 		retry := int(loginLimiterWindow.Seconds() - now.Sub(hits[0]).Seconds())
 		if retry < 1 {

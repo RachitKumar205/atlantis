@@ -28,6 +28,11 @@ import (
 // snake_case on the wire, matching every other Cloud route; web/cloud converts
 // at its own boundary rather than carrying the wire shape inward.
 type meResponse struct {
+	// UserID is what the browser reports analytics under, so a page's events
+	// and this server's land on one person rather than two. The same value
+	// every session already carries.
+	UserID string `json:"user_id"`
+
 	Email string        `json:"email"`
 	Name  string        `json:"name,omitempty"`
 	Orgs  []orgResponse `json:"orgs"`
@@ -99,6 +104,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := meResponse{
+		UserID:   user.ID,
 		Email:    user.Email,
 		Name:     user.Name,
 		Orgs:     make([]orgResponse, 0, len(orgs)),

@@ -28,6 +28,9 @@ import (
 // which looks the same from outside and says nothing about the database.
 const readyProbeTimeout = 3 * time.Second
 
+// analyticsFlushTimeout bounds the last delivery at shutdown.
+const analyticsFlushTimeout = 2 * time.Second
+
 // Server is Cloud's HTTP surface.
 type Server struct {
 	cfg    Config
@@ -41,8 +44,13 @@ type Server struct {
 	// address; see handleCLIPoll.
 	cliPollLim *limiter
 	// analyticsLim throttles the ingestion route, which has no session behind
-	// it; see handleAnalytics.
+	// it; see analytics.Proxy.
 	analyticsLim *limiter
+
+	// tproxy forwards browser ingestion. The console serves the same route
+	// from the same type, so the path allowlist and the key substitution have
+	// one implementation.
+	tproxy *analytics.Proxy
 
 	// events records the account milestones that write no audit row. The
 	// audited actions are reported by the store; see store.LogAction.
@@ -96,11 +104,19 @@ func New(cfg Config, db *store.Store, iss *issuer.Issuer, spaFS fs.FS, log *slog
 		spaFS:        spaFS,
 		providers:    configuredProviders(cfg, log),
 		lim:          newLimiter(),
-		cliPollLim:   newLimiterWithMax(cliPollLimit),
-		analyticsLim: newLimiterWithMax(analyticsRateLimit),
+		cliPollLim:   newLimiterWithMax(cliPollLimit, limiterMaxIPs),
+		analyticsLim: newLimiterWithMax(analytics.ProxyRateLimit, analytics.ProxyMaxAddresses),
 		mux:          http.NewServeMux(),
 		sleep:        realSleep,
 	}
+	s.tproxy = analytics.NewProxy(analytics.ProxyConfig{
+		Key:       cfg.PostHogKey,
+		Host:      cfg.PostHogHost,
+		PublicURL: cfg.PublicURL,
+		ClientIP:  s.clientIP,
+		Allow:     s.analyticsLim.allow,
+		Logger:    log,
+	})
 
 	// Which transport sends the two messages that gate account recovery.
 	//
@@ -193,8 +209,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/auth/signup", s.handleSignup)
 
 	// Analytics ingestion. Unauthenticated, because the sign-up funnel is
-	// measured before a session exists; see analyticsproxy.go.
-	s.mux.HandleFunc("POST "+analyticsPathPrefix+"{rest...}", s.handleAnalytics)
+	// measured before a session exists; see analytics.Proxy.
+	s.mux.Handle("POST "+analytics.ProxyPathPrefix+"{rest...}", s.tproxy)
 
 	// `tide login`, the device-code shape. start and poll are unauthenticated
 	// by design — see cligrant.go for what each is limited by — and lookup

@@ -14,7 +14,9 @@ export default defineConfig({
   // config file is a second place for that alias to drift.
   test: {
     environment: 'node',
-    include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    // web/shared has no vitest of its own. Both applications import the
+    // module and one of them runs its tests.
+    include: ['src/**/*.test.ts', 'src/**/*.test.tsx', '../shared/**/*.test.ts'],
   },
   plugins: [react(), tailwindcss()],
   resolve: {

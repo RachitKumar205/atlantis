@@ -23,6 +23,7 @@ import {
   screenForNext,
   type Screen,
 } from '@/lib/flow'
+import { events, routeForScreen } from '@/lib/analytics'
 import { anySettling, type Me } from '@/lib/orgs'
 import { BackupCodes } from '@/screens/BackupCodes'
 import { Enrol } from '@/screens/Enrol'
@@ -86,6 +87,20 @@ export function App() {
     }
     setError(e instanceof Error ? e.message : String(e))
   }, [])
+
+  // Analytics, read off the state: eleven paths set a screen and four set an
+  // account, and a funnel missing one step reads as people leaving at the
+  // step before it.
+  //
+  // identify sends nothing for an id already reported, so a re-render costs
+  // no event.
+  useEffect(() => {
+    if (screen) events.page(routeForScreen(screen))
+  }, [screen])
+
+  useEffect(() => {
+    if (me) events.identify(me.userId)
+  }, [me])
 
   // Boot: what is configured, and whether a sign-in is already in progress.
   useEffect(() => {
@@ -181,6 +196,9 @@ export function App() {
     () =>
       run(async () => {
         await signOut()
+        // Before the state clears: whoever uses this browser next is somebody
+        // else, and the id this person was reported under must not follow them.
+        events.reset()
         setMe(null)
         setScreen('signin')
       }),

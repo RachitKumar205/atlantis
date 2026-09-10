@@ -18,6 +18,7 @@ import {
 } from '@phosphor-icons/react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/api/client'
+import { events } from '@/lib/analytics'
 import { useMe } from '@/hooks/useAuth'
 import { switcherMode } from '@/lib/session'
 import { markSignInRedirect } from '@/lib/signin'
@@ -59,6 +60,10 @@ export function Sidebar() {
     mutationFn: api.auth.logout,
     onSettled: () => {
       qc.clear()
+      // Beside qc.clear(), and for the same reason. Whoever uses this browser
+      // next is somebody else, and the id this person was reported under must
+      // not follow them into the next session.
+      events.reset()
       markSignInRedirect()
       window.location.href = me?.cloud_signout_url ?? '/login'
     },

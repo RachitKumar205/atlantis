@@ -34,14 +34,22 @@ type limiter struct {
 	// CLI poll limiter keys on a device-code hash rather than an address and
 	// carries a budget sized to its polling interval.
 	max int
+
+	// maxIPs bounds the tracked keys, and with max bounds the memory. The two
+	// move together: a larger budget holds more timestamps per key, so the key
+	// count comes down to keep the product bounded.
+	maxIPs int
 }
 
 func newLimiter() *limiter {
-	return newLimiterWithMax(limiterMax)
+	return newLimiterWithMax(limiterMax, limiterMaxIPs)
 }
 
-func newLimiterWithMax(max int) *limiter {
-	return &limiter{hits: make(map[string][]time.Time), lastSwp: time.Now(), now: time.Now, max: max}
+func newLimiterWithMax(max, maxIPs int) *limiter {
+	return &limiter{
+		hits: make(map[string][]time.Time), lastSwp: time.Now(), now: time.Now,
+		max: max, maxIPs: maxIPs,
+	}
 }
 
 // allow reports whether this address may make another request, and how many
@@ -66,7 +74,7 @@ func (l *limiter) allow(ip string) (bool, int) {
 	// Hard cap on tracked addresses. Full and unknown means refused: failing
 	// closed is better than silently amnestying everyone under load, which is
 	// exactly when the limit matters.
-	if len(l.hits) >= limiterMaxIPs {
+	if len(l.hits) >= l.maxIPs {
 		if _, known := l.hits[ip]; !known {
 			return false, int(limiterWindow.Seconds())
 		}
