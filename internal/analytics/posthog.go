@@ -310,7 +310,14 @@ func properties(e Event) map[string]any {
 		out["$groups"] = map[string]string{GroupType: e.Org}
 	}
 	if e.NoPersonProfile {
+		// $set describes a person, and this event has none. Dropping it here
+		// keeps a machine event that carries one from creating the profile the
+		// flag exists to suppress.
 		out["$process_person_profile"] = false
+		return out
+	}
+	if len(e.Person) > 0 {
+		out["$set"] = e.Person
 	}
 	return out
 }

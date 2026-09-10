@@ -51,7 +51,7 @@ const minCloudActions = 10
 // TestEveryCloudAuditActionIsProjected reads the action argument of every
 // LogAction call and compares the set with analytics.CloudActions.
 func TestEveryCloudAuditActionIsProjected(t *testing.T) {
-	found := auditActions(t, cloudAuditRoots)
+	found := auditActions(t, cloudAuditRoots, auditEntryPoints)
 
 	if len(found) < minCloudActions {
 		t.Fatalf("found %d audit actions, want at least %d — the walk is not reading what it thinks it is",
@@ -159,7 +159,7 @@ func TestErrorClassNamesNoDetail(t *testing.T) {
 // literals assigned to that name in the same function. An argument that
 // resolves to nothing fails the test rather than being skipped, so a third way
 // of naming an action cannot pass unnoticed.
-func auditActions(t *testing.T, roots []string) map[string]string {
+func auditActions(t *testing.T, roots []string, entryPoints map[string]int) map[string]string {
 	t.Helper()
 	found := map[string]string{}
 
@@ -189,11 +189,7 @@ func auditActions(t *testing.T, roots []string) map[string]string {
 					if !ok {
 						return true
 					}
-					sel, ok := call.Fun.(*ast.SelectorExpr)
-					if !ok {
-						return true
-					}
-					actionArg, isEntry := auditEntryPoints[sel.Sel.Name]
+					actionArg, isEntry := entryPoints[calleeName(call)]
 					if !isEntry || len(call.Args) <= actionArg {
 						return true
 					}
@@ -283,21 +279,39 @@ func literal(e ast.Expr) (string, bool) {
 	return s, true
 }
 
-// forwards reports whether an expression is one of the enclosing function's
-// own parameters, which means the literal lives at its callers.
+// forwards reports whether an expression is a parameter of the enclosing
+// function or of a closure inside it, which means the literal lives at the
+// callers of whichever one takes it.
+//
+// The console's approval handler builds `audit := func(verb string)` and hands
+// verb to logAction, so a walk that read only the FuncDecl's own parameters
+// would report that call as an action it could not resolve.
 func forwards(fn *ast.FuncDecl, e ast.Expr) bool {
 	id, ok := e.(*ast.Ident)
-	if !ok || fn.Type.Params == nil {
+	if !ok {
 		return false
 	}
-	for _, field := range fn.Type.Params.List {
-		for _, name := range field.Names {
-			if name.Name == id.Name {
-				return true
+	found := false
+	collect := func(params *ast.FieldList) {
+		if params == nil {
+			return
+		}
+		for _, field := range params.List {
+			for _, name := range field.Names {
+				if name.Name == id.Name {
+					found = true
+				}
 			}
 		}
 	}
-	return false
+	collect(fn.Type.Params)
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if lit, ok := n.(*ast.FuncLit); ok {
+			collect(lit.Type.Params)
+		}
+		return true
+	})
+	return found
 }
 
 // TestNoUnknownAuditForwarderExists fails when a function passes its own
@@ -369,8 +383,8 @@ const minProjectionsWithProps = 4
 // A key is required from every call site of an action, not any: one that omits
 // it emits the zero on that path.
 func TestEveryProjectionReadsOnlyKeysItsCallSitesWrite(t *testing.T) {
-	written := detailKeys(t, cloudAuditRoots)
-	read := projectionReads(t, catalogueFile)
+	written := detailKeys(t, cloudAuditRoots, auditEntryPoints)
+	read := projectionReads(t, catalogueFile, "CloudActions")
 
 	if len(read) < minProjectionsWithProps {
 		t.Fatalf("found %d projections with properties, want at least %d — the parse is not reading what it thinks it is",
@@ -399,19 +413,31 @@ func TestEveryProjectionReadsOnlyKeysItsCallSitesWrite(t *testing.T) {
 //
 // A detail argument that is neither nil nor a map literal fails the test, as an
 // unresolvable action argument does — the keys could not be read from it.
-func detailKeys(t *testing.T, roots []string) map[string]map[string]bool {
+func detailKeys(t *testing.T, roots []string, entryPoints map[string]int) map[string]map[string]bool {
 	t.Helper()
 	found := map[string]map[string]bool{}
 
-	forEachAuditCall(t, roots, func(fn *ast.FuncDecl, call *ast.CallExpr, actionArg int, where string) {
-		if len(call.Args) <= actionArg+1 {
-			return
-		}
+	forEachAuditCall(t, roots, entryPoints, func(fn *ast.FuncDecl, call *ast.CallExpr, actionArg int, where string) {
 		actions := resolveStrings(call.Args[actionArg], stringLocals(fn))
 		if len(actions) == 0 {
 			return
 		}
-		keys, ok := detailLiteralKeys(call.Args[actionArg+1])
+
+		// A closure that takes the action and holds the detail has no detail
+		// argument at its call sites: the console's approval handler builds
+		// `audit := func(verb string)` so its two arms share one map. The keys
+		// are the ones the forwarding call inside it writes.
+		detail := ast.Expr(nil)
+		if len(call.Args) > actionArg+1 {
+			detail = call.Args[actionArg+1]
+		} else if forwarded := forwardedDetail(fn, entryPoints); forwarded != nil {
+			detail = forwarded
+		} else {
+			t.Errorf("%s: the call carries no detail and the enclosing function forwards none, so the keys it writes cannot be read", where)
+			return
+		}
+
+		keys, ok := detailLiteralKeys(detail)
 		if !ok {
 			t.Errorf("%s: the detail argument is neither nil nor a map literal, so the keys it writes cannot be read", where)
 			return
@@ -464,7 +490,7 @@ func detailLiteralKeys(e ast.Expr) (map[string]bool, bool) {
 }
 
 // projectionReads maps each action to the detail keys its Props function reads.
-func projectionReads(t *testing.T, path string) map[string][]string {
+func projectionReads(t *testing.T, path, table string) map[string][]string {
 	t.Helper()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, 0)
@@ -475,7 +501,7 @@ func projectionReads(t *testing.T, path string) map[string][]string {
 	out := map[string][]string{}
 	ast.Inspect(file, func(n ast.Node) bool {
 		spec, ok := n.(*ast.ValueSpec)
-		if !ok || len(spec.Names) == 0 || spec.Names[0].Name != "CloudActions" || len(spec.Values) == 0 {
+		if !ok || len(spec.Names) == 0 || spec.Names[0].Name != table || len(spec.Values) == 0 {
 			return true
 		}
 		table, ok := spec.Values[0].(*ast.CompositeLit)
@@ -545,7 +571,7 @@ func propsReads(entry *ast.CompositeLit) ([]string, bool) {
 
 // forEachAuditCall calls visit for every call to a declared audit entry point,
 // skipping a forwarder whose callers hold the literals.
-func forEachAuditCall(t *testing.T, roots []string, visit func(fn *ast.FuncDecl, call *ast.CallExpr, actionArg int, where string)) {
+func forEachAuditCall(t *testing.T, roots []string, entryPoints map[string]int, visit func(fn *ast.FuncDecl, call *ast.CallExpr, actionArg int, where string)) {
 	t.Helper()
 	for _, root := range roots {
 		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
@@ -570,11 +596,7 @@ func forEachAuditCall(t *testing.T, roots []string, visit func(fn *ast.FuncDecl,
 					if !ok {
 						return true
 					}
-					sel, ok := call.Fun.(*ast.SelectorExpr)
-					if !ok {
-						return true
-					}
-					actionArg, isEntry := auditEntryPoints[sel.Sel.Name]
+					actionArg, isEntry := entryPoints[calleeName(call)]
 					if !isEntry || len(call.Args) <= actionArg || forwards(fn, call.Args[actionArg]) {
 						return true
 					}
@@ -600,4 +622,191 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// consoleAuditRoots is the tree whose logAction calls ConsoleActions covers.
+var consoleAuditRoots = []string{"../../internal/console"}
+
+// consoleEntryPoints are the console's audit writers and the argument the
+// action sits in.
+//
+// logAction is the writer, on orgStore. audit is the closure the approval
+// handler builds so its two arms share one detail map; it takes the action
+// first and its callers hold the literals.
+var consoleEntryPoints = map[string]int{
+	"logAction": 3,
+	"audit":     0,
+}
+
+// minConsoleActions is the floor a broken walk falls through.
+const minConsoleActions = 28
+
+// TestEveryConsoleAuditActionIsProjected holds ConsoleActions and
+// internal/console level with each other, as its Cloud counterpart does.
+func TestEveryConsoleAuditActionIsProjected(t *testing.T) {
+	found := auditActions(t, consoleAuditRoots, consoleEntryPoints)
+
+	if len(found) < minConsoleActions {
+		t.Fatalf("found %d console audit actions, want at least %d — the walk is not reading what it thinks it is",
+			len(found), minConsoleActions)
+	}
+
+	for action, where := range found {
+		if _, ok := analytics.ConsoleActions[action]; !ok {
+			t.Errorf("console audit action %q at %s has no projection in internal/analytics/catalogue.go",
+				action, where)
+		}
+	}
+	for action, p := range analytics.ConsoleActions {
+		if _, ok := found[action]; !ok {
+			t.Errorf("ConsoleActions projects %q, which no logAction call writes — a rename left it dangling",
+				action)
+		}
+		if p.Event == "" && p.Why == "" {
+			t.Errorf("console action %q is not reported and says no reason; set Why", action)
+		}
+	}
+}
+
+// TestNoConsoleProjectionLeaksASensitiveValue runs every console projection
+// over a detail map carrying one of everything those call sites write.
+//
+// The console records operator work on a customer's own schema, so the values
+// here are the customer's: entity patterns, caller names, OIDC subjects,
+// certificate fingerprints, remote addresses and typed reasons.
+func TestNoConsoleProjectionLeaksASensitiveValue(t *testing.T) {
+	secrets := map[string]string{
+		"caller":          "billing-api",
+		"pattern":         "shop.Order",
+		"aliases":         "orders-writer",
+		"reason":          "because the customer asked in ticket 4471",
+		"subject":         "ada@example.com",
+		"subject_pattern": "*@example.com",
+		"issuer":          "https://accounts.example.com",
+		"fingerprint":     "SHA256:0f2a9c",
+		"presented_cn":    "billing-api.acme",
+		"remote":          "203.0.113.7:44212",
+		"sandbox":         "sb_01H9",
+		"forked_from":     "sb_01H8",
+		"schema_version":  "9f3c1d2b",
+		"plan_id":         "plan_01H9",
+		"rule_id":         "rule_01H9",
+		"job_id":          "job_01H9",
+		"session_id":      "sess_01H9",
+		"import":          "imp_01H9",
+		"actor":           "user_01H9",
+		"org":             "acme",
+		"id":              "fw_01H9",
+	}
+
+	detail := map[string]any{
+		"can_mutate":            true,
+		"developers_may_enroll": true,
+		"rehearsal_enabled":     true,
+		"replaced":              true,
+		"revoked":               3,
+		"failures":              1,
+		"sessions_removed":      2,
+		"ttl_seconds":           900,
+		"to_version":            7,
+		"role":                  "approver",
+		"verdict":               "pass",
+		"floor":                 "always_ask",
+		"apply_policy":          "auto_safe",
+		"backend":               "sim",
+		"entities":              []string{"shop.Order", "shop.Customer"},
+		"entries":               []string{"shop.Order"},
+		"sandboxes":             []string{"sb_01H9", "sb_01HA"},
+		"expires_at":            "2026-10-01T00:00:00Z",
+		"starts_at":             "2026-10-01T00:00:00Z",
+		"ends_at":               "2026-10-02T00:00:00Z",
+	}
+	for k, v := range secrets {
+		detail[k] = v
+	}
+
+	for action, p := range analytics.ConsoleActions {
+		if p.Props == nil {
+			continue
+		}
+		props := p.Props(detail)
+		encoded, err := json.Marshal(props)
+		if err != nil {
+			t.Fatalf("%s: properties do not encode: %v", action, err)
+		}
+		for key, secret := range secrets {
+			if strings.Contains(string(encoded), secret) {
+				t.Errorf("%s emits the value of %q:\n%s", action, key, encoded)
+			}
+		}
+	}
+}
+
+// TestEveryConsoleProjectionReadsOnlyKeysItsCallSitesWrite is the Cloud drift
+// check over the console's table.
+func TestEveryConsoleProjectionReadsOnlyKeysItsCallSitesWrite(t *testing.T) {
+	written := detailKeys(t, consoleAuditRoots, consoleEntryPoints)
+	read := projectionReads(t, catalogueFile, "ConsoleActions")
+
+	if len(read) < minProjectionsWithProps {
+		t.Fatalf("found %d console projections with properties, want at least %d",
+			len(read), minProjectionsWithProps)
+	}
+
+	for _, action := range sortedKeys(read) {
+		keys, ok := written[action]
+		if !ok {
+			t.Errorf("ConsoleActions projects %q, which no call site writes", action)
+			continue
+		}
+		for _, key := range read[action] {
+			if !keys[key] {
+				t.Errorf("%s's projection reads %q, which its call sites do not write; the value is always the zero one",
+					action, key)
+			}
+		}
+	}
+}
+
+// calleeName is the function a call names, for a method on a value and for a
+// plain identifier.
+//
+// The console's approval handler calls a local closure, audit("..."), whose
+// Fun is an Ident; every other audit writer is reached through a selector.
+func calleeName(call *ast.CallExpr) string {
+	switch fn := call.Fun.(type) {
+	case *ast.SelectorExpr:
+		return fn.Sel.Name
+	case *ast.Ident:
+		return fn.Name
+	default:
+		return ""
+	}
+}
+
+// forwardedDetail returns the detail map of a call in fn whose action argument
+// is a parameter rather than a literal.
+//
+// That call is the one a closure makes on behalf of its own callers, so its
+// map is what every action those callers name actually writes.
+func forwardedDetail(fn *ast.FuncDecl, entryPoints map[string]int) ast.Expr {
+	var detail ast.Expr
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		actionArg, isEntry := entryPoints[calleeName(call)]
+		if !isEntry || len(call.Args) <= actionArg+1 {
+			return true
+		}
+		if _, literal := literal(call.Args[actionArg]); literal {
+			return true
+		}
+		if forwards(fn, call.Args[actionArg]) {
+			detail = call.Args[actionArg+1]
+		}
+		return true
+	})
+	return detail
 }

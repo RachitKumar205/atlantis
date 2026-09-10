@@ -329,3 +329,44 @@ func TestCheckEndpointNamesTheSetting(t *testing.T) {
 		}
 	}
 }
+
+// TestPersonPropertiesRideUnderSet covers the $set channel the email uses.
+func TestPersonPropertiesRideUnderSet(t *testing.T) {
+	props := properties(Event{
+		Name:       "account.signed_in",
+		DistinctID: "user-1",
+		Person:     map[string]any{PersonEmail: "ada@example.com"},
+	})
+	set, ok := props["$set"].(map[string]any)
+	if !ok {
+		t.Fatalf("$set is %T, want a map", props["$set"])
+	}
+	if set[PersonEmail] != "ada@example.com" {
+		t.Errorf("$set carries %v, want the address", set)
+	}
+}
+
+// A machine event drops person properties rather than creating the profile
+// NoPersonProfile exists to suppress.
+func TestAMachineEventCarriesNoPerson(t *testing.T) {
+	props := properties(Event{
+		Name:            EventOrgProvisioned,
+		DistinctID:      MachineID("acme"),
+		NoPersonProfile: true,
+		Person:          map[string]any{PersonEmail: "ada@example.com"},
+	})
+	if _, ok := props["$set"]; ok {
+		t.Errorf("a machine event carried $set: %v", props)
+	}
+	if props["$process_person_profile"] != false {
+		t.Errorf("$process_person_profile is %v, want false", props["$process_person_profile"])
+	}
+}
+
+// An event with no person properties sends no $set at all.
+func TestNoPersonPropertiesSendsNoSet(t *testing.T) {
+	props := properties(Event{Name: "x", DistinctID: "user-1"})
+	if _, ok := props["$set"]; ok {
+		t.Errorf("an event with no person properties carried $set: %v", props)
+	}
+}

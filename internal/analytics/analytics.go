@@ -37,8 +37,16 @@ type Event struct {
 	Props map[string]any
 
 	// NoPersonProfile suppresses person-profile creation, for events whose
-	// DistinctID is a machine.
+	// DistinctID is a machine. It also drops Person, which describes a person
+	// the event does not have.
 	NoPersonProfile bool
+
+	// Person updates the properties of the person DistinctID names. PostHog
+	// merges these under $set, so a key sent once stays until it is
+	// overwritten, and an event may send a subset.
+	//
+	// The keys are the Person* constants in catalogue.go and no others.
+	Person map[string]any
 
 	// Time is when it happened. Zero means the moment Capture was called.
 	Time time.Time

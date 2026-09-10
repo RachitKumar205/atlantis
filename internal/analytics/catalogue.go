@@ -1,5 +1,7 @@
 package analytics
 
+import "reflect"
+
 // The catalogue turns an audit action into an event.
 //
 // Audit detail maps were written for a log behind row-level security. They
@@ -69,6 +71,15 @@ const (
 	StateReady  = "ready"
 	StatePurged = "purged"
 )
+
+// Person properties. Event.Person is set with these keys and no others, so
+// this is where a new one is reviewed.
+//
+// PersonEmail is a customer's address held by a third party for as long as the
+// project retains it, which is what separates it from every other value this
+// package emits: the projections reduce customer text to booleans and classes,
+// and this does not.
+const PersonEmail = "$email"
 
 // CloudActions projects the actions written to cloud.audit_log.
 //
@@ -155,10 +166,188 @@ var CloudActions = map[string]Projection{
 // a person nothing can ever join to. cli.grant_approved carries the same
 // funnel step with an actor behind it.
 
+// ConsoleActions projects the actions written to console.audit_log.
+//
+// A second table because the console is a second database with its own
+// actions; TestEveryConsoleAuditActionIsProjected holds this one to
+// internal/console the way CloudActions is held to internal/cloud.
+//
+// What the console records is operator work on a customer's own schema, so
+// most of these details are customer text: caller names, entity patterns,
+// OIDC subjects, certificate fingerprints, remote addresses and free-text
+// reasons. What crosses is the shape of the action — an enum, a count, a
+// boolean — and the identifiers stay in Postgres.
+var ConsoleActions = map[string]Projection{
+	// Callers.
+	"register_caller": {
+		Event: "console.caller_registered",
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"can_mutate": d["can_mutate"] == true}
+		},
+	},
+	"revoke_caller":  {Event: "console.caller_revoked"},
+	"restore_caller": {Event: "console.caller_restored"},
+	"revoke_all_callers": {
+		Event: "console.all_callers_revoked",
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"revoked": num(d["revoked"]), "failures": num(d["failures"])}
+		},
+	},
+	"set_caller_aliases": {
+		Event: "console.caller_aliases_set",
+		// The aliases are names a customer chose.
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"aliases": count(d["aliases"])}
+		},
+	},
+	"caller_enrollment_set": {
+		Event: "console.caller_enrolment_set",
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"developers_may_enroll": d["developers_may_enroll"] == true}
+		},
+	},
+
+	// Enrolment. Every detail on these paths identifies a machine or a person:
+	// fingerprints, common names, remote addresses, OIDC issuers and subjects.
+	"enroll_token_minted": {Event: "console.enrol_token_minted"},
+	"enroll_token_spent":  {Event: "console.enrol_token_spent"},
+	"enroll_assertion_spent": {
+		Event: "console.enrol_assertion_spent",
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"role": str(d["role"])}
+		},
+	},
+	"oidc_enrolled": {Event: "console.oidc_enrolled"},
+	"certificate_renewed": {
+		Event: "console.certificate_renewed",
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"replaced": d["replaced"] == true}
+		},
+	},
+	"federation_rule_created": {Event: "console.federation_rule_created"},
+	"federation_rule_revoked": {Event: "console.federation_rule_revoked"},
+
+	// Schema changes and the gates around them.
+	"plan_rehearsed": {
+		Event: "console.plan_rehearsed",
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"verdict": str(d["verdict"])}
+		},
+	},
+	"approve_schema_plan": {
+		Event: "console.plan_approved",
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"role": str(d["role"])}
+		},
+	},
+	"reject_schema_plan": {
+		Event: "console.plan_rejected",
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"role": str(d["role"])}
+		},
+	},
+	// The reason is what an operator typed.
+	"override_schema_plan": {Event: "console.plan_overridden"},
+	"rollback_schema": {
+		Event: "console.schema_rolled_back",
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"to_version": num(d["to_version"])}
+		},
+	},
+	"schema_import_applied": {
+		Event: "console.schema_import_applied",
+		// The entity names are the customer's schema.
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"entities": count(d["entities"])}
+		},
+	},
+
+	// Policy.
+	"apply_policy_set": {
+		Event: "console.apply_policy_set",
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{
+				"apply_policy":      str(d["apply_policy"]),
+				"rehearsal_enabled": d["rehearsal_enabled"] == true,
+			}
+		},
+	},
+	"set_change_policy": {
+		Event: "console.change_policy_set",
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"entries": count(d["entries"])}
+		},
+	},
+	"protected_entity_put": {
+		Event: "console.protected_entity_put",
+		// The pattern names a customer entity.
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"floor": str(d["floor"])}
+		},
+	},
+	"protected_entity_deleted": {Event: "console.protected_entity_deleted"},
+	"freeze_window_created":    {Event: "console.freeze_window_created"},
+	"freeze_window_deleted":    {Event: "console.freeze_window_deleted"},
+
+	// Sandboxes. The two sandbox_booted call sites share backend and a schema
+	// hash; the hash identifies one customer's schema.
+	"sandbox_booted": {
+		Event: "console.sandbox_booted",
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"backend": str(d["backend"])}
+		},
+	},
+	"sandbox_destroyed": {Event: "console.sandbox_destroyed"},
+
+	// Jobs and workers.
+	"retry_dead_job": {Event: "console.dead_job_retried"},
+	"worker_drained": {Event: "console.worker_drained"},
+	"worker_evicted": {Event: "console.worker_evicted"},
+
+	// Sessions.
+	"signed_in": {Event: "console.signed_in"},
+	"sudo_granted": {
+		Event: "console.sudo_granted",
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"ttl_seconds": num(d["ttl_seconds"])}
+		},
+	},
+	"sign_out_others": {
+		Event: "console.signed_out_others",
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"sessions_removed": num(d["sessions_removed"])}
+		},
+	},
+	"sign_out_all": {
+		Event: "console.signed_out_all",
+		Props: func(d map[string]any) map[string]any {
+			return map[string]any{"sessions_removed": num(d["sessions_removed"])}
+		},
+	},
+}
+
 // str returns a string value, or "" for anything else.
 func str(v any) string {
 	s, _ := v.(string)
 	return s
+}
+
+// count returns the length of a slice or map, or 0.
+//
+// It reports how many of something an action touched without reading any of
+// them: the elements are entity names, caller aliases and policy entries.
+// Reflection because the call sites build []string, []any and richer element
+// types, and a type switch over each is a list that goes stale.
+func count(v any) int {
+	if v == nil {
+		return 0
+	}
+	switch rv := reflect.ValueOf(v); rv.Kind() {
+	case reflect.Slice, reflect.Array, reflect.Map:
+		return rv.Len()
+	default:
+		return 0
+	}
 }
 
 // num returns a numeric value as a float64, or 0.

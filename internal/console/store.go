@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/rachitkumar205/atlantis/internal/analytics"
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 	"github.com/rachitkumar205/atlantis/internal/secrets"
 )
@@ -116,6 +117,54 @@ type store struct {
 	// log carries the errors from best-effort audit writes, which have nowhere
 	// else to go. See logAction.
 	log *slog.Logger
+
+	// sink receives an event for each audit action that has a projection.
+	// Nil is the same as analytics.Discard; see report.
+	sink analytics.Sink
+}
+
+// UseAnalytics sets where audited actions are reported. Called once at wiring
+// time, before the store serves a request.
+func (s *store) UseAnalytics(sink analytics.Sink) { s.sink = sink }
+
+// report emits the analytics event for an audited action.
+//
+// The projection decides what crosses. No path here copies detail through, so
+// a key nobody named cannot leave the process.
+//
+// The actor is the Cloud user id, the same id Cloud's own events carry, so one
+// person spans both. Their address rides as a person property.
+//
+// An action with no projection is a gap between the audit log and the
+// catalogue; TestEveryConsoleAuditActionIsProjected fails on one, and this
+// warns in a deployment where the two have drifted anyway.
+func (s *store) report(org, actor, actorEmail, action string, detail map[string]any) {
+	if s.sink == nil {
+		return
+	}
+	p, ok := analytics.ConsoleActions[action]
+	if !ok {
+		s.log.Warn("audit action has no analytics projection", "action", action)
+		return
+	}
+	if p.Event == "" {
+		return
+	}
+	var props map[string]any
+	if p.Props != nil {
+		props = p.Props(detail)
+	}
+	var person map[string]any
+	if actorEmail != "" {
+		person = map[string]any{analytics.PersonEmail: actorEmail}
+	}
+	s.sink.Capture(analytics.Event{
+		Name:       p.Event,
+		DistinctID: actor,
+		Org:        org,
+		Props:      props,
+		Person:     person,
+	})
 }
 
 func newStore(ctx context.Context, pgURL string, log *slog.Logger, keys secrets.Keyring) (*store, error) {
@@ -322,6 +371,7 @@ func (o *orgStore) logAction(ctx context.Context, actor, actorEmail, action stri
 		o.db.log.Warn("audit write failed",
 			"action", action, "org", o.org, "actor", actor, "err", err)
 	}
+	o.db.report(o.org, actor, actorEmail, action, detail)
 }
 
 // listAuditLog reads the most recent entries.
