@@ -291,7 +291,7 @@ func (s *Server) completeSignIn(w http.ResponseWriter, r *http.Request, userID s
 	s.clearCookie(w, pendingCookie)
 	s.setCookie(w, sessionCookie, token, store.SessionTTL)
 
-	s.capture(analytics.EventSignedIn, userID, "", nil)
+	s.capture(analytics.EventSignedIn, userID, "", "", nil)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Signed in."})
 }
 
@@ -405,7 +405,7 @@ func (s *Server) handleEnrolFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.capture(analytics.EventSecondFactor, userID, "", nil)
+	s.capture(analytics.EventSecondFactor, userID, "", "", nil)
 
 	if completing {
 		token, err := s.db.CreateSession(r.Context(), userID)

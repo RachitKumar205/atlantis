@@ -62,7 +62,7 @@ func (s *Store) LogAction(ctx context.Context, org, actor, actorEmail, action st
 			"org", org, "action", action, "actor", actor, "err", err)
 	}
 
-	s.report(org, actor, action, detail)
+	s.report(org, actor, actorEmail, action, detail)
 }
 
 // report emits the analytics event for an audited action.
@@ -73,7 +73,7 @@ func (s *Store) LogAction(ctx context.Context, org, actor, actorEmail, action st
 // An action with no projection is a gap between the audit log and the
 // catalogue; TestEveryCloudAuditActionIsProjected fails on one, and this warns
 // in a deployment where the two have drifted anyway.
-func (s *Store) report(org, actor, action string, detail map[string]any) {
+func (s *Store) report(org, actor, actorEmail, action string, detail map[string]any) {
 	if s.sink == nil {
 		return
 	}
@@ -89,11 +89,18 @@ func (s *Store) report(org, actor, action string, detail map[string]any) {
 	if p.Props != nil {
 		props = p.Props(detail)
 	}
+	// No person for the provisioner, so no address either: distinctID has
+	// already turned it into a machine id.
+	var person map[string]any
+	if actor != ProvisionerActor && actorEmail != "" {
+		person = map[string]any{analytics.PersonEmail: actorEmail}
+	}
 	s.sink.Capture(analytics.Event{
 		Name:            p.Event,
 		DistinctID:      distinctID(org, actor),
 		Org:             org,
 		Props:           props,
+		Person:          person,
 		NoPersonProfile: actor == ProvisionerActor,
 	})
 }

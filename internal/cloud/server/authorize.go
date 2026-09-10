@@ -171,7 +171,7 @@ func (s *Server) redirectWithAssertion(w http.ResponseWriter, r *http.Request, g
 	// The handoff into a console, which is what entering the product looks
 	// like for somebody who already holds a Cloud session. account.signed_in
 	// covers only the sign-in that creates one.
-	s.capture(analytics.EventConsoleAuthorized, grant.Subject, grant.Org, map[string]any{
+	s.capture(analytics.EventConsoleAuthorized, grant.Subject, "", grant.Org, map[string]any{
 		"role":    grant.Role,
 		"step_up": stepUp,
 	})

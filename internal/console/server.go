@@ -21,6 +21,7 @@ import (
 
 	"github.com/rachitkumar205/atlantis/clients/go/adminjson"
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
+	"github.com/rachitkumar205/atlantis/internal/analytics"
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 	"github.com/rachitkumar205/atlantis/internal/console/cloudauth"
 	"github.com/rachitkumar205/atlantis/internal/console/oidcfed"
@@ -48,7 +49,12 @@ type Server struct {
 	// anywhere — the connection was healthy, it was simply the wrong stack.
 	orgs *orgClients
 
-	db       *store
+	db *store
+
+	// events is where audited actions and account milestones are reported.
+	// Discard when no project key is configured.
+	events analytics.Sink
+
 	mux      *http.ServeMux
 	handler  http.Handler // mux wrapped with security headers
 	log      *slog.Logger
@@ -175,8 +181,20 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 	}
 
 	bgCtx, bgCancel := context.WithCancel(context.Background())
+	// An empty key is what a development and CI build has, and Discard runs
+	// every instrumented path.
+	var events analytics.Sink = analytics.Discard{}
+	if cfg.PostHogKey != "" {
+		events = analytics.NewPostHog(analytics.Config{
+			APIKey:   cfg.PostHogKey,
+			Endpoint: cfg.PostHogHost,
+			Logger:   log,
+		})
+	}
+	db.UseAnalytics(events)
+
 	s := &Server{
-		cfg: cfg, db: db, log: log, spaFS: spaFS,
+		cfg: cfg, db: db, log: log, spaFS: spaFS, events: events,
 		loginLim:    newLoginLimiter(),
 		orgs:        newOrgClients(db),
 		cloud:       cloud,
@@ -228,9 +246,21 @@ func (s *Server) Close() {
 	if s.bgCancel != nil {
 		s.bgCancel()
 	}
+	// Before the pool: a queued event is delivered from memory and needs no
+	// database, and the flush is bounded so a slow endpoint cannot hold
+	// shutdown open.
+	if s.events != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), analyticsFlushTimeout)
+		_ = s.events.Close(ctx)
+		cancel()
+	}
 	s.db.close()
 	s.orgs.close()
 }
+
+// analyticsFlushTimeout bounds the last delivery at shutdown. Longer than the
+// sink's own 5s per-request timeout, so a slow delivery is waited out.
+const analyticsFlushTimeout = 6 * time.Second
 
 // auditRetentionLoop runs daily: creates next month's audit partition
 // idempotently (so the very first INSERT on the first of a new month

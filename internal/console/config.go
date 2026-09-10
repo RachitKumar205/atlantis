@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/rachitkumar205/atlantis/internal/analytics"
 )
 
 // Config holds all console BFF configuration, sourced from environment
@@ -28,6 +30,12 @@ type Config struct {
 	// every organisation being unreachable after a restart, with the rows
 	// intact and permanently unopenable.
 	DataKeyset string // CONSOLE_DATA_KEY
+
+	// PostHogKey is the analytics project key, under Cloud's name because the
+	// console reports about the same organisations and the same people Cloud
+	// does. Empty is analytics.Discard.
+	PostHogKey  string // CLOUD_POSTHOG_KEY
+	PostHogHost string // CLOUD_POSTHOG_HOST
 
 	SessionSecret string // CONSOLE_SESSION_SECRET — required, ≥32 chars
 	CookieSecure  bool   // CONSOLE_COOKIE_SECURE — default false
@@ -97,6 +105,8 @@ func ConfigFromEnv() (Config, error) {
 		Listen:        envOr("CONSOLE_LISTEN", ":3000"),
 		PGURL:         os.Getenv("CONSOLE_PG_URL"),
 		DataKeyset:    os.Getenv("CONSOLE_DATA_KEY"),
+		PostHogKey:    os.Getenv("CLOUD_POSTHOG_KEY"),
+		PostHogHost:   envOr("CLOUD_POSTHOG_HOST", analytics.DefaultEndpoint),
 		SessionSecret: os.Getenv("CONSOLE_SESSION_SECRET"),
 		CookieSecure:  os.Getenv("CONSOLE_COOKIE_SECURE") == "true",
 		SignerAddr:    os.Getenv("ATL_SIGNER_ADDR"),
@@ -138,6 +148,13 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if err := c.validateEnrollment(); err != nil {
 		return Config{}, err
+	}
+	// Only when a key is set, so a deployment with analytics off is not held to
+	// a rule that cannot affect it.
+	if c.PostHogKey != "" {
+		if err := analytics.CheckEndpoint("CLOUD_POSTHOG_HOST", c.PostHogHost); err != nil {
+			return Config{}, err
+		}
 	}
 	if c.SessionSecret == "" {
 		return Config{}, fmt.Errorf("CONSOLE_SESSION_SECRET is required")

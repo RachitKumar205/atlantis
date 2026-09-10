@@ -21,7 +21,7 @@ func TestAnAuditedActionBecomesAnEvent(t *testing.T) {
 	rec := &analytics.Recorder{}
 	s := reportOnly(rec)
 
-	s.report("acme", "user-1", "org.created", map[string]any{"display_name": "Acme Ltd"})
+	s.report("acme", "user-1", "ada@example.com", "org.created", map[string]any{"display_name": "Acme Ltd"})
 
 	events := rec.Events()
 	if len(events) != 1 {
@@ -46,6 +46,9 @@ func TestAnAuditedActionBecomesAnEvent(t *testing.T) {
 			t.Errorf("the display name crossed: %v", e.Props)
 		}
 	}
+	if e.Person[analytics.PersonEmail] != "ada@example.com" {
+		t.Errorf("person properties are %v, want the actor's address", e.Person)
+	}
 }
 
 // Work the provisioner did on its own has no person behind it.
@@ -53,7 +56,7 @@ func TestProvisionerActionsCreateNoPerson(t *testing.T) {
 	rec := &analytics.Recorder{}
 	s := reportOnly(rec)
 
-	s.report("acme", ProvisionerActor, "org.provisioned", map[string]any{
+	s.report("acme", ProvisionerActor, "", "org.provisioned", map[string]any{
 		"attempts": 2, "took_ms": 48000, "endpoint": "org-acme.example.dev:31234",
 	})
 
@@ -68,6 +71,9 @@ func TestProvisionerActionsCreateNoPerson(t *testing.T) {
 	if !e.NoPersonProfile {
 		t.Error("a provisioner event would create a person profile")
 	}
+	if len(e.Person) != 0 {
+		t.Errorf("a provisioner event carries person properties: %v", e.Person)
+	}
 	if _, ok := e.Props["endpoint"]; ok {
 		t.Errorf("the endpoint crossed: %v", e.Props)
 	}
@@ -81,7 +87,7 @@ func TestAnUnreportedActionEmitsNothing(t *testing.T) {
 	rec := &analytics.Recorder{}
 	s := reportOnly(rec)
 
-	s.report("acme", ProvisionerActor, "org.console_credentials_rotated", nil)
+	s.report("acme", ProvisionerActor, "", "org.console_credentials_rotated", nil)
 
 	if got := len(rec.Events()); got != 0 {
 		t.Fatalf("got %d events, want 0", got)
@@ -93,7 +99,7 @@ func TestAnUnknownActionEmitsNothing(t *testing.T) {
 	rec := &analytics.Recorder{}
 	s := reportOnly(rec)
 
-	s.report("acme", "user-1", "something.nobody.catalogued", map[string]any{"secret": "x"})
+	s.report("acme", "user-1", "", "something.nobody.catalogued", map[string]any{"secret": "x"})
 
 	if got := len(rec.Events()); got != 0 {
 		t.Fatalf("got %d events, want 0", got)
@@ -104,5 +110,5 @@ func TestAnUnknownActionEmitsNothing(t *testing.T) {
 // project key does.
 func TestNoSinkIsSafe(t *testing.T) {
 	s := reportOnly(nil)
-	s.report("acme", "user-1", "org.created", map[string]any{"display_name": "Acme"})
+	s.report("acme", "user-1", "", "org.created", map[string]any{"display_name": "Acme"})
 }

@@ -168,13 +168,22 @@ func (s *Server) Close() {
 	}
 }
 
-// capture records one account milestone. Milestones that write an audit row go
-// through the store instead.
-func (s *Server) capture(name, userID, org string, props map[string]any) {
+// capture records one account milestone. An action that writes an audit row is
+// reported by the store, where a projection decides what crosses.
+//
+// email may be empty. $set merges, so the address a person sends once stays on
+// them, and the sign-up event is what puts it there.
+func (s *Server) capture(name, userID, email, org string, props map[string]any) {
 	if s.events == nil {
 		return
 	}
-	s.events.Capture(analytics.Event{Name: name, DistinctID: userID, Org: org, Props: props})
+	var person map[string]any
+	if email != "" {
+		person = map[string]any{analytics.PersonEmail: email}
+	}
+	s.events.Capture(analytics.Event{
+		Name: name, DistinctID: userID, Org: org, Props: props, Person: person,
+	})
 }
 
 func (s *Server) routes() {

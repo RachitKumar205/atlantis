@@ -108,7 +108,7 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	// Raised here rather than in the browser: this route answers identically
 	// whether or not the address was already registered, and an event the page
 	// could see would undo that.
-	s.capture(analytics.EventSignedUp, user.ID, "", map[string]any{
+	s.capture(analytics.EventSignedUp, user.ID, email, "", map[string]any{
 		"method":   "password",
 		"has_name": req.FirstName != "" || req.LastName != "",
 	})
@@ -284,7 +284,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.capture(analytics.EventEmailVerified, spent.UserID, "", nil)
+	s.capture(analytics.EventEmailVerified, spent.UserID, "", "", nil)
 	page(w, http.StatusOK, "Your email address is verified.\n\nYou can close this page.")
 }
 
