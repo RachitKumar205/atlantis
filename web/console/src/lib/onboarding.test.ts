@@ -1,117 +1,57 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import {
-  importOffered,
-  markImportOffered,
   markOnboardingPending,
+  onboardingDecision,
   takeOnboardingPending,
+  type OnboardingState,
 } from './onboarding'
 
-// Node exposes `localStorage` as a getter that answers undefined without
-// --localstorage-file, and jsdom's own storage does not reach globalThis
-// through vitest's environment. Both are settled by installing a double.
+// The pending mark's harness needs a storage shape; jsdom's own does not reach
+// globalThis through vitest's environment, so a double is installed below.
 interface Store {
   getItem(key: string): string | null
   setItem(key: string, value: string): void
 }
 
-const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
-
-function install(store: Store) {
-  Object.defineProperty(globalThis, 'localStorage', {
-    value: store,
-    configurable: true,
-    writable: true,
-  })
+function state(over: Partial<OnboardingState> = {}): OnboardingState {
+  return { loading: false, onboarded: false, entities: 0, ...over }
 }
 
-function memoryStore(): Store {
-  const held = new Map<string, string>()
-  return {
-    getItem: key => held.get(key) ?? null,
-    setItem: (key, value) => void held.set(key, value),
-  }
-}
-
-describe('importOffered', () => {
-  beforeEach(() => install(memoryStore()))
-
-  afterEach(() => {
-    if (original) Object.defineProperty(globalThis, 'localStorage', original)
+describe('onboardingDecision', () => {
+  it('offers the flow to an organisation that has not answered', () => {
+    expect(onboardingDecision(state())).toBe('offer')
   })
 
-  it('is false for an organisation that has not been offered the dialog', () => {
-    expect(importOffered('acme')).toBe(false)
+  // The whole point: one member answers, and nobody in the organisation is
+  // asked again — on any browser, on any machine.
+  it('is settled once the organisation has answered', () => {
+    expect(onboardingDecision(state({ onboarded: true }))).toBe('settled')
   })
 
-  it('is true once the offer is recorded, and stays true', () => {
-    markImportOffered('acme')
-    expect(importOffered('acme')).toBe(true)
-    expect(importOffered('acme')).toBe(true)
+  // Carries every organisation that existed before the column did, with no
+  // backfill. A schema is proof the flow is behind them.
+  it('is settled for an organisation that already has a schema', () => {
+    expect(onboardingDecision(state({ entities: 12 }))).toBe('settled')
   })
 
-  it('records one organisation without answering for another', () => {
-    markImportOffered('acme')
-    expect(importOffered('beta')).toBe(false)
+  it('is settled when both say so', () => {
+    expect(onboardingDecision(state({ onboarded: true, entities: 12 }))).toBe('settled')
   })
 
-  it('keeps earlier organisations when a later one is recorded', () => {
-    markImportOffered('acme')
-    markImportOffered('beta')
-    expect(importOffered('acme')).toBe(true)
-    expect(importOffered('beta')).toBe(true)
+  // `wait` is not `settled`. An unread schema looks exactly like an empty one,
+  // and spending the arrival here would cost an organisation its one offer.
+  it('waits while the schema is still being read', () => {
+    expect(onboardingDecision(state({ loading: true }))).toBe('wait')
+    expect(onboardingDecision(state({ loading: true, onboarded: true }))).toBe('wait')
+    expect(onboardingDecision(state({ loading: true, entities: 12 }))).toBe('wait')
   })
 
-  it('is true for an empty slug, so a session naming no organisation is never offered', () => {
-    expect(importOffered('')).toBe(true)
-  })
-
-  it('writes nothing for an empty slug', () => {
-    markImportOffered('')
-    expect(importOffered('acme')).toBe(false)
-  })
-
-  // A value that is not the object this wrote answers false rather than
-  // throwing: the dialog opens once more and the next close overwrites it.
-  it('treats unparseable storage as nothing recorded', () => {
-    localStorage.setItem('atlantis.import-offered', 'not json')
-    expect(importOffered('acme')).toBe(false)
-    markImportOffered('acme')
-    expect(importOffered('acme')).toBe(true)
-  })
-
-  it('treats a non-object payload as nothing recorded', () => {
-    localStorage.setItem('atlantis.import-offered', '"acme"')
-    expect(importOffered('acme')).toBe(false)
-  })
-
-  it('treats null stored by JSON as nothing recorded', () => {
-    localStorage.setItem('atlantis.import-offered', 'null')
-    expect(importOffered('acme')).toBe(false)
-  })
-
-  // Storage that throws on read cannot be written either, so answering false
-  // would open the dialog on every load with no close able to stop it.
-  it('is true when storage cannot be read', () => {
-    install({
-      getItem: () => {
-        throw new Error('denied')
-      },
-      setItem: () => {},
-    })
-    expect(importOffered('acme')).toBe(true)
-  })
-
-  it('does not throw when storage refuses a write', () => {
-    install({
-      getItem: () => null,
-      setItem: () => {
-        throw new Error('quota')
-      },
-    })
-    expect(() => markImportOffered('acme')).not.toThrow()
+  it('waits until the organisation answer has arrived', () => {
+    expect(onboardingDecision(state({ onboarded: undefined }))).toBe('wait')
   })
 })
+
 
 describe('onboarding pending', () => {
   const originalSession = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')

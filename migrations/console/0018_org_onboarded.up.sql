@@ -1,0 +1,15 @@
+-- When an organisation finished with the onboarding flow.
+--
+-- On the organisation rather than on a browser. The flow offers to read an
+-- existing database and write the declarations for it, which is a thing an
+-- organisation does once; a record kept in localStorage answers for one
+-- browser, so a second admin is asked again, and so is the same person on a
+-- second machine.
+--
+-- NULL means not yet, which is what every existing row starts as. No backfill:
+-- an organisation that already has entities is gated on that instead, so the
+-- rows needing no attention get none.
+--
+-- Written once. The first close or completion wins, so the timestamp is when
+-- the organisation first answered and not when it last saw the dialog.
+ALTER TABLE console.orgs ADD COLUMN IF NOT EXISTS onboarded_at TIMESTAMPTZ;

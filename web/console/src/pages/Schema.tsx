@@ -1,5 +1,5 @@
 import { useMemo, useEffect, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { useSearch, useNavigate } from '@tanstack/react-router'
 // LinkSimple aliased, because @tanstack/react-router's Link is the other thing
 // called that in this codebase and the JSX here reads clearer with the suffix.
@@ -14,7 +14,8 @@ import { Timestamp } from '@/components/Timestamp'
 import { Actor } from '@/components/Actor'
 import { PageShell } from '@/components/PageShell'
 import { OnboardingDialog } from '@/components/OnboardingDialog'
-import { takeOnboardingPending } from '@/lib/onboarding'
+import { onboardingDecision, takeOnboardingPending } from '@/lib/onboarding'
+import { useMe } from '@/hooks/useAuth'
 
 // ── IR shapes (mirror internal/dsl/ir.go) ──────────────────────────────────
 interface IRFieldType {
@@ -143,6 +144,7 @@ export function Schema() {
   const search = useSearch({ from: '/schema' })
 
   const { data: canonical, isLoading } = useQuery(queries.schemaCanonical())
+  const { data: me } = useMe()
   const { data: ownersData } = useQuery(queries.entityOwners())
 
   const entities = useMemo(() => {
@@ -242,23 +244,48 @@ export function Schema() {
   const ver = (canonical?.ir as IRRoot | undefined)?.version
   const sub = `${entities.length} entit${entities.length === 1 ? 'y' : 'ies'} · ${namespaces.length} namespace${namespaces.length === 1 ? '' : 's'}${ver ? ` · server v${String(ver).padStart(4, '0')}` : ''}`
 
-  // Every arrival from Cloud opens the flow, whatever the organisation holds
-  // and however many times it has been closed before. While onboarding is being
-  // written, seeing it costs a sign-in; the conditions that will gate it are in
-  // lib/onboarding.ts and nothing reads them yet.
+  // An arrival from Cloud opens the flow once, and only for an organisation
+  // that has neither answered it nor already got a schema.
+  //
+  // Three conditions, each covering what the others cannot:
   //
   // takeOnboardingPending clears the mark, so one sign-in opens it once rather
   // than on every return to this page.
+  //
+  // me.onboarded is the organisation's own answer, held by the server. It is
+  // what stops the second admin being asked, and the same person on a second
+  // machine.
+  //
+  // An organisation with entities has plainly done this already, whatever the
+  // column says. That is what carries every organisation that existed before
+  // the column did, with no backfill. Gated on the load as well, so a schema
+  // that is still arriving does not read as an empty one.
   //
   // Which step it opens at is the difference between the two entry points: an
   // arrival is asked what it wants, and a button press already said.
   const [onboarding, setOnboarding] = useState<'welcome' | 'connect' | null>(null)
   useEffect(() => {
-    if (takeOnboardingPending()) setOnboarding('welcome')
-  }, [])
+    const decision = onboardingDecision({
+      loading: isLoading,
+      onboarded: me?.onboarded,
+      entities: entities.length,
+    })
+    if (decision === 'wait') return
+
+    // The arrival is spent either way. Leaving it set on a settled
+    // organisation would open the flow on the next page it visits.
+    const arrived = takeOnboardingPending()
+    if (decision === 'offer' && arrived) setOnboarding('welcome')
+  }, [isLoading, me, entities.length])
+
+  // Closing counts as answering. The flow stays reachable from the action
+  // below while the schema is empty, so a dialog closed by accident is one
+  // click away.
+  const markDone = useMutation({ mutationFn: api.auth.onboardingDone })
 
   function closeOnboarding() {
     setOnboarding(null)
+    if (me && !me.onboarded) markDone.mutate()
   }
 
   return (

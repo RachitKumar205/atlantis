@@ -1,55 +1,35 @@
-// Whether the import dialog has already been offered for an organisation.
+// Whether an organisation still has the onboarding flow to answer.
 //
-// Keyed by organisation slug, not by browser: an account with two
-// organisations provisions the second one long after answering for the first.
-//
-// Held in localStorage. Losing the record costs one reopened dialog on a
-// schema that is still empty.
+// The record of having answered is the organisation's, held by the server and
+// read from /api/auth/me. It was once a localStorage entry keyed by slug,
+// which answered for one browser: the second admin was asked again, and so was
+// the same person on a second machine.
 
-const KEY = 'atlantis.import-offered'
+export type OnboardingState = {
+  // The schema is still being read. An empty schema and an unread one look
+  // the same from here, and only one of them is an organisation to ask.
+  loading: boolean
 
-// null distinguishes storage that cannot be read from storage holding nothing.
-//
-// A value that will not parse is storage holding nothing: the read itself
-// worked, so the write that replaces the value will work too.
-function read(): Record<string, true> | null {
-  let raw: string | null
-  try {
-    raw = localStorage.getItem(KEY)
-  } catch {
-    return null
-  }
-  if (!raw) return {}
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    if (!parsed || typeof parsed !== 'object') return {}
-    return parsed as Record<string, true>
-  } catch {
-    return {}
-  }
+  // The organisation's own answer, or undefined until /api/auth/me answers.
+  onboarded: boolean | undefined
+
+  // How many entities the schema holds. An organisation with any has plainly
+  // done this, whatever the server recorded — which is what carries the
+  // organisations that existed before the column did.
+  entities: number
 }
 
-// importOffered reports whether the dialog has been shown and closed for org.
+// What to do about an arrival.
 //
-// Storage that cannot be read answers true. A write will not survive either, so
-// answering false opens the dialog on every load with no way to stop it.
-export function importOffered(org: string): boolean {
-  if (!org) return true
-  const seen = read()
-  if (seen === null) return true
-  return seen[org] === true
-}
+// `wait` is not `settled`: nothing is known yet, and spending the arrival here
+// would lose it. The two are separate so a slow schema read cannot silently
+// cost an organisation its one offer.
+export type OnboardingDecision = 'wait' | 'offer' | 'settled'
 
-export function markImportOffered(org: string): void {
-  if (!org) return
-  const seen = read()
-  if (seen === null) return
-  try {
-    localStorage.setItem(KEY, JSON.stringify({ ...seen, [org]: true }))
-  } catch {
-    // Reads can succeed where writes fail once the quota is full. The dialog
-    // opens again on the next load.
-  }
+export function onboardingDecision(s: OnboardingState): OnboardingDecision {
+  if (s.loading || s.onboarded === undefined) return 'wait'
+  if (s.onboarded || s.entities > 0) return 'settled'
+  return 'offer'
 }
 
 // Whether a sign-in arriving from Cloud has just completed.

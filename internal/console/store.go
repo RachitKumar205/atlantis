@@ -525,6 +525,36 @@ func (s *store) rememberOrg(ctx context.Context, org string) error {
 	return err
 }
 
+// onboarded reports whether this organisation has finished with the onboarding
+// flow.
+//
+// An organisation with no row has not: rememberOrg writes one on the first
+// sign-in, so a missing row means nobody has reached the console yet.
+func (s *store) onboarded(ctx context.Context, org string) (bool, error) {
+	var at *time.Time
+	err := s.pool.QueryRow(ctx,
+		`SELECT onboarded_at FROM console.orgs WHERE org = $1`, org).Scan(&at)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return at != nil, nil
+}
+
+// markOnboarded records that this organisation answered the onboarding flow.
+//
+// `IS NULL` in the predicate, so the timestamp is when the organisation first
+// answered. Reopening the flow from the schema page and closing it again does
+// not move it.
+func (s *store) markOnboarded(ctx context.Context, org string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE console.orgs SET onboarded_at = NOW()
+		  WHERE org = $1 AND onboarded_at IS NULL`, org)
+	return err
+}
+
 // ErrOrgNotProvisioned reports an organisation with no atlantis behind it.
 //
 // Distinct from "no such organisation", and both are distinct from a failure to

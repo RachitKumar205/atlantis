@@ -401,6 +401,11 @@ func (s *Server) buildMux() {
 	// Unauthenticated: a browser holding no session cookie is what reads it.
 	mux.HandleFunc("GET /api/config", s.handleConfig)
 
+	// The organisation has answered the onboarding flow. Any member may say so:
+	// the flow is an offer rather than a change to the stack, and requiring an
+	// admin would leave everybody else asked again on every sign-in.
+	mux.HandleFunc("POST /api/onboarding/done", s.auth(s.csrf(s.handleOnboardingDone)))
+
 	// Analytics ingestion. Unauthenticated for the same reason /api/config is:
 	// the page that reports being blocked at sign-in holds no session.
 	mux.Handle("POST "+analytics.ProxyPathPrefix+"{rest...}", s.tproxy)
@@ -901,14 +906,44 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+// handleOnboardingDone records that this organisation has answered the
+// onboarding flow, so no member is offered it again.
+//
+// Idempotent, and the first write is the one that lasts. A failure is reported
+// so the page can decide; nothing else in the console depends on the column.
+func (s *Server) handleOnboardingDone(w http.ResponseWriter, r *http.Request) {
+	u := r.Context().Value(ctxUser).(*User)
+	if err := s.db.markOnboarded(r.Context(), u.Org); err != nil {
+		s.log.Error("mark onboarded", "org", u.Org, "err", err)
+		jsonError(w, "could not record that", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]any{"ok": true})
+}
+
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	u := r.Context().Value(ctxUser).(*User)
+
+	// Whether this organisation has already answered the onboarding flow.
+	//
+	// A read that fails answers true, which shows the dialog to nobody rather
+	// than to everybody: the page this feeds is one an organisation is meant
+	// to see once, and a database that cannot be read is not grounds to ask
+	// again.
+	onboarded := true
+	if done, err := s.db.onboarded(r.Context(), u.Org); err != nil {
+		s.log.Warn("onboarding state unreadable", "org", u.Org, "err", err)
+	} else {
+		onboarded = done
+	}
+
 	jsonOK(w, map[string]any{
-		"subject": u.Subject,
-		"org":     u.Org,
-		"email":   u.Email,
-		"role":    u.Role,
-		"name":    u.Name,
+		"subject":   u.Subject,
+		"org":       u.Org,
+		"email":     u.Email,
+		"role":      u.Role,
+		"name":      u.Name,
+		"onboarded": onboarded,
 
 		// Where the browser goes to prove a second factor before a destructive
 		// action. Built here rather than in the SPA for two reasons: the org

@@ -45,6 +45,14 @@ export interface MeResult {
   role: UserRole
   name: string
 
+  // Whether this organisation has already answered the onboarding flow.
+  //
+  // On the organisation, not the browser: the flow offers to read an existing
+  // database once, and a record kept in this browser asks the second admin
+  // again. A server that cannot read the column answers true, so a database
+  // problem shows the dialog to nobody rather than to everybody.
+  onboarded: boolean
+
   // Where to send the browser to present a second factor before a destructive
   // action. Built by the server from its own CLOUD_ISSUER and the session's
   // org, so the page never assembles a URL or decides which organisation it is
@@ -961,6 +969,11 @@ export const api = {
 
     me: (): Promise<MeResult> =>
       apiFetch<MeResult>('/api/auth/me'),
+
+    // The organisation has answered the onboarding flow. Sent when the dialog
+    // closes however it closes, so a decision either way is a decision.
+    onboardingDone: (): Promise<{ ok: boolean }> =>
+      apiFetch<{ ok: boolean }>('/api/onboarding/done', { method: 'POST' }),
 
     // The one call that answers without a session cookie. The URL names no
     // organisation: this console serves several, and a request carrying no
