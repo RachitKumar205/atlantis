@@ -319,6 +319,11 @@ func dropUndeclarableEntities(ir *dsl.IR, nameFor map[string]string) []string {
 			// key that would give it one.
 			if !hasPrimaryKey(e) {
 				e.Keyless = true
+				// `primary by` naming fields no column resolves to leaves the
+				// clause behind, and `keyless` with a key beside it is a pair
+				// validateEntity refuses. Suggest has already run, above, so
+				// clearing this changes no suggestion.
+				e.CompositePK = nil
 			}
 			kept = append(kept, *e)
 		}

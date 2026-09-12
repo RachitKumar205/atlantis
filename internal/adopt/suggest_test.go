@@ -214,3 +214,35 @@ func TestAnUnresolvableCompositeKeyIsReportedAsNoPrimaryKey(t *testing.T) {
 		t.Error("a composite key naming no existing field was not reported as having no primary key")
 	}
 }
+
+// An entity adopt declares `keyless` carries no key beside the flag.
+//
+// `keyless` and a primary key are alternatives, and validateEntity refuses the
+// pair, so a checkpoint holding one fails to decode. A `primary by` naming
+// fields no column resolves to is the way both end up set: hasPrimaryKey reports
+// no key, and the clause it read stays on the entity.
+func TestAKeylessEntityAdoptDeclaresCarriesNoKey(t *testing.T) {
+	ir := &dsl.IR{Entities: []dsl.Entity{{
+		Name: "Thing", Namespace: "shop",
+		// Neither name resolves, so this is a clause with no key behind it.
+		CompositePK: []string{"cart_id", "variant_id"},
+		Fields: []dsl.Field{
+			{Name: "quantity", Type: dsl.FieldType{Name: "int"}},
+		},
+	}}}
+	nameFor := map[string]string{"shop.Thing": "things"}
+
+	dropUndeclarableEntities(ir, nameFor)
+
+	if len(ir.Entities) != 1 {
+		t.Fatalf("the entity was dropped, so this proves nothing: %d left", len(ir.Entities))
+	}
+	e := ir.Entities[0]
+	if !e.Keyless {
+		t.Error("an entity with no resolvable key was not declared keyless")
+	}
+	if len(e.CompositePK) != 0 {
+		t.Errorf("keyless was set beside a primary key %v, which validateEntity refuses",
+			e.CompositePK)
+	}
+}
