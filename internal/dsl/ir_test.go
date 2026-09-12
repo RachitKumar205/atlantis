@@ -1043,7 +1043,12 @@ entity Account in consumer {
   soft_delete by deleted_at
   touch_on_update by touched_at
   index by expr "lower(email)"
-  cache { read_through ttl=10m tag="account:{id}" invalidate_on: write(self) }
+  index partial by email where deleted_at is null
+  has_many children: Child via account
+  cache {
+    read_through ttl=10m tag="account:{id}"
+    invalidate_on: write(self), write(Child where account = self.id)
+  }
 }
 entity Tenanted in consumer {
   id     bigint primary
@@ -1089,6 +1094,55 @@ hypertable Purchase in vendor on purchased_at {
 	}
 	if len(got.Entities) != len(ir.Entities) {
 		t.Errorf("entity count drift: %d then %d", len(ir.Entities), len(got.Entities))
+	}
+
+	// The three clauses whose JSON is hand-written or rewritten during
+	// validation, asserted by value.
+	//
+	// Decoding alone does not hold them: validateEntity reads the columns a
+	// partial-index predicate names, so a predicate that came back empty is
+	// checked against nothing and passes. PredExpr marshals two node kinds to a
+	// flat shape and the rest to a tagged one, and validateEntity assigns
+	// through r.TargetID and inv.TargetID as it resolves them.
+	var account *Entity
+	for i := range got.Entities {
+		if got.Entities[i].ID() == "consumer.Account" {
+			account = &got.Entities[i]
+		}
+	}
+	if account == nil {
+		t.Fatal("consumer.Account is not in the decoded IR")
+	}
+
+	var partial *Index
+	for i := range account.Indexes {
+		if account.Indexes[i].Where != nil {
+			partial = &account.Indexes[i]
+		}
+	}
+	if partial == nil {
+		t.Error("the partial index lost its predicate")
+	} else if cols := partial.Where.Columns(); len(cols) != 1 || cols[0] != "deleted_at" {
+		t.Errorf("the predicate's columns came back as %v, want [deleted_at]", cols)
+	}
+
+	if len(account.Relations) != 1 || account.Relations[0].TargetID != "consumer.Child" {
+		t.Errorf("the relation did not survive resolved: %+v", account.Relations)
+	}
+
+	if account.Cache == nil || len(account.Cache.Invalidate) != 2 {
+		t.Fatalf("the cache lost an invalidation rule: %+v", account.Cache)
+	}
+	var cross *Invalidate
+	for i := range account.Cache.Invalidate {
+		if !account.Cache.Invalidate[i].Self {
+			cross = &account.Cache.Invalidate[i]
+		}
+	}
+	if cross == nil {
+		t.Error("the cross-entity invalidation rule came back as a self rule")
+	} else if cross.TargetID != "consumer.Child" {
+		t.Errorf("the invalidation target came back as %q, want consumer.Child", cross.TargetID)
 	}
 }
 
