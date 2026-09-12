@@ -446,3 +446,12 @@ func TestBuildUpdateSQL_AllPK(t *testing.T) {
 		t.Errorf("buildUpdateSQL should be empty for all-PK entity, got: %s", sql)
 	}
 }
+
+// entityMetaFor builds one entity's meta with the indexes buildSnapshot would
+// have supplied.
+//
+// buildSnapshot refuses an entity with no key columns before it reaches this,
+// so a meta built here can carry no pkCols where a served one cannot.
+func entityMetaFor(e *dsl.Entity, ir *dsl.IR) *entityMeta {
+	return buildEntityMeta(e, ir, buildInboundIndex(ir), procedureWrittenEntities(ir))
+}

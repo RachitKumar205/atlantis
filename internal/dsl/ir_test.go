@@ -1026,3 +1026,104 @@ entity Cart in consumer {
 		t.Errorf("TargetTableName: got %q want %q", f.Ref.TargetTableName, "consumer.accounts")
 	}
 }
+
+// Every clause DecodeJSONIR now validates survives a round trip.
+//
+// The checks run at decode are the ones Lower runs, so a declaration Lower
+// accepts and decode refuses would stop a server booting on a checkpoint it
+// served the day before. One clause per line below, each one validateEntity
+// reads: the risk is a check that reads a field EncodeJSON does not carry.
+func TestIR_DecodeAcceptsEveryValidatedClause(t *testing.T) {
+	ir := mustLower(t, `
+entity Account in consumer {
+  id         bigint primary
+  email      text not null unique
+  deleted_at timestamptz
+  touched_at timestamptz
+  soft_delete by deleted_at
+  touch_on_update by touched_at
+  index by expr "lower(email)"
+  cache { read_through ttl=10m tag="account:{id}" invalidate_on: write(self) }
+}
+entity Tenanted in consumer {
+  id     bigint primary
+  tenant text not null
+  sku    text
+  vendor text
+  partition by tenant
+  unique by vendor, sku
+  index by sku
+}
+entity CartItem in consumer {
+  cart_id    bigint not null
+  variant_id bigint not null
+  quantity   int not null
+  primary by cart_id, variant_id
+}
+entity Summaries in consumer {
+  keyless
+  table "consumer.old_summaries"
+  notes text
+}
+entity Child in consumer {
+  id      bigint primary
+  account bigint references consumer.Account.id on delete cascade
+}
+hypertable Purchase in vendor on purchased_at {
+  id           bigint primary
+  purchased_at timestamptz not null
+  chunk_time_interval 7d
+}
+`)
+	if len(ir.Entities) != 6 {
+		t.Fatalf("fixture lowered %d entities, so it does not cover what it claims", len(ir.Entities))
+	}
+
+	data, err := ir.EncodeJSON()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	got, err := DecodeJSONIR(data)
+	if err != nil {
+		t.Fatalf("decode refused a checkpoint Lower accepted: %v", err)
+	}
+	if len(got.Entities) != len(ir.Entities) {
+		t.Errorf("entity count drift: %d then %d", len(ir.Entities), len(got.Entities))
+	}
+}
+
+// A checkpoint holding the same entity ID twice is refused.
+//
+// byID keeps one of them, so without this the other's references, relations and
+// invalidation targets resolve against the wrong entity's fields, and
+// buildSnapshot serves whichever the map kept. Lower rejects a repeated
+// declaration by source position, which a checkpoint does not carry.
+func TestIR_RefusesADuplicateEntityID(t *testing.T) {
+	ir := mustLower(t, "entity Thing in app {\n  id bigint primary\n  a text\n}\n")
+
+	// The same ID twice, with different fields, so a resolution against the
+	// wrong one is observable.
+	dup := ir.Entities[0]
+	dup.Fields = []Field{
+		{Name: "id", Type: FieldType{Name: "bigint"}, Primary: true, ProtoNumber: 1},
+	}
+	ir.Entities = append(ir.Entities, dup)
+
+	data, err := ir.EncodeJSON()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	got, err := DecodeJSONIR(data)
+	if err == nil {
+		t.Fatal("DecodeJSONIR accepted a checkpoint holding one entity ID twice")
+	}
+	if got != nil {
+		t.Error("DecodeJSONIR returned an IR alongside its error")
+	}
+	if !strings.Contains(err.Error(), "app.Thing") {
+		t.Errorf("error does not name the repeated entity: %v", err)
+	}
+	if !strings.Contains(err.Error(), "twice") {
+		t.Errorf("error does not say what is wrong with it: %v", err)
+	}
+}

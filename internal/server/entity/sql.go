@@ -57,9 +57,24 @@ func buildBatchGetSQL(e *dsl.Entity) string {
 		return fmt.Sprintf("SELECT %s FROM %s WHERE %s = ANY($1)%s",
 			selectList, table, schema.QuoteIdent(pkCols[0].Name), softFilter)
 	}
-	// Defensive fallback — should not happen with a well-formed IR.
-	return fmt.Sprintf("SELECT %s FROM %s WHERE \"id\" = ANY($1)%s",
-		selectList, table, softFilter)
+	return fmt.Sprintf("SELECT %s FROM %s WHERE %s = ANY($1)%s",
+		selectList, table, noKeyColumn(e), softFilter)
+}
+
+// noKeyColumn renders the column reference for an entity with no key column, as
+// a name no table carries.
+//
+// A discovered table often has a column called id that is not part of its key.
+// A clause naming that column succeeds and addresses rows by a column no caller
+// asked for; this one is refused as `column "atlantis_no_key_column_for_x" does
+// not exist`, which names atlantis and the entity.
+//
+// Unreachable through the server: DecodeJSONIR refuses a checkpoint holding such
+// an entity, and buildSnapshot skips the ones declared `keyless`. buildEntityMeta
+// runs before buildProtoDescriptors reports that error, so these strings are
+// still rendered.
+func noKeyColumn(e *dsl.Entity) string {
+	return schema.QuoteIdent("atlantis_no_key_column_for_" + e.Name)
 }
 
 // buildQueryPrefix renders the SELECT ... FROM prefix; WHERE, ORDER BY,
@@ -196,7 +211,7 @@ func buildDeleteSQL(e *dsl.Entity, extraReturning []string) string {
 func pkWhereClause(e *dsl.Entity, startIdx int) string {
 	pkCols := schema.PKColumns(e)
 	if len(pkCols) == 0 {
-		return fmt.Sprintf("\"id\" = $%d", startIdx)
+		return fmt.Sprintf("%s = $%d", noKeyColumn(e), startIdx)
 	}
 	if len(pkCols) == 1 {
 		return fmt.Sprintf("%s = $%d", schema.QuoteIdent(pkCols[0].Name), startIdx)

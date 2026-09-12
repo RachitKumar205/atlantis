@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/schema"
 )
 
 // Suggest is pure over the enriched IR, so these need no database. The value of
@@ -142,4 +143,74 @@ func TestUnindexedForeignKeyIsFlagged(t *testing.T) {
 			t.Error("a foreign key indexed only as a trailing column was treated as covered")
 		}
 	})
+}
+
+// adopt and the server agree on whether an entity has a key.
+//
+// A composite key naming fields the entity does not carry: `primary by` is
+// non-empty, so counting the clause reports a key, while schema.PKColumns
+// resolves each name and returns none. The server decides what publishes an
+// API from PKColumns, so disagreement here means adopt stays quiet about a
+// table that reaches the server with no key columns at all.
+func TestAdoptAndTheServerAgreeOnWhatHasAKey(t *testing.T) {
+	cases := []struct {
+		what string
+		want bool
+		e    dsl.Entity
+	}{
+		{"a composite key naming no field the entity carries", false, dsl.Entity{
+			Name: "Thing", Namespace: "shop",
+			CompositePK: []string{"cart_id", "variant_id"},
+			Fields:      []dsl.Field{{Name: "quantity"}},
+		}},
+		{"a composite key half of which resolves", true, dsl.Entity{
+			Name: "Thing", Namespace: "shop",
+			CompositePK: []string{"cart_id", "gone"},
+			Fields:      []dsl.Field{{Name: "cart_id"}, {Name: "quantity"}},
+		}},
+		{"a resolvable composite key", true, dsl.Entity{
+			Name: "Thing", Namespace: "shop",
+			CompositePK: []string{"cart_id", "variant_id"},
+			Fields:      []dsl.Field{{Name: "cart_id"}, {Name: "variant_id"}},
+		}},
+		{"a single primary field", true, dsl.Entity{
+			Name: "Thing", Namespace: "shop",
+			Fields: []dsl.Field{{Name: "id", Primary: true}},
+		}},
+		{"no key at all", false, dsl.Entity{
+			Name: "Thing", Namespace: "shop",
+			Fields: []dsl.Field{{Name: "notes"}},
+		}},
+	}
+
+	// want is stated per case rather than read from PKColumns. hasPrimaryKey
+	// delegates to PKColumns, so comparing the two compares the implementation
+	// with itself and no change to either can fail it.
+	for _, c := range cases {
+		t.Run(c.what, func(t *testing.T) {
+			e := c.e
+			if got := hasPrimaryKey(&e); got != c.want {
+				t.Errorf("hasPrimaryKey=%v, want %v", got, c.want)
+			}
+			if server := len(schema.PKColumns(&e)) > 0; server != c.want {
+				t.Errorf("the server's PKColumns says %v, want %v", server, c.want)
+			}
+		})
+	}
+}
+
+// The no-primary-key suggestion fires on a composite key that resolves to
+// nothing.
+//
+// The suggestion is the only warning adopt gives about a table whose rows
+// cannot be addressed, and this is the shape that reached production with none.
+func TestAnUnresolvableCompositeKeyIsReportedAsNoPrimaryKey(t *testing.T) {
+	ir := &dsl.IR{Entities: []dsl.Entity{{
+		Name: "Thing", Namespace: "shop",
+		CompositePK: []string{"cart_id", "variant_id"},
+		Fields:      []dsl.Field{{Name: "quantity"}},
+	}}}
+	if _, ok := kinds(Suggest(ir, nil))[SuggestNoPrimaryKey]; !ok {
+		t.Error("a composite key naming no existing field was not reported as having no primary key")
+	}
 }

@@ -249,10 +249,3 @@ func parentsOf(index map[string][]inboundRule, written []string) []string {
 	sort.Strings(out)
 	return out
 }
-
-// entityMetaFor builds one entity's meta with the indexes buildSnapshot would
-// have supplied. Test helper, kept beside the indexes it wires so the two
-// cannot drift.
-func entityMetaFor(e *dsl.Entity, ir *dsl.IR) *entityMeta {
-	return buildEntityMeta(e, ir, buildInboundIndex(ir), procedureWrittenEntities(ir))
-}

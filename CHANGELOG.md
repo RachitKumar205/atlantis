@@ -624,6 +624,84 @@ Two notes on the schema, both of which are decisions rather than oversights:
   role, but only once a policed table exists — a role that bypasses row-level
   security bypasses nothing while every table is exempt.
 
+### Fixed
+
+#### `tide adopt` no longer deletes three declarations from the schema of record
+
+**Affects any organisation whose adopted schema declared `keyless` or
+`ttl_field`, or whose entities had retired a proto field number.**
+Introspection rebuilds each entity field by field, and those three declarations
+were absent from that rebuild, so adopt persisted a checkpoint without them:
+
+| Dropped | Consequence |
+|---|---|
+| `keyless` | the entity reached the checkpoint with no key and no flag, which panicked the server at boot |
+| `ttl_field` | expiry stopped for that entity, and a sweep with nothing to delete reports the same as no sweep |
+| retired proto numbers | a retired field number became free again, so an old client decodes a new field as the one that was retired |
+
+All three are carried, which is what this package's rule says to do with
+metadata that has no SQL footprint.
+
+`chunk_time_interval` is dropped in the same way and is **not** fixed here.
+Carrying it would make the two sides of `diffChunkTimeInterval` equal by
+construction, so adopt could never report a hypertable whose interval had
+changed — the same false agreement this package already records for
+`partition_field`. Not carrying it diffs against zero on every adopt, which is
+a visible false positive the next apply corrects. Reading it from
+`_timescaledb_catalog.dimension` is the fix, and is filed rather than rushed.
+
+#### An entity with no primary key is refused by name instead of panicking
+
+**A checkpoint that loaded before this commit may now be refused, and the load
+is refused as a whole.** One malformed entity still stops the server starting —
+that is deliberate, not an oversight. Serving the other entities and quietly
+omitting the broken one would answer "unknown method" for it and hide the
+drift; refusing names the entity and the declaration that fixes it.
+
+What changes is the diagnosis, not the blast radius. Before, the server
+panicked during load with no indication of which entity was at fault:
+
+```
+panic: runtime error: index out of range [0] with length 0
+  internal/server/entity/proto.go  buildBatchGetRequest
+```
+
+Nothing re-checked the declaration on the way in: `DecodeJSONIR` read the
+version and nothing else, and the per-entity rules had one caller, `Lower`,
+which a server never runs.
+
+- `DecodeJSONIR` now runs the same per-entity rules `Lower` does, so a
+  malformed checkpoint fails the load with the entity named. This covers every
+  malformation of this shape rather than the one that was hit.
+- The descriptor builder and the proto emitter both return an error where they
+  indexed a key that was not there.
+- `tidectl adopt` and the server now answer "does this entity have a key" with
+  the same function. A `primary by` naming fields the entity does not carry was
+  a key to one and zero columns to the other, so adopt stayed quiet about a
+  table the server could not address.
+- A checkpoint holding two entities with the same ID is refused. The map that
+  resolves references keeps one of them, so the other's references, relations
+  and invalidation targets resolved against the wrong entity's fields.
+- Three places fabricated an `"id"` column for an entity with no key — two
+  generated statements and the emitted proto contract. A discovered table often
+  has a column called `id` that is not part of its key, and against one of those
+  the clause succeeded and addressed rows by a column no caller named. A fourth,
+  `primaryPKName` in the keyset-query emitter, still does; it sits behind the
+  same `keyless` gate and emits a proto constant that does not compile, so it
+  fails at build rather than at run time.
+
+Beyond boot, every reader of the checkpoint now refuses a malformed one: `tide
+apply` will not build on a malformed prior checkpoint, a diff or rollback
+naming a malformed historical version is refused rather than served, and the
+TTL sweeper and workflow loader — which read only `ttl_field` and `workflows` —
+stop as well. The last two are a wider blast radius than the defect being
+fixed; they are read-only consumers that cannot tell one bad entity from a
+schema they should not act on.
+
+Declaring `keyless` on a key-less table remains valid and is unaffected,
+including on a hypertable with a `ttl_field` — expiry reads the ttl column and
+the time dimension, neither of which needs a key.
+
 ### Changed
 
 #### Each organisation has its own atlantis, reached with its own credentials — breaking

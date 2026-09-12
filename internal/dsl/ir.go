@@ -1809,8 +1809,16 @@ func (ir *IR) EncodeJSON() ([]byte, error) {
 	return json.MarshalIndent(ir, "", "  ")
 }
 
-// DecodeJSONIR is the inverse of EncodeJSON. Refuses checkpoints written by a
-// future IR version.
+// DecodeJSONIR is the inverse of EncodeJSON. Refuses a checkpoint written by a
+// future IR version, one holding two entities with the same ID, and one holding
+// a declaration Lower does not accept.
+//
+// The entity checks are the ones Lower runs. A server never calls Lower, so
+// this function is the only thing between the checkpoint bytes and the
+// descriptor builders, and a field those builders require reaches them as a
+// zero value when the checkpoint omits it.
+//
+// Each refusal names its entity.
 func DecodeJSONIR(data []byte) (*IR, error) {
 	var ir IR
 	if err := json.Unmarshal(data, &ir); err != nil {
@@ -1818,6 +1826,35 @@ func DecodeJSONIR(data []byte) (*IR, error) {
 	}
 	if ir.Version > CurrentIRVersion {
 		return nil, fmt.Errorf("ir checkpoint version %d newer than supported %d", ir.Version, CurrentIRVersion)
+	}
+
+	var errs []error
+
+	// One entity per ID, checked before the map is used to resolve anything.
+	//
+	// Lower rejects a duplicate declaration by source position, which a
+	// checkpoint does not carry. byID keeps the last of a repeated ID, so the
+	// first one's references, relations and invalidation targets would resolve
+	// against the other entity's fields, and buildSnapshot would serve one of
+	// the two.
+	byID := make(map[string]*Entity, len(ir.Entities))
+	for i := range ir.Entities {
+		id := ir.Entities[i].ID()
+		if _, dup := byID[id]; dup {
+			errs = append(errs, fmt.Errorf("%s: declared twice", id))
+			continue
+		}
+		byID[id] = &ir.Entities[i]
+	}
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("ir checkpoint: %w", errors.Join(errs...))
+	}
+
+	for i := range ir.Entities {
+		errs = append(errs, validateEntity(&ir.Entities[i], byID)...)
+	}
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("ir checkpoint: %w", errors.Join(errs...))
 	}
 	return &ir, nil
 }

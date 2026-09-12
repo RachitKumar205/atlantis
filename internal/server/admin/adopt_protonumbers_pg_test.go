@@ -14,9 +14,9 @@ import (
 // Numbers are not derivable from the IR — they are assigned once and carried,
 // so an unnumbered checkpoint is unserveable rather than merely incomplete.
 //
-// Nothing on the load path repairs one: DecodeJSONIR is a json.Unmarshal, and
-// neither boot nor the LISTEN reload assigns numbers. The only place that can
-// hold this is the write.
+// Nothing on the load path repairs one: DecodeJSONIR checks the declaration
+// but assigns nothing, and neither boot nor the LISTEN reload assigns numbers.
+// The only place that can hold this is the write.
 //
 // The failure is silent at write time and total at read time. A server that
 // loads a checkpoint whose fields all sit at 0 registers no entity at all,

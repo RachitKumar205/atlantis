@@ -84,6 +84,21 @@ func buildProtoDescriptors(e *dsl.Entity, includeRefs []schema.InboundRef) (prot
 
 	// PK columns for request shells.
 	pkCols := schema.PKColumns(e)
+
+	// An entity with no key columns reaches here only from a checkpoint the
+	// validator refuses: `keyless` declares a table with no key, and
+	// buildSnapshot skips those before calling this.
+	//
+	// The request shells below index pkCols[0], which panics with `index out of
+	// range [0] with length 0`.
+	//
+	// buildSnapshot propagates this and the whole load fails. Dropping the one
+	// entity instead answers unknown method to every caller that asks for it,
+	// and leaves the declaration uncorrected.
+	if len(pkCols) == 0 {
+		return nil, fmt.Errorf("no key columns and not declared `keyless`: " +
+			"this checkpoint holds a declaration the validator refuses")
+	}
 	composite := len(pkCols) > 1
 
 	// Composite PK wrapper message.

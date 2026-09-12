@@ -110,7 +110,16 @@ func TestSweeperDropsChunksOnATenantIsolatedHypertable(t *testing.T) {
 
 	ir := &dsl.IR{Entities: []dsl.Entity{{
 		Name: "Event", Namespace: "swp",
-		Kind:           dsl.EntityKindHypertable,
+		Kind: dsl.EntityKindHypertable,
+		// The table above has no primary key, which is the ordinary shape for a
+		// time-series hypertable, so the declaration that matches it is
+		// `keyless`.
+		//
+		// Required, not cosmetic: Handle reads the checkpoint through
+		// DecodeJSONIR, which refuses an entity with neither a key nor this
+		// flag. What the flag does not change is the sweep — selection is on
+		// TtlField alone, and chunks drop by the time dimension.
+		Keyless:        true,
 		TimeField:      "occurred_at",
 		TtlField:       "occurred_at",
 		PartitionField: "tenant",
@@ -210,6 +219,7 @@ func TestSweeperKeepsTheChunkHoldingLiveRows(t *testing.T) {
 	ir := &dsl.IR{Entities: []dsl.Entity{{
 		Name: "Live", Namespace: "swp",
 		Kind:      dsl.EntityKindHypertable,
+		Keyless:   true,
 		TimeField: "occurred_at",
 		TtlField:  "occurred_at",
 		Fields: []dsl.Field{

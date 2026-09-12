@@ -138,3 +138,39 @@ func TestAKeylessEntityIsDiffed(t *testing.T) {
 		t.Errorf("adding a keyless entity produced no change: %v", d.All())
 	}
 }
+
+// An entity with no key and no `keyless` is refused by the proto emitter.
+//
+// servesAPI is true for it, so the six RPCs are emitted and every one addresses
+// a row by key. An `id` column was substituted for the missing key: a
+// discovered table often has one that is not part of its key, so the emitted
+// contract compiled and addressed rows by a column no caller named, and where
+// no such column existed the generated server failed at its first request.
+//
+// Hand-built rather than parsed, because Lower refuses this declaration — which
+// is why it reaches the emitter only from a checkpoint.
+func TestTheProtoEmitterRefusesAnEntityWithNoKey(t *testing.T) {
+	ir := &dsl.IR{Version: 1, Entities: []dsl.Entity{{
+		Name: "Summaries", Namespace: "app", Kind: dsl.EntityKindRegular,
+		Fields: []dsl.Field{
+			{Name: "id", Type: dsl.FieldType{Name: "bigint"}, ProtoNumber: 1},
+			{Name: "notes", Type: dsl.FieldType{Name: "text"}, ProtoNumber: 2},
+		},
+	}}}
+
+	out, err := EmitProto(ir)
+	if err == nil {
+		t.Fatalf("EmitProto accepted an entity with no key columns and emitted %d file(s)", len(out))
+	}
+	if !strings.Contains(err.Error(), "app.Summaries") {
+		t.Errorf("error does not name the entity: %v", err)
+	}
+	if !strings.Contains(err.Error(), "keyless") {
+		t.Errorf("error does not name the declaration that would fix it: %v", err)
+	}
+	// EmitProto returns nil on the first entity that fails, so there is nothing
+	// to inspect for a fabricated key: the refusal is the whole assertion.
+	if out != nil {
+		t.Errorf("EmitProto returned %d file(s) alongside its error", len(out))
+	}
+}

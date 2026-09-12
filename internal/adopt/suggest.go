@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/rachitkumar205/atlantis/internal/dsl"
+	"github.com/rachitkumar205/atlantis/internal/schema"
 )
 
 // Suggestion is one change worth making to a discovered table.
@@ -137,16 +138,13 @@ func tenantSuggestions(e *dsl.Entity, table string) []Suggestion {
 }
 
 // hasPrimaryKey reports whether the entity has one, single or composite.
+//
+// schema.PKColumns is the function the server resolves an entity's key columns
+// with, and it drops each name in `primary by` that no field answers to.
+// Counting the clause alone reports a key where the server resolves no column,
+// and this suggestion is the only warning a table with no addressable row gets.
 func hasPrimaryKey(e *dsl.Entity) bool {
-	if len(e.CompositePK) > 0 {
-		return true
-	}
-	for i := range e.Fields {
-		if e.Fields[i].Primary {
-			return true
-		}
-	}
-	return false
+	return len(schema.PKColumns(e)) > 0
 }
 
 // unindexedForeignKeys proposes an index for each foreign key with none.

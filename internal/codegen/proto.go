@@ -188,9 +188,10 @@ type pkColumn struct {
 
 // resolvePKColumns turns an entity's PK declaration into the ordered
 // list of (name, proto type) pairs the request-shell emitter needs.
-// Returns nil for entities that have neither a single primary field
-// nor a composite list — those slip through with the historical
-// (id int64) fallback in the request-shell emitter.
+//
+// Returns nil for an entity with neither a single primary field nor a
+// resolvable composite list, and the caller refuses such an entity: every
+// request shell it would emit addresses a row by key.
 func resolvePKColumns(e *dsl.Entity) []pkColumn {
 	if len(e.CompositePK) > 0 {
 		out := make([]pkColumn, 0, len(e.CompositePK))
@@ -306,8 +307,19 @@ func emitProtoEntity(e *dsl.Entity, inbound []inboundRef) (ProtoFile, error) {
 	b.WriteString("}\n\n")
 
 	pkCols := resolvePKColumns(e)
+
+	// The six RPCs below each address a row by key, and servesAPI has already
+	// admitted this entity.
+	//
+	// Substituting an `id` column satisfies the emitter and not the database: a
+	// discovered table often has one that is not part of its key, so the
+	// contract compiles and addresses rows by a column no caller named, and
+	// where the table has no such column the generated server fails at its
+	// first request with `column "id" does not exist`.
 	if len(pkCols) == 0 {
-		pkCols = []pkColumn{{Name: "id", ProtoType: "int64"}}
+		return ProtoFile{}, fmt.Errorf(
+			"entity %s has no key columns and is not declared `keyless`: "+
+				"the six generated RPCs each address a row by key", e.ID())
 	}
 	composite := len(pkCols) > 1
 
