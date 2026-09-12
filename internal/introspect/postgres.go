@@ -19,6 +19,10 @@
 // report a table whose isolation the database is not enforcing. It is read from
 // pg_policies; see loadPartitionPolicies.
 //
+// chunk_time_interval has a SQL footprint too and is neither copied nor read,
+// so it diffs against zero on every adopt. #126 reads it from
+// _timescaledb_catalog.dimension.
+//
 // Only the tables the declared IR claims are queried. Every entity in
 // declaredIR.Entities resolves to a physical (schema, table) pair, from its
 // `table "schema.name"` override or the codegen default
@@ -105,6 +109,22 @@ func FromPostgres(ctx context.Context, q Querier, declaredIR *dsl.IR) (*dsl.IR, 
 			Indexes:            append([]dsl.Index(nil), e.Indexes...),
 			Uniques:            append([]dsl.UniqueSpec(nil), e.Uniques...),
 			Checks:             append([]dsl.TableCheck(nil), e.Checks...),
+
+			// Three declarations with no SQL footprint, carried by the rule
+			// this package's doc states. adopt persists the result as a
+			// checkpoint, so a declaration missing here is one deleted from the
+			// schema of record: expiry stops without TtlField, a retired field
+			// number becomes free again without RetiredProtoNumbers, and an
+			// entity with no key loses the flag that says so.
+			//
+			// chunk_time_interval is not here. diffChunkTimeInterval reads it,
+			// and copying a diffed attribute makes the two sides equal by
+			// construction — the same false agreement this package's doc
+			// records for partition_field. Reading it from
+			// _timescaledb_catalog.dimension is what would carry it (#126).
+			TtlField:            e.TtlField,
+			RetiredProtoNumbers: append([]int(nil), e.RetiredProtoNumbers...),
+			Keyless:             e.Keyless,
 		}
 	}
 
