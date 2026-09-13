@@ -27,24 +27,53 @@
 # assert at boot — set it on the provisioned Deployment so a wrong image is
 # refused at startup rather than discovered in a licence review.
 
-FROM ghcr.io/cloudnative-pg/postgresql:17
+# The repo's signing key, fetched on a supported distro.
+#
+# curl and gnupg are the only reason this image needed packages from Debian's
+# pool, and bullseye's pool no longer serves what its index advertises:
+#
+#     Err:2 .../libnghttp2-14 1.43.0-1+deb11u3  404  Not Found
+#     E: Unable to fetch some archives
+#
+# libnghttp2 is a dependency of curl, and curl is here only to fetch this key.
+# Fetching it in a stage that is not EOL takes the whole chain out of the
+# build, and nothing from deb.debian.org is installed below.
+FROM debian:bookworm-slim AS key
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg; \
+    curl -fsSL https://packagecloud.io/timescale/timescaledb/gpgkey \
+        | gpg --dearmor -o /timescaledb.gpg
+
+# Pinned to a patch version, not the floating `:17`, so a rebuild cannot move
+# the database binaries under a running deployment without the tag changing.
+# Both tags resolve to the same digest today.
+#
+# This is Debian bullseye, which is out of regular support. CloudNativePG
+# publishes no bookworm or trixie build of 17.11 — `17-bookworm` is 17.6, five
+# patch releases back — so a supported distro today means older Postgres
+# binaries over data directories 17.11 initialised. Move when upstream ships
+# 17.x on a supported suite.
+FROM ghcr.io/cloudnative-pg/postgresql:17.11
 
 # Root only for the install; the final USER goes back to postgres. CNPG will not
 # run an image whose default user is root.
 USER root
 
-# One layer, and the apt lists are removed in it, so the index never reaches the
-# published image. gnupg and curl are build-time only and are removed again.
+COPY --from=key /timescaledb.gpg /etc/apt/trusted.gpg.d/timescaledb.gpg
+
+# VERSION_CODENAME out of /etc/os-release, which every Debian carries, so the
+# suite is read without installing lsb-release.
+#
+# The apt lists are removed in the same layer, so the index never reaches the
+# published image. Only the two timescaledb packages are installed, both from
+# packagecloud.
 RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release; \
-    curl -fsSL https://packagecloud.io/timescale/timescaledb/gpgkey \
-        | gpg --dearmor -o /etc/apt/trusted.gpg.d/timescaledb.gpg; \
-    echo "deb https://packagecloud.io/timescale/timescaledb/debian/ $(lsb_release -c -s) main" \
+    . /etc/os-release; \
+    echo "deb https://packagecloud.io/timescale/timescaledb/debian/ ${VERSION_CODENAME} main" \
         > /etc/apt/sources.list.d/timescaledb.list; \
     apt-get update; \
     apt-get install -y --no-install-recommends timescaledb-2-oss-postgresql-17; \
-    apt-get purge -y --auto-remove curl gnupg lsb-release; \
     rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/timescaledb.list
 
 # uid 26, not the name: CNPG matches on the numeric id.
