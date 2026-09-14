@@ -128,6 +128,42 @@ var (
 		Help:      "Console credential rotations that failed; sustained non-zero means an expiry is coming.",
 	})
 
+	// tenantImageDrift counts organisations running an image other than the one
+	// this provisioner is configured with, by kind.
+	//
+	// No reconcile pass rolls an organisation, so this does not return to zero
+	// after a deploy: it stays at the fleet size until somebody runs `cloud org
+	// roll`. That is the signal — a number equal to the organisation count means
+	// a deploy reached the control plane and no tenant.
+	//
+	// One path does move an image without a request. A provisioning attempt that
+	// failed after the workloads existed retries through Ensure, which applies
+	// whatever is configured then, so an organisation in backoff across a deploy
+	// is rebuilt onto the new images. It is not ready, so it is not counted here.
+	//
+	// Not published by a pass that could read no organisation at all: zero reads
+	// as a converged fleet, and the alert is an equality against the
+	// organisation count. See publishImageDrift.
+	//
+	// The kind label is the closed set of three in provision.AllImageKinds.
+	tenantImageDrift = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "atlantis",
+		Subsystem: "provisioning",
+		Name:      "tenant_image_drift",
+		Help:      "Ready organisations whose running image differs from the configured one. Labels: kind (server|signer|postgres).",
+	}, []string{"kind"})
+
+	// imageRollsTotal counts workloads re-applied by an operator's request.
+	//
+	// Labelled by kind because they differ in cost: a postgres roll restarts a
+	// single-instance database, and an unexplained one is worth finding.
+	imageRollsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "atlantis",
+		Subsystem: "provisioning",
+		Name:      "image_rolls_total",
+		Help:      "Images replaced on request. Labels: kind (server|signer|postgres), outcome (rolled|failed).",
+	}, []string{"kind", "outcome"})
+
 	// leaseExtensionFailuresTotal counts heartbeats that did not land.
 	//
 	// A failure here means this process no longer owns the row it is working

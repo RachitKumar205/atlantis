@@ -13,6 +13,64 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Added
 
+#### Existing organisations can be moved onto a new image
+
+A deploy reached the control plane and no tenant. The provisioner applies the
+configured server, signer and Postgres images when it builds an organisation,
+and the reconcile pass that visits every ready organisation compared existence
+only — so an organisation stayed on the image it was provisioned with, for ever.
+Three were found running three different server images while the control plane
+was several deploys ahead of all of them, and the only way to correct one was
+`kubectl` against each namespace in turn.
+
+**The reconcile pass now reports the gap** as
+`atlantis_provisioning_tenant_image_drift{kind="server|signer|postgres"}`. It
+does not fall on its own: a value equal to the organisation count after a deploy
+means no tenant has been rolled. An organisation whose images could not be read
+is left out of the count and named in an error line.
+
+**`cloud org roll` does the work**, and no reconcile pass does:
+
+```
+cloud org roll -org acme                    # server and signer
+cloud org roll -org acme -postgres -yes     # and the database, which restarts
+cloud org roll -all                         # every ready organisation
+cloud org roll -all -cancel                 # withdraw what has not started
+```
+
+**Rolling is never automatic.** A reconcile pass that corrected drift would
+restart every customer's database on the pass after a deploy carrying a new
+Postgres image, with nobody asking and nothing to stop it half way.
+
+**A Postgres roll restarts the database** — about 110 seconds. The tenant
+`Cluster` sets no `primaryUpdateStrategy`, so CloudNativePG's default of
+`unsupervised` with an in-place restart applies, and a tenant runs one instance.
+That is why `-postgres` needs `-yes`, and why the provisioner rolls
+`PROVISIONER_MAX_ROLLS_PER_PASS` organisations per pass — one by default, so
+`-all` takes one organisation down at a time rather than the fleet at once.
+
+**Three things a roll does that its name does not say.** It re-applies the whole
+workload, so resources, probes and replica count converge onto today's
+configuration. A server roll starts a pod that runs `migrations/infra` before it
+serves, which for an organisation several deploys behind is a schema change
+rather than a restart. And a roll onto a tag that has not moved writes the same
+object and restarts nothing — `PROVISIONER_POSTGRES_IMAGE` carries a version tag
+rather than a digest, so rebuilding under an existing tag does not move it. The
+audit row records what the cluster runs after the apply, so a roll that changed
+nothing says so.
+
+**The queue keeps moving past a request that cannot succeed.** Rolls are ordered
+by failed attempts before age. A request the cluster always refuses — a storage
+size CloudNativePG will not shrink, a namespace stuck terminating — would
+otherwise keep the oldest timestamp, take the only slot on every pass, and stop
+every other organisation in the fleet from ever rolling.
+
+The command marks a row, as `cloud org rotate-console` does: the workloads are
+in the organisation's namespace and Cloud holds no Kubernetes credentials.
+Migration `cloud/0015` adds `image_roll_requested_at`, `image_roll_kinds` and
+`image_roll_attempts` to `cloud.org_provisioning`. Deleting an organisation
+withdraws its queued roll, so restoring one does not act on a month-old intent.
+
 #### The Python client is published
 
 `pip install atlantis-client` resolves. Two documentation pages, the CLI

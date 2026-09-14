@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -52,6 +53,13 @@ type Queue interface {
 	// Secret these live in, so it marks the row and this process does the work.
 	ConsoleRotationRequests(ctx context.Context) (map[string]time.Time, error)
 	ClearConsoleRotationRequest(ctx context.Context, org string, seen time.Time) error
+
+	// Operator-requested image rolls, the same shape for the same reason: the
+	// workloads are in the organisation's namespace and Cloud holds no
+	// Kubernetes credentials.
+	ImageRollRequests(ctx context.Context) (map[string]store.ImageRoll, error)
+	ClearImageRollRequest(ctx context.Context, org string, seen time.Time) error
+	RecordImageRollFailure(ctx context.Context, org string, seen time.Time) error
 }
 
 // Cluster is where organisations are built.
@@ -78,6 +86,16 @@ type Cluster interface {
 	RotateConsoleCredentials(
 		ctx context.Context, org string, renewWithin time.Duration, force bool,
 	) (provision.ConsoleRotation, error)
+
+	// Images reports what one organisation is running, and Configured what this
+	// provisioner would give an organisation it built now. The two disagree for
+	// every organisation provisioned before the last deploy.
+	Images(ctx context.Context, org string) (provision.Images, error)
+	Configured() provision.Images
+
+	// RollImages re-applies the workloads for the named kinds, which is what
+	// puts the configured images into use.
+	RollImages(ctx context.Context, org string, kinds []provision.ImageKind) error
 }
 
 // RegisterFunc records a provisioned organisation with the console.
@@ -290,14 +308,22 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-// reconcile puts back in the queue any organisation the cluster has lost, and
-// checks the console certificate's remaining life, this being the only loop
-// that visits every ready organisation.
+// reconcile puts back in the queue any organisation the cluster has lost,
+// checks the console certificate's remaining life, reports which organisations
+// are running an image other than the configured one, and honours image rolls
+// an operator has asked for. This is the only loop that visits every ready
+// organisation.
 //
 // Nothing else reads a ready row: the claim predicate covers 'pending',
-// 'failed' and expired 'provisioning' only. It compares existence, not shape.
+// 'failed' and expired 'provisioning' only.
 //
 // Requeue rather than repair: the authority went with the namespace.
+//
+// Drift is reported, not corrected. Ensure applies the configured images when
+// it builds an organisation and nothing revisits one, so a control-plane deploy
+// reaches no tenant until `cloud org roll` marks a row. Rolling here instead
+// would restart every customer's database on the pass after a deploy carrying a
+// new Postgres image.
 func (w *Worker) reconcile(ctx context.Context) {
 	if !w.Healthy() || ctx.Err() != nil {
 		return
@@ -325,8 +351,24 @@ func (w *Worker) reconcile(ctx context.Context) {
 		requests = nil
 	}
 
+	// Read on the same terms, and for the same reason.
+	rolls, err := w.q.ImageRollRequests(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			w.log.Error("could not read image roll requests; "+
+				"reconciling without them this pass", "err", err)
+		}
+		rolls = nil
+	}
+
 	// The soonest console credential expiry seen this pass, for the gauge below.
 	var soonest time.Time
+
+	// What each organisation is running, for the organisations this pass could
+	// read it from. Absent entries are the ones whose read failed; the drift
+	// gauge counts what was measured and the error naming the organisation is
+	// what says the tally is short.
+	running := map[string]provision.Images{}
 
 	c := w.currentCluster()
 	for _, org := range orgs {
@@ -358,6 +400,20 @@ func (w *Worker) reconcile(ctx context.Context) {
 					soonest = exp
 				}
 			}
+
+			if imgs, rerr := c.Images(ctx, org); rerr != nil {
+				if ctx.Err() == nil {
+					// Both consequences, because the second is the one that
+					// leaves an operator waiting: a roll they asked for does not
+					// run this pass either, and a read that keeps failing is a
+					// roll that never runs.
+					w.log.Error("could not read an organisation's images, so it is "+
+						"missing from this pass's drift count and any roll it has "+
+						"asked for does not run this pass", "org", org, "err", rerr)
+				}
+			} else {
+				running[org] = imgs
+			}
 			continue
 		}
 
@@ -386,6 +442,228 @@ func (w *Worker) reconcile(ctx context.Context) {
 	if !soonest.IsZero() {
 		consoleCertSecondsLeft.Set(time.Until(soonest).Seconds())
 	}
+
+	w.publishImageDrift(c, running, len(orgs))
+	w.runImageRolls(ctx, c, running, rolls)
+}
+
+// publishImageDrift counts the organisations running something other than the
+// configured image, by kind.
+//
+// Over the organisations this pass could read, so a cluster that refused one
+// read produces a tally one short rather than a gap in the series. The error
+// logged at the read is what names that organisation.
+//
+// An organisation missing a workload reads as an empty image, which counts as
+// drift: absent is not the configured image either, and an atlantis Deployment
+// somebody deleted is worth the same attention as an old one.
+//
+// Nothing is published when a non-empty fleet was measured in full nowhere, for
+// the reason consoleCertSecondsLeft is not published on an empty pass: zero
+// here reads as "every organisation is current", and the documented alert is an
+// equality against the organisation count. A pass whose every read was refused
+// would otherwise report health. The previous value stands.
+func (w *Worker) publishImageDrift(c Cluster, running map[string]provision.Images, ready int) {
+	if len(running) == 0 && ready > 0 {
+		w.log.Error("no organisation's images could be read this pass; the drift "+
+			"gauges keep their previous values", "ready", ready)
+		return
+	}
+	want := c.Configured()
+	for _, kind := range provision.AllImageKinds {
+		n := 0
+		for _, got := range running {
+			if got.Get(kind) != want.Get(kind) {
+				n++
+			}
+		}
+		tenantImageDrift.WithLabelValues(string(kind)).Set(float64(n))
+	}
+}
+
+// runImageRolls honours the rolls an operator has asked for, fewest failed
+// attempts first and at most MaxRollsPerPass of them.
+//
+// The cap is why `cloud org roll -all` is safe to type: marking fifty
+// organisations rolls them over fifty passes rather than restarting fifty
+// databases at once.
+//
+// Attempts order before age, and that ordering is what keeps the queue moving.
+// A request that cannot succeed — a storage size CloudNativePG refuses to
+// shrink, a namespace stuck terminating — holds the oldest timestamp for ever,
+// so ordering on age alone gives it the only slot on every pass and no other
+// organisation in the fleet is rolled. One failure moves it behind everything
+// untried.
+//
+// Only organisations this pass found in the cluster. A request against one that
+// has gone stays outstanding, and the requeue above is what is happening to it.
+func (w *Worker) runImageRolls(
+	ctx context.Context, c Cluster, running map[string]provision.Images, rolls map[string]store.ImageRoll,
+) {
+	if len(rolls) == 0 {
+		return
+	}
+	pending := make([]string, 0, len(rolls))
+	for org := range rolls {
+		if _, present := running[org]; present {
+			pending = append(pending, org)
+		}
+	}
+	// Name last, so two requests made in the same transaction still order.
+	sort.Slice(pending, func(i, j int) bool {
+		a, b := rolls[pending[i]], rolls[pending[j]]
+		if a.Attempts != b.Attempts {
+			return a.Attempts < b.Attempts
+		}
+		if !a.RequestedAt.Equal(b.RequestedAt) {
+			return a.RequestedAt.Before(b.RequestedAt)
+		}
+		return pending[i] < pending[j]
+	})
+
+	for i, org := range pending {
+		if ctx.Err() != nil {
+			return
+		}
+		if i >= w.cfg.MaxRollsPerPass {
+			// The organisations waiting are named, and the head is named
+			// separately with its failure count: a queue that is not draining
+			// looks exactly like a queue being throttled, and the count is what
+			// separates them.
+			w.log.Info("more image rolls are queued than this pass will run",
+				"queued", len(pending), "ran", i, "max_per_pass", w.cfg.MaxRollsPerPass,
+				"waiting", strings.Join(pending[i:], ","),
+				"head", org, "head_failed_attempts", rolls[org].Attempts)
+			return
+		}
+		if !w.rollImages(ctx, c, org, rolls[org]) {
+			// The cluster refused this process's credentials. Every remaining
+			// roll would fail against the same client, and the main loop treats
+			// this as a reason to end the pass.
+			return
+		}
+	}
+}
+
+// rollImages re-applies one organisation's workloads and clears the request.
+//
+// Reports whether the pass may continue. False means the cluster refused this
+// process's credentials, which is not about this organisation and would fail
+// every remaining roll the same way.
+//
+// The request is cleared only when every kind applied. A roll that failed
+// halfway leaves the mark with its attempt counted, so the next pass retries it
+// behind whatever has not been tried.
+//
+// The audit row records what the cluster reports AFTER the apply, not what was
+// configured. Re-applying an object that already carries the configured image
+// writes the same object and starts no pod — which is the right outcome, and
+// recording the configured value would report a roll that did not happen. This
+// is reachable: PROVISIONER_POSTGRES_IMAGE carries a version tag rather than a
+// digest, so rebuilding and pushing that tag leaves the string unchanged.
+func (w *Worker) rollImages(ctx context.Context, c Cluster, org string, r store.ImageRoll) bool {
+	kinds, unknown := parseImageKinds(r.Kinds)
+	for _, name := range unknown {
+		// Stored by a command that knew the set, so this is a row written by
+		// something else or by a newer build. Named rather than skipped
+		// silently, and the kinds that did parse still run.
+		w.log.Error("an image roll request names a kind this build does not have",
+			"org", org, "kind", name)
+	}
+	if len(kinds) == 0 {
+		w.log.Error("an image roll request names no kind this build can roll; "+
+			"clearing it so it does not repeat every pass", "org", org, "kinds", r.Kinds)
+		w.clearImageRoll(ctx, org, r.RequestedAt)
+		return true
+	}
+
+	before, _ := c.Images(ctx, org)
+
+	if err := c.RollImages(ctx, org, kinds); err != nil {
+		if ctx.Err() != nil {
+			return false
+		}
+		if credentialError(err) {
+			w.log.Warn("cannot roll images: the cluster refused this provisioner's "+
+				"credentials", "org", org, "err", err)
+			w.reconnect()
+			// Counted, so a provisioner whose credentials expired does not read
+			// as a fleet with no rolls and no failures.
+			for _, k := range kinds {
+				imageRollsTotal.WithLabelValues(string(k), "failed").Inc()
+			}
+			return false
+		}
+		for _, k := range kinds {
+			imageRollsTotal.WithLabelValues(string(k), "failed").Inc()
+		}
+		w.log.Error("could not roll an organisation's images; the request stays "+
+			"outstanding and the next pass retries it, behind anything untried",
+			"org", org, "failed_attempts", r.Attempts+1, "err", err)
+		if ferr := w.q.RecordImageRollFailure(ctx, org, r.RequestedAt); ferr != nil {
+			w.log.Error("could not count a failed image roll; a request that cannot "+
+				"succeed may hold the queue", "org", org, "err", ferr)
+		}
+		return true
+	}
+
+	after, aerr := c.Images(ctx, org)
+	if aerr != nil {
+		// The apply succeeded, so the request is satisfied. What is lost is the
+		// report of what the workloads now carry.
+		w.log.Error("rolled an organisation's images but could not read back what "+
+			"it now runs", "org", org, "err", aerr)
+		after = before
+	}
+
+	changed := make([]string, 0, len(kinds))
+	var unchanged []string
+	for _, k := range kinds {
+		imageRollsTotal.WithLabelValues(string(k), "rolled").Inc()
+		if after.Get(k) == before.Get(k) {
+			unchanged = append(unchanged, string(k))
+			continue
+		}
+		changed = append(changed, string(k)+"="+after.Get(k))
+	}
+	if len(unchanged) > 0 {
+		// Not a failure. A tag that did not move writes the same object and
+		// starts no pod, and an operator who rebuilt an image under a tag it
+		// already had needs to know the roll changed nothing.
+		w.log.Info("some kinds were already on the configured image, so nothing "+
+			"restarted for them", "org", org, "unchanged", strings.Join(unchanged, ","))
+	}
+
+	// One key holding the whole list, so the detail is a map literal. The
+	// analytics catalogue reads the keys a call site writes by parsing it, and a
+	// map built in a loop carries keys nothing can read.
+	w.audit(ctx, org, "org.images_rolled", map[string]any{
+		"changed":   strings.Join(changed, " "),
+		"unchanged": strings.Join(unchanged, ","),
+	})
+	w.clearImageRoll(ctx, org, r.RequestedAt)
+	return true
+}
+
+func (w *Worker) clearImageRoll(ctx context.Context, org string, seen time.Time) {
+	if err := w.q.ClearImageRollRequest(ctx, org, seen); err != nil {
+		w.log.Error("rolled an organisation's images but could not clear the "+
+			"request; it will roll again next pass", "org", org, "err", err)
+	}
+}
+
+// parseImageKinds splits stored kind names into the ones this build knows and
+// the ones it does not.
+func parseImageKinds(names []string) (kinds []provision.ImageKind, unknown []string) {
+	for _, n := range names {
+		k, err := provision.ParseImageKind(n)
+		if err != nil {
+			unknown = append(unknown, n)
+			continue
+		}
+		kinds = append(kinds, k)
+	}
+	return kinds, unknown
 }
 
 // drain provisions organisations until the queue is empty or something breaks.

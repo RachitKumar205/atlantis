@@ -77,6 +77,13 @@ func (s *Store) SoftDeleteOrg(ctx context.Context, org, userID string, window ti
 			       deleted_at  = NOW(),
 			       purge_after = NOW() + ($2 * interval '1 millisecond'),
 			       claimed_by = NULL, claimed_until = NULL,
+			       -- An outstanding image roll does not survive deletion. The
+			       -- provisioner skips an organisation that is not ready, so a
+			       -- request kept here would do nothing until a restore, and
+			       -- then restart the database on an intent weeks old.
+			       image_roll_requested_at = NULL,
+			       image_roll_kinds        = NULL,
+			       image_roll_attempts     = 0,
 			       updated_at  = NOW()
 			 WHERE org = $1 AND state = 'ready'
 		`, org, window.Milliseconds())

@@ -47,6 +47,16 @@ const (
 	// lifetime rotates on every pass; a much narrower one removes the margin.
 	DefaultConsoleCertRenewWithin = 10 * 24 * time.Hour
 
+	// DefaultMaxRollsPerPass is how many organisations one reconcile pass
+	// re-applies workloads for.
+	//
+	// One. A roll of the postgres kind changes a CloudNativePG imageName, and
+	// the tenant cluster runs a single instance under the default unsupervised
+	// strategy, so the database restarts: about 110 seconds measured. At one per
+	// pass a fleet-wide `cloud org roll -all` takes one organisation down at a
+	// time, five minutes apart, and can be stopped after the first.
+	DefaultMaxRollsPerPass = 1
+
 	// DefaultMetricsAddr is loopback. The address matters, not the port:
 	// DefaultHealthAddr binds every interface so the kubelet can reach the
 	// probes, and tenant namespaces restrict ingress rather than egress, so a
@@ -122,6 +132,10 @@ type Config struct {
 	// DefaultConsoleCertRenewWithin for how the number is chosen.
 	ConsoleCertRenewWithin time.Duration
 
+	// MaxRollsPerPass bounds how many organisations one reconcile pass rolls
+	// images for. See DefaultMaxRollsPerPass.
+	MaxRollsPerPass int
+
 	// Lease is how long a claim is held before another provisioner may take it.
 	// Heartbeat extends it while a wait is in progress.
 	Lease     time.Duration
@@ -169,11 +183,12 @@ func ConfigFromEnv() (Config, error) {
 		ReconcileInterval: envDuration("PROVISIONER_RECONCILE_INTERVAL", DefaultReconcileInterval),
 		ConsoleCertRenewWithin: envDuration("PROVISIONER_CONSOLE_CERT_RENEW_WITHIN",
 			DefaultConsoleCertRenewWithin),
-		Heartbeat:   envDuration("PROVISIONER_LEASE_HEARTBEAT", DefaultHeartbeat),
-		RetryBase:   envDuration("PROVISIONER_RETRY_BASE", DefaultRetryBase),
-		RetryMax:    envDuration("PROVISIONER_RETRY_MAX", DefaultRetryMax),
-		HealthAddr:  envOr("PROVISIONER_HEALTH_LISTEN", DefaultHealthAddr),
-		MetricsAddr: envOr("PROVISIONER_METRICS_LISTEN", DefaultMetricsAddr),
+		MaxRollsPerPass: int(envInt32("PROVISIONER_MAX_ROLLS_PER_PASS", DefaultMaxRollsPerPass)),
+		Heartbeat:       envDuration("PROVISIONER_LEASE_HEARTBEAT", DefaultHeartbeat),
+		RetryBase:       envDuration("PROVISIONER_RETRY_BASE", DefaultRetryBase),
+		RetryMax:        envDuration("PROVISIONER_RETRY_MAX", DefaultRetryMax),
+		HealthAddr:      envOr("PROVISIONER_HEALTH_LISTEN", DefaultHealthAddr),
+		MetricsAddr:     envOr("PROVISIONER_METRICS_LISTEN", DefaultMetricsAddr),
 
 		Provision: provision.Config{
 			// Set here because the lease is sized from it.
@@ -306,6 +321,11 @@ func (c Config) validate() error {
 	// Zero would mean rotating only a certificate that has already expired.
 	if c.ConsoleCertRenewWithin <= 0 {
 		return errors.New("PROVISIONER_CONSOLE_CERT_RENEW_WITHIN must be positive")
+	}
+	// Zero would accept every roll request and act on none, so an operator's
+	// command would report success and nothing would happen.
+	if c.MaxRollsPerPass <= 0 {
+		return errors.New("PROVISIONER_MAX_ROLLS_PER_PASS must be positive")
 	}
 	if c.ClaimedBy == "" {
 		return errors.New("PROVISIONER_NAME must not be empty")

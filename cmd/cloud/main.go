@@ -40,6 +40,7 @@ import (
 
 	"github.com/rachitkumar205/atlantis/internal/cloud/identity"
 	"github.com/rachitkumar205/atlantis/internal/cloud/issuer"
+	"github.com/rachitkumar205/atlantis/internal/cloud/provision"
 	"github.com/rachitkumar205/atlantis/internal/cloud/provision/certs"
 	cloudsrv "github.com/rachitkumar205/atlantis/internal/cloud/server"
 	"github.com/rachitkumar205/atlantis/internal/cloud/store"
@@ -102,6 +103,8 @@ usage:
   cloud org register [flags]   point an organisation at an atlantis built by hand
   cloud signing-key -path P    create the assertion signing key, if absent
   cloud data-key               print a keyset for a console's CONSOLE_DATA_KEY
+
+  cloud org roll [flags]       put the configured images into use on running orgs
 
   cloud org rotate-console     replace the console's credentials for one org
   cloud org revoke-console     cut the console off from one organisation
@@ -512,7 +515,7 @@ func memberChange(args []string, add bool, log *slog.Logger) error {
 // while before it is provisioned.
 func org(args []string, log *slog.Logger) error {
 	if len(args) == 0 {
-		return errors.New(`cloud org: expected a subcommand (create, status, register, purge, rotate-console, revoke-console, restore-console)`)
+		return errors.New(`cloud org: expected a subcommand (create, status, register, purge, roll, rotate-console, revoke-console, restore-console)`)
 	}
 	switch args[0] {
 	case "create":
@@ -527,6 +530,8 @@ func org(args []string, log *slog.Logger) error {
 		return orgRevokeConsole(args[1:], log)
 	case "restore-console":
 		return orgRestoreConsole(args[1:], log)
+	case "roll":
+		return orgRoll(args[1:], log)
 	case "rotate-console":
 		return orgRotateConsole(args[1:], log)
 	default:
@@ -1196,6 +1201,167 @@ UPDATE atlantis.caller_identities SET revoked_at = NULL WHERE caller = $1`,
 // No -yes. Rotation replaces a credential with an equivalent one and
 // re-registers it, and the console picks the new one up within its refresh
 // interval. The confirmation lives on `revoke-console`.
+// orgRoll queues an image roll for one organisation or for every ready one.
+//
+// Ensure applies the configured images when it builds an organisation, and
+// reconcile never revisits one, so an organisation keeps the images it was
+// provisioned with. Three were found on three different server images while the
+// control plane was several deploys ahead of all of them.
+//
+// A request, like rotate-console: the workloads are in the organisation's
+// namespace and this process holds no Kubernetes credentials.
+//
+// -postgres is opt-in and -yes is required with it. Rolling the database
+// changes a CloudNativePG imageName, and a tenant cluster runs one instance
+// under the default unsupervised strategy, so the organisation's database goes
+// down for the length of a restart.
+func orgRoll(args []string, log *slog.Logger) error {
+	fs := flag.NewFlagSet("org roll", flag.ExitOnError)
+	name := fs.String("org", "", "organisation name; omit with -all")
+	all := fs.Bool("all", false, "every ready organisation")
+	withPG := fs.Bool("postgres", false, "also roll Postgres, which restarts the database")
+	yes := fs.Bool("yes", false, "confirm a Postgres roll")
+	withdraw := fs.Bool("cancel", false, "withdraw queued rolls instead of queueing them")
+	dbURL := cloudDBFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	switch {
+	case *name == "" && !*all:
+		return errors.New("-org is required, or -all for every ready organisation")
+	case *name != "" && *all:
+		return errors.New("-org and -all are alternatives; pass one")
+	}
+	if *withdraw && (*withPG || *yes) {
+		return errors.New("-cancel withdraws whatever was queued; it takes no -postgres or -yes")
+	}
+	if *withPG && !*yes {
+		return errors.New("refusing to roll Postgres without -yes: a tenant cluster " +
+			"runs one instance, so changing its image restarts the database and the " +
+			"organisation is down for about 110 seconds")
+	}
+
+	kinds := []string{string(provision.ImageServer), string(provision.ImageSigner)}
+	if *withPG {
+		kinds = append(kinds, string(provision.ImagePostgres))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	db, err := openCloud(ctx, *dbURL, log)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	targets := []string{*name}
+	if *all {
+		// Ready only. An organisation still provisioning gets the configured
+		// images when it finishes, so a request against one asks for work that
+		// has already been queued by a different route.
+		targets, err = db.ReadyOrgs(ctx)
+		if err != nil {
+			return err
+		}
+		if len(targets) == 0 {
+			fmt.Println("no ready organisations, so nothing to roll")
+			return nil
+		}
+	} else {
+		// Read first, so a name typed from memory that matches nothing says so.
+		p, perr := db.ProvisioningFor(ctx, *name)
+		if errors.Is(perr, store.ErrNotFound) {
+			return fmt.Errorf("%s has no provisioning row, so there is no organisation "+
+				"for the provisioner to roll", *name)
+		}
+		if perr != nil {
+			return perr
+		}
+		if p.State != store.StateReady {
+			fmt.Printf("note: %s is %s, not ready. The provisioner only rolls "+
+				"organisations it can see in the cluster, so this request waits "+
+				"until it is serving.\n", *name, p.State)
+		}
+	}
+
+	if *withdraw {
+		withdrawn := 0
+		var failed []string
+		for _, org := range targets {
+			was, cerr := db.CancelImageRoll(ctx, org)
+			if cerr != nil {
+				failed = append(failed, fmt.Sprintf("%s (%v)", org, cerr))
+				continue
+			}
+			if was {
+				withdrawn++
+			}
+		}
+		fmt.Printf("withdrew %d queued roll(s) of %d organisation(s) checked\n",
+			withdrawn, len(targets))
+		if len(failed) > 0 {
+			return fmt.Errorf("could not withdraw: %s", strings.Join(failed, ", "))
+		}
+		fmt.Println()
+		fmt.Println("    A roll already in progress on the provisioner is not stopped —")
+		fmt.Println("    only one that has not been started. Watch the provisioner's log.")
+		return nil
+	}
+
+	// Every organisation is attempted, and what was queued is reported whatever
+	// happened. Returning on the first failure would leave an arbitrary prefix
+	// of the fleet marked and say nothing about which — with -postgres that is
+	// an unknown number of database restarts queued by a command that exited
+	// non-zero.
+	queued := make([]string, 0, len(targets))
+	var failed []string
+	for _, org := range targets {
+		if err := db.RequestImageRoll(ctx, org, kinds); err != nil {
+			failed = append(failed, fmt.Sprintf("%s (%v)", org, err))
+			continue
+		}
+		queued = append(queued, org)
+	}
+
+	fmt.Printf("queued an image roll for %d organisation(s): %s\n",
+		len(queued), strings.Join(kinds, ", "))
+	fmt.Println()
+	fmt.Println("    The provisioner does the work on its next reconcile pass, which is")
+	fmt.Println("    PROVISIONER_RECONCILE_INTERVAL away — five minutes by default.")
+	fmt.Println("    Watch the provisioner's log, not this one.")
+	fmt.Println()
+	fmt.Println("    It rolls PROVISIONER_MAX_ROLLS_PER_PASS organisations per pass, one")
+	fmt.Println("    by default, so the fleet converges over several passes. Withdraw")
+	fmt.Println("    what has not started yet with:")
+	if *all {
+		fmt.Println("      cloud org roll -all -cancel")
+	} else {
+		fmt.Printf("      cloud org roll -org %s -cancel\n", *name)
+	}
+	fmt.Println()
+	fmt.Println("    A roll re-applies the whole workload, not only its image field, so")
+	fmt.Println("    it also converges resources, probes and replica count onto what")
+	fmt.Println("    this provisioner is configured with today.")
+	fmt.Println()
+	fmt.Println("    Rolling the server starts a pod that runs the infra migrations")
+	fmt.Println("    before it serves. An organisation several deploys behind is a")
+	fmt.Println("    schema change, not a restart.")
+	fmt.Println()
+	fmt.Println("    A kind already on the configured image is re-applied and nothing")
+	fmt.Println("    restarts. Rebuilding an image under a tag it already had does not")
+	fmt.Println("    move it; push a new tag.")
+	if !*withPG {
+		fmt.Println()
+		fmt.Println("    Postgres is NOT included. Add -postgres -yes to roll it, accepting")
+		fmt.Println("    a restart of each organisation's database.")
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("could not queue: %s", strings.Join(failed, ", "))
+	}
+	return nil
+}
+
 func orgRotateConsole(args []string, log *slog.Logger) error {
 	fs := flag.NewFlagSet("org rotate-console", flag.ExitOnError)
 	name := fs.String("org", "", "organisation name")

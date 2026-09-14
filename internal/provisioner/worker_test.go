@@ -87,9 +87,22 @@ type fakeQueue struct {
 	rotateRequestsErr error
 	rotateCleared     []clearedRotation
 	rotateClearErr    error
+
+	// Image roll requests, the same shape. rollCleared is the part that decides
+	// whether a roll repeats on every pass.
+	rollRequests    map[string]store.ImageRoll
+	rollRequestsErr error
+	rollCleared     []clearedRoll
+	rollClearErr    error
+	rollFailures    []clearedRoll
 }
 
 type clearedRotation struct {
+	org  string
+	seen time.Time
+}
+
+type clearedRoll struct {
 	org  string
 	seen time.Time
 }
@@ -283,6 +296,17 @@ type fakeCluster struct {
 	// and watch the gauge recover.
 	rotateExpiry  map[string]time.Time
 	rotatedExpiry time.Time
+
+	// Images. configured is what this cluster would give a new organisation;
+	// images is what each one is actually running, and an organisation absent
+	// from it is running the configured set. imagesErr and rollErr are per
+	// organisation so a test can fail one and watch the pass carry on with the
+	// rest.
+	configured provision.Images
+	images     map[string]provision.Images
+	imagesErr  map[string]error
+	rollCalls  []rollCall
+	rollErr    map[string]error
 }
 
 func (f *fakeCluster) Ensure(_ context.Context, spec provision.Spec) (provision.Status, error) {
@@ -356,11 +380,14 @@ func testConfig() Config {
 		// non-positive window — a rotation that only fires once the certificate
 		// has expired is the outage it exists to prevent.
 		ConsoleCertRenewWithin: 10 * 24 * time.Hour,
-		Lease:                  time.Second,
-		Heartbeat:              5 * time.Millisecond,
-		RetryBase:              time.Second,
-		RetryMax:               time.Minute,
-		HealthAddr:             "127.0.0.1:0",
+		// Here for the same reason: validate refuses zero, which would accept
+		// every roll request and act on none. A test about the cap sets its own.
+		MaxRollsPerPass: DefaultMaxRollsPerPass,
+		Lease:           time.Second,
+		Heartbeat:       5 * time.Millisecond,
+		RetryBase:       time.Second,
+		RetryMax:        time.Minute,
+		HealthAddr:      "127.0.0.1:0",
 		Provision: provision.Config{
 			ExternalHost:  "atl-dev.test",
 			ServerImage:   "atlantis-server:local",
@@ -1160,6 +1187,114 @@ func (f *fakeQueue) ClearConsoleRotationRequest(ctx context.Context, org string,
 		return f.rotateClearErr
 	}
 	f.rotateCleared = append(f.rotateCleared, clearedRotation{org: org, seen: seen})
+	return nil
+}
+
+func (f *fakeQueue) ImageRollRequests(ctx context.Context) (map[string]store.ImageRoll, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctxErr(ctx); err != nil {
+		return nil, err
+	}
+	if f.rollRequestsErr != nil {
+		return nil, f.rollRequestsErr
+	}
+	out := map[string]store.ImageRoll{}
+	for k, v := range f.rollRequests {
+		out[k] = v
+	}
+	return out, nil
+}
+
+func (f *fakeQueue) ClearImageRollRequest(ctx context.Context, org string, seen time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	if f.rollClearErr != nil {
+		return f.rollClearErr
+	}
+	f.rollCleared = append(f.rollCleared, clearedRoll{org: org, seen: seen})
+	return nil
+}
+
+// RecordImageRollFailure counts a failed attempt. The worker orders on the
+// count, so a test asserting the queue drains needs the count to move.
+func (f *fakeQueue) RecordImageRollFailure(ctx context.Context, org string, seen time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	f.rollFailures = append(f.rollFailures, clearedRoll{org: org, seen: seen})
+	if r, ok := f.rollRequests[org]; ok && !r.RequestedAt.After(seen) {
+		r.Attempts++
+		f.rollRequests[org] = r
+	}
+	return nil
+}
+
+// rollCall records one RollImages call, so a test can assert which kinds the
+// worker asked for and not merely that it asked.
+type rollCall struct {
+	org   string
+	kinds []provision.ImageKind
+}
+
+func (c *fakeCluster) Configured() provision.Images {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.configured
+}
+
+func (c *fakeCluster) Images(ctx context.Context, org string) (provision.Images, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := ctxErr(ctx); err != nil {
+		return provision.Images{}, err
+	}
+	if err := c.imagesErr[org]; err != nil {
+		return provision.Images{}, err
+	}
+	// An organisation the test said nothing about is running the configured
+	// images. Defaulting the other way would make every existing reconcile test
+	// report three drifted organisations.
+	imgs, ok := c.images[org]
+	if !ok {
+		return c.configured, nil
+	}
+	return imgs, nil
+}
+
+func (c *fakeCluster) RollImages(ctx context.Context, org string, kinds []provision.ImageKind) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := ctxErr(ctx); err != nil {
+		return err
+	}
+	c.rollCalls = append(c.rollCalls, rollCall{org: org, kinds: append([]provision.ImageKind(nil), kinds...)})
+	if err := c.rollErr[org]; err != nil {
+		return err
+	}
+	// The roll is what puts the configured images into use, so the fake has to
+	// move them. Without this a test could not tell a roll that worked from one
+	// that reported success and changed nothing.
+	if c.images == nil {
+		c.images = map[string]provision.Images{}
+	}
+	got := c.images[org]
+	for _, k := range kinds {
+		switch k {
+		case provision.ImageServer:
+			got.Server = c.configured.Server
+		case provision.ImageSigner:
+			got.Signer = c.configured.Signer
+		case provision.ImagePostgres:
+			got.Postgres = c.configured.Postgres
+		}
+	}
+	c.images[org] = got
 	return nil
 }
 

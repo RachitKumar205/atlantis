@@ -164,6 +164,12 @@ var CloudActions = map[string]Projection{
 	"org.console_credentials_rotated": {
 		Why: "a scheduled certificate rotation, which answers no product question",
 	},
+
+	"org.images_rolled": {
+		Why: "an operator moving an organisation onto a built image, which answers " +
+			"no product question. The audit row is where a restart is traced back " +
+			"to the command that asked for it",
+	},
 }
 
 // Not reported: starting a CLI login. The route is unauthenticated and no

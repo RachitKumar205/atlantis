@@ -587,6 +587,7 @@ factor and the assertion signing key.
 | `PROVISIONER_POLL_INTERVAL` | `10s` | How often an idle queue is checked. |
 | `PROVISIONER_RECONCILE_INTERVAL` | `5m` | How often ready organisations are checked against the cluster and requeued if absent. |
 | `PROVISIONER_CONSOLE_CERT_RENEW_WITHIN` | `240h` (10 days) | How much life the console's certificate for an organisation must have left before a reconcile pass replaces it. Paired with the 30-day certificate lifetime, so a credential is replaced with a third of its life to spare. |
+| `PROVISIONER_MAX_ROLLS_PER_PASS` | `1` | How many organisations one reconcile pass re-applies workloads for, after `cloud org roll` has asked. One takes a single database down at a time when the request covers Postgres. |
 | `PROVISIONER_RETRY_BASE` / `_MAX` | `30s` / `30m` | Backoff after a failed attempt: doubling, capped. |
 | `PROVISIONER_NAME` | the hostname | Names this process in the queue. In Kubernetes the hostname is the pod name. |
 
@@ -619,10 +620,59 @@ sweeper to run.
 
 **It reconciles absence, not shape.** Every `PROVISIONER_RECONCILE_INTERVAL` it
 asks the cluster whether each ready organisation still exists, and requeues the
-ones that do not. It does **not** detect drift inside a namespace — a Deployment
+ones that do not. It does **not** repair drift inside a namespace — a Deployment
 scaled to zero, a NetworkPolicy removed, a Secret edited — because a partial
 version of that would report an organisation as reconciled while leaving whole
 classes of drift unchecked.
+
+**It does report image drift, and repairs it only when asked.** The same pass
+compares each organisation's running server, signer and Postgres images with
+`PROVISIONER_SERVER_IMAGE`, `PROVISIONER_SIGNER_IMAGE` and
+`PROVISIONER_POSTGRES_IMAGE`, and publishes the count as
+`atlantis_provisioning_tenant_image_drift{kind}`. Nothing rolls an organisation
+without `cloud org roll`:
+
+```
+cloud org roll -org acme                    # server and signer
+cloud org roll -org acme -postgres -yes     # and the database, which restarts
+cloud org roll -all                         # every ready organisation
+cloud org roll -all -cancel                 # withdraw what has not started
+```
+
+The command marks `cloud.org_provisioning.image_roll_requested_at`, the same
+shape `cloud org rotate-console` uses, and the provisioner does the work on its
+next pass — at most `PROVISIONER_MAX_ROLLS_PER_PASS` organisations, fewest
+failed attempts first and oldest request next. The attempt count is what keeps
+the queue moving: a request that can never succeed would otherwise hold the only
+slot on every pass and no other organisation would roll.
+
+Three things a roll does that its name does not say:
+
+| | |
+|---|---|
+| It re-applies the whole workload | Resources, probes and replica count converge onto what this provisioner is configured with today, not only the image |
+| A server roll runs migrations | The new pod applies `migrations/infra` before it serves. An organisation several deploys behind is a schema change, not a restart |
+| A Postgres roll restarts the database | The CloudNativePG `imageName` changes and a tenant runs one instance under the default `unsupervised` strategy — about 110 seconds |
+
+**A roll onto a tag that has not moved changes nothing.** Re-applying an
+identical object writes no new pod template, so nothing restarts, and
+`PROVISIONER_POSTGRES_IMAGE` carries a version tag rather than a digest —
+rebuilding under a tag that already exists does not move it. Push a new tag. The
+audit row records what the cluster runs after the apply, so a roll that changed
+nothing says so rather than claiming the configured image.
+
+**Watch `atlantis_provisioning_tenant_image_drift`.** It does not fall on its
+own, so a value equal to the organisation count after a deploy means the deploy
+reached the control plane and no tenant. An organisation whose images could not
+be read is left out of the count, named in an error line, and not rolled that
+pass either. A pass that could read no organisation at all publishes nothing and
+the previous values stand, because zero here reads as a converged fleet.
+
+**The cap is per process.** Two provisioner replicas each roll up to
+`PROVISIONER_MAX_ROLLS_PER_PASS`. They normally converge on the same
+organisation and a duplicate apply of an identical object is harmless, but run
+one replica while rolling Postgres across the fleet if one database at a time
+is what you need.
 
 **The one exception is the console's certificate**, which the same pass replaces
 when it is within `PROVISIONER_CONSOLE_CERT_RENEW_WITHIN` of expiring. That is
