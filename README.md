@@ -6,9 +6,18 @@ schema, a typed Go client, a gRPC data plane with per-entity opt-in
 caching, and the cache-invalidation logic. Schema changes are planned,
 approved, and applied through the platform.
 
-This repository is private: the source is not published, and no outside
-contributions are accepted. Release artifacts for the `tide` CLI are
-published to the public releases bucket.
+**The source is published to be read, not to be used.** atlantis is
+proprietary — not open source. You may read it, and compile and run it locally
+to evaluate it. Production use, redistribution, hosting, and derivative works
+are not permitted, and outside contributions are not accepted. See
+[LICENSE](LICENSE).
+
+The two client libraries are the exception: `clients/go` and `clients/python`
+are Apache 2.0, because callers have to link them to talk to a server. Each
+carries its own LICENSE.
+
+Release artifacts for the `tide` CLI are published to the public releases
+bucket.
 
 ## Documentation
 
@@ -37,8 +46,8 @@ published to the public releases bucket.
 
 Local setup, the test matrix, and the codegen loop are covered in
 [`ops/local-development.md`](ops/local-development.md). CI runs lint and
-tests on every pull request, plus an offline link check over the Markdown
-tree when Markdown changes; run lint and tests locally before pushing.
+tests on every change, plus an offline link check over the Markdown tree when
+Markdown changes; run lint and tests locally before pushing.
 
 ## Naming
 
