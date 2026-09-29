@@ -260,6 +260,79 @@ func TestARequestIsNotApprovedByThePersonWhoMadeIt(t *testing.T) {
 	}
 }
 
+// TestAPlanRecordsWhoAskedByName reads the requester's name and email back
+// through every RPC that returns a plan, and through the re-open of an
+// expired request.
+func TestAPlanRecordsWhoAskedByName(t *testing.T) {
+	svc := depScopeService(t)
+	tierFixture(t, svc, "reqname")
+	ctx := context.Background()
+
+	src := tierSrc(tierV2Destructive, "reqname")
+	plan := depScopePlan(t, svc, "reqname", "coil.atl", src)
+	apply := func(actor, email, name string) {
+		t.Helper()
+		_, err := svc.ApplyMigration(ctx, &adminpb.ApplyMigrationRequest{
+			Caller: "reqname", PlanId: plan.GetPlanId(), Files: depScopeFiles("coil.atl", src),
+			CheckpointHash: plan.GetCheckpointHash(),
+			Actor:          actor, ActorEmail: email, ActorName: name,
+		})
+		if err == nil {
+			t.Fatal("the destructive apply was not refused")
+		}
+	}
+	check := func(where string, got *adminpb.SchemaPlanSummary, actor, email, name string) {
+		t.Helper()
+		if got.GetRequestedByActor() != actor || got.GetRequestedByActorEmail() != email ||
+			got.GetRequestedByActorName() != name {
+			t.Errorf("%s: requester = %s %q <%s>, want %s %q <%s>", where,
+				got.GetRequestedByActor(), got.GetRequestedByActorName(), got.GetRequestedByActorEmail(),
+				actor, name, email)
+		}
+	}
+	list := func() *adminpb.SchemaPlanSummary {
+		t.Helper()
+		out, err := svc.ListSchemaPlans(ctx, &adminpb.ListSchemaPlansRequest{Caller: "reqname"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out.GetPlans()) != 1 {
+			t.Fatalf("ListSchemaPlans returned %d plans, want 1", len(out.GetPlans()))
+		}
+		return out.GetPlans()[0]
+	}
+
+	apply("console:usr_1", "ada@example.com", "Ada Lovelace")
+	got, err := svc.GetSchemaPlan(ctx, &adminpb.GetSchemaPlanRequest{PlanId: plan.GetPlanId()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("GetSchemaPlan", got.GetPlan().GetSummary(), "console:usr_1", "ada@example.com", "Ada Lovelace")
+
+	// A pending request keeps the person who filed it, so the name shown
+	// matches the principal the self-approval refusal compares.
+	apply("console:usr_3", "grace@example.com", "Grace Hopper")
+	check("ListSchemaPlans while pending", list(), "console:usr_1", "ada@example.com", "Ada Lovelace")
+
+	// An expired request is re-filed by the next apply, under that apply's
+	// requester.
+	if _, err := svc.pool.Exec(ctx, `UPDATE atlantis.schema_plans
+SET expires_at = now() - interval '1 minute' WHERE plan_id = $1`, plan.GetPlanId()); err != nil {
+		t.Fatal(err)
+	}
+	apply("console:usr_3", "grace@example.com", "Grace Hopper")
+	check("ListSchemaPlans after the re-open", list(), "console:usr_3", "grace@example.com", "Grace Hopper")
+
+	approved, err := svc.ApproveSchemaPlan(ctx, &adminpb.ApproveSchemaPlanRequest{
+		PlanId: plan.GetPlanId(), DecidedBy: "two@example.com", DecidedByRole: "admin",
+		DecidedByActor: "console:usr_2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("ApproveSchemaPlan", approved.GetPlan(), "console:usr_3", "grace@example.com", "Grace Hopper")
+}
+
 func TestSelfApprovalYieldsToAnOverrideAndIsRecorded(t *testing.T) {
 	svc := depScopeService(t)
 	tierFixture(t, svc, "selfov")

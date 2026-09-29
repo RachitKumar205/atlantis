@@ -69,9 +69,13 @@ func cmdRollback(args []string) int {
 	}
 	defer func() { _ = client.Close() }()
 
+	actor := cfg.actor()
 	resp, err := client.RollbackSchema(ctx, &adminpb.RollbackSchemaRequest{
-		ToVersion: *toVersion,
-		Caller:    cfg.Caller,
+		ToVersion:  *toVersion,
+		Caller:     cfg.Caller,
+		Actor:      actor.ID,
+		ActorEmail: actor.Email,
+		ActorName:  actor.Name,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide rollback:", err)

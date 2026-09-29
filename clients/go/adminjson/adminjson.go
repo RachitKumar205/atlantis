@@ -25,6 +25,7 @@ package adminjson
 import (
 	"encoding/base64"
 	"encoding/json"
+	"unicode/utf8"
 
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -109,6 +110,68 @@ func MarshalIndentInlining(m proto.Message, fields ...string) ([]byte, error) {
 		return b, nil
 	}
 	return json.MarshalIndent(inlined, "", "  ")
+}
+
+// MarshalIndentText is MarshalIndent with the named `bytes` fields rendered as
+// the UTF-8 text they hold, at any depth. It is for fields that carry source
+// text, such as an .atl file's content.
+//
+// A named field that is absent, empty, or not valid UTF-8 is left exactly as
+// protojson rendered it.
+func MarshalIndentText(m proto.Message, fields ...string) ([]byte, error) {
+	b, err := MarshalIndent(m)
+	if err != nil || len(fields) == 0 {
+		return b, err
+	}
+	var doc any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return b, nil //nolint:nilerr // protojson's output is returned unchanged
+	}
+	want := make(map[string]bool, len(fields))
+	for _, f := range fields {
+		want[f] = true
+	}
+	decoded, changed := decodeBase64Text(doc, want)
+	if !changed {
+		return b, nil
+	}
+	return json.MarshalIndent(decoded, "", "  ")
+}
+
+// decodeBase64Text walks a decoded JSON tree, replacing any string value under
+// a named key with the UTF-8 text it base64-decodes to.
+func decodeBase64Text(node any, want map[string]bool) (any, bool) {
+	switch v := node.(type) {
+	case map[string]any:
+		changed := false
+		for key, child := range v {
+			if want[key] {
+				if s, ok := child.(string); ok && s != "" {
+					if raw, err := base64.StdEncoding.DecodeString(s); err == nil && utf8.Valid(raw) {
+						v[key] = string(raw)
+						changed = true
+						continue
+					}
+				}
+			}
+			if replaced, sub := decodeBase64Text(child, want); sub {
+				v[key] = replaced
+				changed = true
+			}
+		}
+		return v, changed
+	case []any:
+		changed := false
+		for i, child := range v {
+			if replaced, sub := decodeBase64Text(child, want); sub {
+				v[i] = replaced
+				changed = true
+			}
+		}
+		return v, changed
+	default:
+		return node, false
+	}
 }
 
 // inlineBase64JSON walks a decoded JSON tree, replacing any string value under

@@ -795,6 +795,21 @@ Adding a `references` field to an existing entity emitted its foreign key twice,
 and the second `ADD CONSTRAINT` failed with SQLSTATE 42710. The migration now
 adds it once.
 
+#### The Approvals queue shows who asked, and what they asked for
+
+A request filed by `tide apply` read "(unattributed)", and its proposed `.atl`
+files showed as base64. The console now sends file content as text, on the
+Approvals card and on `GET /api/schema`, whose entity search in the command bar
+found nothing. The card shows the files and the SQL as highlighted code.
+
+`tide login` records the Atlantis Cloud account it signed in as, and `tide
+apply`, `tide apply --backfill` and `tide rollback` send it. The server keeps
+the account's name and email on the request (migration `infra/0043`), and the
+card shows the name. `ATL_ACTOR`, `ATL_ACTOR_EMAIL` and `ATL_ACTOR_NAME` name
+the person in CI. A machine enrolled with a token names no person until they
+are set.
+
+
 #### `tide adopt` no longer deletes three declarations from the schema of record
 
 **Affects any organisation whose adopted schema declared `keyless` or

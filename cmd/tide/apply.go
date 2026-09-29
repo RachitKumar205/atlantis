@@ -256,10 +256,14 @@ func doBeginBackfill(ctx context.Context, client *adminClient, cfg *tideConfig, 
 	// their contents rather than their paths. The property that holds
 	// regardless of either is that the request has no channel for raw SQL at
 	// all.
+	actor := cfg.actor()
 	resp, err := client.BeginBackfillPlan(ctx, &adminpb.BeginBackfillPlanRequest{
-		Caller: cfg.Caller,
-		PlanId: plan.GetPlanId(),
-		Files:  files,
+		Caller:     cfg.Caller,
+		PlanId:     plan.GetPlanId(),
+		Files:      files,
+		Actor:      actor.ID,
+		ActorEmail: actor.Email,
+		ActorName:  actor.Name,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "tide backfill:", err)
@@ -310,11 +314,15 @@ func doApply(ctx context.Context, client *adminClient, cfg *tideConfig, plan *ad
 	// re-emits the DDL from these files against the checkpoint the hash pins,
 	// so the statements that run are codegen's output for the submitted schema
 	// rather than a string the client chose.
+	actor := cfg.actor()
 	req := &adminpb.ApplyMigrationRequest{
 		Caller:         cfg.Caller,
 		PlanId:         plan.GetPlanId(),
 		Files:          files,
 		CheckpointHash: plan.GetCheckpointHash(),
+		Actor:          actor.ID,
+		ActorEmail:     actor.Email,
+		ActorName:      actor.Name,
 	}
 	applyResp, err := client.ApplyMigration(ctx, req)
 	if err != nil && status.Code(err) == codes.FailedPrecondition && wait > 0 {

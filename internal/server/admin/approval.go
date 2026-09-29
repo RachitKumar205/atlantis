@@ -369,6 +369,10 @@ type gateRequest struct {
 	// Actor is the request's untrusted human attribution, stamped onto the
 	// plan row so a decision can be compared against it.
 	Actor string
+
+	// ActorEmail and ActorName are recorded as given, for display only.
+	ActorEmail string
+	ActorName  string
 }
 
 // approvalRequired is the refusal a caller sees when a human has to decide.
@@ -428,6 +432,11 @@ type schemaPlan struct {
 	RequestedByActor string
 	DecidedVia       string
 
+	// RequestedByActorEmail and RequestedByActorName are the apply's own
+	// words for RequestedByActor, for display.
+	RequestedByActorEmail string
+	RequestedByActorName  string
+
 	// RehearsalID and Verdict denormalize the latest rehearsal of this
 	// plan's exact content, for the queue's rendering. The gate never reads
 	// them — it looks the verdict up itself, with the freshness bound.
@@ -455,7 +464,7 @@ func loadSchemaPlan(ctx context.Context, q pgxQuerier, planID string) (schemaPla
 SELECT plan_id, caller, change_class, files_hash, base_checkpoint_hash, up_sql,
        state, requested_by, created_at, expires_at, decided_by, decided_by_role,
        decided_at, decision_reason, requested_by_actor, decided_via, diff,
-       rehearsal_id, verdict
+       rehearsal_id, verdict, requested_by_actor_email, requested_by_actor_name
 FROM atlantis.schema_plans WHERE plan_id = $1`, planID)
 	if err != nil {
 		return schemaPlan{}, false, err
@@ -468,7 +477,8 @@ FROM atlantis.schema_plans WHERE plan_id = $1`, planID)
 	if err := rows.Scan(&p.PlanID, &p.Caller, &p.ChangeClass, &p.FilesHash, &p.BaseHash,
 		&p.UpSQL, &p.State, &p.RequestedBy, &p.CreatedAt, &p.ExpiresAt,
 		&p.DecidedBy, &p.DecidedByRole, &p.DecidedAt, &p.DecisionReason,
-		&p.RequestedByActor, &p.DecidedVia, &p.Diff, &p.RehearsalID, &p.Verdict); err != nil {
+		&p.RequestedByActor, &p.DecidedVia, &p.Diff, &p.RehearsalID, &p.Verdict,
+		&p.RequestedByActorEmail, &p.RequestedByActorName); err != nil {
 		return schemaPlan{}, false, err
 	}
 	return p, true, rows.Err()
@@ -509,8 +519,9 @@ func (s *Service) recordPendingPlan(ctx context.Context, g gateRequest, class ad
 	_, err = s.pool.Exec(ctx, `
 INSERT INTO atlantis.schema_plans
     (plan_id, caller, change_class, files, files_hash, diff, up_sql, down_sql,
-     base_checkpoint_hash, state, requested_by, created_at, expires_at, requested_by_actor)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+     base_checkpoint_hash, state, requested_by, created_at, expires_at, requested_by_actor,
+     requested_by_actor_email, requested_by_actor_name)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 ON CONFLICT (plan_id) DO UPDATE SET
     files                = EXCLUDED.files,
     files_hash           = EXCLUDED.files_hash,
@@ -523,6 +534,8 @@ ON CONFLICT (plan_id) DO UPDATE SET
     created_at           = EXCLUDED.created_at,
     expires_at           = EXCLUDED.expires_at,
     requested_by_actor   = EXCLUDED.requested_by_actor,
+    requested_by_actor_email = EXCLUDED.requested_by_actor_email,
+    requested_by_actor_name  = EXCLUDED.requested_by_actor_name,
     decided_via          = '',
     -- Cleared, because the row is going back to pending and a decision that
     -- no longer applies must not be displayed beside it. Leaving these would
@@ -540,7 +553,7 @@ ON CONFLICT (plan_id) DO UPDATE SET
 WHERE atlantis.schema_plans.state IN ('pending_approval', 'superseded', 'approved')`,
 		g.PlanID, g.Caller, class.String(), filesJSON, g.FilesHash, diffJSON,
 		g.UpSQL, g.DownSQL, g.BaseHash, planPending, g.RequestedBy, g.Now, expires,
-		normalizeActor(g.Actor))
+		normalizeActor(g.Actor), g.ActorEmail, g.ActorName)
 	return err
 }
 

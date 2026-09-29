@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -106,6 +107,10 @@ type storedCredentials struct {
 	// keeps working where login needed the flag.
 	EnrollCAPEM []byte
 
+	// Actor is the account a browser login signed in as. Zero for an
+	// enrolment token or a workload identity, which name no person.
+	Actor actorIdentity
+
 	// NotAfter comes from the certificate rather than from a file beside it.
 	// A stored copy is a second source that can disagree with the thing it
 	// describes, and renewal decides what to do from exactly this value.
@@ -118,6 +123,7 @@ const (
 	endpointName  = "endpoint"
 	enrollURLName = "enroll_url"
 	enrollCAName  = "enroll_ca.crt"
+	actorName     = "actor.json"
 )
 
 // ErrNoCredentials reports that nothing has been enrolled for this pair.
@@ -150,6 +156,11 @@ func loadCredentials(org, caller string) (*storedCredentials, error) {
 		Endpoint:    readTrimmed(dir, endpointName),
 		EnrollURL:   readTrimmed(dir, enrollURLName),
 		EnrollCAPEM: enrollCA,
+	}
+	// Optional: absent for a login that named no person. Unreadable content
+	// is treated the same, since it only attributes.
+	if b, err := os.ReadFile(filepath.Join(dir, actorName)); err == nil {
+		_ = json.Unmarshal(b, &c.Actor)
 	}
 	leaf, err := leafOf(clientPEM)
 	if err != nil {
@@ -225,6 +236,12 @@ func writeNewCredentials(c *storedCredentials) error {
 		return fmt.Errorf("write %s: %w", filepath.Join(dir, clientPEMName), err)
 	}
 
+	// A login that names no person keeps no actor from an earlier login here.
+	if c.Actor.ID == "" {
+		if err := os.Remove(filepath.Join(dir, actorName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove %s: %w", filepath.Join(dir, actorName), err)
+		}
+	}
 	return writeSidecars(dir, c)
 }
 
@@ -243,6 +260,13 @@ func writeSidecars(dir string, c *storedCredentials) error {
 	// ask the system roots about it.
 	if len(c.EnrollCAPEM) > 0 {
 		files[enrollCAName] = c.EnrollCAPEM
+	}
+	if c.Actor.ID != "" {
+		b, err := json.Marshal(c.Actor)
+		if err != nil {
+			return fmt.Errorf("encode %s: %w", actorName, err)
+		}
+		files[actorName] = append(b, '\n')
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), body, 0o644); err != nil {

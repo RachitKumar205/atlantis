@@ -1628,7 +1628,8 @@ input:-webkit-autofill:active {
 .planview__title { font-size: 12.5px; font-weight: 500; color: var(--ink-0); }
 .planview__note { font-size: 11.5px; color: var(--ink-3); }
 .planview__body { padding: 14px; overflow: auto; background: var(--canvas-2); }
-.planview__sql {
+/* pre.planview__sql, to outrank pre.sql above. */
+pre.planview__sql {
   flex: 1; min-height: 0; overflow: auto; margin: 0;
   padding: 12px 14px; background: var(--code-bg);
   font-family: var(--mono); font-feature-settings: var(--feat-mono);
@@ -1645,6 +1646,14 @@ input:-webkit-autofill:active {
 .planview__sql .sql-str  { color: var(--code-string); }
 .planview__sql .sql-num  { color: var(--code-number); }
 .planview__sql .sql-cmt  { color: var(--code-comment); font-style: italic; }
+.planview__sql .sql-ident { color: var(--code-ink); }
+
+/* A plan opened for review on the Approvals page. */
+.approval__review { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+.approval__review .section-label,
+.approval__review .field { margin-top: 6px; }
+.approval__review .planview { flex: none; }
+.approval__code { max-height: 380px; overflow: auto; }
 
 /* The drift report. Grouped by kind, because a flat list repeats one sentence
    per row and buries the only part that differs — which column. */

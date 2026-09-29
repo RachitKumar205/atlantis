@@ -618,6 +618,11 @@ message SchemaPlanSummary {
   // per-plan join.
   string rehearsal_id = 17;
   string rehearsal_verdict = 18;
+
+  // The email and display name the apply gave for requested_by_actor, recorded
+  // as given. Empty when the apply sent none.
+  string requested_by_actor_email = 19;
+  string requested_by_actor_name = 20;
 }
 
 // SchemaPlanDetail is what a reviewer decides on.

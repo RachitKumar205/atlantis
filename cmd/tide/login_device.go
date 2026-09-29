@@ -111,6 +111,7 @@ func deviceLogin(caller, caFile string) int {
 		fmt.Fprintf(os.Stderr, "tide login: %v\n", err)
 		return 1
 	}
+	bundle.Actor = actorFromAssertion(approval.Assertion)
 	return storeAndReport(bundle)
 }
 

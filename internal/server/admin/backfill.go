@@ -305,6 +305,8 @@ func (s *Service) BeginBackfillPlan(ctx context.Context, req *adminpb.BeginBackf
 		UpSQL:       scripts.PreBackfillUp,
 		Now:         time.Now().UTC(),
 		Actor:       req.GetActor(),
+		ActorEmail:  req.GetActorEmail(),
+		ActorName:   req.GetActorName(),
 	})
 	if err != nil {
 		return nil, err

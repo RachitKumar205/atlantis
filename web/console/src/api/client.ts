@@ -638,6 +638,9 @@ export interface SchemaPlanSummary {
   /** The human attributed to the apply that filed this plan. Untrusted, and
    * empty for an unattended pipeline — the "unattributed request" case. */
   requested_by_actor?: string
+  /** The email and name the apply gave for requested_by_actor. */
+  requested_by_actor_email?: string
+  requested_by_actor_name?: string
   /** '' | 'override' | 'self_approval_override'. */
   decided_via?: string
   /** The latest rehearsal of this exact content, when one ran. */

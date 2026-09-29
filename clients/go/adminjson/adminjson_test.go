@@ -187,6 +187,37 @@ func TestInliningLeavesNonJSONPayloadsAlone(t *testing.T) {
 	}
 }
 
+// A plan's .atl files render as the source they hold, nested inside the plan,
+// and a named field that is not UTF-8 keeps its base64.
+func TestMarshalIndentTextDecodesSource(t *testing.T) {
+	const src = "entity Invoice in billing {\n  id bigint primary\n}\n"
+	b, err := MarshalIndentText(&adminpb.GetSchemaPlanResponse{Plan: &adminpb.SchemaPlanDetail{
+		Files: []*adminpb.SubmittedFile{
+			{Path: "billing/schema.atl", Content: []byte(src)},
+			{Path: "blob", Content: []byte{0xff, 0xfe}},
+		},
+	}}, "content")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Plan struct {
+			Files []struct {
+				Content string `json:"content"`
+			} `json:"files"`
+		} `json:"plan"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatalf("decode: %v\n%s", err, b)
+	}
+	if len(doc.Plan.Files) != 2 || doc.Plan.Files[0].Content != src {
+		t.Fatalf("content = %q, want the .atl source:\n%s", doc.Plan.Files, b)
+	}
+	if doc.Plan.Files[1].Content != "//4=" {
+		t.Errorf("non-UTF-8 content = %q, want its base64 //4=", doc.Plan.Files[1].Content)
+	}
+}
+
 func TestInliningIsANoOpWithoutNamedFields(t *testing.T) {
 	msg := &adminpb.JobStatus{JobId: "j1", Args: []byte(`{"n":1}`)}
 	with, err := MarshalIndentInlining(msg)

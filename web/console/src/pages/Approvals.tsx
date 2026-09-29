@@ -3,7 +3,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { CheckCircle, ShieldChevron, Snowflake, XCircle } from '@phosphor-icons/react'
 import { api, planClassBadge, planClassLabel, type SchemaPlanSummary } from '@/api/client'
 import { useMe } from '@/hooks/useAuth'
+import { Actor } from '@/components/Actor'
+import { CodeView } from '@/components/Atl'
 import { PageShell } from '@/components/PageShell'
+import { Sql } from '@/components/Sql'
 import { SudoConfirmDialog } from '@/pages/Settings'
 
 // Changes waiting on a human.
@@ -39,6 +42,32 @@ function verdictBadge(verdict: string): string {
     default:
       return 'badge--plain'
   }
+}
+
+// Requester names the person who filed the plan.
+//
+// A plan with a principal and no name or email shows the principal, which is
+// what the self-approval refusal compares.
+//
+// A plan with no principal names no person, so the refusal cannot apply to it.
+function Requester({ p }: { p: SchemaPlanSummary }) {
+  if (!p.requested_by_actor) {
+    return <><span className="mono">{p.requested_by}</span> (unattributed)</>
+  }
+  if (!p.requested_by_actor_name && !p.requested_by_actor_email) {
+    return <span className="mono">{p.requested_by_actor}</span>
+  }
+  return (
+    <Actor
+      of={{
+        caller: p.requested_by,
+        actor: p.requested_by_actor,
+        actor_email: p.requested_by_actor_email,
+        actor_name: p.requested_by_actor_name,
+      }}
+      suppressCaller={p.caller}
+    />
+  )
 }
 
 export function Approvals() {
@@ -158,7 +187,7 @@ export function Approvals() {
           const mine = me?.role === p.approver_role
           const open = openID === p.plan_id
           return (
-            <div className="card" key={p.plan_id} style={{ marginBottom: 12 }}>
+            <div className="card card__body" key={p.plan_id} style={{ marginBottom: 12 }}>
               <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
                 <div>
                   <div className="row" style={{ gap: 8, alignItems: 'center' }}>
@@ -172,10 +201,7 @@ export function Approvals() {
                       </span>
                     )}
                     <span className="muted">
-                      requested by {p.requested_by}
-                      {p.requested_by_actor
-                        ? <> for <span className="mono">{p.requested_by_actor}</span></>
-                        : ' (unattributed)'}
+                      requested by <Requester p={p} />
                     </span>
                   </div>
                   <div className="muted" style={{ marginTop: 4, fontSize: 12 }}>
@@ -203,29 +229,37 @@ export function Approvals() {
               </div>
 
               {open && (
-                <div style={{ marginTop: 14 }}>
+                <div className="approval__review">
                   {/* Source first. See the note at the top of this file. */}
-                  <h4>Proposed schema</h4>
+                  <div className="section-label">Proposed schema</div>
                   {detail?.plan.files.map(f => (
-                    <div key={f.path} style={{ marginBottom: 10 }}>
-                      <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>{f.path}</div>
-                      <pre style={{ overflowX: 'auto', fontSize: 11, margin: 0 }}>{f.content}</pre>
+                    <div className="planview" key={f.path}>
+                      <div className="planview__head">
+                        <span className="planview__title mono">{f.path}</span>
+                      </div>
+                      <CodeView body={f.content} path={f.path} className="approval__code" />
                     </div>
                   ))}
 
-                  <h4>SQL this will run</h4>
-                  <pre style={{ overflowX: 'auto', fontSize: 11 }}>{detail?.plan.up_sql || '(none)'}</pre>
+                  <div className="section-label">SQL this will run</div>
+                  <div className="planview">
+                    <Sql className="planview__sql approval__code">
+                      {detail?.plan.up_sql || '-- no statements'}
+                    </Sql>
+                  </div>
 
-                  <label className="lbl" htmlFor={`reason-${p.plan_id}`}>Reason</label>
-                  <input
-                    id={`reason-${p.plan_id}`}
-                    className="input"
-                    value={reason}
-                    placeholder="Required to reject; recorded either way"
-                    onChange={e => setReason(e.target.value)}
-                  />
+                  <div className="field">
+                    <label className="field__label" htmlFor={`reason-${p.plan_id}`}>Reason</label>
+                    <input
+                      id={`reason-${p.plan_id}`}
+                      className="input"
+                      value={reason}
+                      placeholder="Required to reject; recorded either way"
+                      onChange={e => setReason(e.target.value)}
+                    />
+                  </div>
 
-                  <div className="row" style={{ gap: 8, marginTop: 12 }}>
+                  <div className="row" style={{ gap: 8 }}>
                     <button
                       className="btn btn--sm"
                       disabled={!mine || p.expired || approve.isPending}

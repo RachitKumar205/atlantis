@@ -982,6 +982,8 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 		DownSQL:     scripts.Down,
 		Now:         time.Now().UTC(),
 		Actor:       req.GetActor(),
+		ActorEmail:  req.GetActorEmail(),
+		ActorName:   req.GetActorName(),
 	})
 	if err != nil {
 		return nil, err

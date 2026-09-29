@@ -1079,7 +1079,7 @@ func (s *Server) handleGetMergedSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp, err := atl.GetMergedSchema(r.Context(), &adminpb.GetMergedSchemaRequest{})
-	s.proxyProto(w, "GetMergedSchema", resp, err)
+	s.proxyProtoText(w, "GetMergedSchema", resp, err, "content")
 }
 
 func (s *Server) handleGetCanonicalIR(w http.ResponseWriter, r *http.Request) {
@@ -2075,6 +2075,25 @@ func (s *Server) proxyProto(w http.ResponseWriter, name string, resp proto.Messa
 	_, _ = w.Write(b)
 }
 
+// proxyProtoText is proxyProto with the named `bytes` fields sent as the text
+// they hold, for .atl source the page shows and searches.
+func (s *Server) proxyProtoText(w http.ResponseWriter, name string, resp proto.Message, err error, textBytes ...string) {
+	if err != nil {
+		s.log.Error("admin rpc", "method", name, "err", err)
+		jsonError(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	b, merr := adminjson.MarshalIndentText(resp, textBytes...)
+	if merr != nil {
+		s.log.Error("admin rpc: marshal response", "method", name, "err", merr)
+		jsonError(w, merr.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(b)
+}
+
 // shortPlanClass lived here. It lowercased PLAN_CLASS_BACKFILL_REQUIRED to
 // "backfill_required" for the one response this BFF assembled itself — the
 // schema-edit preview, now removed.
@@ -2378,7 +2397,7 @@ func (s *Server) handleGetSchemaPlan(w http.ResponseWriter, r *http.Request) {
 	resp, err := atl.GetSchemaPlan(r.Context(), &adminpb.GetSchemaPlanRequest{
 		PlanId: r.PathValue("id"),
 	})
-	s.proxyProto(w, "GetSchemaPlan", resp, err)
+	s.proxyProtoText(w, "GetSchemaPlan", resp, err, "content")
 }
 
 func (s *Server) handleApproveSchemaPlan(w http.ResponseWriter, r *http.Request) {

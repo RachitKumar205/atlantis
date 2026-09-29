@@ -73,6 +73,9 @@ type tideConfig struct {
 	storeDir       string `yaml:"-"`
 	storeEnrollURL string `yaml:"-"`
 	storeEnrollCA  string `yaml:"-"`
+
+	// storeActor is the account `tide login` signed in as; see actor().
+	storeActor actorIdentity `yaml:"-"`
 }
 
 // parseTideConfig reads tide.yaml and applies the environment, without
@@ -224,6 +227,7 @@ func applyStoreCredentials(c *tideConfig) error {
 		// only because nothing else supplied a certificate.
 		c.storeDir = creds.Dir
 		c.storeEnrollURL = creds.EnrollURL
+		c.storeActor = creds.Actor
 		c.storeEnrollCA = string(creds.EnrollCAPEM)
 	}
 	if c.TLS.CAPEM == "" {

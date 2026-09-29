@@ -117,9 +117,8 @@ func (t2 *twoOrgs) schemaFor(t *testing.T, org string) string {
 	var resp struct {
 		Files []struct {
 			Path string `json:"path"`
-			// encoding/json decodes a base64 string straight into []byte,
-			// which is the same encoding proto JSON emits for `bytes`.
-			Content []byte `json:"content"`
+			// Text: the BFF decodes the proto `bytes` field. See proxyProtoText.
+			Content string `json:"content"`
 		} `json:"files"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -134,7 +133,7 @@ func (t2 *twoOrgs) schemaFor(t *testing.T, org string) string {
 	for _, f := range resp.Files {
 		sb.WriteString(f.Path)
 		sb.WriteString("\n")
-		sb.Write(f.Content)
+		sb.WriteString(f.Content)
 	}
 	return sb.String()
 }

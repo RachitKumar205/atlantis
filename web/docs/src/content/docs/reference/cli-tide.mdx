@@ -69,6 +69,8 @@ Each path is walked recursively; every file with extension `.atl` is included, a
 | `ATLANTIS_HOME` | — | Where the credential store lives. Defaults to `~/.atlantis`. |
 | `ATL_CLOUD_URL` | — | Where Atlantis Cloud is, for `tide login`'s browser flow. Release builds carry the address; a development build needs this. |
 | `ATL_ENROLL_URL` | — | The organisation's enrolment listener, for `tide login --oidc` in CI. The browser flow discovers it and never needs this. |
+| `ATL_ACTOR` | — | The person `tide apply`, `tide apply --backfill` and `tide rollback` attribute a change to, as a principal such as `console:<subject>`. Defaults to the Atlantis Cloud account `tide login` signed in as. It is recorded as given and authorizes nothing. An approver whose console principal matches it cannot approve the request. |
+| `ATL_ACTOR_EMAIL`, `ATL_ACTOR_NAME` | — | The email and name shown for `ATL_ACTOR` in the console. Read only when `ATL_ACTOR` is set. |
 
 `TIDE_CALLER` is not consulted. The equivalent variable is `ATL_CALLER`.
 

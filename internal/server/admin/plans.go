@@ -44,7 +44,7 @@ func (s *Service) ListSchemaPlans(ctx context.Context, req *adminpb.ListSchemaPl
 SELECT plan_id, caller, change_class, files_hash, base_checkpoint_hash, up_sql,
        state, requested_by, created_at, expires_at, decided_by, decided_by_role,
        decided_at, decision_reason, diff, requested_by_actor, decided_via,
-       rehearsal_id, verdict
+       rehearsal_id, verdict, requested_by_actor_email, requested_by_actor_name
 FROM atlantis.schema_plans
 WHERE ($1 = '' OR state = $1)
   AND ($2 = '' OR caller = $2)
@@ -61,7 +61,8 @@ LIMIT $3`, req.GetState(), req.GetCaller(), limit)
 		if err := rows.Scan(&p.PlanID, &p.Caller, &p.ChangeClass, &p.FilesHash, &p.BaseHash,
 			&p.UpSQL, &p.State, &p.RequestedBy, &p.CreatedAt, &p.ExpiresAt,
 			&p.DecidedBy, &p.DecidedByRole, &p.DecidedAt, &p.DecisionReason, &p.Diff,
-			&p.RequestedByActor, &p.DecidedVia, &p.RehearsalID, &p.Verdict); err != nil {
+			&p.RequestedByActor, &p.DecidedVia, &p.RehearsalID, &p.Verdict,
+			&p.RequestedByActorEmail, &p.RequestedByActorName); err != nil {
 			return nil, fmt.Errorf("scan schema plan: %w", err)
 		}
 		plans = append(plans, p)
@@ -99,11 +100,13 @@ func (s *Service) GetSchemaPlan(ctx context.Context, req *adminpb.GetSchemaPlanR
 	err := s.pool.QueryRow(ctx, `
 SELECT plan_id, caller, change_class, files_hash, base_checkpoint_hash, up_sql, down_sql,
        state, requested_by, created_at, expires_at, decided_by, decided_by_role,
-       decided_at, decision_reason, files, diff
+       decided_at, decision_reason, files, diff, requested_by_actor, decided_via,
+       rehearsal_id, verdict, requested_by_actor_email, requested_by_actor_name
 FROM atlantis.schema_plans WHERE plan_id = $1`, req.GetPlanId()).Scan(
 		&p.PlanID, &p.Caller, &p.ChangeClass, &p.FilesHash, &p.BaseHash, &p.UpSQL, &downSQL,
 		&p.State, &p.RequestedBy, &p.CreatedAt, &p.ExpiresAt, &p.DecidedBy, &p.DecidedByRole,
-		&p.DecidedAt, &p.DecisionReason, &filesJSON, &p.Diff)
+		&p.DecidedAt, &p.DecisionReason, &filesJSON, &p.Diff, &p.RequestedByActor, &p.DecidedVia,
+		&p.RehearsalID, &p.Verdict, &p.RequestedByActorEmail, &p.RequestedByActorName)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, status.Errorf(codes.NotFound, "admin: no plan %s", req.GetPlanId())
@@ -438,6 +441,9 @@ func planSummaryToPB(p schemaPlan, stored map[adminpb.PlanClass]ChangePolicy, no
 		DecidedVia:       p.DecidedVia,
 		RehearsalId:      p.RehearsalID,
 		RehearsalVerdict: p.Verdict,
+
+		RequestedByActorEmail: p.RequestedByActorEmail,
+		RequestedByActorName:  p.RequestedByActorName,
 	}
 	if p.ExpiresAt != nil {
 		out.ExpiresAt = p.ExpiresAt.UTC().Format(time.RFC3339)
