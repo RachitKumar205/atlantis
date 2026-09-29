@@ -835,6 +835,15 @@ no styles. They are now option cards, and the dialog's checkboxes are the
 console's own. The hover text on a caller card's buttons no longer widens the
 page, which scrolled it sideways when the dialog opened.
 
+#### `make dev-token` and the host console find the running Cloud
+
+`make dev-token`, `make dev-console` and `make dev-console-app` defaulted
+`CLOUD_ISSUER` to the cluster, so on the host route the console refused every
+assertion with `invalid issuer claim` until the issuer was passed by hand. They
+now use the Cloud on `:9500` when `make dev-auth` is running, and the cluster's
+otherwise. `make dev-token` prints the issuer it used. A `CLOUD_ISSUER` on the
+command line, in the environment or in `.env` still wins.
+
 #### `tide adopt` no longer deletes three declarations from the schema of record
 
 **Affects any organisation whose adopted schema declared `keyless` or

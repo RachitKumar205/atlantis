@@ -91,7 +91,8 @@ CLOUD_SIGNING_KEY  ?= $(DEV_CERT_DIR)/cloud-signing-key.pem
 # assertion already in flight.
 #
 # `make dev-auth` and `dev-auth-app` override this back to localhost — see the
-# note on those targets. Run one or the other, not both.
+# note on those targets. Run one or the other, not both. dev-token, dev-console
+# and dev-console-app use whichever is running; see DEV_CLOUD_ISSUER.
 CLOUD_NODE_PORT    ?= 30500
 CLOUD_ISSUER       ?= http://$(K8S_EXTERNAL_HOST):$(CLOUD_NODE_PORT)
 
@@ -1299,6 +1300,21 @@ dev-auth-app: dev-cloud-role dev-cloud-data-key build-cloud-embedded ## Serve Cl
 			-key "$(CLOUD_SIGNING_KEY)" \
 			-listen "$(CLOUD_LISTEN)"
 
+# The issuer for the targets that run a console or mint for one on this machine:
+# the host Cloud (`make dev-auth`) when its key set answers, and the cluster's
+# otherwise. Probed once, and only when one of these targets runs; unexported,
+# because the `export` above would expand it for every recipe.
+#
+# Only while CLOUD_ISSUER is this Makefile's default. A value from the command
+# line, the environment or .env is used as is.
+DEV_CLOUD_ISSUER = $(eval DEV_CLOUD_ISSUER := $$(shell \
+	curl -sf -o /dev/null --max-time 1 $(CLOUD_HOST_ISSUER)/.well-known/jwks.json \
+	&& echo $(CLOUD_HOST_ISSUER) || echo http://$(K8S_EXTERNAL_HOST):$(CLOUD_NODE_PORT)))$(DEV_CLOUD_ISSUER)
+unexport DEV_CLOUD_ISSUER
+ifeq ($(value CLOUD_ISSUER),http://$$(K8S_EXTERNAL_HOST):$$(CLOUD_NODE_PORT))
+dev-token dev-console dev-console-app: CLOUD_ISSUER = $(DEV_CLOUD_ISSUER)
+endif
+
 .PHONY: dev-token
 dev-token: build-cloud ## Mint a sign-in assertion. EMAIL=you@example.com ROLE=admin ORG=acme
 	@# Prints the URL to open, because the console reads the assertion from the
@@ -1318,6 +1334,7 @@ dev-token: build-cloud ## Mint a sign-in assertion. EMAIL=you@example.com ROLE=a
 		-org "$${ORG:-acme}" \
 		-email "$${EMAIL:-dev@example.com}") && \
 	echo "" && \
+	echo "Minted by $(CLOUD_ISSUER)." && \
 	echo "Open this to sign in (the assertion is single-use):" && \
 	echo "  http://localhost:3000/login#assertion=$$token" && \
 	echo ""
