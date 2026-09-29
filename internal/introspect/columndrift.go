@@ -26,6 +26,7 @@ package introspect
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
@@ -58,19 +59,57 @@ func DetectColumnTypeDrift(ctx context.Context, q DBTX, declaredIR *dsl.IR) ([]C
 	if declaredIR == nil {
 		return nil, nil, fmt.Errorf("introspect: declaredIR is required")
 	}
+	return renderColumns(ctx, q, declaredIR).drift(ctx, q)
+}
+
+// renderedColumns is a schema's declared column types as format_type
+// deparses them.
+type renderedColumns struct {
+	entities map[physRef]*dsl.Entity
+	declared map[string]map[string]string // entity ID → column → format_type
+}
+
+// renderColumns renders every column declaredIR declares. It reads no user
+// table.
+func renderColumns(ctx context.Context, q DBTX, declaredIR *dsl.IR) *renderedColumns {
 	entities := make(map[physRef]*dsl.Entity, len(declaredIR.Entities))
 	for i := range declaredIR.Entities {
 		e := &declaredIR.Entities[i]
 		s, t := physical(e)
 		entities[physRef{s, t}] = e
 	}
-	if len(entities) == 0 {
+	r := &renderedColumns{entities: entities}
+	if len(entities) > 0 {
+		r.declared = renderDeclaredColumnTypes(ctx, q, entities)
+	}
+	return r
+}
+
+// settle renders again the entities renderColumns could not.
+func (r *renderedColumns) settle(ctx context.Context, q DBTX) {
+	missing := map[physRef]*dsl.Entity{}
+	for ref, e := range r.entities {
+		if _, ok := r.declared[e.ID()]; !ok && len(e.Fields) > 0 {
+			missing[ref] = e
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+	if r.declared == nil {
+		r.declared = map[string]map[string]string{}
+	}
+	maps.Copy(r.declared, renderDeclaredColumnTypes(ctx, q, missing))
+}
+
+// drift compares r with the live column types q reads.
+func (r *renderedColumns) drift(ctx context.Context, q Querier) ([]ColumnTypeDrift, []string, error) {
+	if len(r.entities) == 0 {
 		return nil, nil, nil
 	}
-
-	pairs := make([]physRef, 0, len(entities))
-	for r := range entities {
-		pairs = append(pairs, r)
+	pairs := make([]physRef, 0, len(r.entities))
+	for ref := range r.entities {
+		pairs = append(pairs, ref)
 	}
 	live, err := loadLiveColumnTypes(ctx, q, pairs)
 	if err != nil {
@@ -79,8 +118,8 @@ func DetectColumnTypeDrift(ctx context.Context, q DBTX, declaredIR *dsl.IR) ([]C
 
 	var drift []ColumnTypeDrift
 	var notes []string
-	declaredAll := renderDeclaredColumnTypes(ctx, q, entities)
-	for ref, e := range entities {
+	declaredAll := r.declared
+	for ref, e := range r.entities {
 		liveCols := live[ref]
 		if len(liveCols) == 0 {
 			continue // table not in live DB — the plan emits CREATE TABLE
@@ -133,16 +172,22 @@ func DetectColumnTypeDrift(ctx context.Context, q DBTX, declaredIR *dsl.IR) ([]C
 // columns and a schema of this size passes that. Rolled back; no persistent
 // objects.
 //
-// A missing entity is absent from the result rather than failing the batch, and
-// the caller emits a note for it.
+// An entity with a field of a type that does not exist yet, such as an enum a
+// migration is about to create, is absent from the result, and the caller
+// emits a note for it.
 func renderDeclaredColumnTypes(ctx context.Context, db DBTX, entities map[physRef]*dsl.Entity) map[string]map[string]string {
 	type target struct {
 		id    string
 		table string
 	}
+	missing, ok := missingTypes(ctx, db, entities)
+	if !ok {
+		return nil
+	}
 	var stmts []string
 	targets := make([]target, 0, len(entities))
 	i := 0
+entities:
 	for _, e := range entities {
 		if len(e.Fields) == 0 {
 			continue
@@ -150,7 +195,11 @@ func renderDeclaredColumnTypes(ctx context.Context, db DBTX, entities map[physRe
 		defs := make([]string, 0, len(e.Fields))
 		for j := range e.Fields {
 			f := &e.Fields[j]
-			defs = append(defs, schema.QuoteIdent(f.Name)+" "+schema.SQLType(f.Type))
+			typ := schema.SQLType(f.Type)
+			if missing[typ] {
+				continue entities
+			}
+			defs = append(defs, schema.QuoteIdent(f.Name)+" "+typ)
 		}
 		name := fmt.Sprintf("_atl_coltype_%d", i)
 		i++
@@ -209,6 +258,35 @@ WHERE n.nspname LIKE 'pg\_temp%'
 		return nil
 	}
 	return out
+}
+
+// missingTypes returns the field types of entities that do not resolve in the
+// database q reads, and false when the read fails.
+func missingTypes(ctx context.Context, q Querier, entities map[physRef]*dsl.Entity) (map[string]bool, bool) {
+	seen := map[string]bool{}
+	var types []string
+	for _, e := range entities {
+		for j := range e.Fields {
+			if t := schema.SQLType(e.Fields[j].Type); !seen[t] {
+				seen[t] = true
+				types = append(types, t)
+			}
+		}
+	}
+	rows, err := q.Query(ctx, `SELECT t FROM unnest($1::text[]) AS t WHERE to_regtype(t) IS NULL`, types)
+	if err != nil {
+		return nil, false
+	}
+	defer rows.Close()
+	missing := map[string]bool{}
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, false
+		}
+		missing[t] = true
+	}
+	return missing, rows.Err() == nil
 }
 
 // loadLiveColumnTypes reads format_type for every column of the given physical

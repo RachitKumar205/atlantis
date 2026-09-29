@@ -315,6 +315,46 @@ func TestEmit_Diff_FieldAddedNullable(t *testing.T) {
 	assertNotContains(t, scripts.Down, `DROP COLUMN "name"`)
 }
 
+// One ADD CONSTRAINT per foreign key; a second fails the migration with 42710.
+func TestEmit_Diff_ReferenceConstraintIsAddedOnce(t *testing.T) {
+	const fk = `ADD CONSTRAINT "x_a_o_id_fkey"`
+	cases := []struct{ name, from, to string }{
+		{"new field",
+			`entity O in x { id bigint primary }
+entity A in x { id bigint primary }`,
+			`entity O in x { id bigint primary }
+entity A in x { id bigint primary  o_id bigint references x.O.id }`},
+		{"existing field",
+			`entity O in x { id bigint primary }
+entity A in x { id bigint primary  o_id bigint }`,
+			`entity O in x { id bigint primary }
+entity A in x { id bigint primary  o_id bigint references x.O.id }`},
+	}
+	for _, c := range cases {
+		oldIR, newIR := lower(t, c.from), lower(t, c.to)
+		scripts, err := EmitSQL(oldIR, newIR, ComputeDiff(oldIR, newIR))
+		if err != nil {
+			t.Fatalf("%s: EmitSQL: %v", c.name, err)
+		}
+		if n := strings.Count(scripts.Up, fk); n != 1 {
+			t.Errorf("%s: %d ADD CONSTRAINT statements for one reference, want 1:\n%s", c.name, n, scripts.Up)
+		}
+	}
+
+	// The backfill path adds the column through emitFieldAddNullable.
+	oldIR := lower(t, `entity O in x { id bigint primary }
+entity A in x { id bigint primary }`)
+	newIR := lower(t, `entity O in x { id bigint primary }
+entity A in x { id bigint primary  o_id bigint not null references x.O.id backfill "1" }`)
+	scripts, err := EmitSQL(oldIR, newIR, ComputeDiff(oldIR, newIR))
+	if err != nil {
+		t.Fatalf("backfill: EmitSQL: %v", err)
+	}
+	if n := strings.Count(scripts.PreBackfillUp, fk); n != 1 {
+		t.Errorf("backfill: %d ADD CONSTRAINT statements for one reference, want 1:\n%s", n, scripts.PreBackfillUp)
+	}
+}
+
 func TestEmit_Diff_FieldAddedNotNullDefault(t *testing.T) {
 	oldIR := lower(t, `entity A in x { id bigint primary }`)
 	newIR := lower(t, `entity A in x { id bigint primary  v text not null default "" }`)

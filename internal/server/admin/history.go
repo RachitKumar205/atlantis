@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 
@@ -442,7 +445,15 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.GetToV
 	// Diffed current to target, so the emitted SQL moves the database from one
 	// to the other.
 	codegen.AssignProtoNumbers(currentIR, targetIR)
-	d := codegen.ComputeDiff(currentIR, targetIR)
+	// Read through tx, the transaction the rollback SQL runs in.
+	d, parkConflicts, err := diffWithParked(ctx, tx, tx, currentIR, targetIR)
+	if err != nil {
+		return nil, fmt.Errorf("rollback: %w", err)
+	}
+	if len(parkConflicts) > 0 {
+		return nil, status.Error(codes.FailedPrecondition,
+			"admin: "+strings.Join(parkConflicts, "; "))
+	}
 	scripts, err := codegen.EmitSQL(currentIR, targetIR, d)
 	if err != nil {
 		return nil, fmt.Errorf("emit rollback sql: %w", err)
@@ -548,7 +559,14 @@ SELECT ir_snapshot FROM atlantis.schema_versions WHERE version = $1`, req.GetToV
 		`SELECT MAX(version) FROM atlantis.schema_versions`).Scan(&currentVersion)
 
 	codegen.AssignProtoNumbers(currentIR, targetIR)
-	d := codegen.ComputeDiff(currentIR, targetIR)
+	d, parkConflicts, err := diffWithParked(ctx, s.pool, s.pool, currentIR, targetIR)
+	if err != nil {
+		return nil, fmt.Errorf("preview rollback: %w", err)
+	}
+	if len(parkConflicts) > 0 {
+		return nil, status.Error(codes.FailedPrecondition,
+			"admin: "+strings.Join(parkConflicts, "; "))
+	}
 	scripts, err := codegen.EmitSQL(currentIR, targetIR, d)
 	if err != nil {
 		return nil, fmt.Errorf("emit rollback sql: %w", err)

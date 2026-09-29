@@ -733,6 +733,68 @@ Two notes on the schema, both of which are decisions rather than oversights:
 
 ### Fixed
 
+#### A dropped column can be restored, and changed in the same plan
+
+Re-declaring a parked NOT NULL column with no default planned as
+backfill-required, and `tide apply` refused it for lack of a `backfill`, although
+the migration renames the parked column back with its rows. The server now reads
+the parked columns when it plans, applies, starts a backfill or rolls back.
+
+**A re-declared field is restored as schema history declared it when it was
+parked.** The restore is additive, or backfill-required with a declared
+`backfill`. Each difference from the new declaration follows the restore as its
+own change — type, `not null`, `unique`, `check`, reference, default — classed
+and gated as on any column. Re-declaring a field whose parked column has
+another type than schema history records, or no recorded declaration, is
+refused at plan, apply, backfill and rollback.
+
+**Rows inserted while the column was parked** have no value for it. The restore
+fails with a message that names the table and the column and asks for a
+backfill. A field declared with `backfill` restores through `tide apply
+--backfill`: the parked column comes back with every value it held, and the
+backfill fills only the rows without one. A declared default does not fill
+them. `tide rehearse` counts those rows and names the backfill.
+
+**`tide rehearse` copies parked columns into the clone**, with their unique,
+check and foreign-key constraints, so a rehearsed column restore reaches the
+apply's verdict. It reported `fail_data` for a restore the apply completes.
+
+A restore whose parked column the reaper dropped after the plan fails, naming
+the field, where it would have added an empty column.
+
+Checking for parked columns costs no query when a plan adds no field to an
+existing entity. Otherwise it costs one catalog query. A parked column adds one
+read of schema history and up to two type queries. A rehearsal reads the parked
+columns once, and copies their rows.
+
+#### `tide apply` no longer refuses the changes it makes
+
+`tide apply` refused every plan that added or changed a `check`, changed a
+column's type or removed a `unique index partial`, with "CHECK constraints
+diverge", "column type(s) diverge" or "UNIQUE index(es)". It compared the new
+declaration with the database before running the migration, so the migration's
+own changes read as drift. It now compares after the migration's DDL, in the
+same transaction: a divergence the migration leaves behind still refuses the
+apply and rolls the DDL back. The declared side is rendered before the DDL, so
+the check adds catalog reads, not work, while the migration holds its locks.
+
+**A type change from a type it was not planned against is refused.** When a
+column's live type matches neither the last applied schema nor the new
+declaration — `numeric(12,4)` changed by hand under a `numeric(10,2)`
+declaration — the conversion to the new type could round or truncate, and
+`tide apply` refuses before the DDL. Declaring the live type is the way
+through.
+
+`tide plan` reports drift against the last applied schema and the entities the
+plan adds. A parked column's CHECK constraint is not drift, and no longer blocks
+applies to its table.
+
+#### Adding a field with a reference no longer fails the migration
+
+Adding a `references` field to an existing entity emitted its foreign key twice,
+and the second `ADD CONSTRAINT` failed with SQLSTATE 42710. The migration now
+adds it once.
+
 #### `tide adopt` no longer deletes three declarations from the schema of record
 
 **Affects any organisation whose adopted schema declared `keyless` or

@@ -24,6 +24,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
 	"github.com/rachitkumar205/atlantis/internal/codegen"
@@ -419,7 +421,7 @@ const (
 	ClassBackfill    ClassName = "backfill_required"
 	ClassBreaking    ClassName = "cross_caller_breaking"
 	ClassDestructive ClassName = "destructive"
-	ClassUnclean     ClassName = "unparseable" // returned when DSL itself doesn't parse
+	ClassUnclean     ClassName = "unparseable" // returned when the schema fails validation
 )
 
 // ImpactEntry describes how one caller is affected by a plan; includes the plan's own caller.
@@ -569,12 +571,27 @@ func (s *Service) PlanSchema(ctx context.Context, req *adminpb.PlanSchemaRequest
 	// Assign proto numbers before diffing so both sides see stable IDs.
 	codegen.AssignProtoNumbers(prior, newIR)
 
+	// The database the plan describes.
+	mpool, err := s.managedPool(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("plan: %w", err)
+	}
+
 	// Build caller-ownership context so the diff engine can downgrade
 	// removals that only affect the submitting caller.
 	ownership := buildEntityOwnership(req.GetCaller(), callerFiles, others)
 	crossRefs := buildCrossCallerRefs(others)
-	d := codegen.ComputeDiff(prior, newIR,
+	d, parkConflicts, err := diffWithParked(ctx, mpool, s.pool, prior, newIR,
 		codegen.WithCallerContext(req.GetCaller(), ownership, crossRefs))
+	if err != nil {
+		return nil, fmt.Errorf("plan: %w", err)
+	}
+	if len(parkConflicts) > 0 {
+		return &adminpb.PlanSchemaResponse{
+			Class:       adminpb.PlanClass_PLAN_CLASS_UNPARSEABLE,
+			ParseErrors: parkConflicts,
+		}, nil
+	}
 
 	// The token the apply is checked against. Scoped to what this caller reads
 	// so an unrelated caller's apply does not invalidate this plan.
@@ -607,38 +624,31 @@ func (s *Service) PlanSchema(ctx context.Context, req *adminpb.PlanSchemaRequest
 	// apply runs. Read-only: pg_available_extensions + pg_extension.
 	// Errors here don't fail the plan — the extension check is best-
 	// effort, and the apply path will hard-refuse if anything's missing.
-	// The database the plan describes. A failure here is reported as no
-	// extension information rather than a failed plan, matching how the
-	// drift reads below degrade.
-	mpool, mperr := s.managedPool(ctx)
-	if mperr != nil {
-		return nil, fmt.Errorf("plan: %w", mperr)
-	}
 	extStatuses, _ := inspectExtensions(ctx, mpool, newIR)
 
-	// Surface live unique-index drift so `tide plan` warns before apply.
-	// Best-effort and read-only (no lock); the apply path re-checks inside
-	// the locked tx and refuses. The error is recorded rather than swallowed as
-	// extensions are, so a check that could not run does not read as clean.
-	indexDrift, driftNotes, driftErr := introspect.DetectUniqueIndexDrift(ctx, mpool, newIR)
+	// Surface live drift so `tide plan` warns before apply. Best-effort and
+	// read-only (no lock); the apply re-checks after its DDL and refuses. An
+	// error is recorded rather than swallowed as extensions are, so a check
+	// that could not run does not read as clean.
+	//
+	// Read against the checkpoint plus the entities this plan adds: the
+	// database has not run this plan's DDL, so against newIR every object the
+	// plan changes would read as drift.
+	driftIR := withAddedEntities(prior, newIR)
+	indexDrift, driftNotes, driftErr := introspect.DetectUniqueIndexDrift(ctx, mpool, driftIR)
 	var driftErrMsg string
 	if driftErr != nil {
 		driftErrMsg = driftErr.Error()
 	}
-
-	// Same for CHECK-constraint drift: the differ never manages CHECKs, so a
-	// constraint that diverged from the .atl at adoption stays divergent and
-	// only surfaces as a runtime 23514. Read-only here; the apply path
-	// re-checks inside the locked tx and refuses.
-	checkDrift, checkNotes, checkErr := introspect.DetectCheckConstraintDrift(ctx, mpool, newIR)
+	checkDrift, checkNotes, checkErr := introspect.DetectCheckConstraintDrift(ctx, mpool, driftIR)
+	if checkErr == nil {
+		checkDrift, checkErr = withoutParkedChecks(ctx, mpool, checkDrift)
+	}
 	var checkErrMsg string
 	if checkErr != nil {
 		checkErrMsg = checkErr.Error()
 	}
-
-	// And column type/width drift (live column type ≠ declared) — the
-	// checkpoint→live half of the varchar-length gap. Read-only here.
-	columnDrift, columnNotes, columnErr := introspect.DetectColumnTypeDrift(ctx, mpool, newIR)
+	columnDrift, columnNotes, columnErr := introspect.DetectColumnTypeDrift(ctx, mpool, driftIR)
 	var columnErrMsg string
 	if columnErr != nil {
 		columnErrMsg = columnErr.Error()
@@ -839,7 +849,7 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 	// Two separate databases cannot share a transaction, so mtx commits before
 	// the checkpoint is written and the two are consistent only across that
 	// gap. Ordered so a crash inside it leaves the database ahead of the
-	// record — what the drift checks above already detect — rather than a
+	// record — what the drift checks detect — rather than a
 	// record of a change that did not happen.
 	mpool, err := s.managedPool(ctx)
 	if err != nil {
@@ -886,8 +896,18 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 	// Build caller-ownership context for the diff (same as PlanSchema).
 	applyOwnership := buildEntityOwnership(req.GetCaller(), parsed, others)
 	applyCrossRefs := buildCrossCallerRefs(others)
-	d := codegen.ComputeDiff(prior, newIR,
+	// Read through mtx after the advisory lock, so no other apply moves a
+	// parked column before the DDL runs. The reaper takes no lock; a restore
+	// whose column it drops in between raises in the DDL.
+	d, parkConflicts, err := diffWithParked(ctx, mtx, tx, prior, newIR,
 		codegen.WithCallerContext(req.GetCaller(), applyOwnership, applyCrossRefs))
+	if err != nil {
+		return nil, fmt.Errorf("apply: %w", err)
+	}
+	if len(parkConflicts) > 0 {
+		return nil, status.Error(codes.FailedPrecondition,
+			"admin: "+strings.Join(parkConflicts, "; "))
+	}
 
 	// Re-validate inside the lock: another caller's apply between plan and apply
 	// can change which tables are visible. Same caller-scoping rationale as
@@ -975,21 +995,6 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 		return nil, err
 	}
 
-	// Refuse to apply over a live UNIQUE index the schema doesn't account
-	// for — applying would leave a hidden constraint silently rejecting
-	// legitimate writes. Read inside the locked tx so the verdict is
-	// authoritative. The operator either drops the index, declares the
-	// uniqueness, or sets ATLANTIS_ALLOW_INDEX_DRIFT=1 to proceed knowingly.
-	if os.Getenv("ATLANTIS_ALLOW_INDEX_DRIFT") != "1" {
-		drift, _, derr := introspect.DetectUniqueIndexDrift(ctx, mtx, newIR)
-		if derr != nil {
-			return nil, fmt.Errorf("apply: index-drift check failed: %w", derr)
-		}
-		if len(drift) > 0 {
-			return nil, indexDriftError(drift)
-		}
-	}
-
 	// Refuse to turn on tenant isolation over rows nobody will be able to read.
 	//
 	// `''` is a legal value for a NOT NULL text column and is what a legacy
@@ -998,10 +1003,10 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 	// so those rows become unreachable silently, with no error anywhere,
 	// because the policy is doing exactly what it says.
 	//
-	// Read inside the locked tx so the verdict is authoritative, and beside
-	// the drift checks because it is the same kind of question: something true
-	// of the live DATA that the declaration cannot see. The operator assigns
-	// the rows a tenant, deletes them, or sets the override knowingly.
+	// Read inside the locked tx so the verdict is authoritative. It is the
+	// same kind of question as the drift checks: something true of the live
+	// DATA that the declaration cannot see. The operator assigns the rows a
+	// tenant, deletes them, or sets the override knowingly.
 	if os.Getenv("ATLANTIS_ALLOW_UNREACHABLE_TENANT") != "1" {
 		stranded, uerr := detectUnreachableTenantRows(ctx, tx, d, newIR)
 		if uerr != nil {
@@ -1031,41 +1036,29 @@ func (s *Service) ApplyMigration(ctx context.Context, req *adminpb.ApplyMigratio
 		return nil, unexpirableExpiryError(bad)
 	}
 
-	// Refuse to apply while CHECK constraints diverge between the .atl and
-	// the live table — the differ doesn't manage CHECKs, so applying would
-	// silently leave the divergence in place (the carts `awaiting_checkout`
-	// outage). Read inside the locked tx so the verdict is authoritative.
-	// The operator reconciles the constraint out-of-band, or sets
-	// ATLANTIS_ALLOW_CHECK_DRIFT=1 to proceed knowingly (e.g. a cosmetic
-	// `col IS NULL OR ...` difference).
-	if os.Getenv("ATLANTIS_ALLOW_CHECK_DRIFT") != "1" {
-		drift, _, derr := introspect.DetectCheckConstraintDrift(ctx, mtx, newIR)
-		if derr != nil {
-			return nil, fmt.Errorf("apply: check-drift check failed: %w", derr)
-		}
-		if len(drift) > 0 {
-			return nil, checkDriftError(drift)
-		}
+	if err := refuseStaleTypeChanges(ctx, mtx, prior, newIR, d); err != nil {
+		return nil, err
 	}
-
-	// Refuse to apply while a column's live type/width diverges from the
-	// declaration — the diff path compares against the checkpoint, not live,
-	// so applying would leave e.g. a varchar(10) in place under a varchar(255)
-	// declaration (the value-too-long outage). Read inside the locked tx. The
-	// operator reconciles the column out-of-band, or sets
-	// ATLANTIS_ALLOW_COLUMN_DRIFT=1 to proceed knowingly.
-	if os.Getenv("ATLANTIS_ALLOW_COLUMN_DRIFT") != "1" {
-		drift, _, derr := introspect.DetectColumnTypeDrift(ctx, mtx, newIR)
-		if derr != nil {
-			return nil, fmt.Errorf("apply: column-drift check failed: %w", derr)
-		}
-		if len(drift) > 0 {
-			return nil, columnDriftError(drift)
-		}
+	// Rendered before the DDL, so the comparison after it holds the
+	// migration's locks for catalog reads, and for rendering again only what
+	// referred to a type the DDL creates.
+	declared, err := renderForDrift(ctx, mtx, newIR)
+	if err != nil {
+		return nil, err
 	}
 
 	if _, err := mtx.Exec(ctx, scripts.Up); err != nil {
 		return nil, fmt.Errorf("apply: %w", err)
+	}
+
+	// After the DDL and before either commit: the database is compared with
+	// the declaration in the state this migration leaves it, and a refusal
+	// rolls the DDL back.
+	if err := refuseMissingTables(ctx, mtx, newIR); err != nil {
+		return nil, err
+	}
+	if err := refuseUnresolvedDrift(ctx, mtx, declared); err != nil {
+		return nil, err
 	}
 
 	// The DDL lands before the record of it. See the note on mtx above for

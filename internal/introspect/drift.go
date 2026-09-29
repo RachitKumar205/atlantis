@@ -73,34 +73,73 @@ func DetectUniqueIndexDrift(ctx context.Context, q DBTX, declaredIR *dsl.IR) ([]
 	if declaredIR == nil {
 		return nil, nil, fmt.Errorf("introspect: declaredIR is required")
 	}
-	declared := buildDeclaredUniques(declaredIR)
-	if len(declared) == 0 {
+	return renderUniques(ctx, q, declaredIR).drift(ctx, q)
+}
+
+// renderedUniques is a schema's declared uniqueness, with each `unique index
+// partial` predicate in Postgres's pg_get_expr deparse form.
+type renderedUniques struct {
+	declared map[physRef]declaredUnique
+	preds    map[*dsl.PredExpr]renderedPred
+}
+
+type renderedPred struct {
+	entity *dsl.Entity
+	def    string
+	ok     bool
+}
+
+// settle normalizes again the predicates renderUniques could not.
+func (r *renderedUniques) settle(ctx context.Context, q DBTX) {
+	for pred, p := range r.preds {
+		if !p.ok && p.entity != nil {
+			p.def, p.ok = normalizePredicate(ctx, q, p.entity, pred)
+			r.preds[pred] = p
+		}
+	}
+}
+
+// renderUniques renders the uniqueness declaredIR declares. It reads no user
+// table.
+func renderUniques(ctx context.Context, q DBTX, declaredIR *dsl.IR) *renderedUniques {
+	r := &renderedUniques{
+		declared: buildDeclaredUniques(declaredIR),
+		preds:    map[*dsl.PredExpr]renderedPred{},
+	}
+	entities := make(map[string]*dsl.Entity, len(declaredIR.Entities))
+	for i := range declaredIR.Entities {
+		entities[declaredIR.Entities[i].ID()] = &declaredIR.Entities[i]
+	}
+	for _, du := range r.declared {
+		for _, preds := range du.partialUniques {
+			for _, pred := range preds {
+				e := entities[du.entityID]
+				def, ok := normalizePredicate(ctx, q, e, pred)
+				r.preds[pred] = renderedPred{e, def, ok}
+			}
+		}
+	}
+	return r
+}
+
+// drift compares r with the live bare unique indexes q reads.
+func (r *renderedUniques) drift(ctx context.Context, q Querier) ([]UniqueIndexDrift, []string, error) {
+	if len(r.declared) == 0 {
 		return nil, nil, nil
 	}
-	pairs := make([]physRef, 0, len(declared))
-	for r := range declared {
-		pairs = append(pairs, r)
+	pairs := make([]physRef, 0, len(r.declared))
+	for ref := range r.declared {
+		pairs = append(pairs, ref)
 	}
 	live, skippedExpr, err := loadBareUniqueIndexes(ctx, q, pairs)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	// Normalize a declared predicate through Postgres so it can be compared to
-	// the live pg_get_expr deparse on equal terms (see normalizePredicate).
-	entities := make(map[string]*dsl.Entity, len(declaredIR.Entities))
-	for i := range declaredIR.Entities {
-		e := &declaredIR.Entities[i]
-		entities[e.ID()] = e
+	normalize := func(_ string, pred *dsl.PredExpr) (string, bool) {
+		p := r.preds[pred]
+		return p.def, p.ok
 	}
-	normalize := func(entityID string, pred *dsl.PredExpr) (string, bool) {
-		e := entities[entityID]
-		if e == nil {
-			return "", false
-		}
-		return normalizePredicate(ctx, q, e, pred)
-	}
-	drift := classifyUniqueIndexDrift(declared, live, normalize)
+	drift := classifyUniqueIndexDrift(r.declared, live, normalize)
 
 	var notes []string
 	if skippedExpr > 0 {

@@ -44,14 +44,43 @@ tide apply
 The apply moves the parked object back: the entity exists again, with its
 API, its generated types, and the rows it held when it was dropped.
 
-Two conditions on the restore:
+A restored field comes back as it was declared when it was dropped. The
+restore is additive: the column comes back with its rows. If the
+declaration changed since, the plan lists each difference after the
+restore as its own change: a new type, `not null`, `unique`, `check`,
+reference or default. Each difference is classed and gated as it would be
+on any other column.
 
-- The re-declared columns must match the parked object's. A declaration
-  whose column set differs is refused, naming the mismatch — restore
-  first with the original declaration, then change it in a second apply.
+Conditions on the restore:
+
 - The window must still be open. Re-declaring after the reaper has run
   creates a fresh, empty object; the rows are gone, and only a platform
   backup restore brings them back.
+- A restored table must be declared as it was dropped. `tide apply`
+  refuses a different column name, type or `check`. A changed default,
+  `unique` or reference is not applied: the table keeps the parked ones.
+  Restore the table with its original declaration, then change it in a
+  second apply.
+- A parked column must keep the type it was dropped with, and schema
+  history must record its declaration. Otherwise `tide plan` refuses the
+  restore and names the problem: change the column back, or give the field
+  another name.
+
+### Rows inserted while a column was parked
+
+Rows inserted while a NOT NULL column with no default was parked have no
+value for it, so restoring it fails. `tide rehearse` reports this before
+the apply. Declare a backfill for those rows:
+
+```atl
+customer_name text not null backfill "'unknown'"
+```
+
+`tide apply --backfill` restores the parked column with every value it
+held, and fills only the rows without one. A default does not fill them,
+because it applies only to rows inserted later. `tide rehearse` runs the
+migration without the backfill, so it still reports the failure after you
+declare one.
 
 ## Verify
 

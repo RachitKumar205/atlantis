@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"time"
@@ -79,7 +80,7 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 		return SQLScripts{}, fmt.Errorf("prior schema: %w", err)
 	}
 	newByID := indexByID(newIR)
-	oldByID := indexByID(oldIR)
+	oldByID := withRestoredOld(indexByID(oldIR), d)
 
 	up := &sqlBuilder{}
 	down := &sqlBuilder{}
@@ -165,16 +166,20 @@ func EmitSQL(oldIR, newIR *dsl.IR, d *Diff) (SQLScripts, error) {
 		label   string
 		changes []Change
 	}{
-		// EVERY group is filtered, not just BREAKING. Being bracketed is a
-		// property of the entity, not of a class: a same-column type change
-		// whose policy predicate does not move is ADDITIVE.
+		// Restores first: every other change to a restored field acts on the
+		// column the restore renames back, whatever its class. A restore is
+		// never a partition change, so this group needs no filter.
+		{"RESTORED FROM PARKED", restores(d)},
+		// EVERY class group is filtered, not just BREAKING. Being bracketed
+		// is a property of the entity, not of a class: a same-column type
+		// change whose policy predicate does not move is ADDITIVE.
 		//
 		// A bracketed entity's partition change is removed because the bracket
 		// owns the drop and the recreate. Left in a group it emits the policy
 		// twice, and on the DOWN path recreates it before the column is
 		// reverted — the SQLSTATE 0A000 the bracket exists to remove.
-		{"ADDITIVE", withoutBracketedPartitionChanges(d.Additive, rebuilt)},
-		{"BACKFILL REQUIRED", withoutBracketedPartitionChanges(d.BackfillRequired, rebuilt)},
+		{"ADDITIVE", withoutBracketedPartitionChanges(withoutRestores(d.Additive), rebuilt)},
+		{"BACKFILL REQUIRED", withoutBracketedPartitionChanges(withoutRestores(d.BackfillRequired), rebuilt)},
 		// Destructive before breaking: a parked object must be out of the way
 		// before anything that might recreate a name it still holds.
 		{"DESTRUCTIVE — PARKED, REAPED AFTER THE RETENTION WINDOW", withoutBracketedPartitionChanges(d.Destructive, rebuilt)},
@@ -412,10 +417,13 @@ func buildPhaseSplit(d *Diff, newByID, oldByID map[string]*dsl.Entity) (pre, pre
 	deferred := map[[2]string]*dsl.Entity{}
 	throwaway := &sqlBuilder{}
 
-	for _, ch := range d.Additive {
+	for _, ch := range restores(d) {
 		emitPhaseSplitChange(ch, newByID, oldByID, pre, post, throwaway, deferred)
 	}
-	for _, ch := range d.BackfillRequired {
+	for _, ch := range withoutRestores(d.Additive) {
+		emitPhaseSplitChange(ch, newByID, oldByID, pre, post, throwaway, deferred)
+	}
+	for _, ch := range withoutRestores(d.BackfillRequired) {
 		emitPhaseSplitChange(ch, newByID, oldByID, pre, post, throwaway, deferred)
 	}
 	for _, ch := range d.Breaking {
@@ -458,9 +466,10 @@ func emitPhaseSplitChange(ch Change, newByID, oldByID map[string]*dsl.Entity, pr
 	switch ch.Kind {
 	case KindFieldAdded:
 		f := e.FindField(ch.Field)
-		if f != nil && f.Backfill != "" && f.NotNull {
+		added := addedField(ch, f)
+		if f != nil && f.Backfill != "" && added.NotNull {
 			pre.commentf("%s: %s (backfill-deferred; ADD nullable here, SET NOT NULL in post)", ch.Kind, ch.Detail)
-			emitFieldAddNullable(pre, e, f)
+			emitFieldAddNullable(pre, e, added, isRestore(ch))
 			pre.blank()
 			post.commentf("%s: %s (post-backfill SET NOT NULL)", ch.Kind, ch.Detail)
 			emitNotNull(post, e, ch.Field, true)
@@ -489,29 +498,14 @@ func emitPhaseSplitChange(ch Change, newByID, oldByID map[string]*dsl.Entity, pr
 // nullable while the chunked backfill populates it; Phase 3 then runs
 // SET NOT NULL.
 //
-// A parked column of the same name refuses the add. Backfilling implies
-// computed values, and a fresh column beside the parked one would leave
-// the parked data on a live reap clock while the name it belongs to
-// fills with something else. Restoring and backfilling are separate
-// intents; the message names both ways forward.
-func emitFieldAddNullable(b *sqlBuilder, e *dsl.Entity, f *dsl.Field) {
-	parked := parkedName(f.Name)
-	sch, tbl := physicalParts(e)
-	b.line("DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = " +
-		"to_regclass(format('%I.%I', " + sqlStringLiteral(sch) + ", " +
-		sqlStringLiteral(tbl) + ")) AND attname = " + sqlStringLiteral(parked) +
-		" AND attnum > 0 AND NOT attisdropped) THEN " +
-		"RAISE EXCEPTION 'atlantis: a parked column % exists on %. Re-declare the " +
-		"field without a backfill to restore the parked data, or have the parked " +
-		"column reaped before backfilling a fresh one.', " +
-		sqlStringLiteral(f.Name) + ", " + sqlStringLiteral(sch+"."+tbl) +
-		"; END IF; END $$;")
+// A parked column of the same name is restored, still nullable, so the
+// backfill fills only the rows inserted while it was parked.
+func emitFieldAddNullable(b *sqlBuilder, e *dsl.Entity, f *dsl.Field, restore bool) {
+	emitFieldRestoreIfParked(b, e, f, false, restore)
 	nullable := *f
 	nullable.NotNull = false
-	b.linef("ALTER TABLE %s ADD COLUMN %s;", qualifiedTable(e), columnDecl(nullable, fieldCheckName(e, nullable.Name)))
-	if f.Ref != nil {
-		emitFKAdd(b, e, f)
-	}
+	b.linef("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s;", qualifiedTable(e), columnDecl(nullable, fieldCheckName(e, nullable.Name)))
+	emitFieldFKIfMissing(b, e, f)
 }
 
 // backfillIndexName names the partial index Phase 1 creates and Phase 3
@@ -615,8 +609,8 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 		emitEntityUnpark(down, e)
 	case KindFieldAdded:
 		e := newByID[ch.EntityID]
-		f := e.FindField(ch.Field)
-		emitFieldRestoreOrAdd(up, e, f)
+		f := addedField(ch, e.FindField(ch.Field))
+		emitFieldRestoreOrAdd(up, e, f, isRestore(ch))
 		// A park, for the same reason as the entity case above, and
 		// tolerant of an absent column for the same reason.
 		emitFieldParkIfExists(down, e, f.Name)
@@ -794,7 +788,12 @@ func emitChange(up, down *sqlBuilder, ch Change, newByID, oldByID map[string]*ds
 	case KindFieldReferenceAdded:
 		e := newByID[ch.EntityID]
 		f := e.FindField(ch.Field)
-		emitFKAdd(up, e, f)
+		// On a field this diff adds, emitFieldRestoreOrAdd and
+		// emitFieldAddNullable write the constraint, and a second ADD
+		// CONSTRAINT fails with 42710.
+		if oldE := oldByID[ch.EntityID]; oldE != nil && oldE.FindField(ch.Field) != nil {
+			emitFKAdd(up, e, f)
+		}
 		emitFKDrop(down, e, f)
 	case KindFieldReferenceRemoved:
 		oldE := oldByID[ch.EntityID]
@@ -1160,42 +1159,140 @@ func emitEntityRestoreOrCreate(b *sqlBuilder, e *dsl.Entity) {
 // emitFieldRestoreOrAdd adds the field's column, restoring a parked column
 // of the same name first when the table holds one.
 //
-// The restore is emitFieldUnpark's rename inside a DO block, so the same
-// script serves the fresh-add and the re-declare case. Restoring a
-// declared NOT NULL onto parked data that grew NULLs while parked fails
-// the apply, which is the correct answer: those rows have no value for
-// the column.
-func emitFieldRestoreOrAdd(b *sqlBuilder, e *dsl.Entity, f *dsl.Field) {
+// The same script serves the fresh-add and the re-declare case. restore says
+// the plan restores the column, and a missing parked column then raises.
+func emitFieldRestoreOrAdd(b *sqlBuilder, e *dsl.Entity, f *dsl.Field, restore bool) {
+	emitFieldRestoreIfParked(b, e, f, f.NotNull && !f.Primary, restore)
+	b.linef("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s;",
+		qualifiedTable(e), columnDecl(*f, fieldCheckName(e, f.Name)))
+	emitFieldFKIfMissing(b, e, f)
+}
+
+// addedField returns the field a KindFieldAdded change adds: the restored
+// declaration for a restore, and f otherwise.
+func addedField(ch Change, f *dsl.Field) *dsl.Field {
+	if isRestore(ch) {
+		return ch.From.(*dsl.Field)
+	}
+	return f
+}
+
+// restores returns d's restore changes in diff order.
+func restores(d *Diff) []Change {
+	var out []Change
+	for _, ch := range d.All() {
+		if isRestore(ch) {
+			out = append(out, ch)
+		}
+	}
+	return out
+}
+
+// withoutRestores returns changes less its restores.
+func withoutRestores(changes []Change) []Change {
+	out := make([]Change, 0, len(changes))
+	for _, ch := range changes {
+		if !isRestore(ch) {
+			out = append(out, ch)
+		}
+	}
+	return out
+}
+
+// withRestoredOld returns oldByID with each field d restores added to its
+// entity, as the restore leaves it.
+func withRestoredOld(oldByID map[string]*dsl.Entity, d *Diff) map[string]*dsl.Entity {
+	rs := restores(d)
+	if len(rs) == 0 {
+		return oldByID
+	}
+	// The emitters of the changes after a restore read the field's old side
+	// from here.
+	out := maps.Clone(oldByID)
+	for _, ch := range rs {
+		e := out[ch.EntityID]
+		if e == nil {
+			continue
+		}
+		cp := *e
+		cp.Fields = append(append([]dsl.Field(nil), e.Fields...), *ch.From.(*dsl.Field))
+		out[ch.EntityID] = &cp
+	}
+	return out
+}
+
+// emitFieldRestoreIfParked renames a parked column of f's name back and
+// deregisters it, when e's table holds one. setNotNull restores the NOT NULL
+// the park dropped.
+//
+// A parked column of another base type raises, leaving the parked rows in
+// place. So does setNotNull when rows were inserted while the column was
+// parked: those rows have no value for it. With mustExist, a table without the
+// parked column raises too.
+func emitFieldRestoreIfParked(b *sqlBuilder, e *dsl.Entity, f *dsl.Field, setNotNull, mustExist bool) {
 	parked := parkedName(f.Name)
 	sch, tbl := physicalParts(e)
+	declared := sqlStringLiteral(sqlType(f.Type))
+
+	// Base types only: Postgres before 17 has no function that parses a
+	// typmod out of a type name. diffWithParked in the admin server compares
+	// the full type first.
+	guard := "IF parked_type IS DISTINCT FROM to_regtype(" + declared + ") THEN " +
+		"RAISE EXCEPTION 'atlantis: the parked column for % on % is %, and the " +
+		"declaration says %. Declare the field as % to restore its rows, or give " +
+		"the new field another name.', " + sqlStringLiteral(f.Name) + ", " +
+		sqlStringLiteral(sch+"."+tbl) + ", format_type(parked_type, parked_mod), " +
+		declared + ", format_type(parked_type, parked_mod); END IF; "
 
 	restore := "ALTER TABLE " + qualifiedTable(e) + " RENAME COLUMN " +
 		quoteIdent(parked) + " TO " + quoteIdent(f.Name) + "; "
-	if f.NotNull && !f.Primary {
-		restore += "ALTER TABLE " + qualifiedTable(e) + " ALTER COLUMN " +
-			quoteIdent(f.Name) + " SET NOT NULL; "
+	if setNotNull {
+		// Re-raised with the same SQLSTATE and the table and column set, so a
+		// rehearsal still counts the NULL rows.
+		restore += "BEGIN ALTER TABLE " + qualifiedTable(e) + " ALTER COLUMN " +
+			quoteIdent(f.Name) + " SET NOT NULL; " +
+			"EXCEPTION WHEN not_null_violation THEN RAISE EXCEPTION USING " +
+			"ERRCODE = 'not_null_violation', SCHEMA = " + sqlStringLiteral(sch) +
+			", TABLE = " + sqlStringLiteral(tbl) + ", COLUMN = " + sqlStringLiteral(f.Name) +
+			", MESSAGE = " + sqlStringLiteral("atlantis: rows inserted into "+sch+"."+tbl+
+			" while "+f.Name+" was parked have no value for it. Declare a backfill "+
+			"for the field to fill them.") + "; END; "
 	}
 	restore += "DELETE FROM atlantis.parked_objects WHERE schema_name = " +
 		sqlStringLiteral(sch) + " AND parent_table = " + sqlStringLiteral(tbl) +
 		" AND object_name = " + sqlStringLiteral(parked) + " AND reaped_at IS NULL; "
 
-	b.line("DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = " +
-		"to_regclass(format('%I.%I', " + sqlStringLiteral(sch) + ", " +
-		sqlStringLiteral(tbl) + ")) AND attname = " + sqlStringLiteral(parked) +
-		" AND attnum > 0 AND NOT attisdropped) THEN " + restore + "END IF; END $$;")
-
-	b.linef("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s;",
-		qualifiedTable(e), columnDecl(*f, fieldCheckName(e, f.Name)))
-	if f.Ref != nil {
-		// The restored column kept its constraint through the rename, so
-		// the add is conditional on the derived name.
-		b.line("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = " +
-			sqlStringLiteral(fkName(e, f.Name)) + " AND conrelid = to_regclass(format('%I.%I', " +
-			sqlStringLiteral(sch) + ", " + sqlStringLiteral(tbl) + "))) THEN " +
-			"ALTER TABLE " + qualifiedTable(e) + " ADD CONSTRAINT " +
-			quoteIdent(fkName(e, f.Name)) + " " + fkConstraintBody(f) + "; " +
-			"END IF; END $$;")
+	// The reaper takes no apply lock, so it can drop the parked column
+	// between the plan and this statement.
+	missing := ""
+	if mustExist {
+		missing = "ELSE RAISE EXCEPTION 'atlantis: the parked column for % on % no longer " +
+			"exists, so the rows this plan restores are gone. Plan again to add the field " +
+			"as a new column.', " + sqlStringLiteral(f.Name) + ", " + sqlStringLiteral(sch+"."+tbl) + "; "
 	}
+
+	b.line("DO $$ DECLARE parked_type oid; parked_mod int; BEGIN " +
+		"SELECT atttypid, atttypmod INTO parked_type, parked_mod FROM pg_attribute " +
+		"WHERE attrelid = to_regclass(format('%I.%I', " + sqlStringLiteral(sch) + ", " +
+		sqlStringLiteral(tbl) + ")) AND attname = " + sqlStringLiteral(parked) +
+		" AND attnum > 0 AND NOT attisdropped; " +
+		"IF FOUND THEN " + guard + restore + missing + "END IF; END $$;")
+}
+
+// emitFieldFKIfMissing adds f's foreign key unless e's table already has a
+// constraint of its derived name, which a restored column keeps through the
+// rename.
+func emitFieldFKIfMissing(b *sqlBuilder, e *dsl.Entity, f *dsl.Field) {
+	if f.Ref == nil {
+		return
+	}
+	sch, tbl := physicalParts(e)
+	b.line("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = " +
+		sqlStringLiteral(fkName(e, f.Name)) + " AND conrelid = to_regclass(format('%I.%I', " +
+		sqlStringLiteral(sch) + ", " + sqlStringLiteral(tbl) + "))) THEN " +
+		"ALTER TABLE " + qualifiedTable(e) + " ADD CONSTRAINT " +
+		quoteIdent(fkName(e, f.Name)) + " " + fkConstraintBody(f) + "; " +
+		"END IF; END $$;")
 }
 
 // TombstoneSchema holds parked objects awaiting the retention window.
@@ -1216,6 +1313,19 @@ const TombstoneSchema = "atlantis_tombstone"
 func parkedName(base string) string {
 	return truncateIdent(base + "__parked")
 }
+
+// ParkedColumn returns the schema, table and column where
+// emitFieldRestoreIfParked looks for a parked column of e's field name.
+func ParkedColumn(e *dsl.Entity, name string) (sch, tbl, column string) {
+	sch, tbl = physicalParts(e)
+	return sch, tbl, parkedName(name)
+}
+
+// ParkedName returns the name a parked column of field takes.
+func ParkedName(field string) string { return parkedName(field) }
+
+// PhysicalTable returns the schema and name of e's table.
+func PhysicalTable(e *dsl.Entity) (sch, tbl string) { return physicalParts(e) }
 
 // emitFieldPark renames a column out of the way instead of dropping it.
 //

@@ -295,28 +295,107 @@ func (d *Diff) ClassesPresent() []ChangeClass {
 	return out
 }
 
-// diffCtx carries optional caller-ownership context into the diff engine.
-// When populated, removals of entities/fields owned exclusively by the
-// submitting caller (with no cross-caller references) are downgraded from
-// ClassCrossCallerBreaking to ClassAdditive.
+// diffCtx carries what ComputeDiff knows beyond the two IRs.
 type diffCtx struct {
 	submittingCaller string
-	entityOwnership  map[string]string // entityID → caller who declared it
-	crossCallerRefs  map[string]bool   // "entityID" or "entityID.fieldName" → referenced by another caller
+	entityOwnership  map[string]string     // entityID → caller who declared it
+	crossCallerRefs  map[string]bool       // "entityID" or "entityID.fieldName" → referenced by another caller
+	parked           map[string]*dsl.Field // "entityID.fieldName" → the declaration a parked column had
 }
 
 // DiffOption configures optional behavior of ComputeDiff.
 type DiffOption func(*diffCtx)
 
-// WithCallerContext supplies per-caller ownership and cross-reference data
-// so the diff engine can downgrade removals that only affect the submitting
-// caller from ClassCrossCallerBreaking to ClassAdditive.
+// WithCallerContext supplies per-caller ownership and cross-reference data.
+// With it, removing something only the submitting caller uses classifies as
+// ClassDestructive; without it, every removal is ClassCrossCallerBreaking.
 func WithCallerContext(caller string, ownership map[string]string, refs map[string]bool) DiffOption {
 	return func(c *diffCtx) {
 		c.submittingCaller = caller
 		c.entityOwnership = ownership
 		c.crossCallerRefs = refs
 	}
+}
+
+// WithParkedFields names the added fields whose migration renames a parked
+// column back, keyed "entityID.fieldName", each with the declaration the
+// column had when it was parked.
+//
+// The diff restores such a field as that declaration, in a KindFieldAdded
+// change whose From is the restored declaration, then lists every difference
+// from the new declaration as its own change. The restore is ClassAdditive,
+// or ClassBackfillRequired when it sets NOT NULL and the field declares a
+// backfill.
+//
+// The caller must build fields from the database the migration runs against,
+// and only for a parked column emitFieldRestoreIfParked would restore.
+func WithParkedFields(fields map[string]*dsl.Field) DiffOption {
+	return func(c *diffCtx) {
+		c.parked = fields
+	}
+}
+
+// withRestoredFields returns oldE with a field for each parked column newE
+// restores, as the restore leaves it, and appends a restore change for each
+// to d. It returns oldE itself when newE restores nothing.
+func (ctx *diffCtx) withRestoredFields(oldE, newE *dsl.Entity, d *Diff) *dsl.Entity {
+	if len(ctx.parked) == 0 {
+		return oldE
+	}
+	var out *dsl.Entity
+	for i := range newE.Fields {
+		nf := &newE.Fields[i]
+		parked, ok := ctx.parked[newE.ID()+"."+nf.Name]
+		if !ok || oldE.FindField(nf.Name) != nil {
+			continue
+		}
+		// The park dropped NOT NULL. The restore sets it again only when
+		// both declarations have it; a nullable parked column tightened is
+		// its own change.
+		//
+		// The backfill modifier has no physical form, so the new one is
+		// carried and never shows as a difference.
+		restored := *parked
+		restored.Name = nf.Name
+		restored.NotNull = parked.NotNull && nf.NotNull
+		restored.Backfill = nf.Backfill
+
+		class := ClassAdditive
+		detail := "field restored from its parked column"
+		// A parked column holds values for the rows it had when parked. A
+		// declared backfill fills the rows inserted since; a DEFAULT does
+		// not, since it applies to rows inserted later.
+		if restored.NotNull && nf.Backfill != "" {
+			class = ClassBackfillRequired
+			detail += "; the backfill fills rows inserted while it was parked"
+		}
+		d.append(Change{
+			Kind:     KindFieldAdded,
+			Class:    class,
+			EntityID: newE.ID(),
+			Field:    nf.Name,
+			Detail:   detail,
+			From:     &restored,
+			To:       nf,
+		})
+
+		if out == nil {
+			cp := *oldE
+			cp.Fields = append([]dsl.Field(nil), oldE.Fields...)
+			out = &cp
+		}
+		out.Fields = append(out.Fields, restored)
+	}
+	if out == nil {
+		return oldE
+	}
+	return out
+}
+
+// isRestore reports whether ch restores a parked column.
+func isRestore(ch Change) bool {
+	_, ok := ch.From.(*dsl.Field)
+	return ch.Kind == KindFieldAdded && ok
 }
 
 // classifyRemoval decides how removing a column or entity is gated. It returns
@@ -408,7 +487,7 @@ func ComputeDiff(oldIR, newIR *dsl.IR, opts ...DiffOption) *Diff {
 				To:       newE,
 			})
 		default:
-			diffEntity(oldE, newE, d, ctx)
+			diffEntity(ctx.withRestoredFields(oldE, newE, d), newE, d, ctx)
 		}
 	}
 

@@ -374,6 +374,114 @@ entity B in x { id bigint primary  account_id bigint references x.Account.id }
 	}
 }
 
+// parkedField returns entity A's field name as src declares it, standing in
+// for the declaration schema history records for a parked column.
+func parkedField(t *testing.T, src, name string) map[string]*dsl.Field {
+	t.Helper()
+	ir := lower(t, src)
+	f := ir.Entities[0].FindField(name)
+	if f == nil {
+		t.Fatalf("no field %s in %s", name, src)
+	}
+	return map[string]*dsl.Field{"x.A." + name: f}
+}
+
+// A parked column brings its rows back with the field, so the restore is
+// additive. The option names one field; the other in the same diff keeps its
+// class.
+func TestDiff_RestoredNotNullField_IsAdditive(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary }`)
+	newIR := lower(t, `entity A in x { id bigint primary  v text not null  w text not null }`)
+
+	d := ComputeDiff(oldIR, newIR, WithParkedFields(
+		parkedField(t, `entity A in x { id bigint primary  v text not null }`, "v")))
+	added := map[string]Change{}
+	for _, c := range d.All() {
+		if c.Kind == KindFieldAdded {
+			added[c.Field] = c
+		}
+	}
+	if c := added["v"]; c.Class != ClassAdditive || !strings.Contains(c.Detail, "restored") {
+		t.Errorf("restored NOT NULL field: class %s, detail %q; want additive, restored", c.Class, c.Detail)
+	}
+	if c := added["w"]; c.Class != ClassBackfillRequired {
+		t.Errorf("NOT NULL field with no parked column: class %s, want backfill-required", c.Class)
+	}
+	if d.Len() != 2 {
+		t.Errorf("%d changes for a restore identical to its parked declaration and one add, want 2: %+v", d.Len(), d.All())
+	}
+}
+
+// A restored NOT NULL field with a backfill takes the backfill path, which
+// fills the rows inserted while the column was parked.
+func TestDiff_RestoredFieldWithBackfill_IsBackfillRequired(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary }`)
+	newIR := lower(t, `entity A in x { id bigint primary  v text not null backfill "'x'" }`)
+
+	d := ComputeDiff(oldIR, newIR, WithParkedFields(
+		parkedField(t, `entity A in x { id bigint primary  v text not null }`, "v")))
+	c := findChange(t, d, KindFieldAdded)
+	if c == nil || c.Class != ClassBackfillRequired || !strings.Contains(c.Detail, "restored") {
+		t.Errorf("restored NOT NULL field with a backfill: %+v; want backfill-required, restored", c)
+	}
+
+	// A DEFAULT fills no row the table already holds, so it does not take
+	// the backfill's place.
+	withDefault := lower(t, `entity A in x { id bigint primary  v text not null default "d" backfill "'x'" }`)
+	d = ComputeDiff(oldIR, withDefault, WithParkedFields(
+		parkedField(t, `entity A in x { id bigint primary  v text not null }`, "v")))
+	if c := findChange(t, d, KindFieldAdded); c == nil || c.Class != ClassBackfillRequired {
+		t.Errorf("restored NOT NULL field with a default and a backfill: %+v; want backfill-required", c)
+	}
+}
+
+// A column parked NOT NULL and declared nullable restores without its NOT
+// NULL: the park already dropped it, and rows inserted since may be NULL.
+func TestDiff_RestoredField_NullableDropsTheNotNull(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary }`)
+	newIR := lower(t, `entity A in x { id bigint primary  v text }`)
+
+	d := ComputeDiff(oldIR, newIR, WithParkedFields(
+		parkedField(t, `entity A in x { id bigint primary  v text not null }`, "v")))
+	if d.Len() != 1 {
+		t.Fatalf("%d changes, want the restore alone: %+v", d.Len(), d.All())
+	}
+	if r := findChange(t, d, KindFieldAdded); r == nil || r.From.(*dsl.Field).NotNull {
+		t.Errorf("restore %+v; want a nullable column", r)
+	}
+}
+
+// A restore is followed by one change per difference between the parked
+// declaration and the new one, each classed by its own rule.
+func TestDiff_RestoredField_ListsEachDifference(t *testing.T) {
+	oldIR := lower(t, `entity A in x { id bigint primary }`)
+	newIR := lower(t, `entity A in x { id bigint primary  v varchar(20) not null unique check "length(v) > 1" }`)
+
+	d := ComputeDiff(oldIR, newIR, WithParkedFields(
+		parkedField(t, `entity A in x { id bigint primary  v varchar(10) }`, "v")))
+	got := map[ChangeKind]Change{}
+	for _, c := range d.All() {
+		got[c.Kind] = c
+	}
+	for _, want := range []ChangeKind{KindFieldAdded, KindFieldTypeChanged,
+		KindFieldNotNullTightened, KindFieldUniqueAdded, KindCheckAdded} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("no %s change; got %+v", want, d.All())
+		}
+	}
+	if d.Len() != 5 {
+		t.Errorf("%d changes, want 5: %+v", d.Len(), d.All())
+	}
+	// The parked column is nullable, so the NOT NULL is a tightening with
+	// its own class, and the restore itself sets none.
+	if r := got[KindFieldAdded]; r.Class != ClassAdditive || r.From.(*dsl.Field).NotNull {
+		t.Errorf("restore %+v; want additive, restoring a nullable column", r)
+	}
+	if c := got[KindFieldNotNullTightened]; c.Class != ClassBackfillRequired {
+		t.Errorf("NOT NULL tightening: class %s, want backfill-required", c.Class)
+	}
+}
+
 func TestDiff_ReferenceAddedOnNewField_IsAdditive(t *testing.T) {
 	oldIR := lower(t, `
 entity Account in x { id bigint primary }

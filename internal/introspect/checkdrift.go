@@ -4,10 +4,10 @@ package introspect
 // declares (column-level `check "..."` and table-level `check "..." as
 // name`) and the CHECK constraints actually enforced on the live table.
 //
-// The plan/diff path is blind to CHECK drift the same way it is to unique-index
-// drift: the differ never manages CHECK constraints, so a check narrower at
-// adoption — or one the .atl later widened — stays whatever the database had,
-// and the mismatch surfaces as SQLSTATE 23514 on a write the schema permits.
+// The diff compares against the checkpoint, not the database, so a check that
+// diverged outside atlantis — narrower at adoption, or edited by hand — stays
+// whatever the database has, and the mismatch surfaces as SQLSTATE 23514 on a
+// write the schema permits.
 //
 // Matching is by normalized expression, not by constraint name. A declared
 // check is rendered onto a throwaway TEMP table carrying the entity's column
@@ -18,8 +18,8 @@ package introspect
 //
 // Two checks that are semantically equal and textually different are reported
 // as divergent — most often `col IS NULL OR col IN (...)` against a bare
-// `col IN (...)`, which pass identically since a CHECK admits NULL. That is why
-// this is an advisory rather than a refusal.
+// `col IN (...)`, which pass identically since a CHECK admits NULL. The apply
+// refuses on drift; ATLANTIS_ALLOW_CHECK_DRIFT=1 turns the check off.
 
 import (
 	"context"
@@ -84,61 +84,107 @@ func DetectCheckConstraintDrift(ctx context.Context, q DBTX, declaredIR *dsl.IR)
 	if declaredIR == nil {
 		return nil, nil, fmt.Errorf("introspect: declaredIR is required")
 	}
-
-	// Declared checks per physical table — column-level (Field.Check) and
-	// table-level (Entity.Checks). We record every entity (even with no
-	// declared checks) so live orphans on those tables still surface.
-	type declTable struct {
-		entity *dsl.Entity
-		exprs  []string
+	r := renderChecks(ctx, q, declaredIR)
+	r.settle(ctx, q, false)
+	drift, err := r.drift(ctx, q)
+	if err != nil {
+		return nil, nil, err
 	}
-	decl := make(map[physRef]*declTable, len(declaredIR.Entities))
+	return drift, r.notes, nil
+}
+
+// renderedChecks is a schema's declared CHECK constraints in Postgres's
+// deparse form, per physical table. A table with no declared check is
+// present, so its live orphans still surface.
+type renderedChecks struct {
+	tables  map[physRef]*renderedCheckTable
+	pending []pendingCheck // checks that did not normalize
+	notes   []string
+}
+
+type renderedCheckTable struct {
+	entityID string
+	defs     map[string]string // normalized def → verbatim expr
+}
+
+type pendingCheck struct {
+	ref    physRef
+	entity *dsl.Entity
+	expr   string
+}
+
+// settle normalizes the pending checks again when retry is set, and records
+// a note for each that still does not normalize.
+func (r *renderedChecks) settle(ctx context.Context, q DBTX, retry bool) {
+	for _, p := range r.pending {
+		if retry {
+			if norm, ok := normalizeCheck(ctx, q, p.entity, p.expr); ok {
+				r.tables[p.ref].defs[norm] = p.expr
+				continue
+			}
+		}
+		r.notes = append(r.notes, fmt.Sprintf("%s: could not normalize declared check %q for comparison — audit it out-of-band", p.entity.ID(), p.expr))
+	}
+	r.pending = nil
+}
+
+// renderChecks normalizes every column-level and table-level CHECK
+// declaredIR declares. It reads no user table.
+func renderChecks(ctx context.Context, q DBTX, declaredIR *dsl.IR) *renderedChecks {
+	r := &renderedChecks{tables: make(map[physRef]*renderedCheckTable, len(declaredIR.Entities))}
 	for i := range declaredIR.Entities {
 		e := &declaredIR.Entities[i]
 		s, t := physical(e)
 		ref := physRef{s, t}
-		dt := decl[ref]
-		if dt == nil {
-			dt = &declTable{entity: e}
-			decl[ref] = dt
+		rt := r.tables[ref]
+		if rt == nil {
+			rt = &renderedCheckTable{entityID: e.ID(), defs: map[string]string{}}
+			r.tables[ref] = rt
 		}
+		var exprs []string
 		for j := range e.Fields {
 			if c := strings.TrimSpace(e.Fields[j].Check); c != "" {
-				dt.exprs = append(dt.exprs, c)
+				exprs = append(exprs, c)
 			}
 		}
 		for _, tc := range e.Checks {
 			if c := strings.TrimSpace(tc.Expr); c != "" {
-				dt.exprs = append(dt.exprs, c)
+				exprs = append(exprs, c)
 			}
 		}
+		for _, expr := range exprs {
+			norm, ok := normalizeCheck(ctx, q, e, expr)
+			if !ok {
+				r.pending = append(r.pending, pendingCheck{ref, e, expr})
+				continue
+			}
+			rt.defs[norm] = expr
+		}
 	}
-	if len(decl) == 0 {
-		return nil, nil, nil
-	}
+	return r
+}
 
-	pairs := make([]physRef, 0, len(decl))
-	for r := range decl {
-		pairs = append(pairs, r)
+// drift compares r with the live CHECK constraints q reads, in both
+// directions.
+func (r *renderedChecks) drift(ctx context.Context, q Querier) ([]CheckConstraintDrift, error) {
+	if len(r.tables) == 0 {
+		return nil, nil
 	}
-	live, err := loadLiveChecks(ctx, q, pairs)
+	pairs := make([]physRef, 0, len(r.tables))
+	for ref := range r.tables {
+		pairs = append(pairs, ref)
+	}
+	live, exists, err := loadLiveChecks(ctx, q, pairs)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	var drift []CheckConstraintDrift
-	var notes []string
-	for ref, dt := range decl {
-		// Normalize every declared check to Postgres's deparse form.
-		declaredDefs := make(map[string]string, len(dt.exprs)) // normDef → verbatim expr
-		for _, expr := range dt.exprs {
-			norm, ok := normalizeCheck(ctx, q, dt.entity, expr)
-			if !ok {
-				notes = append(notes, fmt.Sprintf("%s: could not normalize declared check %q for comparison — audit it out-of-band", dt.entity.ID(), expr))
-				continue
-			}
-			declaredDefs[norm] = expr
+	for ref, rt := range r.tables {
+		if !exists[ref] {
+			continue // table not in the live database
 		}
+		declaredDefs := rt.defs
 		liveDefs := make(map[string]bool, len(live[ref]))
 		for _, lc := range live[ref] {
 			liveDefs[lc.def] = true
@@ -149,7 +195,7 @@ func DetectCheckConstraintDrift(ctx context.Context, q DBTX, declaredIR *dsl.IR)
 			if !liveDefs[norm] {
 				drift = append(drift, CheckConstraintDrift{
 					Kind:       CheckDeclaredNotEnforced,
-					EntityID:   dt.entity.ID(),
+					EntityID:   rt.entityID,
 					Schema:     ref.schema,
 					Table:      ref.table,
 					Declared:   expr,
@@ -162,7 +208,7 @@ func DetectCheckConstraintDrift(ctx context.Context, q DBTX, declaredIR *dsl.IR)
 			if _, ok := declaredDefs[lc.def]; !ok {
 				drift = append(drift, CheckConstraintDrift{
 					Kind:           CheckLiveNotDeclared,
-					EntityID:       dt.entity.ID(),
+					EntityID:       rt.entityID,
 					Schema:         ref.schema,
 					Table:          ref.table,
 					ConstraintName: lc.name,
@@ -188,7 +234,7 @@ func DetectCheckConstraintDrift(ctx context.Context, q DBTX, declaredIR *dsl.IR)
 		}
 		return a.Definition < b.Definition
 	})
-	return drift, notes, nil
+	return drift, nil
 }
 
 // normalizeCheck returns the pg_get_constraintdef deparse of a declared check
@@ -236,31 +282,36 @@ type liveCheck struct {
 // loadLiveChecks reads every CHECK constraint (contype='c') on the given
 // physical tables, keyed by table, with Postgres's canonical
 // pg_get_constraintdef deparse for each.
-func loadLiveChecks(ctx context.Context, q Querier, pairs []physRef) (map[physRef][]liveCheck, error) {
+func loadLiveChecks(ctx context.Context, q Querier, pairs []physRef) (checks map[physRef][]liveCheck, exists map[physRef]bool, err error) {
 	schemas, tables := splitPairs(pairs)
+	// One row per existing table with no CHECK, the constraint columns NULL.
 	rows, err := q.Query(ctx, `
 WITH targets AS (
     SELECT unnest($1::text[]) AS schema, unnest($2::text[]) AS table_name
 )
 SELECT n.nspname, c.relname, con.conname, pg_get_constraintdef(con.oid)
-FROM pg_constraint con
-JOIN pg_class c     ON c.oid = con.conrelid
-JOIN pg_namespace n ON n.oid = c.relnamespace
-JOIN targets tg     ON tg.schema = n.nspname AND tg.table_name = c.relname
-WHERE con.contype = 'c'`, schemas, tables)
+FROM targets tg
+JOIN pg_namespace n ON n.nspname = tg.schema
+JOIN pg_class c     ON c.relnamespace = n.oid AND c.relname = tg.table_name
+LEFT JOIN pg_constraint con ON con.conrelid = c.oid AND con.contype = 'c'`, schemas, tables)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
-	out := make(map[physRef][]liveCheck)
+	checks = make(map[physRef][]liveCheck)
+	exists = make(map[physRef]bool)
 	for rows.Next() {
-		var s, t, name, def string
+		var s, t string
+		var name, def *string
 		if err := rows.Scan(&s, &t, &name, &def); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		key := physRef{s, t}
-		out[key] = append(out[key], liveCheck{name: name, def: def})
+		exists[key] = true
+		if name != nil {
+			checks[key] = append(checks[key], liveCheck{name: *name, def: *def})
+		}
 	}
-	return out, rows.Err()
+	return checks, exists, rows.Err()
 }

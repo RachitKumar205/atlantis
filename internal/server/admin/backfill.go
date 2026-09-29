@@ -13,6 +13,8 @@ import (
 	"github.com/rachitkumar205/atlantis/internal/storage/pg"
 
 	"github.com/jackc/pgx/v5"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	adminpb "github.com/rachitkumar205/atlantis/clients/go/pb/atlantis/admin/v1"
@@ -222,8 +224,16 @@ func (s *Service) BeginBackfillPlan(ctx context.Context, req *adminpb.BeginBackf
 	// diff is part of that scope.
 	backfillOwnership := buildEntityOwnership(req.GetCaller(), parsed, others)
 	backfillCrossRefs := buildCrossCallerRefs(others)
-	backfillDiff := codegen.ComputeDiff(prior, newIR,
+	// Read through tx, the transaction this RPC's DDL runs in.
+	backfillDiff, parkConflicts, err := diffWithParked(ctx, tx, tx, prior, newIR,
 		codegen.WithCallerContext(req.GetCaller(), backfillOwnership, backfillCrossRefs))
+	if err != nil {
+		return nil, fmt.Errorf("begin-backfill: %w", err)
+	}
+	if len(parkConflicts) > 0 {
+		return nil, status.Error(codes.FailedPrecondition,
+			"admin: "+strings.Join(parkConflicts, "; "))
+	}
 
 	depHash, err := callerDependencyHash(req.GetCaller(), prior, backfillOwnership, parsed, backfillDiff)
 	if err != nil {

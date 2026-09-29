@@ -192,7 +192,7 @@ func (s *Service) gateOnChangePolicy(ctx context.Context, tx pgx.Tx, g gateReque
 		pb := planClassToPB(translateClass(c))
 		// A class outside the settable set cannot be governed by a rule, and
 		// there are only two: UNSPECIFIED, meaning the diff produced nothing a
-		// class maps to, and UNPARSEABLE, meaning the DSL did not compile and
+		// class maps to, and UNPARSEABLE, meaning the schema failed validation and
 		// the apply was refused long before here. Neither may proceed quietly.
 		//
 		// Unreachable as written, and kept. policyClassIsSettable

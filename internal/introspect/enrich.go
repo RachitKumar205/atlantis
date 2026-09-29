@@ -41,7 +41,7 @@ func Enrich(ctx context.Context, q Querier, ir *dsl.IR) ([]string, error) {
 
 	var notes []string
 
-	checks, err := loadLiveChecks(ctx, q, pairs)
+	checks, _, err := loadLiveChecks(ctx, q, pairs)
 	if err != nil {
 		return nil, fmt.Errorf("enrich: load live checks: %w", err)
 	}

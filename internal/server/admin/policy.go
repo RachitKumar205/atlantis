@@ -34,8 +34,8 @@ import (
 // Derived from codegen.Diff's buckets rather than from the PlanClass enum,
 // because the buckets are what a diff is actually sorted into. The enum
 // carries two more values and neither can reach a policy decision: UNPARSEABLE
-// means the DSL did not compile, so the apply is refused long before any rule
-// is consulted, and UNSPECIFIED is the zero value.
+// means the schema failed validation, so the apply is refused long before any
+// rule is consulted, and UNSPECIFIED is the zero value.
 //
 // TestEveryChangeClassHasAPolicyKey walks the buckets reflectively and fails
 // when one has no entry here, so a fifth bucket cannot quietly arrive with no
@@ -175,7 +175,7 @@ func (s *Service) SetChangePolicy(ctx context.Context, req *adminpb.SetChangePol
 	for _, e := range req.GetEntries() {
 		if !policyClassIsSettable(e.GetChangeClass()) {
 			return nil, fmt.Errorf("admin: %s is not a class a rule can apply to — "+
-				"a plan is only unparseable when the DSL did not compile, which is "+
+				"a plan is only unparseable when its schema fails validation, which is "+
 				"refused before any policy is consulted", e.GetChangeClass())
 		}
 		if role := e.GetApproverRole(); role != "" && !approverRoleSettable(role) {

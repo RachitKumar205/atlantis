@@ -179,7 +179,10 @@ SELECT version, source FROM atlantis.rehearsal_database WHERE id = 1`).
 // a destructive change records into atlantis.parked_objects, and a
 // `partition by` policy calls atlantis.current_partition(). Without them the
 // rehearsal reports structural failures the real apply cannot produce.
-func rehearsalSetup(prior *dsl.IR) (func(context.Context, *pgx.Conn) error, error) {
+//
+// parked columns are added last, so the copy fills them and a re-declared
+// field restores on the clone as it does on the managed database.
+func rehearsalSetup(prior *dsl.IR, parked []parkedColumn) (func(context.Context, *pgx.Conn) error, error) {
 	if prior == nil {
 		prior = &dsl.IR{}
 	}
@@ -216,6 +219,9 @@ func rehearsalSetup(prior *dsl.IR) (func(context.Context, *pgx.Conn) error, erro
 			if _, err := tx.Exec(ctx, ddl); err != nil {
 				return err
 			}
+		}
+		if err := addParkedColumns(ctx, tx, parked); err != nil {
+			return err
 		}
 		return tx.Commit(ctx)
 	}, nil
@@ -408,7 +414,11 @@ WITH ins AS (
 	if err != nil {
 		return nil, fmt.Errorf("load checkpoint: %w", err)
 	}
-	setup, err := rehearsalSetup(prior)
+	parked, err := readParkedColumns(ctx, managed)
+	if err != nil {
+		return nil, fmt.Errorf("read parked columns: %w", err)
+	}
+	setup, err := rehearsalSetup(prior, parked)
 	if err != nil {
 		return nil, err
 	}
@@ -532,13 +542,24 @@ func (s *Service) rehearsalDiagnostics(ctx context.Context, target *pgx.ConnConf
 	col := pgx.Identifier{e.ColumnName}.Sanitize()
 	switch e.Code {
 	case "23502": // not_null_violation
+		key := e.TableName + "." + e.ColumnName + " null"
 		n, err := rehearse.CountWhere(ctx, target, dbName, rel, col+" IS NULL")
+		if err == nil {
+			remediation := fmt.Sprintf(
+				"%d rows hold NULL in %s.%s. Add a `default`, or a backfill: `%s <type> not null backfill \"<expression>\"`.",
+				n, e.TableName, e.ColumnName, e.ColumnName)
+			return map[string]int64{key: n}, remediation
+		}
+		// A restore that failed rolled its rename back, so the rows are
+		// under the parked name.
+		parked := pgx.Identifier{codegen.ParkedName(e.ColumnName)}.Sanitize()
+		n, err = rehearse.CountWhere(ctx, target, dbName, rel, parked+" IS NULL")
 		if err != nil {
 			return nil, ""
 		}
-		key := e.TableName + "." + e.ColumnName + " null"
 		remediation := fmt.Sprintf(
-			"%d rows hold NULL in %s.%s. Add a `default`, or a backfill: `%s <type> not null backfill \"<expression>\"`.",
+			"%d rows inserted into %s while %s was parked hold NULL. Declare a backfill: "+
+				"`%s <type> not null backfill \"<expression>\"`, and apply with `tide apply --backfill`.",
 			n, e.TableName, e.ColumnName, e.ColumnName)
 		return map[string]int64{key: n}, remediation
 	}
