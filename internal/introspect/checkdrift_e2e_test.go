@@ -28,7 +28,7 @@ func TestDetectCheckConstraintDrift_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	exec := func(sql string) {
 		t.Helper()
@@ -55,7 +55,7 @@ func TestDetectCheckConstraintDrift_EndToEnd(t *testing.T) {
 	exec(`CREATE TABLE public.ct (id int PRIMARY KEY, status varchar(20) NOT NULL)`)
 	exec(`ALTER TABLE public.ct ADD CONSTRAINT ct_status_check
 	      CHECK (status IN ('active','abandoned','checked_out'))`)
-	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS public.ct`) })
+	t.Cleanup(func() { cleanExec(t, ctx, pool, `DROP TABLE IF EXISTS public.ct`) })
 
 	declaredMatch := lower(`entity Ct in x {
   table "public.ct"

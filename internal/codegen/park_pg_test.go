@@ -45,6 +45,15 @@ func parkOwner() DiffOption {
 	return WithCallerContext("backend", map[string]string{"prk.Memo": "backend"}, nil)
 }
 
+// cleanExec runs a cleanup statement and fails the test if it fails, so a
+// fixture left in the shared database is reported.
+func cleanExec(t *testing.T, ctx context.Context, conn *pgx.Conn, sql string) {
+	t.Helper()
+	if _, err := conn.Exec(ctx, sql); err != nil {
+		t.Errorf("clean up %q: %v", sql, err)
+	}
+}
+
 func TestParkedColumnKeepsItsData(t *testing.T) {
 	url := os.Getenv("ATLANTIS_TEST_PG")
 	if url == "" {
@@ -55,14 +64,14 @@ func TestParkedColumnKeepsItsData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close(ctx)
+	t.Cleanup(func() { _ = conn.Close(ctx) })
 
 	reset := func() {
-		_, _ = conn.Exec(ctx, `DROP TABLE IF EXISTS atlantis.prk_memo CASCADE`)
+		cleanExec(t, ctx, conn, `DROP TABLE IF EXISTS atlantis.prk_memo CASCADE`)
 		// Only this test's own tombstone, never the schema: it is shared, and
 		// `go test ./...` runs packages concurrently, so dropping the schema
 		// destroys the reaper package's fixtures mid-run.
-		_, _ = conn.Exec(ctx, `DROP TABLE IF EXISTS atlantis_tombstone.atlantis_prk_memo__parked`)
+		cleanExec(t, ctx, conn, `DROP TABLE IF EXISTS atlantis_tombstone.atlantis_prk_memo__parked`)
 	}
 	reset()
 	t.Cleanup(reset)
@@ -156,14 +165,14 @@ func TestParkedTableKeepsItsData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close(ctx)
+	t.Cleanup(func() { _ = conn.Close(ctx) })
 
 	reset := func() {
-		_, _ = conn.Exec(ctx, `DROP TABLE IF EXISTS atlantis.prk_memo CASCADE`)
+		cleanExec(t, ctx, conn, `DROP TABLE IF EXISTS atlantis.prk_memo CASCADE`)
 		// Only this test's own tombstone, never the schema: it is shared, and
 		// `go test ./...` runs packages concurrently, so dropping the schema
 		// destroys the reaper package's fixtures mid-run.
-		_, _ = conn.Exec(ctx, `DROP TABLE IF EXISTS atlantis_tombstone.atlantis_prk_memo__parked`)
+		cleanExec(t, ctx, conn, `DROP TABLE IF EXISTS atlantis_tombstone.atlantis_prk_memo__parked`)
 	}
 	reset()
 	t.Cleanup(reset)
@@ -245,15 +254,15 @@ func TestParkRegistersItselfForReaping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close(ctx)
+	t.Cleanup(func() { _ = conn.Close(ctx) })
 
 	reset := func() {
-		_, _ = conn.Exec(ctx, `DROP TABLE IF EXISTS atlantis.prk_memo CASCADE`)
+		cleanExec(t, ctx, conn, `DROP TABLE IF EXISTS atlantis.prk_memo CASCADE`)
 		// Only this test's own tombstone, never the schema: it is shared, and
 		// `go test ./...` runs packages concurrently, so dropping the schema
 		// destroys the reaper package's fixtures mid-run.
-		_, _ = conn.Exec(ctx, `DROP TABLE IF EXISTS atlantis_tombstone.atlantis_prk_memo__parked`)
-		_, _ = conn.Exec(ctx, `DELETE FROM atlantis.parked_objects WHERE original_name IN ('notes','prk_memo')`)
+		cleanExec(t, ctx, conn, `DROP TABLE IF EXISTS atlantis_tombstone.atlantis_prk_memo__parked`)
+		cleanExec(t, ctx, conn, `DELETE FROM atlantis.parked_objects WHERE original_name IN ('notes','prk_memo')`)
 	}
 	reset()
 	t.Cleanup(reset)
@@ -351,16 +360,16 @@ func TestParkingAnAdoptedTableKeepsAndRestoresIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close(ctx)
+	t.Cleanup(func() { _ = conn.Close(ctx) })
 
 	reset := func() {
-		_, _ = conn.Exec(ctx, `DROP SCHEMA IF EXISTS prk_adopted CASCADE`)
-		_, _ = conn.Exec(ctx, `DROP TABLE IF EXISTS atlantis_tombstone.prk_adopted_ledger__parked`)
+		cleanExec(t, ctx, conn, `DROP SCHEMA IF EXISTS prk_adopted CASCADE`)
+		cleanExec(t, ctx, conn, `DROP TABLE IF EXISTS atlantis_tombstone.prk_adopted_ledger__parked`)
 		// The bare name too: a park that mis-resolves leaves the real table in
 		// the tombstone schema under its original name, and one such run would
 		// otherwise poison every later run of this test.
-		_, _ = conn.Exec(ctx, `DROP TABLE IF EXISTS atlantis_tombstone.ledger`)
-		_, _ = conn.Exec(ctx, `DELETE FROM atlantis.parked_objects WHERE original_name = 'ledger'`)
+		cleanExec(t, ctx, conn, `DROP TABLE IF EXISTS atlantis_tombstone.ledger`)
+		cleanExec(t, ctx, conn, `DELETE FROM atlantis.parked_objects WHERE original_name = 'ledger'`)
 	}
 	reset()
 	t.Cleanup(reset)
@@ -466,16 +475,16 @@ func TestUnparkingAReapedTableFailsLoudly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer conn.Close(ctx)
+	t.Cleanup(func() { _ = conn.Close(ctx) })
 
 	reset := func() {
-		_, _ = conn.Exec(ctx, `DROP SCHEMA IF EXISTS prk_adopted CASCADE`)
-		_, _ = conn.Exec(ctx, `DROP TABLE IF EXISTS atlantis_tombstone.prk_adopted_ledger__parked`)
+		cleanExec(t, ctx, conn, `DROP SCHEMA IF EXISTS prk_adopted CASCADE`)
+		cleanExec(t, ctx, conn, `DROP TABLE IF EXISTS atlantis_tombstone.prk_adopted_ledger__parked`)
 		// The bare name too: a park that mis-resolves leaves the real table in
 		// the tombstone schema under its original name, and one such run would
 		// otherwise poison every later run of this test.
-		_, _ = conn.Exec(ctx, `DROP TABLE IF EXISTS atlantis_tombstone.ledger`)
-		_, _ = conn.Exec(ctx, `DELETE FROM atlantis.parked_objects WHERE original_name = 'ledger'`)
+		cleanExec(t, ctx, conn, `DROP TABLE IF EXISTS atlantis_tombstone.ledger`)
+		cleanExec(t, ctx, conn, `DELETE FROM atlantis.parked_objects WHERE original_name = 'ledger'`)
 	}
 	reset()
 	t.Cleanup(reset)

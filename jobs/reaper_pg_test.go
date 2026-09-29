@@ -23,6 +23,15 @@ import (
 //	ATLANTIS_TEST_PG=postgres://atlantis:atlantis@localhost:5432/atlantis?sslmode=disable \
 //	  go test ./jobs/ -run Reap -v
 
+// cleanExec runs a cleanup statement and fails the test if it fails, so a
+// fixture left in the shared database is reported.
+func cleanExec(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string, args ...any) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, sql, args...); err != nil {
+		t.Errorf("clean up %q: %v", sql, err)
+	}
+}
+
 func TestReapDropsOnlyWhatIsDue(t *testing.T) {
 	url := os.Getenv("ATLANTIS_TEST_PG")
 	if url == "" {
@@ -33,7 +42,7 @@ func TestReapDropsOnlyWhatIsDue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	exec := func(sql string) {
 		t.Helper()
@@ -42,10 +51,10 @@ func TestReapDropsOnlyWhatIsDue(t *testing.T) {
 		}
 	}
 	reset := func() {
-		_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS atlantis_tombstone.reap_due__parked`)
-		_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS atlantis_tombstone.reap_pending__parked`)
-		_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS atlantis.reap_host`)
-		_, _ = pool.Exec(ctx, `DELETE FROM atlantis.parked_objects WHERE object_name LIKE 'reap_%'
+		cleanExec(t, ctx, pool, `DROP TABLE IF EXISTS atlantis_tombstone.reap_due__parked`)
+		cleanExec(t, ctx, pool, `DROP TABLE IF EXISTS atlantis_tombstone.reap_pending__parked`)
+		cleanExec(t, ctx, pool, `DROP TABLE IF EXISTS atlantis.reap_host`)
+		cleanExec(t, ctx, pool, `DELETE FROM atlantis.parked_objects WHERE object_name LIKE 'reap_%'
 		                        OR object_name LIKE '%__parked' AND parent_table = 'reap_host'`)
 	}
 	reset()
@@ -160,11 +169,11 @@ func TestReapGivesUpRatherThanBlockingTheTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	reset := func() {
-		_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS atlantis.reap_locked`)
-		_, _ = pool.Exec(ctx, `DELETE FROM atlantis.parked_objects WHERE parent_table = 'reap_locked'`)
+		cleanExec(t, ctx, pool, `DROP TABLE IF EXISTS atlantis.reap_locked`)
+		cleanExec(t, ctx, pool, `DELETE FROM atlantis.parked_objects WHERE parent_table = 'reap_locked'`)
 	}
 	reset()
 	t.Cleanup(reset)
@@ -378,13 +387,13 @@ func TestOneStuckObjectDoesNotStarveTheRest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	reset := func() {
-		_, _ = pool.Exec(ctx, `DROP VIEW IF EXISTS atlantis_tombstone.starve_dep`)
-		_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS atlantis_tombstone.starve_stuck__parked`)
-		_, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS atlantis_tombstone.starve_free__parked`)
-		_, _ = pool.Exec(ctx, `DELETE FROM atlantis.parked_objects WHERE original_name LIKE 'starve_%'`)
+		cleanExec(t, ctx, pool, `DROP VIEW IF EXISTS atlantis_tombstone.starve_dep`)
+		cleanExec(t, ctx, pool, `DROP TABLE IF EXISTS atlantis_tombstone.starve_stuck__parked`)
+		cleanExec(t, ctx, pool, `DROP TABLE IF EXISTS atlantis_tombstone.starve_free__parked`)
+		cleanExec(t, ctx, pool, `DELETE FROM atlantis.parked_objects WHERE original_name LIKE 'starve_%'`)
 	}
 	reset()
 	t.Cleanup(reset)
@@ -462,14 +471,14 @@ func TestReapHonoursItsBatchLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	reset := func() {
 		for i := 0; i < 3; i++ {
-			_, _ = pool.Exec(ctx, fmt.Sprintf(
+			cleanExec(t, ctx, pool, fmt.Sprintf(
 				`DROP TABLE IF EXISTS atlantis_tombstone.batch%d__parked`, i))
 		}
-		_, _ = pool.Exec(ctx, `DELETE FROM atlantis.parked_objects WHERE original_name LIKE 'batch%'`)
+		cleanExec(t, ctx, pool, `DELETE FROM atlantis.parked_objects WHERE original_name LIKE 'batch%'`)
 	}
 	reset()
 	t.Cleanup(reset)

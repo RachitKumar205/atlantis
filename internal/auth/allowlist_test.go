@@ -28,7 +28,9 @@ func TestReload_UnionsRegistrationsAndIdentities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer pool.Close()
+	// A cleanup, so it runs after the row deletes registered below. A defer
+	// runs before every cleanup, and the deletes then fail on a closed pool.
+	t.Cleanup(pool.Close)
 
 	mustExec := func(sql string, args ...any) {
 		t.Helper()
@@ -56,8 +58,12 @@ func TestReload_UnionsRegistrationsAndIdentities(t *testing.T) {
 	mustExec(`INSERT INTO atlantis.caller_identities (caller, can_mutate)
 		VALUES ($1, false) ON CONFLICT DO NOTHING`, readOnly)
 	t.Cleanup(func() {
-		_, _ = pool.Exec(ctx, `DELETE FROM atlantis.caller_registrations WHERE caller = $1`, applied)
-		_, _ = pool.Exec(ctx, `DELETE FROM atlantis.caller_identities WHERE caller = $1`, readOnly)
+		if _, err := pool.Exec(ctx, `DELETE FROM atlantis.caller_registrations WHERE caller = $1`, applied); err != nil {
+			t.Errorf("remove %s: %v", applied, err)
+		}
+		if _, err := pool.Exec(ctx, `DELETE FROM atlantis.caller_identities WHERE caller = $1`, readOnly); err != nil {
+			t.Errorf("remove %s: %v", readOnly, err)
+		}
 	})
 
 	a := New(pool, nil)

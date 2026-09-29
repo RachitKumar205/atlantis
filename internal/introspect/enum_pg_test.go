@@ -31,12 +31,17 @@ func TestIntrospectReadsEnumLabels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pool: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	drop := func() {
-		c := context.Background()
-		_, _ = pool.Exec(c, `DROP TABLE IF EXISTS atlantis.enumintro_person`)
-		_, _ = pool.Exec(c, `DROP TYPE IF EXISTS atlantis.enumintro_mood`)
+		for _, stmt := range []string{
+			`DROP TABLE IF EXISTS atlantis.enumintro_person`,
+			`DROP TYPE IF EXISTS atlantis.enumintro_mood`,
+		} {
+			if _, err := pool.Exec(context.Background(), stmt); err != nil {
+				t.Errorf("clean up %q: %v", stmt, err)
+			}
+		}
 	}
 	drop()
 	t.Cleanup(drop)

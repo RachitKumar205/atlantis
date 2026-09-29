@@ -27,7 +27,7 @@ func TestDetectColumnTypeDrift_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	exec := func(sql string) {
 		t.Helper()
@@ -56,7 +56,7 @@ func TestDetectColumnTypeDrift_EndToEnd(t *testing.T) {
 		vc varchar(10) NOT NULL,
 		created_at timestamptz NOT NULL DEFAULT now(),
 		amount numeric(10,2))`)
-	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS public.cd`) })
+	t.Cleanup(func() { cleanExec(t, ctx, pool, `DROP TABLE IF EXISTS public.cd`) })
 
 	matchIR := lower(`entity Cd in x {
   table "public.cd"

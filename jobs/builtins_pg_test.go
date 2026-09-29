@@ -28,17 +28,30 @@ func TestRegisterBuiltinsRegistersAndSchedules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	names := make([]string, 0, len(Builtins()))
 	for _, b := range Builtins() {
 		names = append(names, b.Name)
 	}
+	// A dev server sharing this database owns these rows, and an edit to one
+	// survives its restart, so the rows go back as they were.
+	var saved string
+	if err := pool.QueryRow(ctx, `
+SELECT coalesce(json_agg(s), '[]')::text FROM atlantis.job_schedules s WHERE job_name = ANY($1)`,
+		names).Scan(&saved); err != nil {
+		t.Fatalf("save schedules: %v", err)
+	}
 	clean := func() {
-		_, _ = pool.Exec(ctx, `DELETE FROM atlantis.job_schedules WHERE job_name = ANY($1)`, names)
+		cleanExec(t, ctx, pool, `DELETE FROM atlantis.job_schedules WHERE job_name = ANY($1)`, names)
 	}
 	clean()
-	t.Cleanup(clean)
+	t.Cleanup(func() {
+		clean()
+		cleanExec(t, ctx, pool, `
+INSERT INTO atlantis.job_schedules
+SELECT * FROM json_populate_recordset(NULL::atlantis.job_schedules, $1::json)`, saved)
+	})
 
 	reg := NewRegistry()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))

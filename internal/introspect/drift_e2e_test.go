@@ -29,7 +29,7 @@ func TestDetectUniqueIndexDrift_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	// A real table with a bare partial-UNIQUE index carrying a rich predicate
 	// (boolean structure over a varchar + a timestamp — the implicit-cast case).
@@ -38,7 +38,7 @@ func TestDetectUniqueIndexDrift_EndToEnd(t *testing.T) {
 		id int PRIMARY KEY, sku text, status varchar(20), deleted_at timestamptz)`)
 	mustExec(t, ctx, pool, `CREATE UNIQUE INDEX et_sku_live ON public.et (sku)
 		WHERE status = 'active' AND deleted_at IS NULL`)
-	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS public.et`) })
+	t.Cleanup(func() { cleanExec(t, ctx, pool, `DROP TABLE IF EXISTS public.et`) })
 
 	lower := func(atl string) *dsl.IR {
 		t.Helper()
@@ -123,5 +123,14 @@ func mustExec(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string)
 	t.Helper()
 	if _, err := pool.Exec(ctx, sql); err != nil {
 		t.Fatalf("exec %q: %v", sql, err)
+	}
+}
+
+// cleanExec runs a cleanup statement and fails the test if it fails, so a
+// fixture left in the shared database is reported.
+func cleanExec(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, sql); err != nil {
+		t.Errorf("clean up %q: %v", sql, err)
 	}
 }

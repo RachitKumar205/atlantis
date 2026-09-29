@@ -29,7 +29,7 @@ func TestNormalizePredicate_RealPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	// A real table whose column types must match the declared entity's, so the
 	// real index and the normalizer's temp index deparse identically.
@@ -37,7 +37,7 @@ func TestNormalizePredicate_RealPostgres(t *testing.T) {
 		id int, deleted_at timestamptz, status varchar(20), tier int, is_default boolean, _k int)`); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
-	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS pm_verify`) })
+	t.Cleanup(func() { cleanExec(t, ctx, pool, `DROP TABLE IF EXISTS pm_verify`) })
 
 	// Declared entity built through the real DSL so field types are faithful.
 	file, err := dsl.Parse("verify.atl", []byte(`entity Pm in x {

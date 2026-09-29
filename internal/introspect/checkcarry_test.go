@@ -37,7 +37,7 @@ func TestCheckCarryProducesNoFalseDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	exec := func(sql string) {
 		t.Helper()
@@ -50,7 +50,7 @@ func TestCheckCarryProducesNoFalseDrift(t *testing.T) {
 	exec(`CREATE TABLE public.cc (
 	        id     int PRIMARY KEY,
 	        total  int NOT NULL CONSTRAINT cc_total_check CHECK (total > 0))`)
-	t.Cleanup(func() { _, _ = pool.Exec(ctx, `DROP TABLE IF EXISTS public.cc`) })
+	t.Cleanup(func() { cleanExec(t, ctx, pool, `DROP TABLE IF EXISTS public.cc`) })
 
 	const atl = `
 entity Cc in pub {
