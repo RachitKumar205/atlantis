@@ -71,14 +71,14 @@ func TestCreateAndReadAUser(t *testing.T) {
 	db := newTestStore(t)
 	ctx := context.Background()
 
-	u, err := db.CreateUser(ctx, "Ada@Example.COM", "Ada", "", nil)
+	u, err := db.CreateUser(ctx, "Zoe@Example.COM", "Zoe", "", nil)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
 	// Folded on write. The database enforces the same rule, so this is checking
 	// that the two agree rather than that Go remembered.
-	if u.Email != "ada@example.com" {
+	if u.Email != "zoe@example.com" {
 		t.Errorf("email was stored as %q, not folded", u.Email)
 	}
 	if u.HasPassword() {
@@ -90,11 +90,14 @@ func TestCreateAndReadAUser(t *testing.T) {
 	// The id becomes the audit actor in every organisation's console, so it
 	// must not be the email — an address can be reassigned to another person,
 	// which would retroactively change who an audit row says acted.
-	if strings.Contains(u.ID, "ada") || strings.Contains(u.ID, "example") {
+	//
+	// "zoe" and "example" hold letters outside hex, so a random id cannot
+	// contain them by chance.
+	if strings.Contains(u.ID, "zoe") || strings.Contains(u.ID, "example") {
 		t.Errorf("id %q is derived from the email", u.ID)
 	}
 
-	got, err := db.UserByEmail(ctx, "ADA@example.com")
+	got, err := db.UserByEmail(ctx, "ZOE@example.com")
 	if err != nil {
 		t.Fatalf("lookup by a differently-cased address: %v", err)
 	}
