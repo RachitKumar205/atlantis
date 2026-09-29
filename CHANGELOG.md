@@ -13,6 +13,46 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Added
 
+#### One place that says what every organisation is running
+
+Each organisation's own database is the only record of its schema version, its
+dead-letter queue and its parked objects. Nothing central held any of it, so
+"which organisations are behind", "which have dead jobs accumulating", "which
+have a freeze window open" and "which have parked objects past their retention"
+were four questions answered by opening N databases by hand.
+
+**The console now sweeps the fleet** every `CONSOLE_FLEET_POLL_INTERVAL`, five
+minutes by default, writing what it saw to `console.org_facts` (migration
+`console/0019`) and publishing it as `atlantis_console_fleet_*` gauges labelled
+by organisation.
+
+**The console is the only component that could do this.** Each tenant's
+NetworkPolicy admits the console's namespace and pod label together, and the
+comment on it states that Cloud, the provisioner and a debugging shell have no
+business on a tenant's admin port.
+
+**`NaN` is a third state, and the point of the feature.** A fact the sweep could
+not read is `NaN` in the gauge and NULL in the table, never zero: a new
+organisation genuinely has schema version 0 and no dead jobs, and an
+organisation whose admin plane refused the call must not read the same. A sweep
+that fails keeps the numbers the last good one recorded and moves only
+`collected_at`, so the gap to `facts_at` says how stale they are.
+
+**An organisation that is removed stops being published.** Prometheus `GaugeVec`
+children are never collected, so a purged organisation would otherwise keep
+reporting its last values and an alert on it would never clear.
+
+**`/metrics` is a new listener on loopback**, `CONSOLE_METRICS_LISTEN`, default
+`127.0.0.1:9103`. The console's own listener is browser-facing behind a TLS
+terminator with cookie auth, and a client certificate is not the alternative —
+the console verifies each organisation's callers against that organisation's own
+authority and has no process-wide client CA. Nothing scrapes it yet.
+
+A sweep costs each tenant one `GET /status` and three list calls. `/readyz` is
+not polled: it pings the tenant's Postgres and memcached. `GetCallers` is not
+called either — it is an unbounded join and aggregate over the tenant's primary
+pool, and it answers none of the four questions.
+
 #### Existing organisations can be moved onto a new image
 
 A deploy reached the control plane and no tenant. The provisioner applies the

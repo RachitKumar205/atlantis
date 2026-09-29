@@ -246,8 +246,63 @@ Read by `cmd/console`, not the Atlantis server.
 | `CONSOLE_ENROLL_PUBLIC_URL` | (unset; **required with the group**) | Where a machine reaches the enrolment listener. Not derivable from the bind address, and deliberately not read from the `Host` header — the page that uses it prints a live token. |
 | `SANDBOX_PER_USER_LIMIT` | `100` | Maximum concurrent sandboxes per authenticated user, per organisation. A boot beyond this returns HTTP `429`. The limit also caps fork count — forking N children requires `N + parent` headroom. |
 | `SANDBOX_TTL` | `30m` | Idle window after which the BFF's janitor evicts a sandbox. Go duration syntax. Set lower (`10s`) for CI; higher (`2h`) for long agent loops. |
+| `CONSOLE_METRICS_LISTEN` | `127.0.0.1:9103` | Where `/metrics` is served, on its own listener. Loopback; see below. Not `9102`, which is the provisioner's and runs in the same namespace. |
+| `CONSOLE_FLEET_POLL_INTERVAL` | `5m` | Gap between sweeps of every registered organisation. Matches the client cache's refresh, so a rotated credential comes into use on the following sweep. |
+| `CONSOLE_FLEET_ORG_TIMEOUT` | `15s` | Budget for one organisation within a sweep. This is what stops a wedged tenant consuming the tick: it holds one of eight worker slots for this long and no longer. Capped by the sweep's own budget, four fifths of the interval — a value at or above that has no effect. |
 
 The 256 MiB cap on `PUT /api/sandbox/{id}/snapshot` is a compile-time constant, not configurable. See [Sandbox HTTP API](https://docs.tryatlantis.dev/reference/sandbox-api/#limits).
+
+### The fleet sweep
+
+Each organisation's own database is the only record of its schema version, its
+dead-letter queue and its parked objects, so asking "which organisations need
+attention" means opening every one of them. Every
+`CONSOLE_FLEET_POLL_INTERVAL` the console visits each registered organisation,
+writes what it saw to `console.org_facts`, and publishes it:
+
+| Gauge | |
+|---|---|
+| `atlantis_console_fleet_reachable{org}` | 0 while the last sweep could not reach it. Why is in `console.org_facts.unreachable_kind` |
+| `atlantis_console_fleet_schema_version{org}` | The spread across the fleet is what says a deploy reached some tenants |
+| `atlantis_console_fleet_dead_jobs{org}` | Work that has stopped retrying |
+| `atlantis_console_fleet_parked_objects{org}` | Still recoverable after a destructive migration |
+| `atlantis_console_fleet_parked_objects_overdue{org}` | Past `reap_after` and still present |
+| `atlantis_console_fleet_freeze_window_open{org}` | A freeze covering now |
+| `atlantis_console_fleet_counts_truncated{org,what}` | 1 when the matching count is a lower bound |
+| `atlantis_console_fleet_last_poll_timestamp_seconds{org}` | Alert on the age: a stopped sweep leaves every other gauge at its last value, and this is the only one that says so |
+| `atlantis_console_fleet_orgs` | `NaN` before the first sweep |
+| `atlantis_console_fleet_sweep_failures_total{stage}` | A sweep that could not list organisations (`list`), or a result it could not record (`write`). A failed list publishes nothing, so without this a console whose own database is down reports a frozen but healthy fleet |
+
+**`facts_at` moves only when every fact was read.** A tenant whose health
+listener answers and whose admin plane does not still updates what it can, and
+leaves `facts_at` where it was — so a gap between `collected_at` and `facts_at`
+means some numbers in the row are older than the last sweep.
+
+**`NaN` is a third state, and it matters.** A fact the sweep could not read is
+`NaN`, not zero — a new organisation genuinely has schema version 0 and no dead
+jobs, and an organisation whose admin plane refused the call must not read the
+same. Every threshold comparison against `NaN` is false.
+
+**The console is the only component that can collect this.** Each tenant's
+NetworkPolicy admits the console's namespace and pod label together;
+`internal/cloud/provision/objects.go` states that Cloud, the provisioner and a
+debugging shell have no business on a tenant's admin port.
+
+**`/metrics` is on its own loopback listener.** The main mux is browser-facing
+behind a TLS terminator with cookie auth, and a scraper holds no session. A
+client certificate is not the alternative: the console verifies each
+organisation's callers against that organisation's own authority and has no
+process-wide client CA to check one against — `CONSOLE_ENROLL_CLIENT_CA` was
+removed for exactly that reason. These series carry the customer list and each
+customer's schema version, so moving the listener to a reachable address means
+putting a credential in front of it at the same time. Nothing scrapes it today;
+that is the platform observability work.
+
+**What a sweep costs a tenant:** one `GET /status`, which runs a `MAX(version)`
+over `atlantis.schema_versions`, and three list calls. `/readyz` is **not**
+polled — it pings the tenant's Postgres and memcached, and that is an on-demand
+check the Health page makes, not something to run against every tenant on a
+timer.
 
 ### Identity comes from Atlantis Cloud
 

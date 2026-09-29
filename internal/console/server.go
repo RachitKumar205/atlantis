@@ -94,8 +94,12 @@ type Server struct {
 	// routes and nothing else — see enroll.go for why it cannot share the mux.
 	enrollSrv *http.Server
 
+	// metricsSrv is the third listener. It carries /metrics and nothing else;
+	// see newMetricsServer for why it is not on the mux.
+	metricsSrv *http.Server
+
 	// Cancelled by Close() to stop background workers (audit retention,
-	// sandbox TTL janitor).
+	// sandbox TTL janitor, fleet sweep).
 	bgCtx    context.Context
 	bgCancel context.CancelFunc
 }
@@ -245,6 +249,14 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 		}
 	}
 
+	// Built rather than dialled, so a bad address is a refusal here. Not fatal
+	// the way the enrolment listener is: enrolment silently absent is a broken
+	// deployment, while metrics absent costs observability, and stopping a
+	// working console over its telemetry trades the job for the reporting on it.
+	if cfg.MetricsListen != "" {
+		s.metricsSrv = newMetricsServer(cfg.MetricsListen)
+	}
+
 	// Clean up embedded-pg tempdirs left over from a prior crashed
 	// process before any new sandboxes are booted; idempotent and
 	// best-effort.
@@ -255,7 +267,32 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 	s.handler = s.withSecurityHeaders(s.mux)
 	go s.auditRetentionLoop()
 	go s.sandboxes.runJanitor(bgCtx, 60*time.Second)
+	go s.runFleetPoller(bgCtx)
 	return s, nil
+}
+
+// ServeMetrics runs the metrics listener until it is shut down.
+//
+// Returns nil immediately when no address is configured, so a caller does not
+// have to know whether it is on.
+func (s *Server) ServeMetrics() error {
+	if s.metricsSrv == nil {
+		return nil
+	}
+	s.log.Info("metrics listener", "addr", s.cfg.MetricsListen)
+	err := s.metricsSrv.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+// ShutdownMetrics stops the metrics listener.
+func (s *Server) ShutdownMetrics(ctx context.Context) error {
+	if s.metricsSrv == nil {
+		return nil
+	}
+	return s.metricsSrv.Shutdown(ctx)
 }
 
 func (s *Server) Close() {

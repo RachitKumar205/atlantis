@@ -81,6 +81,17 @@ func main() {
 		}
 	}()
 
+	// The metrics listener, on its own loopback address.
+	//
+	// A failure here is logged and the console keeps serving, unlike the two
+	// above. Metrics absent costs the fleet view; stopping a working console
+	// over it trades the job for the reporting on the job.
+	go func() {
+		if err := srv.ServeMetrics(); err != nil {
+			log.Error("metrics listen", "err", err)
+		}
+	}()
+
 	<-ctx.Done()
 	log.Info("shutting down")
 
@@ -88,4 +99,5 @@ func main() {
 	defer cancel()
 	_ = httpSrv.Shutdown(shutCtx)
 	_ = srv.ShutdownEnrollment(shutCtx)
+	_ = srv.ShutdownMetrics(shutCtx)
 }

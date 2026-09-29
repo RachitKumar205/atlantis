@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -405,5 +406,79 @@ func TestTheAuditPageIsScopedToTheSignedInOrganisation(t *testing.T) {
 		if strings.Contains(a, orgAcme) {
 			t.Errorf("globex's audit page shows %q", a)
 		}
+	}
+}
+
+// Fleet facts do not cross organisations.
+//
+// The rows carry a customer's schema version, their dead-job backlog and their
+// last admin-plane error, which is why console.org_facts is policed where
+// console.orgs is not.
+func TestFleetFactsDoNotCrossOrganisations(t *testing.T) {
+	f := newConsoleFixture(t)
+	ctx := context.Background()
+
+	// Both organisations have to exist, since org_facts references the registry.
+	if err := f.srv.db.rememberOrg(ctx, orgGlobex); err != nil {
+		t.Fatalf("remember %s: %v", orgGlobex, err)
+	}
+
+	now := time.Now().UTC()
+	acmeJobs, globexJobs := int32(3), int32(9)
+	for org, n := range map[string]*int32{orgAcme: &acmeJobs, orgGlobex: &globexJobs} {
+		if err := f.srv.db.forOrg(org).upsertOrgFacts(ctx, orgFacts{
+			Org: org, CollectedAt: now, Reachable: true, MeasuredFacts: true, DeadJobs: n,
+		}); err != nil {
+			t.Fatalf("record facts for %s: %v", org, err)
+		}
+	}
+
+	// Ground truth first. Without it a policy admitting nothing passes every
+	// assertion below.
+	var total int
+	if err := f.pool.QueryRow(ctx, `SELECT count(*) FROM console.org_facts`).Scan(&total); err != nil {
+		t.Fatalf("ground truth: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("the superuser sees %d rows, want 2; the writes did not land", total)
+	}
+
+	got, ok, err := f.srv.db.forOrg(orgAcme).orgFacts(ctx)
+	if err != nil {
+		t.Fatalf("read acme's facts: %v", err)
+	}
+	if !ok {
+		t.Fatal("acme reads no facts of its own")
+	}
+	if got.Org != orgAcme {
+		t.Errorf("acme read %s's row", got.Org)
+	}
+	if got.DeadJobs == nil || *got.DeadJobs != acmeJobs {
+		t.Errorf("dead_jobs = %v, want acme's %d — globex's row was read", got.DeadJobs, acmeJobs)
+	}
+}
+
+// Facts cannot be written for another organisation.
+//
+// The SELECT side is above; this is the WITH CHECK half, which upsertOrgFacts
+// cannot reach because it writes console.current_org().
+func TestFleetFactsCannotBeWrittenForAnotherOrganisation(t *testing.T) {
+	f := newConsoleFixture(t)
+	ctx := context.Background()
+
+	if err := f.srv.db.rememberOrg(ctx, orgGlobex); err != nil {
+		t.Fatalf("remember %s: %v", orgGlobex, err)
+	}
+
+	err := f.srv.db.forOrg(orgAcme).tx(ctx, func(tx pgx.Tx) error {
+		_, execErr := tx.Exec(ctx, `
+			INSERT INTO console.org_facts (org, collected_at, reachable)
+			VALUES ($1, NOW(), true)
+		`, orgGlobex)
+		return execErr
+	})
+	if err == nil {
+		t.Error("acme wrote a facts row for globex; the WITH CHECK half of the " +
+			"policy is not holding")
 	}
 }

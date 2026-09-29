@@ -2,6 +2,7 @@ package console
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -262,6 +264,33 @@ type atlStack struct {
 	svc      *admin.Service
 	pool     *pgxpool.Pool
 	dsn      string
+
+	// healthAddr is the mTLS health listener, carrying /status as cmd/server
+	// does. The fleet sweep reads it for every organisation on every pass.
+	healthAddr string
+
+	// status is what /status answers, so a test can make it fail or stall
+	// without taking the gRPC service down with it. Guarded because the sweep
+	// reads it from its own goroutines.
+	statusMu sync.Mutex
+	status   func() (int, string)
+
+	// stopHealth takes the health listener down, which is what a tenant whose
+	// pod has gone looks like. Editing the registry row instead would not
+	// reach a sweep for orgClientRefresh, since the cached entry is returned
+	// without re-reading the row.
+	stopHealth func()
+
+	// stopGRPC takes the admin service down and leaves /status answering:
+	// a tenant whose health listener is up and whose admin plane is not.
+	stopGRPC func()
+}
+
+// setStatus replaces what the health listener answers.
+func (s *atlStack) setStatus(fn func() (int, string)) {
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
+	s.status = fn
 }
 
 // newATLStack runs the real admin service on a real mTLS listener over dsn.
@@ -290,10 +319,57 @@ func newATLStack(t *testing.T, dsn string) *atlStack {
 	go func() { _ = grpcSrv.Serve(lis) }()
 	t.Cleanup(grpcSrv.Stop)
 
-	return &atlStack{
+	stack := &atlStack{
 		pki: pki, certFile: certFile, keyFile: keyFile,
 		addr: lis.Addr().String(), svc: svc, pool: pool, dsn: dsn,
+		stopGRPC: grpcSrv.Stop,
 	}
+
+	// The health listener, terminating its own TLS as cmd/server's does. Stood
+	// up for every stack: the fleet sweep reads /status per organisation, and a
+	// dead address here would make every sweep in every test report the
+	// organisation unreachable.
+	healthLis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen health: %v", err)
+	}
+	healthMux := http.NewServeMux()
+	healthMux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
+		stack.statusMu.Lock()
+		fn := stack.status
+		stack.statusMu.Unlock()
+		if fn != nil {
+			code, body := fn()
+			w.WriteHeader(code)
+			_, _ = io.WriteString(w, body)
+			return
+		}
+		var version *int64
+		if err := pool.QueryRow(context.Background(),
+			`SELECT MAX(version) FROM atlantis.schema_versions`).Scan(&version); err != nil {
+			version = nil
+		}
+		out := map[string]any{
+			"started_at": time.Now().UTC().Format(time.RFC3339),
+			"version":    "test",
+		}
+		if version != nil {
+			out["schema_version"] = *version
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	})
+	healthSrv := &http.Server{
+		Handler:           healthMux,
+		TLSConfig:         pki.ServerTLS(t),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go func() { _ = healthSrv.ServeTLS(healthLis, "", "") }()
+	t.Cleanup(func() { _ = healthSrv.Close() })
+	stack.healthAddr = healthLis.Addr().String()
+	stack.stopHealth = func() { _ = healthSrv.Close() }
+
+	return stack
 }
 
 // credentials is what `cloud org register` would be handed for this stack.
@@ -311,11 +387,9 @@ func (s *atlStack) credentials(t *testing.T, org string) orgCredentials {
 		return string(b)
 	}
 	return orgCredentials{
-		Org:      org,
-		Endpoint: s.addr,
-		// Nothing in these tests reads the health endpoint, but a
-		// half-registered row is refused, so it has to be here.
-		HealthAddr: "127.0.0.1:1",
+		Org:        org,
+		Endpoint:   s.addr,
+		HealthAddr: s.healthAddr,
 		CAPEM:      read(s.pki.CAFile),
 		CertPEM:    read(s.certFile),
 		KeyPEM:     []byte(read(s.keyFile)),

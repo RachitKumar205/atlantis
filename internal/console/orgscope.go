@@ -100,6 +100,35 @@ func (o *orgStore) tx(ctx context.Context, fn func(pgx.Tx) error) error {
 	return nil
 }
 
+// listOrgNames returns every registered organisation, ordered.
+//
+// The list is read and the cursor closed before anything acts on it: a caller
+// holding it open across per-organisation work holds a connection for the
+// length of the whole sweep.
+//
+// console.orgs carries no policy, which is what makes this readable with no
+// organisation bound.
+func (s *store) listOrgNames(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT org FROM console.orgs ORDER BY org`)
+	if err != nil {
+		return nil, fmt.Errorf("list organisations: %w", err)
+	}
+	defer rows.Close()
+
+	var orgs []string
+	for rows.Next() {
+		var org string
+		if err := rows.Scan(&org); err != nil {
+			return nil, fmt.Errorf("scan organisation: %w", err)
+		}
+		orgs = append(orgs, org)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list organisations: %w", err)
+	}
+	return orgs, nil
+}
+
 // eachOrg runs fn once per registered organisation, bound to it.
 //
 // How housekeeping crosses a row-level-security boundary. A
@@ -120,22 +149,9 @@ func (o *orgStore) tx(ctx context.Context, fn func(pgx.Tx) error) error {
 // Every organisation is attempted before any error returns, so one failing does
 // not stop the rest being swept.
 func (s *store) eachOrg(ctx context.Context, fn func(*orgStore) error) error {
-	rows, err := s.pool.Query(ctx, `SELECT org FROM console.orgs ORDER BY org`)
+	orgs, err := s.listOrgNames(ctx)
 	if err != nil {
-		return fmt.Errorf("list organisations: %w", err)
-	}
-	var orgs []string
-	for rows.Next() {
-		var org string
-		if err := rows.Scan(&org); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan organisation: %w", err)
-		}
-		orgs = append(orgs, org)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("list organisations: %w", err)
+		return err
 	}
 
 	var errs []error

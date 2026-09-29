@@ -98,6 +98,21 @@ type Config struct {
 	// a sandbox. Default 30 minutes; tune via SANDBOX_TTL (Go duration
 	// string, e.g. "10s", "2h").
 	SandboxTTL time.Duration
+
+	// MetricsListen is where /metrics is served, on its own listener.
+	// Default 127.0.0.1:9103, set by CONSOLE_METRICS_LISTEN. Loopback
+	// because these series carry the customer list and each customer's
+	// schema version; see newMetricsServer.
+	MetricsListen string
+
+	// FleetPollInterval is the gap between sweeps of every registered
+	// organisation. Default 5 minutes, set by CONSOLE_FLEET_POLL_INTERVAL.
+	FleetPollInterval time.Duration
+
+	// FleetOrgTimeout bounds one organisation within a sweep, which is what
+	// keeps a wedged tenant from consuming it. Default 15 seconds, set by
+	// CONSOLE_FLEET_ORG_TIMEOUT.
+	FleetOrgTimeout time.Duration
 }
 
 func ConfigFromEnv() (Config, error) {
@@ -127,6 +142,10 @@ func ConfigFromEnv() (Config, error) {
 
 		SandboxPerUserLimit: envInt("SANDBOX_PER_USER_LIMIT", 100),
 		SandboxTTL:          envDuration("SANDBOX_TTL", 30*time.Minute),
+
+		MetricsListen:     envOr("CONSOLE_METRICS_LISTEN", "127.0.0.1:9103"),
+		FleetPollInterval: envDuration("CONSOLE_FLEET_POLL_INTERVAL", defaultFleetPollInterval),
+		FleetOrgTimeout:   envDuration("CONSOLE_FLEET_ORG_TIMEOUT", defaultFleetOrgTimeout),
 	}
 	if c.PGURL == "" {
 		return Config{}, fmt.Errorf("CONSOLE_PG_URL is required")
