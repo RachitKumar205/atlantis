@@ -819,6 +819,13 @@ values stay out of the message, which the rehearsal record stores. Rows with a
 NULL key, and rows outside a partial index's predicate, are not counted, as the
 index does not refuse them.
 
+#### The apply-policy dialog lists its tiers as choices
+
+The five tiers ran together as one paragraph, because the class they used had
+no styles. They are now option cards, and the dialog's checkboxes are the
+console's own. The hover text on a caller card's buttons no longer widens the
+page, which scrolled it sideways when the dialog opened.
+
 #### `tide adopt` no longer deletes three declarations from the schema of record
 
 **Affects any organisation whose adopted schema declared `keyless` or

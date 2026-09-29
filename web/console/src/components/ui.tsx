@@ -128,15 +128,19 @@ export function RadioCardGroup({
   value,
   onChange,
   options,
+  label,
+  disabled = false,
 }: {
   name: string
   value: string
   onChange: (value: string) => void
   options: RadioCard[]
+  label?: string
+  disabled?: boolean
 }) {
   const id = useId()
   return (
-    <div className="radiocards" role="radiogroup">
+    <div className="radiocards" role="radiogroup" aria-label={label} aria-disabled={disabled || undefined}>
       {options.map(o => (
         <label
           key={o.value}
@@ -149,6 +153,7 @@ export function RadioCardGroup({
             name={name}
             value={o.value}
             checked={value === o.value}
+            disabled={disabled}
             onChange={() => onChange(o.value)}
             className="radiocard__input"
           />

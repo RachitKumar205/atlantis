@@ -17,6 +17,7 @@ import { useIsAdmin } from '@/hooks/useAuth'
 import { enrolControlState, type EnrolControl } from '@/lib/session'
 import { PageShell } from '@/components/PageShell'
 import { HoverInfo } from '@/components/HoverInfo'
+import { RadioCardGroup, type RadioCard } from '@/components/ui'
 import { SudoConfirmDialog } from './Settings'
 
 function fmtDateShort(iso?: string) {
@@ -496,6 +497,7 @@ function CallerCard({
           <HoverInfo
             side="bottom"
             inline
+            align="end"
             content={
               <>
                 <p>Clears the revocation. Certificates this caller holds start authenticating again within seconds.</p>
@@ -517,6 +519,7 @@ function CallerCard({
             <HoverInfo
               side="bottom"
               inline
+              align="end"
               content={
                 <>
                   <p>Configure identity aliases — let this cert satisfy <code className="mono">visible_to</code> for other names.</p>
@@ -535,6 +538,7 @@ function CallerCard({
             <HoverInfo
               side="bottom"
               inline
+              align="end"
               content={
                 <>
                   <p>Apply policy — how much this caller may apply without a human: from sandbox-only up to everything a rehearsal covers.</p>
@@ -552,6 +556,7 @@ function CallerCard({
             <HoverInfo
               side="bottom"
               inline
+              align="end"
               content={
                 <>
                   <p>Enrolment access — whether developers may run <code className="mono">tide login</code> as this caller, and which CI workloads may.</p>
@@ -569,6 +574,7 @@ function CallerCard({
             <HoverInfo
               side="bottom"
               inline
+              align="end"
               content={
                 enrolState === 'unconfigured' ? (
                   <>
@@ -599,6 +605,7 @@ function CallerCard({
             <HoverInfo
               side="bottom"
               inline
+              align="end"
               content={
                 <>
                   <p>Revokes this caller's identity and removes any files it registered.</p>
@@ -914,11 +921,11 @@ function AliasesDialog({
     setSaveError(null)
   }
 
-  const save = async (password: string) => {
+  const save = async (assertion: string) => {
     setSaving(true)
     setSaveError(null)
     try {
-      await api.auth.sudo(password)
+      await api.auth.sudo(assertion)
       await api.callers.setAliases(caller, current)
       qc.invalidateQueries({ queryKey: ['caller-aliases', caller] })
       setShowSudo(false)
@@ -1098,12 +1105,12 @@ function arraysEqual(a: string[], b: string[]): boolean {
 // `tide login`, and which CI workloads may obtain a certificate under a
 // federation rule. Both writes run behind admin + sudo; the gate that opened
 // this dialog elevated the session.
-const APPLY_TIERS: { value: string; label: string; blurb: string }[] = [
-  { value: 'sandbox_only', label: 'Sandbox only', blurb: 'Nothing applies. Plan, generate and rehearse stay available.' },
-  { value: 'always_ask', label: 'Always ask', blurb: 'Every change waits for an approval.' },
-  { value: 'auto_safe', label: 'Auto: safe', blurb: 'Additive changes apply unattended; everything else waits. The default.' },
-  { value: 'auto_verified', label: 'Auto: verified', blurb: 'Backfills also apply unattended when a fresh rehearsal passes.' },
-  { value: 'auto_all', label: 'Auto: all', blurb: 'Destructive changes too, behind a passing rehearsal. Cross-caller breaking changes still wait — this caller cannot consent for the others.' },
+const APPLY_TIERS: RadioCard[] = [
+  { value: 'sandbox_only', title: 'Sandbox only', description: 'Nothing applies. Plan, generate and rehearse stay available.' },
+  { value: 'always_ask', title: 'Always ask', description: 'Every change waits for an approval.' },
+  { value: 'auto_safe', title: 'Auto: safe', description: 'Additive changes apply unattended; everything else waits. The default.' },
+  { value: 'auto_verified', title: 'Auto: verified', description: 'Backfills also apply unattended when a fresh rehearsal passes.' },
+  { value: 'auto_all', title: 'Auto: all', description: 'Destructive changes too, behind a passing rehearsal. Cross-caller breaking changes still wait — this caller cannot consent for the others.' },
 ]
 
 function ApplyPolicyDialog({
@@ -1156,13 +1163,14 @@ function ApplyPolicyDialog({
               A higher tier saves, but the gate uses the cap.
             </div>
           )}
-          <label className="check" style={{ marginBottom: 14, alignItems: 'flex-start' }}>
+          <label className="checkbox checkbox--block" style={{ marginBottom: 16 }}>
             <input
               type="checkbox"
               checked={rehearseOn}
               disabled={policyQ.isLoading || saveM.isPending}
               onChange={e => saveM.mutate({ policy: stored, rehearse: e.target.checked })}
             />
+            <span className="checkbox__box"><Check size={11} /></span>
             <span>
               <strong>May rehearse</strong>
               <br />
@@ -1174,24 +1182,14 @@ function ApplyPolicyDialog({
             </span>
           </label>
 
-          <div role="radiogroup" aria-label="Apply policy tier">
-            {APPLY_TIERS.map(t => (
-              <label className="check" key={t.value} style={{ marginBottom: 10, alignItems: 'flex-start' }}>
-                <input
-                  type="radio"
-                  name="apply-tier"
-                  checked={(stored === '' ? 'auto_safe' : stored) === t.value}
-                  disabled={policyQ.isLoading || saveM.isPending}
-                  onChange={() => saveM.mutate({ policy: t.value, rehearse: rehearseOn })}
-                />
-                <span>
-                  <strong>{t.label}</strong>
-                  <br />
-                  <span className="faint" style={{ fontSize: 12 }}>{t.blurb}</span>
-                </span>
-              </label>
-            ))}
-          </div>
+          <RadioCardGroup
+            name="apply-tier"
+            label="Apply policy tier"
+            value={stored === '' ? 'auto_safe' : stored}
+            options={APPLY_TIERS}
+            disabled={policyQ.isLoading || saveM.isPending}
+            onChange={tier => saveM.mutate({ policy: tier, rehearse: rehearseOn })}
+          />
         </div>
         <div className="modal__foot">
           <button className="btn btn--ghost" onClick={onClose}>Close</button>
@@ -1266,13 +1264,14 @@ function EnrolmentPolicyDialog({
         <div className="modal__body">
           {err && <div className="notice notice--error" style={{ marginBottom: 12 }}>{err}</div>}
 
-          <label className="check" style={{ marginBottom: 16 }}>
+          <label className="checkbox checkbox--block" style={{ marginBottom: 16 }}>
             <input
               type="checkbox"
               checked={allowed}
               disabled={policyQ.isLoading || toggleM.isPending}
               onChange={e => toggleM.mutate(e.target.checked)}
             />
+            <span className="checkbox__box"><Check size={11} /></span>
             <span>
               Developers may enrol — a viewer's <span className="mono">tide login</span> can
               take this caller's identity

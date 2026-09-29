@@ -1116,6 +1116,13 @@ input:-webkit-autofill:active {
 .hover-info:focus-within .hover-info-pop--right {
   transform: translateX(0) translateY(-50%);
 }
+/* align="end": the popover's right edge meets the trigger's. */
+.hover-info-pop--end { left: auto; right: 0; transform: translateY(4px); }
+.hover-info-pop--top.hover-info-pop--end { transform: translateY(-4px); }
+.hover-info:hover .hover-info-pop--end,
+.hover-info:focus-within .hover-info-pop--end {
+  transform: translateY(0);
+}
 .hover-info-pop p {
   margin: 0 0 5px;
   color: var(--ink-1);

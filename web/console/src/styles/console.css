@@ -586,6 +586,10 @@ a { color: inherit; text-decoration: none; }
 .checkbox input:checked + .checkbox__box { background: var(--accent); border-color: var(--accent); }
 .checkbox input:checked + .checkbox__box svg { opacity: 1; transform: scale(1); }
 .checkbox input:focus-visible + .checkbox__box { box-shadow: 0 0 0 3px var(--accent-tint); }
+/* A checkbox whose label runs to several lines: the box sits on the first. */
+.checkbox--block { display: flex; align-items: flex-start; }
+.checkbox--block .checkbox__box { flex: none; margin-top: 2px; }
+.checkbox:has(input:disabled) { cursor: default; }
 
 /* segmented control */
 .seg { display: inline-flex; background: var(--canvas-1); border: 1px solid var(--line-soft); border-radius: var(--radius); padding: 2px; gap: 2px; }
@@ -882,6 +886,7 @@ a { color: inherit; text-decoration: none; }
 }
 .radiocard:has(.radiocard__input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 .radiocard__input { position: absolute; opacity: 0; pointer-events: none; }
+.radiocard:has(.radiocard__input:disabled) { cursor: default; }
 .radiocard__icon {
   flex: none; width: 34px; height: 34px; display: grid; place-items: center;
   color: var(--icon-nav); border: 1px solid var(--line);
