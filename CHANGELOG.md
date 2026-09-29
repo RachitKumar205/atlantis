@@ -810,6 +810,15 @@ the person in CI. A machine enrolled with a token names no person until they
 are set.
 
 
+#### A rehearsal that fails on duplicates counts them
+
+`tide rehearse` of a new `unique`, `unique by` or `unique index partial` on
+data that repeats a value reported the index name and nothing else. It now
+reports how many rows share how many values, and a query that lists them. Row
+values stay out of the message, which the rehearsal record stores. Rows with a
+NULL key, and rows outside a partial index's predicate, are not counted, as the
+index does not refuse them.
+
 #### `tide adopt` no longer deletes three declarations from the schema of record
 
 **Affects any organisation whose adopted schema declared `keyless` or

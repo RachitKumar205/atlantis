@@ -674,3 +674,69 @@ func TestEmit_TableOverride_IndexDropQualifies(t *testing.T) {
 	assertContains(t, scripts.Up, `DROP INDEX IF EXISTS "consumer".`)
 	assertNotContains(t, scripts.Up, `DROP INDEX IF EXISTS "atlantis".`)
 }
+
+// TestUniqueKeysNameWhatTheEmitterCreates adds each kind of uniqueness rule
+// to an existing table and requires every UniqueKeys name in the emitted SQL.
+//
+// A long table name gives names over 63 bytes, which Postgres cuts to 63; the
+// SQL then holds the full name, and the stored name is its first 63 bytes.
+func TestUniqueKeysNameWhatTheEmitterCreates(t *testing.T) {
+	for _, tc := range []struct {
+		entity string
+		cut    bool
+	}{
+		{"ledger", false},
+		{"a_customer_ledger_entry_with_a_name_long_enough_to_truncate", true},
+	} {
+		t.Run(tc.entity, func(t *testing.T) {
+			oldIR := lower(t, `entity `+tc.entity+` in x {
+  id bigint primary
+  tenant text
+  email text
+  deleted_at timestamptz
+}`)
+			newIR := lower(t, `entity `+tc.entity+` in x {
+  id bigint primary
+  tenant text
+  email text unique
+  deleted_at timestamptz
+  unique by tenant, email
+  unique index partial by email where deleted_at is null
+}`)
+			scripts, err := EmitSQL(oldIR, newIR, ComputeDiff(oldIR, newIR))
+			if err != nil {
+				t.Fatalf("EmitSQL: %v", err)
+			}
+
+			keys := UniqueKeys(&newIR.Entities[0])
+			if len(keys) != 3 {
+				t.Fatalf("UniqueKeys returned %d rules, want 3: %+v", len(keys), keys)
+			}
+			for _, k := range keys {
+				named := `"` + k.Name + `"`
+				if tc.cut {
+					if len(k.Name) != 63 {
+						t.Errorf("%s is %d bytes, want the 63 Postgres keeps", k.Name, len(k.Name))
+					}
+					named = `"` + k.Name
+				}
+				if !strings.Contains(scripts.Up, named) {
+					t.Errorf("the emitted SQL creates nothing named %s:\n%s", named, scripts.Up)
+				}
+			}
+
+			want := []struct{ keys, label, where string }{
+				{`"email"`, "email", ""},
+				{`"tenant", "email"`, "tenant, email", ""},
+				{`"email"`, "email", `"deleted_at" IS NULL`},
+			}
+			for i, w := range want {
+				if got := strings.Join(keys[i].Keys, ", "); got != w.keys || keys[i].Label != w.label ||
+					keys[i].Where != w.where {
+					t.Errorf("rule %d = %q %q %q, want %q %q %q",
+						i, got, keys[i].Label, keys[i].Where, w.keys, w.label, w.where)
+				}
+			}
+		})
+	}
+}

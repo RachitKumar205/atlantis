@@ -438,6 +438,45 @@ func CountWhere(ctx context.Context, target *pgx.ConnConfig, dbName, rel, predic
 	return n, err
 }
 
+// DuplicatesQuery returns a query listing each key value of rel that a unique
+// index on keys would refuse, with its row count. A row with a NULL key, or
+// outside a partial index's predicate, is exempt, as it is from the index.
+func DuplicatesQuery(rel string, keys []string, predicate string) string {
+	list, where := duplicateClauses(keys, predicate)
+	return fmt.Sprintf("SELECT %s, count(*) FROM %s WHERE %s GROUP BY %s HAVING count(*) > 1",
+		list, rel, where, list)
+}
+
+// CountDuplicates counts the rows DuplicatesQuery reports, and the distinct
+// key values they share.
+func CountDuplicates(ctx context.Context, target *pgx.ConnConfig, dbName, rel string, keys []string, predicate string) (rows, values int64, err error) {
+	conn, err := connectTo(ctx, target, dbName)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = conn.Close(context.Background()) }()
+	if _, err := conn.Exec(ctx, `SET row_security = off`); err != nil {
+		return 0, 0, err
+	}
+	list, where := duplicateClauses(keys, predicate)
+	err = conn.QueryRow(ctx, fmt.Sprintf(`
+SELECT coalesce(sum(n), 0)::bigint, count(*)
+FROM (SELECT count(*) AS n FROM %s WHERE %s GROUP BY %s HAVING count(*) > 1) d`,
+		rel, where, list)).Scan(&rows, &values)
+	return rows, values, err
+}
+
+func duplicateClauses(keys []string, predicate string) (list, where string) {
+	conds := make([]string, 0, len(keys)+1)
+	for _, k := range keys {
+		conds = append(conds, k+" IS NOT NULL")
+	}
+	if predicate != "" {
+		conds = append(conds, "("+predicate+")")
+	}
+	return strings.Join(keys, ", "), strings.Join(conds, " AND ")
+}
+
 // Drop destroys one clone database, terminating anything still attached.
 func Drop(ctx context.Context, target *pgx.ConnConfig, dbName string) error {
 	admin, err := pgx.ConnectConfig(ctx, target)

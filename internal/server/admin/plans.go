@@ -119,16 +119,13 @@ FROM atlantis.schema_plans WHERE plan_id = $1`, req.GetPlanId()).Scan(
 		return nil, err
 	}
 
-	var storedFiles []struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
-	}
-	if err := json.Unmarshal(filesJSON, &storedFiles); err != nil {
-		return nil, fmt.Errorf("decode stored files for %s: %w", p.PlanID, err)
+	storedFiles, err := decodeStoredFiles(p.PlanID, filesJSON)
+	if err != nil {
+		return nil, err
 	}
 	files := make([]*adminpb.SubmittedFile, 0, len(storedFiles))
 	for _, f := range storedFiles {
-		files = append(files, &adminpb.SubmittedFile{Path: f.Path, Content: []byte(f.Content)})
+		files = append(files, &adminpb.SubmittedFile{Path: f.Path, Content: f.Content})
 	}
 
 	return &adminpb.GetSchemaPlanResponse{Plan: &adminpb.SchemaPlanDetail{

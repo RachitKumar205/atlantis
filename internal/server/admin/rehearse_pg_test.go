@@ -170,6 +170,79 @@ entity Reading in %s {
 	}
 }
 
+// TestRehearsalCountsTheDuplicates covers a unique field and a unique partial
+// index. The error names only the index, so the columns come from the
+// declaration. NULL keys and rows outside the predicate are exempt.
+func TestRehearsalCountsTheDuplicates(t *testing.T) {
+	svc := depScopeService(t)
+	rehearseAdminFixture(t, svc, "rhdup")
+	ctx := context.Background()
+
+	// With the fixture's (1, a@) and (2, NULL): a@ three times, b@ twice.
+	if _, err := svc.pool.Exec(ctx, `
+INSERT INTO atlantis.rhdup_reading (id, email) VALUES
+    (3, 'a@example.com'), (4, 'a@example.com'), (5, 'b@example.com'),
+    (6, 'b@example.com'), (7, 'c@example.com'), (8, NULL)`); err != nil {
+		t.Fatalf("seed duplicates: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name, src, key, counts string
+		rows                   int64
+	}{
+		{
+			name: "unique field",
+			src: `
+entity Reading in %s {
+  id    bigint primary
+  email text unique
+}
+`,
+			key:    "rhdup_reading.email duplicate",
+			counts: "5 rows in rhdup_reading share 2 values of email",
+			rows:   5,
+		},
+		{
+			// id 5 is outside the predicate, so b@ has one row inside it. The
+			// `unique by` builds, so the index that fails is the second rule.
+			name: "unique partial index",
+			src: `
+entity Reading in %s {
+  id    bigint primary
+  email text
+  unique by id, email
+  unique index partial by email where id != 5
+}
+`,
+			key:    "rhdup_reading.email duplicate",
+			counts: "3 rows in rhdup_reading share 1 value of email",
+			rows:   3,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := svc.RehearseMigration(ctx, &adminpb.RehearseMigrationRequest{
+				Caller: "rhdup", Files: rehearseFiles("rhdup", tc.src),
+			})
+			if err != nil {
+				t.Fatalf("RehearseMigration: %v", err)
+			}
+			if resp.GetVerdict() != "fail_data" || resp.GetSqlstate() != "23505" {
+				t.Fatalf("verdict = %q sqlstate %q (%s / %s), want fail_data 23505",
+					resp.GetVerdict(), resp.GetSqlstate(), resp.GetReason(), resp.GetError())
+			}
+			if !strings.Contains(resp.GetRemediation(), tc.counts) {
+				t.Errorf("remediation = %q, want it to say %q", resp.GetRemediation(), tc.counts)
+			}
+			if strings.Contains(resp.GetRemediation(), "@example.com") {
+				t.Errorf("the remediation carries a row value: %s", resp.GetRemediation())
+			}
+			if got := resp.GetDiagnostics(); len(got) != 1 || got[tc.key] != tc.rows {
+				t.Errorf("diagnostics = %v, want %s: %d", got, tc.key, tc.rows)
+			}
+		})
+	}
+}
+
 // The whole point: a verified destructive change applies unattended at
 // auto_all, and only a fresh matching pass does it.
 func TestAutoAllConsumesAFreshPass(t *testing.T) {

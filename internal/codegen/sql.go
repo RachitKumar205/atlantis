@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rachitkumar205/atlantis/internal/coltype"
 	"github.com/rachitkumar205/atlantis/internal/dsl"
@@ -1326,6 +1327,81 @@ func ParkedName(field string) string { return parkedName(field) }
 
 // PhysicalTable returns the schema and name of e's table.
 func PhysicalTable(e *dsl.Entity) (sch, tbl string) { return physicalParts(e) }
+
+// UniqueKey is a uniqueness rule of an entity, as EmitSQL creates it.
+type UniqueKey struct {
+	// Name is the name EmitSQL gives the constraint or index, cut to the 63
+	// bytes Postgres keeps.
+	//
+	// A unique field created with its column, by CREATE TABLE or ADD COLUMN,
+	// is named by Postgres, which can differ: it uses the physical table, and
+	// shortens a long name another way.
+	Name string
+
+	// Keys holds one SQL expression per key column, and Label names them for
+	// a message.
+	Keys  []string
+	Label string
+
+	// Where is the predicate of a partial unique index, or empty.
+	Where string
+}
+
+// UniqueKeys lists the uniqueness rules e declares: unique fields, `unique by`
+// groups, and unique partial indexes.
+func UniqueKeys(e *dsl.Entity) []UniqueKey {
+	var out []UniqueKey
+	for _, f := range e.Fields {
+		if f.Unique && !f.Primary {
+			out = append(out, UniqueKey{
+				Name: storedIdent(uqName(e, f.Name)), Keys: []string{quoteIdent(f.Name)}, Label: f.Name,
+			})
+		}
+	}
+	for _, u := range e.Uniques {
+		keys := make([]string, len(u.Fields))
+		for i, f := range u.Fields {
+			keys[i] = quoteIdent(f)
+		}
+		out = append(out, UniqueKey{
+			Name: storedIdent(compositeUniqueName(e, u.Fields)), Keys: keys,
+			Label: strings.Join(u.Fields, ", "),
+		})
+	}
+	for _, idx := range e.Indexes {
+		if idx.Kind != dsl.IndexPartial || !idx.Unique {
+			continue
+		}
+		keys := make([]string, len(idx.Fields))
+		labels := make([]string, len(idx.Fields))
+		for i, f := range idx.Fields {
+			keys[i], labels[i] = quoteIdent(f.Name), f.Name
+			if f.IsExpr {
+				keys[i], labels[i] = "("+f.Expr+")", f.Expr
+			}
+		}
+		k := UniqueKey{Name: storedIdent(indexName(e, idx)), Keys: keys, Label: strings.Join(labels, ", ")}
+		if idx.Where != nil {
+			k.Where = predsql.Render(idx.Where)
+		}
+		out = append(out, k)
+	}
+	return out
+}
+
+// storedIdent cuts name to the 63 bytes Postgres keeps of an identifier, on a
+// character boundary.
+func storedIdent(name string) string {
+	const maxIdent = 63
+	if len(name) <= maxIdent {
+		return name
+	}
+	cut := maxIdent
+	for cut > 0 && !utf8.RuneStart(name[cut]) {
+		cut--
+	}
+	return name[:cut]
+}
 
 // emitFieldPark renames a column out of the way instead of dropping it.
 //

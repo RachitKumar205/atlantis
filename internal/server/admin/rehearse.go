@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -289,6 +290,9 @@ type rehearsalContent struct {
 	FilesHash string
 	BaseHash  string
 	UpSQL     string
+
+	// Files is the caller's schema the SQL was emitted from.
+	Files []SubmittedFile
 }
 
 // RehearseMigration clones the managed database, executes the change's
@@ -309,9 +313,14 @@ func (s *Service) RehearseMigration(ctx context.Context, req *adminpb.RehearseMi
 		if !found {
 			return nil, status.Errorf(codes.NotFound, "admin: no plan %s", req.GetPlanId())
 		}
+		files, err := s.loadPlanFiles(ctx, plan.PlanID)
+		if err != nil {
+			return nil, err
+		}
 		content = rehearsalContent{
 			Caller: plan.Caller, PlanID: plan.PlanID,
 			FilesHash: plan.FilesHash, BaseHash: plan.BaseHash, UpSQL: plan.UpSQL,
+			Files: files,
 		}
 
 	case len(req.GetFiles()) > 0:
@@ -334,10 +343,12 @@ func (s *Service) RehearseMigration(ctx context.Context, req *adminpb.RehearseMi
 				"admin: the schema does not plan, so there is nothing to rehearse: %s",
 				strings.Join(append(resp.GetParseErrors(), resp.GetCustomSqlErrors()...), "; "))
 		}
+		files := submittedFilesFromPB(req.GetFiles())
 		content = rehearsalContent{
 			Caller: req.GetCaller(), PlanID: resp.GetPlanId(),
-			FilesHash: filesHash(submittedFilesFromPB(req.GetFiles())),
+			FilesHash: filesHash(files),
 			UpSQL:     resp.GetUpSql(),
+			Files:     files,
 		}
 
 	default:
@@ -450,7 +461,7 @@ WITH ins AS (
 	rec := verdictFromOutcome(out)
 	rec.CloneMs, rec.ExecuteMs = cloneMs, execMs
 	if rec.Verdict == "fail_data" && out.PgErr != nil {
-		rec.Diagnostics, rec.Remediation = s.rehearsalDiagnostics(ctx, target, dbName, out)
+		rec.Diagnostics, rec.Remediation = s.rehearsalDiagnostics(ctx, target, dbName, content, out)
 	}
 
 	id, err := s.recordRehearsal(ctx, content, rec)
@@ -533,15 +544,36 @@ func redactedPgError(e *pgconn.PgError) string {
 // rehearsalDiagnostics counts the violating rows for the failures worth
 // counting, on the clone's pre-migration data, and renders the remediation
 // template the server knows.
-func (s *Service) rehearsalDiagnostics(ctx context.Context, target *pgx.ConnConfig, dbName string, out rehearse.Outcome) (map[string]int64, string) {
+func (s *Service) rehearsalDiagnostics(ctx context.Context, target *pgx.ConnConfig, dbName string, content rehearsalContent, out rehearse.Outcome) (map[string]int64, string) {
 	e := out.PgErr
-	if e == nil || e.TableName == "" || e.ColumnName == "" {
+	if e == nil || e.TableName == "" {
 		return nil, ""
 	}
 	rel := pgx.Identifier{e.SchemaName, e.TableName}.Sanitize()
-	col := pgx.Identifier{e.ColumnName}.Sanitize()
 	switch e.Code {
+	case "23505": // unique_violation
+		// The error names the index and not its columns, so they come from
+		// the declaration that EmitSQL named it after.
+		u, ok := s.declaredUnique(ctx, content, e.SchemaName, e.TableName, e.ConstraintName)
+		if !ok {
+			return nil, ""
+		}
+		rows, values, err := rehearse.CountDuplicates(ctx, target, dbName, rel, u.Keys, u.Where)
+		if err != nil || rows == 0 {
+			return nil, ""
+		}
+		remediation := fmt.Sprintf(
+			"%d rows in %s share %d %s of %s, so the unique index cannot be built. "+
+				"Make the values distinct, then rehearse again. This query lists them: `%s`",
+			rows, e.TableName, values, plural(int(values), "value", "values"), u.Label,
+			rehearse.DuplicatesQuery(rel, u.Keys, u.Where))
+		return map[string]int64{e.TableName + "." + u.Label + " duplicate": rows}, remediation
+
 	case "23502": // not_null_violation
+		if e.ColumnName == "" {
+			return nil, ""
+		}
+		col := pgx.Identifier{e.ColumnName}.Sanitize()
 		key := e.TableName + "." + e.ColumnName + " null"
 		n, err := rehearse.CountWhere(ctx, target, dbName, rel, col+" IS NULL")
 		if err == nil {
@@ -564,6 +596,62 @@ func (s *Service) rehearsalDiagnostics(ctx context.Context, target *pgx.ConnConf
 		return map[string]int64{key: n}, remediation
 	}
 	return nil, ""
+}
+
+// declaredUnique finds the uniqueness rule that content declares on
+// schema.table under the name constraint. It reports false when the schema
+// does not lower, or declares no rule of that name.
+func (s *Service) declaredUnique(ctx context.Context, content rehearsalContent, schema, table, constraint string) (codegen.UniqueKey, bool) {
+	parsed, errs := parseSubmitted(content.Caller, content.Files)
+	if len(errs) > 0 || len(parsed) == 0 {
+		return codegen.UniqueKey{}, false
+	}
+	others, err := s.loadOtherCallers(ctx, content.Caller)
+	if err != nil {
+		return codegen.UniqueKey{}, false
+	}
+	ir, err := dsl.Lower(append(parsed, others...))
+	if err != nil {
+		return codegen.UniqueKey{}, false
+	}
+	for i := range ir.Entities {
+		e := &ir.Entities[i]
+		if sch, tbl := codegen.PhysicalTable(e); sch != schema || tbl != table {
+			continue
+		}
+		for _, u := range codegen.UniqueKeys(e) {
+			if u.Name == constraint {
+				return u, true
+			}
+		}
+	}
+	return codegen.UniqueKey{}, false
+}
+
+// loadPlanFiles returns the files a plan was filed with.
+func (s *Service) loadPlanFiles(ctx context.Context, planID string) ([]SubmittedFile, error) {
+	var raw []byte
+	if err := s.pool.QueryRow(ctx,
+		`SELECT files FROM atlantis.schema_plans WHERE plan_id = $1`, planID).Scan(&raw); err != nil {
+		return nil, fmt.Errorf("load files of plan %s: %w", planID, err)
+	}
+	return decodeStoredFiles(planID, raw)
+}
+
+// decodeStoredFiles decodes the files column readableFiles wrote.
+func decodeStoredFiles(planID string, raw []byte) ([]SubmittedFile, error) {
+	var stored []struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		return nil, fmt.Errorf("decode stored files for %s: %w", planID, err)
+	}
+	out := make([]SubmittedFile, len(stored))
+	for i, f := range stored {
+		out[i] = SubmittedFile{Path: f.Path, Content: []byte(f.Content)}
+	}
+	return out, nil
 }
 
 // recordRehearsal writes the verdict row and denormalizes it onto the plan.
