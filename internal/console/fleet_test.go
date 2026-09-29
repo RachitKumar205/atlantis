@@ -12,13 +12,16 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -226,6 +229,30 @@ func TestTheMetricsListenerServesPrometheusText(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /metrics = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read /metrics: %v", err)
+	}
+	// The fleet registry and the default one, served together.
+	for _, series := range []string{"atlantis_console_fleet_orgs", "go_goroutines"} {
+		if !strings.Contains(string(body), series) {
+			t.Errorf("/metrics has no %s", series)
+		}
+	}
+}
+
+// The fleet series stay out of the default registry, which the provisioner
+// serves: it imports this package, and has no fleet to report.
+func TestFleetSeriesStayOutOfTheDefaultRegistry(t *testing.T) {
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range families {
+		if strings.HasPrefix(mf.GetName(), "atlantis_console_fleet") {
+			t.Errorf("the default registry holds %s", mf.GetName())
+		}
 	}
 }
 

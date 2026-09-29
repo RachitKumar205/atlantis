@@ -1,10 +1,11 @@
-// Observability for the fleet sweep. Same shape as
-// internal/provisioner/metrics.go: package-level promauto vars registered at
-// import time.
+// Observability for the fleet sweep.
 //
-// Declared here rather than imported from internal/obs, whose collectors are
-// server-shaped — a pool, a cache, an outbox — and would register unincremented
-// in a process that has none of them.
+// The collectors are registered in fleetRegistry, which only the console's
+// metrics listener serves. internal/provisioner imports this package, and its
+// /metrics serves the default registry.
+//
+// Importing internal/obs would register its pool, cache and outbox collectors,
+// unincremented, in a process that has none of them.
 
 package console
 
@@ -31,12 +32,18 @@ func init() {
 	markFleetUnmeasured()
 }
 
+// fleetRegistry holds every fleet collector; fleetFactory registers into it.
+var (
+	fleetRegistry = prometheus.NewRegistry()
+	fleetFactory  = promauto.With(fleetRegistry)
+)
+
 var (
 	// fleetReachable is whether the last sweep reached each organisation's
 	// health listener. The reason a zero has is in console.org_facts; a label
 	// for it here would leave the previous reason's child at 1 when the reason
 	// changed.
-	fleetReachable = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	fleetReachable = fleetFactory.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "atlantis",
 		Subsystem: "console_fleet",
 		Name:      "reachable",
@@ -45,7 +52,7 @@ var (
 
 	// fleetSchemaVersion is the highest schema version each organisation has
 	// applied. The fleet spread is what says a deploy reached some tenants.
-	fleetSchemaVersion = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	fleetSchemaVersion = fleetFactory.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "atlantis",
 		Subsystem: "console_fleet",
 		Name:      "schema_version",
@@ -54,7 +61,7 @@ var (
 
 	// fleetDeadJobs counts what has stopped retrying. Rising means work is
 	// being dropped, which nothing else in the fleet reports.
-	fleetDeadJobs = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	fleetDeadJobs = fleetFactory.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "atlantis",
 		Subsystem: "console_fleet",
 		Name:      "dead_jobs",
@@ -63,7 +70,7 @@ var (
 
 	// fleetParkedObjects counts what a destructive migration renamed out of the
 	// way and has not reaped.
-	fleetParkedObjects = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	fleetParkedObjects = fleetFactory.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "atlantis",
 		Subsystem: "console_fleet",
 		Name:      "parked_objects",
@@ -77,7 +84,7 @@ var (
 	// whenever that one is, and counts_truncated{what="parked_objects"} covers
 	// both. The page is ordered by reap_after, earliest first, so the overdue
 	// rows are the ones a truncated page keeps.
-	fleetParkedOverdue = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	fleetParkedOverdue = fleetFactory.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "atlantis",
 		Subsystem: "console_fleet",
 		Name:      "parked_objects_overdue",
@@ -89,7 +96,7 @@ var (
 	// ListDeadJobs carries no total and no has_more, so a response filling the
 	// sweep's limit and a queue exactly that long are the same message. Without
 	// this a capped count reads as the whole queue.
-	fleetCountsTruncated = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	fleetCountsTruncated = fleetFactory.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "atlantis",
 		Subsystem: "console_fleet",
 		Name:      "counts_truncated",
@@ -99,7 +106,7 @@ var (
 	// fleetFreezeOpen is whether a freeze window covers now. Computed by the
 	// sweep: ListFreezeWindows returns every row, including expired ones, and
 	// has no notion of the current time.
-	fleetFreezeOpen = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	fleetFreezeOpen = fleetFactory.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "atlantis",
 		Subsystem: "console_fleet",
 		Name:      "freeze_window_open",
@@ -109,7 +116,7 @@ var (
 	// fleetLastPoll is when each organisation was last visited. Alert on the
 	// age: a sweep that has stopped leaves every other gauge at its last value,
 	// and this is the only one that says so.
-	fleetLastPoll = promauto.NewGaugeVec(prometheus.GaugeOpts{
+	fleetLastPoll = fleetFactory.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "atlantis",
 		Subsystem: "console_fleet",
 		Name:      "last_poll_timestamp_seconds",
@@ -118,7 +125,7 @@ var (
 
 	// fleetOrgs is how many organisations the last sweep visited. init sets it
 	// to NaN; see markFleetUnmeasured.
-	fleetOrgs = promauto.NewGauge(prometheus.GaugeOpts{
+	fleetOrgs = fleetFactory.NewGauge(prometheus.GaugeOpts{
 		Namespace: "atlantis",
 		Subsystem: "console_fleet",
 		Name:      "orgs",
@@ -133,7 +140,7 @@ var (
 	// fleet, and looks the same as a console whose sweep has stopped.
 	//
 	// The stage label is a closed set of two.
-	fleetSweepFailures = promauto.NewCounterVec(prometheus.CounterOpts{
+	fleetSweepFailures = fleetFactory.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "atlantis",
 		Subsystem: "console_fleet",
 		Name:      "sweep_failures_total",
@@ -143,7 +150,7 @@ var (
 	// fleetSweepSeconds is how long a whole sweep took. Buckets run to five
 	// minutes, the default interval: a sweep approaching its own interval is
 	// the signal that the concurrency or the interval has to move.
-	fleetSweepSeconds = promauto.NewHistogram(prometheus.HistogramOpts{
+	fleetSweepSeconds = fleetFactory.NewHistogram(prometheus.HistogramOpts{
 		Namespace: "atlantis",
 		Subsystem: "console_fleet",
 		Name:      "sweep_duration_seconds",
@@ -269,7 +276,8 @@ func retireOrgGauges(published map[string]bool, seen map[string]bool) {
 // customer's dead-job backlog.
 func newMetricsServer(addr string) *http.Server {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
+	mux.Handle("/metrics", promhttp.HandlerFor(
+		prometheus.Gatherers{prometheus.DefaultGatherer, fleetRegistry}, promhttp.HandlerOpts{}))
 	return &http.Server{
 		Addr:              addr,
 		Handler:           mux,
