@@ -152,3 +152,21 @@ func TestEveryChangeClassIsDisplayable(t *testing.T) {
 		}
 	}
 }
+
+// The approval hint names the command that reaches the server's gate for each
+// class: a backfill-required plan is filed only by `tide apply --backfill`.
+func TestApprovalNextStepNamesTheCommandThatFilesTheRequest(t *testing.T) {
+	for _, tc := range []struct {
+		class adminpb.PlanClass
+		want  string
+	}{
+		{adminpb.PlanClass_PLAN_CLASS_ADDITIVE, "`tide apply` files the request; admin decides under Approvals"},
+		{adminpb.PlanClass_PLAN_CLASS_BACKFILL_REQUIRED, "`tide apply --backfill` files the request; admin decides under Approvals"},
+		{adminpb.PlanClass_PLAN_CLASS_CROSS_CALLER_BREAKING, "`tide apply` files the request; admin decides under Approvals"},
+		{adminpb.PlanClass_PLAN_CLASS_DESTRUCTIVE, "`tide apply` files the request; admin decides under Approvals"},
+	} {
+		if got := approvalNextStep(tc.class, "admin"); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.class, got, tc.want)
+		}
+	}
+}

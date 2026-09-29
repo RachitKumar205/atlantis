@@ -168,8 +168,7 @@ func printPlanReport(resp *adminpb.PlanSchemaResponse) {
 			fmt.Sprintf("required (%s)", resp.GetApproverRole())))
 		// The next step, because "required" alone reads as "stop": the
 		// request exists only once an apply files it.
-		cliout.Field(os.Stdout, "", cliout.Faint(fmt.Sprintf(
-			"`tide apply` files the request; %s decides under Approvals", resp.GetApproverRole())))
+		cliout.Field(os.Stdout, "", cliout.Faint(approvalNextStep(resp.GetClass(), resp.GetApproverRole())))
 	}
 	if len(resp.GetImpactReport()) > 0 {
 		fmt.Println()
@@ -193,6 +192,19 @@ func printPlanReport(resp *adminpb.PlanSchemaResponse) {
 		fmt.Println()
 		printExtensions(resp.GetExtensions())
 	}
+}
+
+// approvalNextStep names the command that files an approval request for a
+// plan of class c.
+//
+// A backfill-required plan needs --backfill: a bare `tide apply` stops in
+// tide and never reaches the server.
+func approvalNextStep(c adminpb.PlanClass, role string) string {
+	cmd := "tide apply"
+	if c == adminpb.PlanClass_PLAN_CLASS_BACKFILL_REQUIRED {
+		cmd = "tide apply --backfill"
+	}
+	return fmt.Sprintf("`%s` files the request; %s decides under Approvals", cmd, role)
 }
 
 // printExtensions renders the per-extension state the server reported

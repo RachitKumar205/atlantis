@@ -810,8 +810,8 @@ the person in CI. A machine enrolled with a token names no person until they
 are set.
 
 `tide plan` now follows "approval required" with the next step: `tide apply`
-files the request. An agent that read "required" as "stop" planned, stopped,
-and never filed one.
+files the request, or `tide apply --backfill` for a backfill-required plan. An
+agent that read "required" as "stop" planned, stopped, and never filed one.
 
 #### A rehearsal that fails on duplicates counts them
 
