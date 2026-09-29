@@ -13,6 +13,15 @@ Unreleased entries describe work on `main` that has not been tagged.
 
 ### Added
 
+#### Step-up without a second factor on a local console
+
+`CONSOLE_DEV_SKIP_STEP_UP=true` lets a console on localhost confirm approvals,
+overrides, caller policy and the other step-up actions without the popup to
+Atlantis Cloud. The console refuses to start with it unless
+`CONSOLE_COOKIE_SECURE` is off and `CLOUD_ISSUER` is an `http://` loopback
+address, logs a warning at startup, and records `second_factor: false` on each
+`sudo_granted` audit row.
+
 #### One place that says what every organisation is running
 
 Each organisation's own database is the only record of its schema version, its

@@ -967,7 +967,9 @@ export function SudoConfirmDialog({
   const { data: me } = useMe()
 
   const phraseOK = !requiredText || typed.trim().toLowerCase() === requiredText.toLowerCase()
-  const canSubmit = phraseOK && assertion.length > 0 && !pending
+  // The server elevates on an empty assertion only when it reported step_up false.
+  const stepUpOff = me?.step_up === false
+  const canSubmit = phraseOK && (stepUpOff || assertion.length > 0) && !pending
 
   // Listen for the assertion the popup hands back.
   //
@@ -1038,20 +1040,26 @@ export function SudoConfirmDialog({
             </div>
           )}
 
-          {/*
-            Step-up sends the user back to Atlantis Cloud to present a second
-            factor — this console holds no credential to re-check. What comes
-            back is an assertion saying a factor was presented, which is a
-            stronger statement than "this token is fresh": Cloud will mint a
-            fresh one for anybody holding a twelve-hour session, and only the
-            reauth path sets the claim the server requires here.
-
-            A popup rather than a redirect. A full navigation would discard
-            this dialog, and with it the action the user is partway through
-            confirming; the popup returns through postMessage and leaves the
-            page standing.
-          */}
+          {stepUpOff ? (
+            <div className="hint" style={{ marginBottom: 12 }}>
+              Step-up is off on this local console (CONSOLE_DEV_SKIP_STEP_UP), so no
+              second factor is asked for.
+            </div>
+          ) : (
           <div className="field">
+            {/*
+              Step-up sends the user back to Atlantis Cloud to present a second
+              factor — this console holds no credential to re-check. What comes
+              back is an assertion saying a factor was presented, which is a
+              stronger statement than "this token is fresh": Cloud will mint a
+              fresh one for anybody holding a twelve-hour session, and only the
+              reauth path sets the claim the server requires here.
+
+              A popup rather than a redirect. A full navigation would discard
+              this dialog, and with it the action the user is partway through
+              confirming; the popup returns through postMessage and leaves the
+              page standing.
+            */}
             <label className="field__label">Confirm with Atlantis Cloud</label>
             <button
               className="btn"
@@ -1067,6 +1075,7 @@ export function SudoConfirmDialog({
               </div>
             )}
           </div>
+          )}
 
           {/*
             The fallback, and it stays. A browser that blocks the popup would

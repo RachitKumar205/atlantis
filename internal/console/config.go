@@ -2,6 +2,8 @@ package console
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -39,6 +41,11 @@ type Config struct {
 
 	SessionSecret string // CONSOLE_SESSION_SECRET — required, ≥32 chars
 	CookieSecure  bool   // CONSOLE_COOKIE_SECURE — default false
+
+	// SkipStepUp lets /api/auth/sudo elevate a session without an assertion
+	// from Cloud. CONSOLE_DEV_SKIP_STEP_UP=true; ConfigFromEnv accepts it only
+	// with CONSOLE_COOKIE_SECURE off and an http:// loopback CLOUD_ISSUER.
+	SkipStepUp bool
 
 	// Enrolment: how a machine gets a client certificate.
 	//
@@ -124,6 +131,7 @@ func ConfigFromEnv() (Config, error) {
 		PostHogHost:   envOr("CLOUD_POSTHOG_HOST", analytics.DefaultEndpoint),
 		SessionSecret: os.Getenv("CONSOLE_SESSION_SECRET"),
 		CookieSecure:  os.Getenv("CONSOLE_COOKIE_SECURE") == "true",
+		SkipStepUp:    os.Getenv("CONSOLE_DEV_SKIP_STEP_UP") == "true",
 		SignerAddr:    os.Getenv("ATL_SIGNER_ADDR"),
 		SignerCert:    os.Getenv("ATL_SIGNER_CERT"),
 		SignerKey:     os.Getenv("ATL_SIGNER_KEY"),
@@ -181,6 +189,11 @@ func ConfigFromEnv() (Config, error) {
 	if len(c.SessionSecret) < 32 {
 		return Config{}, fmt.Errorf("CONSOLE_SESSION_SECRET must be at least 32 characters")
 	}
+	if c.SkipStepUp {
+		if err := localOnly(c); err != nil {
+			return Config{}, err
+		}
+	}
 	// mTLS is required on every channel to atlantis, but the credentials live
 	// in each organisation's console.orgs row, so there is no process-wide
 	// certificate to validate here. dialOrg has no insecure branch, and an
@@ -197,6 +210,35 @@ func ConfigFromEnv() (Config, error) {
 				"For local development: `make dev-data-key` prints one to export.")
 	}
 	return c, nil
+}
+
+// localOnly returns an error unless c has CookieSecure off and an http://
+// loopback CloudIssuer.
+func localOnly(c Config) error {
+	// CONSOLE_COOKIE_SECURE defaults to false, so the issuer is checked too:
+	// Cloud is https everywhere except a laptop.
+	if c.CookieSecure {
+		return fmt.Errorf("CONSOLE_DEV_SKIP_STEP_UP is for a console on localhost and " +
+			"CONSOLE_COOKIE_SECURE=true says this one is not: admin actions would run " +
+			"without a second factor")
+	}
+	u, err := url.Parse(c.CloudIssuer)
+	if err != nil || u.Scheme != "http" || !loopback(u.Hostname()) {
+		return fmt.Errorf("CONSOLE_DEV_SKIP_STEP_UP is for a console on localhost and "+
+			"CLOUD_ISSUER %q is not an http:// loopback address: admin actions would "+
+			"run without a second factor", c.CloudIssuer)
+	}
+	return nil
+}
+
+// loopback reports whether host is "localhost" or a loopback IP literal. It
+// resolves no names.
+func loopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func envOr(key, fallback string) string {

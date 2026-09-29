@@ -231,6 +231,37 @@ func TestSudoNeedsAFreshAssertion(t *testing.T) {
 		t.Fatalf("a step-up assertion did not grant sudo: status %d, body %s",
 			stepUp.Code, stepUp.Body.String())
 	}
+	if rows := sudoGrants(t, f, "sudo@example.com"); len(rows) != 1 || rows[0]["second_factor"] != true {
+		t.Errorf("sudo_granted audit rows = %v, want one with second_factor true", rows)
+	}
+}
+
+// sudoGrants returns the detail of every sudo_granted audit row for email.
+func sudoGrants(t *testing.T, f *consoleFixture, email string) []map[string]any {
+	t.Helper()
+	rows, err := f.pool.Query(context.Background(), `
+SELECT detail FROM console.audit_log
+ WHERE action = 'sudo_granted' AND actor_email = $1`, email)
+	if err != nil {
+		t.Fatalf("read sudo_granted audit rows: %v", err)
+	}
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatalf("scan audit row: %v", err)
+		}
+		var d map[string]any
+		if err := json.Unmarshal(raw, &d); err != nil {
+			t.Fatalf("decode audit detail %s: %v", raw, err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read sudo_granted audit rows: %v", err)
+	}
+	return out
 }
 
 // A step-up assertion is still single-use.
@@ -259,6 +290,52 @@ func TestAStepUpAssertionIsStillSingleUse(t *testing.T) {
 	}
 	if second := f.post(t, "/api/auth/sudo", exchangeBody(elevate), token); second.Code == http.StatusOK {
 		t.Fatal("the same step-up assertion elevated twice")
+	}
+}
+
+// Under SkipStepUp an empty assertion elevates, /api/auth/me reports step_up false,
+// and the audit row records second_factor false. Without it the same request is
+// refused.
+func TestSkipStepUpElevatesWithoutAnAssertion(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		t.Run(fmt.Sprintf("SkipStepUp=%v", skip), func(t *testing.T) {
+			f := newFixture(t, false, func(c *Config) { c.SkipStepUp = skip })
+			const email = "local@example.com"
+			token := f.signIn(t, email, "admin")
+
+			me := httptest.NewRecorder()
+			f.srv.handler.ServeHTTP(me, f.request(t, http.MethodGet, "/api/auth/me", "", token))
+			if me.Code != http.StatusOK {
+				t.Fatalf("/api/auth/me: status %d, body %s", me.Code, me.Body.String())
+			}
+			var got struct {
+				StepUp *bool `json:"step_up"`
+			}
+			if err := json.NewDecoder(me.Body).Decode(&got); err != nil {
+				t.Fatalf("decode /api/auth/me: %v", err)
+			}
+			if got.StepUp == nil || *got.StepUp == skip {
+				t.Errorf("/api/auth/me step_up = %v with SkipStepUp %v", got.StepUp, skip)
+			}
+
+			w := f.post(t, "/api/auth/sudo", exchangeBody(""), token)
+			rows := sudoGrants(t, f, email)
+			if !skip {
+				if w.Code != http.StatusBadRequest {
+					t.Errorf("an empty assertion with step-up on: status %d, want 400", w.Code)
+				}
+				if len(rows) != 0 {
+					t.Errorf("sudo_granted audit rows = %v, want none", rows)
+				}
+				return
+			}
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, body %s", w.Code, w.Body.String())
+			}
+			if len(rows) != 1 || rows[0]["second_factor"] != false {
+				t.Errorf("sudo_granted audit rows = %v, want one with second_factor false", rows)
+			}
+		})
 	}
 }
 

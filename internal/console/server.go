@@ -115,6 +115,9 @@ func New(cfg Config, spaFS fs.FS, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("CONSOLE_DATA_KEY: %w", err)
 	}
+	if cfg.SkipStepUp {
+		log.Warn("CONSOLE_DEV_SKIP_STEP_UP is set: admin actions run without a second factor")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -880,7 +883,14 @@ func (s *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 // checking the code. Without the check below the claim is inert and sudo always
 // succeeds, which looks identical to a working gate on every screen and in
 // every audit row.
+//
+// Under Config.SkipStepUp it grants without an assertion, and the audit row
+// records second_factor false.
 func (s *Server) handleSudo(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.SkipStepUp {
+		s.elevate(w, r, false)
+		return
+	}
 	claims := s.acceptAssertion(w, r)
 	if claims == nil {
 		return
@@ -903,7 +913,13 @@ func (s *Server) handleSudo(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "assertion does not match this session", http.StatusForbidden)
 		return
 	}
+	s.elevate(w, r, true)
+}
 
+// elevate puts the request's session into sudo mode for sudoTTL. secondFactor
+// is whether Cloud confirmed one, and is recorded in the audit row.
+func (s *Server) elevate(w http.ResponseWriter, r *http.Request, secondFactor bool) {
+	u := r.Context().Value(ctxUser).(*User)
 	token, _ := r.Context().Value(ctxSessionToken).(string)
 	if token == "" {
 		jsonError(w, "session not found", http.StatusUnauthorized)
@@ -915,7 +931,8 @@ func (s *Server) handleSudo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.db.forOrg(u.Org).logAction(r.Context(), u.Subject, u.Email, "sudo_granted", map[string]any{
-		"ttl_seconds": int(sudoTTL.Seconds()),
+		"ttl_seconds":   int(sudoTTL.Seconds()),
+		"second_factor": secondFactor,
 	})
 	jsonOK(w, map[string]any{"ok": true, "expires_in_seconds": int(sudoTTL.Seconds())})
 }
@@ -992,6 +1009,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		// to match exactly, so there is no second value that could drift.
 		"step_up_url": s.cfg.CloudIssuer + "/authorize?org=" +
 			url.QueryEscape(u.Org) + "&prompt=reauth",
+
+		// False only under CONSOLE_DEV_SKIP_STEP_UP, where /api/auth/sudo
+		// elevates without an assertion.
+		"step_up": !s.cfg.SkipStepUp,
 
 		// Cloud itself, for the way back. Both sessions survive following it,
 		// so returning here costs one click.

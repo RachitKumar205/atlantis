@@ -125,6 +125,15 @@ It prints a URL with the assertion in the fragment. Open it. The assertion is
 run the target again for each sign-in, and again when the console asks you to
 confirm a destructive action.
 
+To confirm destructive actions without a second factor, start the console with
+`CONSOLE_DEV_SKIP_STEP_UP=true`. The confirm dialog then skips the popup to
+Cloud. The console accepts the setting only with `CONSOLE_COOKIE_SECURE` off and
+an `http://` loopback `CLOUD_ISSUER`, so on the host route:
+
+```bash
+make dev-console-app CLOUD_ISSUER=http://localhost:9500 CONSOLE_DEV_SKIP_STEP_UP=true
+```
+
 ## 0d. Give your organisation an atlantis
 
 There are two ways, and the first is the normal one.

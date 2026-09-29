@@ -102,7 +102,8 @@ func newEnrolmentFixture(t *testing.T) *consoleFixture {
 	return newFixture(t, true)
 }
 
-func newFixture(t *testing.T, enrolment bool) *consoleFixture {
+// newFixture applies opts to the console's Config before New.
+func newFixture(t *testing.T, enrolment bool, opts ...func(*Config)) *consoleFixture {
 	t.Helper()
 	adminDSN := requireTestPG(t)
 
@@ -210,6 +211,9 @@ func newFixture(t *testing.T, enrolment bool) *consoleFixture {
 		// the setting exists at all: a bind address says nothing about how
 		// anything outside reaches you.
 		cfg.EnrollPublicURL = "https://console.test:3443"
+	}
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 
 	srv, err := New(cfg, nil, quiet)

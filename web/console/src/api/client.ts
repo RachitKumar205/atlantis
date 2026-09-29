@@ -59,6 +59,10 @@ export interface MeResult {
   // asking about.
   step_up_url: string
 
+  // False only on a local console started with CONSOLE_DEV_SKIP_STEP_UP, where
+  // confirming an admin action asks for no second factor.
+  step_up: boolean
+
   // Cloud itself. Following it keeps both sessions, so coming back is one
   // click.
   cloud_url: string

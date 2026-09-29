@@ -121,4 +121,63 @@ func TestConfigFromEnvAcceptsACompleteEnvironment(t *testing.T) {
 	if c.DataKeyset == "" {
 		t.Errorf("CONSOLE_DATA_KEY did not survive loading")
 	}
+	if c.SkipStepUp {
+		t.Errorf("SkipStepUp is on with CONSOLE_DEV_SKIP_STEP_UP unset")
+	}
+}
+
+// CONSOLE_DEV_SKIP_STEP_UP is accepted only on a console on localhost: secure
+// cookies off and an http:// loopback issuer.
+func TestConfigFromEnvAcceptsSkipStepUpOnlyOnLocalhost(t *testing.T) {
+	for _, tc := range []struct {
+		name, issuer, cookieSecure string
+		ok                         bool
+	}{
+		{"localhost", "http://localhost:9500", "", true},
+		{"127.0.0.1", "http://127.0.0.1:9500", "false", true},
+		{"::1", "http://[::1]:9500", "", true},
+		{"secure cookies", "http://localhost:9500", "true", false},
+		{"https issuer", "https://localhost:9500", "", false},
+		{"deployed issuer", "https://platform.tryatlantis.dev", "", false},
+		{"http issuer off loopback", "http://atlantis-cloud.atlantis-system.svc.cluster.local:9500", "", false},
+		{"http issuer on a private address", "http://10.1.2.3:9500", "", false},
+		{"userinfo before a remote host", "http://localhost@evil.example:9500", "", false},
+		{"uppercase name", "http://LOCALHOST:9500", "", false},
+		{"loopback-looking name", "http://localhost.example.com:9500", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setConsoleEnv(t)
+			t.Setenv("CONSOLE_DEV_SKIP_STEP_UP", "true")
+			t.Setenv("CLOUD_ISSUER", tc.issuer)
+			t.Setenv("CONSOLE_COOKIE_SECURE", tc.cookieSecure)
+
+			c, err := ConfigFromEnv()
+			switch {
+			case tc.ok && err != nil:
+				t.Fatalf("refused a console on localhost: %v", err)
+			case tc.ok && !c.SkipStepUp:
+				t.Fatal("accepted the setting and then dropped it")
+			case !tc.ok && err == nil:
+				t.Fatalf("started with step-up off, issuer %q, CONSOLE_COOKIE_SECURE=%q",
+					tc.issuer, tc.cookieSecure)
+			case !tc.ok && !strings.Contains(err.Error(), "CONSOLE_DEV_SKIP_STEP_UP"):
+				t.Errorf("the error does not name the setting: %v", err)
+			}
+		})
+	}
+}
+
+// Only the exact value "true" turns step-up off; anything else leaves it on.
+func TestConfigFromEnvReadsSkipStepUpOnlyFromTrue(t *testing.T) {
+	for _, v := range []string{"1", "TRUE", " true", "yes"} {
+		setConsoleEnv(t)
+		t.Setenv("CONSOLE_DEV_SKIP_STEP_UP", v)
+		c, err := ConfigFromEnv()
+		if err != nil {
+			t.Fatalf("CONSOLE_DEV_SKIP_STEP_UP=%q: %v", v, err)
+		}
+		if c.SkipStepUp {
+			t.Errorf("CONSOLE_DEV_SKIP_STEP_UP=%q turned step-up off", v)
+		}
+	}
 }
