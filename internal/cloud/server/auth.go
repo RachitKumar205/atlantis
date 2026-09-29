@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"errors"
-	"html"
 	"net/http"
 	"strings"
 	"time"
@@ -290,34 +289,33 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 
 // handleResetForm renders somewhere to type a new password.
 //
-// Unstyled and script-free: strictCSP allows nothing to load, so the form posts
-// to the JSON endpoint as an ordinary submission.
+// Script-free: the form posts to /reset as an ordinary submission.
 func (s *Server) handleResetForm(w http.ResponseWriter, r *http.Request) {
-	token := r.URL.Query().Get("token")
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	// Escaped: the token comes from the query string into an attribute.
-	_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8">` +
-		`<title>Choose a new password</title>` +
-		`<h1>Choose a new password</h1>` +
-		`<form method="post" action="/reset">` +
-		`<input type="hidden" name="token" value="` + html.EscapeString(token) + `">` +
-		`<label>New password <input type="password" name="password" autocomplete="new-password" required></label> ` +
-		`<button type="submit">Change password</button>` +
-		`</form>`))
+	writeCard(w, http.StatusOK, cardPage{
+		Title: "Choose a new password",
+		Form: &cardForm{
+			Action: "/reset",
+			// From the query string; the template escapes it.
+			Hidden: []cardHidden{{Name: "token", Value: r.URL.Query().Get("token")}},
+			Field: cardField{
+				Label: "New password", Name: "password", Type: "password",
+				AutoComplete: "new-password",
+			},
+			Submit: "Change password",
+		},
+	})
 }
 
-// page writes a plain-text response.
+// page writes a message in the sign-in app's card. The first paragraph of body
+// is the title; paragraphs are separated by a blank line.
 //
 // Every caller is a page reached with a single-use credential in the query
 // string — a verification token, a reset token, an OAuth authorization code —
 // so none of them may be stored. Referrer-Policy already stops the URL leaking
-// sideways; this stops it being written down.
+// sideways; writeCard's no-store stops it being written down.
 func page(w http.ResponseWriter, code int, body string) {
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(code)
-	_, _ = w.Write([]byte(body + "\n"))
+	paras := strings.Split(body, "\n\n")
+	writeCard(w, code, cardPage{Title: paras[0], Lead: paras[1:]})
 }
 
 // rateLimited reports whether the request may proceed, answering it if not.

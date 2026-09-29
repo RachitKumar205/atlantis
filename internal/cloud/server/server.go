@@ -295,10 +295,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /authorize/reauth", s.handleReauth)
 
 	// Reached from an email, by a person, in a browser, so these answer with
-	// plain pages rather than JSON. Unstyled and framework-free; the Cloud
-	// sign-in app replaces them.
+	// server-rendered pages rather than JSON. See pages.go.
 	s.mux.HandleFunc("GET /verify", s.handleVerify)
 	s.mux.HandleFunc("GET /reset", s.handleResetForm)
+	s.mux.HandleFunc("GET "+pageStylesheet, s.handlePageStylesheet)
 
 	// Where a console sends the browser to end its Cloud session. GET because a
 	// redirect is what carries it here.
@@ -390,12 +390,12 @@ func (s *Server) withSPAPolicy(next http.Handler) http.Handler {
 
 // strictCSP is the policy every route gets unless it says otherwise.
 //
-// `default-src 'none'`: nothing loads from anywhere. It fits the JSON routes
-// and the three script-free pages reached with a token in the query string.
+// `default-src 'none'`: nothing loads from anywhere. It fits the JSON routes.
+// The server-rendered pages set their own policy in writeCard.
 const strictCSP = "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 
-// spaCSP is the Content-Security-Policy for the sign-in application. Wider than
-// strictCSP, which the plain pages use, because a React page loads its own
+// spaCSP is the Content-Security-Policy for the sign-in application. It admits
+// scripts and connections from this origin, because a React page loads its own
 // bundle.
 //
 //   - `script-src 'self'`, no 'unsafe-inline'.

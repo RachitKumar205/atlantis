@@ -2,10 +2,8 @@ package server
 
 import (
 	"errors"
-	"html"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/rachitkumar205/atlantis/internal/analytics"
 	"github.com/rachitkumar205/atlantis/internal/cloud/issuer"
@@ -206,59 +204,35 @@ func originOf(raw string) string {
 // The console opens this in a popup, so unlike the JSON sign-in routes it is
 // navigated to by a browser.
 //
-// Script-free, so Cloud stays under `default-src 'none'`. The postMessage that
-// hands the result back runs on the console's origin, under the console's own
-// script-src, after the redirect below.
+// Script-free. The postMessage that hands the result back runs on the
+// console's origin, under the console's own script-src, after the redirect
+// below.
 func (s *Server) serveReauthPage(w http.ResponseWriter, org, consoleURL, errMsg string) {
-	banner := ""
-	if errMsg != "" {
-		banner = `<p><strong>` + html.EscapeString(errMsg) + `</strong></p>`
-	}
-	w.Header().Set("Cache-Control", "no-store")
-
-	// form-action has to name the console, and `'self'` alone silently breaks
-	// this page.
-	//
-	// The form POSTs same-origin to /authorize/reauth, which is what `'self'`
-	// covers — but that handler answers 303 to the console's origin, and
-	// browsers enforce form-action ACROSS the redirect chain. With `'self'`
-	// only, Chrome and Firefox accept the POST, let the server mint the
-	// assertion, and then refuse to follow the redirect.
-	//
-	// The failure has no symptom. The page does not navigate and no error is
-	// shown, so the operator presses the button again, resends a code that is
-	// now spent, and is told the code is wrong — which is the one explanation
-	// that is not true. It cost an afternoon to find.
-	//
-	// The console's origin is not a wildcard: it is cloud.orgs.console_url for
-	// this organisation, the same value used as the assertion's audience, so an
-	// assertion cannot be posted anywhere it would not verify. Only the origin
-	// is used — the column is constrained to scheme://host[:port] — because a
-	// CSP source expression with a path would not match.
-	w.Header().Set("Content-Security-Policy", strings.Join([]string{
-		"default-src 'none'",
-		"form-action 'self' " + originOf(consoleURL),
-		"base-uri 'none'",
-		"frame-ancestors 'none'",
-	}, "; "))
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(`<!doctype html><meta charset="utf-8">` +
-		`<title>Confirm it is you</title>` +
-		`<h1>Confirm it is you</h1>` +
-		`<p>This action needs your second factor, even though you are signed in.</p>` +
-		banner +
-		`<form method="post" action="/authorize/reauth">` +
-		// The organisation travels in a hidden field rather than the query
-		// string, because the POST target is fixed and this is the only thing
-		// the form needs to carry. It is escaped: it is attacker-supplied and
-		// is going into an attribute.
-		`<input type="hidden" name="org" value="` + html.EscapeString(org) + `">` +
-		`<label>Code from your authenticator ` +
-		`<input name="code" inputmode="numeric" autocomplete="one-time-code" ` +
-		`autofocus required></label> ` +
-		`<button type="submit">Confirm</button>` +
-		`</form>` +
-		`<p>A backup code works here too.</p>`))
+	writeCard(w, http.StatusOK, cardPage{
+		Title: "Confirm it is you",
+		Lead:  []string{"This action needs your second factor, even though you are signed in."},
+		Error: errMsg,
+		Form: &cardForm{
+			Action: "/authorize/reauth",
+			// The organisation travels in a hidden field, because the POST
+			// target is fixed and this is the only thing the form carries. It
+			// is attacker-supplied; the template escapes it.
+			Hidden: []cardHidden{{Name: "org", Value: org}},
+			Field: cardField{
+				Label: "Code from your authenticator", Name: "code",
+				InputMode: "numeric", AutoComplete: "one-time-code",
+				Hint: "A backup code works here too.",
+			},
+			Submit: "Confirm",
+		},
+		// handleReauth answers 303 to the console, and browsers enforce
+		// form-action across the redirect: with `'self'` alone the redirect is
+		// refused silently, after the code is spent.
+		//
+		// The origin only, because a source expression with a path would not
+		// match /login.
+		FormOrigin: originOf(consoleURL),
+	})
 }
 
 // handleReauth checks the second factor and mints a step-up assertion.

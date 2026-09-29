@@ -819,6 +819,15 @@ values stay out of the message, which the rehearsal record stores. Rows with a
 NULL key, and rows outside a partial index's predicate, are not counted, as the
 index does not refuse them.
 
+#### Atlantis Cloud's own pages draw the sign-in card
+
+The second-factor popup that confirms a destructive action, the password reset
+form and Cloud's messages rendered as unstyled HTML or plain text. They now use
+the sign-in application's stylesheet, served at `/page.css`, and its card. Their
+policy adds styles, fonts and images from Cloud's own origin, and still runs no
+script. Without the built sign-in application, as in `make dev-auth`, they
+render unstyled.
+
 #### The apply-policy dialog lists its tiers as choices
 
 The five tiers ran together as one paragraph, because the class they used had
