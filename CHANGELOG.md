@@ -809,6 +809,9 @@ card shows the name. `ATL_ACTOR`, `ATL_ACTOR_EMAIL` and `ATL_ACTOR_NAME` name
 the person in CI. A machine enrolled with a token names no person until they
 are set.
 
+`tide plan` now follows "approval required" with the next step: `tide apply`
+files the request. An agent that read "required" as "stop" planned, stopped,
+and never filed one.
 
 #### A rehearsal that fails on duplicates counts them
 

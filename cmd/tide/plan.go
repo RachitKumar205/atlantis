@@ -166,6 +166,10 @@ func printPlanReport(resp *adminpb.PlanSchemaResponse) {
 	if resp.GetRequiresApproval() {
 		cliout.Field(os.Stdout, "approval", cliout.Brass(
 			fmt.Sprintf("required (%s)", resp.GetApproverRole())))
+		// The next step, because "required" alone reads as "stop": the
+		// request exists only once an apply files it.
+		cliout.Field(os.Stdout, "", cliout.Faint(fmt.Sprintf(
+			"`tide apply` files the request; %s decides under Approvals", resp.GetApproverRole())))
 	}
 	if len(resp.GetImpactReport()) > 0 {
 		fmt.Println()
