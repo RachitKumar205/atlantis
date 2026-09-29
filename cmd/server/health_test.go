@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -251,4 +252,26 @@ func isGated(path string) bool {
 		gated = true
 	}
 	return gated
+}
+
+// /status reports 0 for an empty history and leaves the field out when the
+// read failed, so a reader never takes a failed read for version 0.
+func TestStatusTellsAnEmptyHistoryFromAFailedRead(t *testing.T) {
+	seven := int64(7)
+	for _, tc := range []struct {
+		name   string
+		max    *int64
+		err    error
+		want   int64
+		wantOK bool
+	}{
+		{"versions", &seven, nil, 7, true},
+		{"no versions", nil, nil, 0, true},
+		{"failed read", nil, errors.New("timeout"), 0, false},
+	} {
+		got, ok := reportedSchemaVersion(tc.max, tc.err)
+		if got != tc.want || ok != tc.wantOK {
+			t.Errorf("%s: (%d, %v), want (%d, %v)", tc.name, got, ok, tc.want, tc.wantOK)
+		}
+	}
 }

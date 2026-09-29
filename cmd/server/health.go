@@ -122,23 +122,32 @@ func statusHandler(deps healthDeps) http.HandlerFunc {
 		defer cancel()
 
 		var schemaVersion *int64
-		var ver int64
 		err := deps.Pool.QueryRow(ctx,
 			`SELECT MAX(version) FROM atlantis.schema_versions`).Scan(&schemaVersion)
-		if err == nil && schemaVersion != nil {
-			ver = *schemaVersion
-		}
 
 		out := map[string]any{
 			"started_at": deps.StartedAt.UTC().Format(time.RFC3339),
 			"version":    deps.Version,
 		}
-		if ver > 0 {
+		if ver, ok := reportedSchemaVersion(schemaVersion, err); ok {
 			out["schema_version"] = ver
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
 	}
+}
+
+// reportedSchemaVersion returns what /status reports as schema_version for a
+// MAX(version) read: 0 for a database with no versions, and false when the
+// read failed, which leaves the field out.
+func reportedSchemaVersion(max *int64, err error) (int64, bool) {
+	if err != nil {
+		return 0, false
+	}
+	if max == nil {
+		return 0, true
+	}
+	return *max, true
 }
 
 func livenessHandler(w http.ResponseWriter, _ *http.Request) {

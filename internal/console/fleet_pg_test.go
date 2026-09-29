@@ -12,6 +12,7 @@ package console
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -183,6 +184,40 @@ func TestAnUnreachableOrganisationRecordsNoCountsRatherThanZero(t *testing.T) {
 //
 // The alternative erases what was known the first time a tenant restarts, so an
 // operator asking what an organisation was running learns nothing.
+// A /status without schema_version is an unknown version, never 0: the stored
+// version keeps its last value, and the gauge reads NaN.
+func TestAMissingSchemaVersionIsUnknownNotZero(t *testing.T) {
+	f := newConsoleFixture(t)
+	seedTenant(t, f)
+
+	f.atl.setStatus(func() (int, string) {
+		return 200, `{"started_at":"2026-09-29T00:00:00Z","version":"test","schema_version":7}`
+	})
+	sweepOnce(t, f)
+	f.atl.setStatus(func() (int, string) {
+		return 200, `{"started_at":"2026-09-29T00:00:00Z","version":"test"}`
+	})
+	sweepOnce(t, f)
+
+	got, ok := readFacts(t, f, defaultOrg)
+	if !ok {
+		t.Fatal("the sweep wrote no row")
+	}
+	if !got.Reachable {
+		t.Fatalf("a tenant that answered /status was reported unreachable: %s", got.LastError)
+	}
+	if got.SchemaVersion == nil || *got.SchemaVersion != 7 {
+		var stored any = "NULL"
+		if got.SchemaVersion != nil {
+			stored = *got.SchemaVersion
+		}
+		t.Errorf("schema_version = %v after a status without one, want the last known 7", stored)
+	}
+	if v := testutil.ToFloat64(fleetSchemaVersion.WithLabelValues(defaultOrg)); !math.IsNaN(v) {
+		t.Errorf("the schema-version gauge reads %v for an unknown version, want NaN", v)
+	}
+}
+
 func TestAFailedSweepKeepsTheLastKnownFacts(t *testing.T) {
 	f := newConsoleFixture(t)
 	seedTenant(t, f)

@@ -348,16 +348,20 @@ func newATLStack(t *testing.T, dsn string) *atlStack {
 			_, _ = io.WriteString(w, body)
 			return
 		}
+		// As cmd/server's statusHandler: 0 for no versions, and no field when
+		// the read fails.
 		var version *int64
-		if err := pool.QueryRow(context.Background(),
-			`SELECT MAX(version) FROM atlantis.schema_versions`).Scan(&version); err != nil {
-			version = nil
-		}
+		err := pool.QueryRow(context.Background(),
+			`SELECT MAX(version) FROM atlantis.schema_versions`).Scan(&version)
 		out := map[string]any{
 			"started_at": time.Now().UTC().Format(time.RFC3339),
 			"version":    "test",
 		}
-		if version != nil {
+		switch {
+		case err != nil:
+		case version == nil:
+			out["schema_version"] = 0
+		default:
 			out["schema_version"] = *version
 		}
 		w.Header().Set("Content-Type", "application/json")

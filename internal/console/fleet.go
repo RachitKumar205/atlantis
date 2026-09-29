@@ -380,16 +380,15 @@ func (s *Server) readOrgStatus(ctx context.Context, e *orgClientEntry, f *orgFac
 	var body struct {
 		StartedAt     string `json:"started_at"`
 		Version       string `json:"version"`
-		SchemaVersion int64  `json:"schema_version"`
+		SchemaVersion *int64 `json:"schema_version"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4*1024)).Decode(&body); err != nil {
 		return err
 	}
 	f.ServerVersion = body.Version
-	// Absent below the first applied migration, which statusHandler omits
-	// rather than sending as zero.
-	v := body.SchemaVersion
-	f.SchemaVersion = &v
+	// Absent when the tenant could not read its version, and from a server
+	// older than 0 for an empty history. Either way unknown: NULL, and NaN.
+	f.SchemaVersion = body.SchemaVersion
 	if t, err := time.Parse(time.RFC3339, body.StartedAt); err == nil {
 		f.StartedAt = &t
 	}
