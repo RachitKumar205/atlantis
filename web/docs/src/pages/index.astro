@@ -280,61 +280,6 @@ const sections = [
     margin-top: 2rem;
   }
 
-  /* The filled control, as Cloud draws it: background-color and
-     background-image set separately, because a gradient cannot be
-     interpolated — a hover that swapped one for another snapped while the
-     colour underneath eased. The sheen is constant, so only the colour moves. */
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    height: var(--control-h);
-    padding: 0 18px;
-    border-radius: 999px;
-    border: 1px solid var(--line);
-    background-color: var(--canvas-2);
-    color: var(--ink-1);
-    font-size: 13.5px;
-    font-weight: 600;
-    text-decoration: none;
-    white-space: nowrap;
-    box-shadow: var(--drop);
-    transition:
-      background-color var(--med) var(--ease),
-      border-color var(--med) var(--ease),
-      color var(--med) var(--ease),
-      box-shadow var(--med) var(--ease);
-  }
-
-  .btn:hover {
-    background-color: var(--canvas-3);
-    border-color: var(--line-strong);
-    color: var(--ink-0);
-  }
-
-  .btn--primary {
-    background-color: var(--accent);
-    background-image: var(--sheen);
-    color: var(--accent-ink);
-    border-color: var(--accent-ring);
-    box-shadow:
-      inset 0 1px 0 var(--accent-hi),
-      inset 0 -1px 0 var(--accent-shade),
-      var(--drop-lg);
-  }
-
-  .btn--primary:hover {
-    background-color: var(--accent-hover);
-    color: var(--accent-ink);
-    border-color: var(--accent-ring);
-  }
-
-  .btn :global(svg) {
-    width: 15px;
-    height: 15px;
-    flex: none;
-  }
-
   /* ---- Capabilities ---- */
 
   .band {

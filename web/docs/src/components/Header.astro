@@ -31,6 +31,9 @@ const currentSlug = Astro.url.pathname.replace(/\/$/, "") || "/";
 const sections =
   sectionsProp ?? (await getSidebarSections(currentSlug, { collection }));
 const showSections = sections.length >= 2;
+
+// Atlantis Cloud: sign-in, and from there each organisation's console.
+const platformUrl = "https://platform.tryatlantis.dev";
 ---
 
 <header class="sticky top-0 z-30 border-b border-border bg-card/80 backdrop-blur-lg">
@@ -90,6 +93,8 @@ const showSections = sections.length >= 2;
           <Icon name="ph:github-logo" class="w-4 h-4" />
         </LinkButton>
       )}
+      <span class="hidden sm:block h-5 w-px mx-1 bg-border" aria-hidden="true"></span>
+      <a class="btn btn--primary" href={platformUrl}>Dashboard</a>
       {showSidebar && (
         <Button
           variant="ghost"
