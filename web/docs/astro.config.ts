@@ -13,14 +13,22 @@ const nimbusConfig = defineNimbusConfig({
   // absolute OG image URLs, robots.txt, the sitemap, and every link in
   // /llms.txt.
   site: "https://docs.tryatlantis.dev",
-  title: "Atlantis",
+  // The site name: the home page's <title>, its WebSite structured data, and
+  // the suffix of every other page's <title>.
+  title: "Atlantis docs",
   description:
-    "Declare your schema in .atl, apply it, and get a typed client, " +
-    "migrations, and a serving API derived from the same source.",
+    "Declare your database schema in .atl, apply it, and get a typed " +
+    "client, migrations, and a serving API derived from the same source.",
   locale: "en",
   // The repository is private, so there is no source link to offer.
   github: null,
   socialImageAlt: "Atlantis documentation",
+  // Nimbus links /favicon.svg. Google Search reads no SVG favicon, so the
+  // raster icons are linked beside it.
+  head: [
+    { tag: "link", attrs: { rel: "icon", href: "/favicon.ico", sizes: "16x16 32x32 48x48" } },
+    { tag: "link", attrs: { rel: "apple-touch-icon", href: "/apple-touch-icon.png" } },
+  ],
 });
 
 export default defineConfig({

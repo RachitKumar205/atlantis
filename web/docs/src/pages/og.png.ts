@@ -1,17 +1,16 @@
-import { generateOpenGraphImage } from "astro-og-canvas";
+import type { APIRoute } from "astro";
 import { config } from "virtual:nimbus/config";
-import { ogCardConfig } from "./og/_og-card-config";
+import { renderCard } from "@/lib/raster";
 
 export const prerender = true;
 
-export async function GET() {
-  const body = await generateOpenGraphImage({
-    title: config.title,
-    description: config.description,
-    ...ogCardConfig,
-  });
-
-  return new Response(body, {
-    headers: { "Content-Type": "image/png" },
-  });
-}
+// The home page's card, and the fallback for any page without its own.
+export const GET: APIRoute = async () =>
+  new Response(
+    await renderCard({
+      title: "Documentation",
+      description: config.description,
+      host: new URL(config.site).host,
+    }),
+    { headers: { "Content-Type": "image/png" } },
+  );

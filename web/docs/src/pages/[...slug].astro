@@ -12,6 +12,7 @@ import {
   getTOC,
   withBase,
 } from "@cloudflare/nimbus-docs/runtime";
+import type { HeadElement } from "@cloudflare/nimbus-docs/types";
 import { components } from "../components";
 
 export const prerender = true;
@@ -48,6 +49,30 @@ const markdownPath = entry.id === "index" ? "/index.md" : `/${entry.id}/index.md
 const basedMarkdownPath = withBase(markdownPath, import.meta.env.BASE_URL);
 const markdownUrl = Astro.site ? new URL(basedMarkdownPath, Astro.site).href : basedMarkdownPath;
 const socialImage = entry.data.socialImage ?? `/og/${entry.id}.png`;
+
+// BreadcrumbList structured data from the trail the page renders. Google
+// requires a URL on every crumb but the last, so a crumb with no landing page
+// is left out.
+//
+// `<` is escaped so no string can close the script element.
+const crumbs = breadcrumbs.filter((c, i) => c.href || i === breadcrumbs.length - 1);
+const head: HeadElement[] = [...(entry.data.head ?? [])];
+if (crumbs.length > 1) {
+  head.push({
+    tag: "script",
+    attrs: { type: "application/ld+json" },
+    content: JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "BreadcrumbList",
+      itemListElement: crumbs.map((c, i) => ({
+        "@type": "ListItem",
+        position: i + 1,
+        name: c.label,
+        ...(c.href ? { item: new URL(c.href, Astro.site).href } : {}),
+      })),
+    }).replace(/</g, "\\u003c"),
+  });
+}
 ---
 
 <DocsLayout
@@ -59,7 +84,7 @@ const socialImage = entry.data.socialImage ?? `/og/${entry.id}.png`;
   prevNext={prevNext}
   mode={entry.data.mode}
   banner={entry.data.banner}
-  head={entry.data.head}
+  head={head}
   searchable={entry.data.searchable}
   noindex={entry.data.noindex}
   markdownUrl={markdownUrl}

@@ -14,14 +14,19 @@ src/
 │   └── partials/*.mdx       # referenced via <Render file="..." />
 ├── content.config.ts        # registers docsCollection() + partialsCollection()
 ├── layouts/                 # BaseLayout (NimbusHead), DocsLayout (sidebar/TOC/breadcrumbs)
-├── lib/cn.ts                # Tailwind className merger
+├── lib/
+│   ├── brand.ts             # Datum colours and the ring mark, for generated images
+│   ├── cn.ts                # Tailwind className merger
+│   └── raster.ts            # canvaskit renderer: OG cards, raster icons, .ico packing
 ├── pages/
 │   ├── [...slug].astro
 │   ├── [...slug]/index.md.ts   # per-page markdown alternate
+│   ├── apple-touch-icon.png.ts
+│   ├── favicon.ico.ts
+│   ├── favicon.svg.ts
 │   ├── llms.txt.ts
 │   ├── og.png.ts                # site-level OG card
 │   ├── og/
-│   │   ├── _og-card-config.ts   # shared OG theme tokens (underscore = not a route)
 │   │   └── [...slug].ts         # per-page OG cards
 │   └── robots.txt.ts
 └── styles/                  # globals.css, prose.css
@@ -61,7 +66,7 @@ Rules:
 | Feature recipe | `pnpm exec nimbus-docs add <feature-slug>`. Pipe the printed brief to your agent. |
 | Check it builds | `pnpm exec nimbus-docs check` — build-free preflight (env + structure + authoring + types). `--json` for an agent loop, `--fix` to repair what's safe. |
 | Custom page route | Add a file under `src/pages/`. |
-| Custom OG style | Edit `src/pages/og/_og-card-config.ts`. |
+| Custom OG style | Edit `renderCard` in `src/lib/raster.ts`; colours live in `src/lib/brand.ts`. |
 | Check for updates | `pnpm exec nimbus-docs outdated` — starter files behind their tag + registry components behind. |
 | Upgrade a starter file | `pnpm exec nimbus-docs diff <file>` to review, `diff --apply <file>` to pull a clean upstream change. |
 | Upgrade a registry component | `pnpm exec nimbus-docs add <slug> --overwrite`, then review with `git diff`. |

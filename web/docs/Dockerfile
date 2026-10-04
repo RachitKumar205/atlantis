@@ -16,10 +16,8 @@
 # dies on "Exit handler never called", and the same version fails the same way
 # on the host.
 #
-# Debian, not alpine. Astro pulls sharp and astro-og-canvas pulls
-# canvaskit-wasm, both of which ship prebuilt native binaries per libc, and
-# the musl variants are not in the lockfile. Nothing from this stage reaches
-# the runtime image except dist/, so the larger base costs it nothing.
+# Debian slim. Only dist/ leaves this stage, so the base's size never reaches
+# the runtime image.
 FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS build
 WORKDIR /app
 
