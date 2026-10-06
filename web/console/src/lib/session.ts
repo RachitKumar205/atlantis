@@ -9,13 +9,11 @@ import type { MeResult } from '@/api/client'
 // are ordinary functions, and the tests beside them are the only thing standing
 // between "the condition is still right" and "the condition still compiles".
 
-// The name Cloud gives the assertion in the redirect fragment, and the flag
-// that says which of the two arrivals it is.
+// The name Cloud gives the assertion in the redirect fragment.
 //
 // Fragment, not query string: it never reaches a server, so it stays out of
 // access logs and out of the Referer header on the next navigation.
 export const ASSERTION_PARAM = 'assertion'
-export const MODE_PARAM = 'mode'
 
 // RETURN_TO_PARAM carries the path the browser was trying to reach before it
 // was sent to Cloud.
@@ -59,17 +57,11 @@ export function carriesAssertion(hash: string): boolean {
 // shouldRenderLogin decides whether /login renders or the guard bounces the
 // browser to the console.
 //
-// An authenticated browser normally has no business at /login. Two arrivals are
-// the exception, and both are authenticated by definition:
-//
-//   - Switching organisation. The old session is still live when Cloud
-//     redirects back, so bouncing here drops the assertion in the fragment and
-//     lands the user on /schema, still in the old organisation, with nothing
-//     anywhere to say the switch did not happen.
-//   - Stepping up. The popup shares the session cookie, so it is authenticated
-//     the moment it opens. Bounced, it never runs the page that posts the
-//     assertion back to the dialog waiting in the opener, and the dialog waits
-//     for a message nobody will send.
+// An authenticated browser normally has no business at /login. Switching
+// organisation is the exception: the old session is still live when Cloud
+// redirects back, so bouncing here drops the assertion in the fragment and
+// lands the user on /schema, still in the old organisation, with nothing
+// anywhere to say the switch did not happen.
 //
 // Reading the fragment is not trusting it. Login.tsx still spends the token at
 // the server, which checks the signature, the issuer and the audience, and

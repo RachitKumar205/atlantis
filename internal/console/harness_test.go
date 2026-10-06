@@ -450,7 +450,7 @@ func (f *consoleFixture) assertionWithOrgs(t *testing.T, org, email, role string
 	return f.mint(t, org, email, role, false, orgs)
 }
 
-// stepUpAssertion mints what Cloud's /authorize?prompt=reauth produces.
+// stepUpAssertion mints what Cloud's POST /api/orgs/{org}/step-up produces.
 //
 // The difference from an ordinary assertion is one claim, and it is the whole
 // of the step-up gate: an ordinary one says somebody holds a Cloud session,

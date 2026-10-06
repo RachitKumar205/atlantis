@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -24,6 +24,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const enroll = vi.fn()
 const sudo = vi.fn()
+const stepUp = vi.fn()
+
+const me = {
+  role: 'admin',
+  step_up: true,
+  step_up_endpoint: 'http://cloud.test/api/orgs/acme/step-up',
+  cloud_url: 'http://cloud.test',
+}
 
 vi.mock('@/api/client', async () => {
   const actual = await vi.importActual<typeof import('@/api/client')>('@/api/client')
@@ -38,20 +46,20 @@ vi.mock('@/api/client', async () => {
         register: vi.fn(),
       },
       instance: { get: async () => ({ endpoint: 'localhost:9090' }) },
-      auth: { sudo, me: async () => ({ role: 'admin', step_up_url: 'http://cloud.test/authorize' }) },
+      auth: { sudo, stepUp, me: async () => me },
     },
     queries: {
       callers: () => ({ queryKey: ['callers'], queryFn: async () => ({ callers: [{ caller: 'backend', can_mutate: true }] }) }),
       callerCerts: () => ({ queryKey: ['caller-certs'], queryFn: async () => ({ enrolment_enabled: true, certs: [] }) }),
       instance: () => ({ queryKey: ['instance'], queryFn: async () => ({ endpoint: 'localhost:9090' }) }),
-      me: () => ({ queryKey: ['auth', 'me'], queryFn: async () => ({ role: 'admin', step_up_url: 'http://cloud.test/authorize' }) }),
+      me: () => ({ queryKey: ['auth', 'me'], queryFn: async () => me }),
     },
   }
 })
 
 // Imported after the mock so the page picks it up.
 const { Callers } = await import('./Callers')
-const { STEP_UP_MESSAGE } = await import('./Login')
+const { ApiError, STEP_UP_SESSION_REQUIRED } = await import('@/api/client')
 
 function renderPage() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -74,28 +82,30 @@ async function pressEnrol() {
   })
 }
 
-/** Delivers an assertion the way the step-up popup does. */
-async function deliverAssertion(assertion = 'assert-1') {
+/** Types a code into the six boxes and confirms, as an operator does. */
+async function enterCode(code = '123456') {
+  const slots = await screen.findAllByLabelText(/^digit \d of 6$/i)
   await act(async () => {
-    window.dispatchEvent(
-      new MessageEvent('message', {
-        data: { type: STEP_UP_MESSAGE, assertion },
-        origin: window.location.origin,
-      }),
-    )
+    code.split('').forEach((ch, i) => fireEvent.change(slots[i], { target: { value: ch } }))
+  })
+  const confirm = screen.getByRole('button', { name: /mint the token/i })
+  await act(async () => {
+    confirm.click()
   })
 }
 
 beforeEach(() => {
   enroll.mockReset()
   sudo.mockReset()
-  // jsdom's window.open returns null, which the dialog reads as a blocked
-  // popup — it then reveals the paste field and keeps working. That is the
-  // path this test drives, and it is also a real one.
-  vi.stubGlobal('open', () => null)
+  stepUp.mockReset()
+  stepUp.mockResolvedValue({ assertion: 'assert-1' })
 })
 
+// Explicit: vitest runs without globals here, so Testing Library cannot
+// register its own cleanup, and a dialog left open by one test is the first
+// match in the next.
 afterEach(() => {
+  cleanup()
   vi.unstubAllGlobals()
 })
 
@@ -108,6 +118,106 @@ describe('the Enrol control', () => {
 
     expect(enroll).not.toHaveBeenCalled()
     expect(await screen.findByText(/confirm it is you|mint an enrolment token/i)).toBeTruthy()
+  })
+
+  // The gate opens on the code boxes, with no step before them.
+  it('asks for the code straight away', async () => {
+    renderPage()
+    await pressEnrol()
+
+    expect(await screen.findAllByLabelText(/^digit \d of 6$/i)).toHaveLength(6)
+    expect(screen.queryByText(/confirm with atlantis cloud/i)).toBeNull()
+  })
+
+  it('sends the code to Cloud at the endpoint the server named', async () => {
+    sudo.mockResolvedValue({ ok: true, expires_in_seconds: 300 })
+    enroll.mockResolvedValue({ token: 'tok-1', caller: 'backend', expires_at: '2030-01-01T00:00:00Z' })
+
+    renderPage()
+    await pressEnrol()
+    await enterCode('482915')
+
+    await waitFor(() => expect(stepUp).toHaveBeenCalledWith(me.step_up_endpoint, '482915'))
+  })
+
+  // Cloud's refusal is shown in the dialog, and the boxes are cleared: the same
+  // code is refused again because Cloud spends each step once.
+  it('shows a refused code and clears the boxes', async () => {
+    stepUp.mockRejectedValue(new ApiError(401, 'That code is not right, or it has already been used.', 'code_rejected'))
+
+    renderPage()
+    await pressEnrol()
+    await enterCode()
+
+    expect(await screen.findByText(/that code is not right/i)).toBeTruthy()
+    const slots = screen.getAllByLabelText(/^digit \d of 6$/i) as HTMLInputElement[]
+    expect(slots.every(s => s.value === '')).toBe(true)
+    expect(sudo).not.toHaveBeenCalled()
+    expect(enroll).not.toHaveBeenCalled()
+  })
+
+  it('takes a backup code in its own field and keeps it after a refusal', async () => {
+    stepUp.mockRejectedValueOnce(new ApiError(401, 'That code is not right, or it has already been used.', 'code_rejected'))
+
+    renderPage()
+    await pressEnrol()
+    await act(async () => {
+      screen.getByRole('button', { name: /use a backup code/i }).click()
+    })
+    const field = await screen.findByPlaceholderText('XXXXX-XXXXX') as HTMLInputElement
+    await act(async () => {
+      fireEvent.change(field, { target: { value: 'ABCDE-FGHIJ' } })
+    })
+    await act(async () => {
+      screen.getByRole('button', { name: /mint the token/i }).click()
+    })
+
+    await waitFor(() => expect(stepUp).toHaveBeenCalledWith(me.step_up_endpoint, 'ABCDE-FGHIJ'))
+    expect(await screen.findByText(/that code is not right/i)).toBeTruthy()
+    // A typo in a backup code can be corrected rather than retyped.
+    expect((screen.getByPlaceholderText('XXXXX-XXXXX') as HTMLInputElement).value).toBe('ABCDE-FGHIJ')
+  })
+
+  it('names the likely causes when Cloud cannot be read', async () => {
+    stepUp.mockRejectedValue(new TypeError('Failed to fetch'))
+
+    renderPage()
+    await pressEnrol()
+    await enterCode()
+
+    expect(await screen.findByText(/could not reach atlantis cloud, or it did not accept/i)).toBeTruthy()
+    expect(sudo).not.toHaveBeenCalled()
+  })
+
+  it('confirms without a code when the console reports step-up off', async () => {
+    sudo.mockResolvedValue({ ok: true, expires_in_seconds: 300 })
+    enroll.mockResolvedValue({ token: 'tok-1', caller: 'backend', expires_at: '2030-01-01T00:00:00Z' })
+    me.step_up = false
+    try {
+      renderPage()
+      await pressEnrol()
+      expect(screen.queryAllByLabelText(/^digit \d of 6$/i)).toHaveLength(0)
+      await act(async () => {
+        (await screen.findByRole('button', { name: /mint the token/i })).click()
+      })
+
+      await waitFor(() => expect(sudo).toHaveBeenCalledWith(''))
+      expect(stepUp).not.toHaveBeenCalled()
+    } finally {
+      me.step_up = true
+    }
+  })
+
+  it('points to Cloud when its session has ended', async () => {
+    stepUp.mockRejectedValue(new ApiError(401, 'sign in first', STEP_UP_SESSION_REQUIRED))
+
+    renderPage()
+    await pressEnrol()
+    await enterCode()
+
+    const link = await screen.findByRole('link', { name: /sign in to atlantis cloud/i })
+    expect(link.getAttribute('href')).toBe(me.cloud_url)
+    expect(sudo).not.toHaveBeenCalled()
   })
 
   // Order matters and is not interchangeable: sudo is a property of the
@@ -126,7 +236,7 @@ describe('the Enrol control', () => {
 
     renderPage()
     await pressEnrol()
-    await deliverAssertion()
+    await enterCode()
 
     await waitFor(() => expect(order).toEqual(['sudo', 'enroll']))
     expect(sudo).toHaveBeenCalledWith('assert-1')
@@ -141,7 +251,7 @@ describe('the Enrol control', () => {
 
     renderPage()
     await pressEnrol()
-    await deliverAssertion()
+    await enterCode()
 
     expect(await screen.findByText(/sudo required/i)).toBeTruthy()
   })

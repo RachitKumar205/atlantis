@@ -174,9 +174,11 @@ func (s *Server) orgResponse(o store.OrgSummary) orgResponse {
 //
 // Unlike the console's equivalent, a missing Origin header is refused. That is
 // safe on /api/*, which is reached by fetch in cors mode and always carries a
-// real Origin. It is not safe on the form posts: securityHeaders sets
-// Referrer-Policy: no-referrer, under which POST /reset and
-// POST /authorize/reauth send `Origin: null`.
+// real Origin. It is not safe on the form post: securityHeaders sets
+// Referrer-Policy: no-referrer, under which POST /reset sends `Origin: null`.
+//
+// The step-up route is the one /api/* route a console calls from its own
+// origin; handleStepUp checks that origin against the registered console URLs.
 func (s *Server) sameOrigin(w http.ResponseWriter, r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {

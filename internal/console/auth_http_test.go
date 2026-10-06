@@ -266,9 +266,9 @@ SELECT detail FROM console.audit_log
 
 // A step-up assertion is still single-use.
 //
-// The new claim is an addition to the old guard, not a replacement for it. Were
-// it a replacement, one trip through the reauth popup would yield a token good
-// for every destructive action afterwards.
+// The claim adds to single use; it does not replace it. Were it a replacement,
+// one step-up would yield a token good for every destructive action
+// afterwards.
 func TestAStepUpAssertionIsStillSingleUse(t *testing.T) {
 	f := newConsoleFixture(t)
 
@@ -363,6 +363,54 @@ func TestSudoRefusesAnAssertionForSomebodyElse(t *testing.T) {
 	// The body names which check refused, so the two cannot be confused.
 	if !strings.Contains(w.Body.String(), "does not match this session") {
 		t.Errorf("refused for the wrong reason: %s", w.Body.String())
+	}
+}
+
+// A step-up for one organisation does not elevate a session in another.
+//
+// One console serves several organisations under one audience, and a Cloud
+// subject is the person, the same in each. So the subject check alone admits a
+// factor presented for organisation B against a session acting in A.
+func TestSudoRefusesAStepUpForAnotherOrganisation(t *testing.T) {
+	f := newConsoleFixture(t)
+
+	token := f.signIn(t, "member@example.com", "admin")
+	other := f.mintAs(t, subjectFor(defaultOrg, "member@example.com"), "otherorg",
+		"member@example.com", "admin", true, nil)
+
+	w := f.post(t, "/api/auth/sudo", exchangeBody(other), token)
+	if w.Code == http.StatusOK {
+		t.Fatal("a step-up for another organisation elevated this session")
+	}
+	if !strings.Contains(w.Body.String(), "does not match this session") {
+		t.Errorf("refused for the wrong reason: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// The page sends its step-up to Cloud, so /api/auth/me names Cloud's route for
+// the session's organisation and the policy lets the page call it.
+func TestTheConsoleCanReachCloudForStepUp(t *testing.T) {
+	f := newConsoleFixture(t)
+	token := f.signIn(t, "member@example.com", "admin")
+
+	w := httptest.NewRecorder()
+	f.srv.handler.ServeHTTP(w, f.request(t, http.MethodGet, "/api/auth/me", "", token))
+	if w.Code != http.StatusOK {
+		t.Fatalf("me: %d %s", w.Code, w.Body.String())
+	}
+	var me map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &me); err != nil {
+		t.Fatalf("decode me: %v", err)
+	}
+	want := f.srv.cfg.CloudIssuer + "/api/orgs/" + defaultOrg + "/step-up"
+	if me["step_up_endpoint"] != want {
+		t.Errorf("step_up_endpoint = %v, want %s", me["step_up_endpoint"], want)
+	}
+
+	csp := w.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "connect-src 'self' "+cspOrigin(f.srv.cfg.CloudIssuer)+";") {
+		t.Errorf("connect-src does not admit Cloud's origin %s:\n%s",
+			cspOrigin(f.srv.cfg.CloudIssuer), csp)
 	}
 }
 

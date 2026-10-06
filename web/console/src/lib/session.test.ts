@@ -23,8 +23,8 @@ describe('carriesAssertion', () => {
   it('finds the assertion Cloud actually sends', () => {
     expect(carriesAssertion('#assertion=abc')).toBe(true)
     expect(carriesAssertion('assertion=abc')).toBe(true)
-    expect(carriesAssertion('#assertion=abc&mode=reauth')).toBe(true)
-    expect(carriesAssertion('#mode=reauth&assertion=abc')).toBe(true)
+    expect(carriesAssertion('#assertion=abc&return_to=%2Fschema')).toBe(true)
+    expect(carriesAssertion('#return_to=%2Fschema&assertion=abc')).toBe(true)
   })
 
   it('is not fooled by a fragment that merely contains the word', () => {
@@ -60,13 +60,6 @@ describe('shouldRenderLogin', () => {
     // live when Cloud redirects back here, so "authenticated" is exactly the
     // state a returning switcher is in — bouncing it drops the token.
     expect(shouldRenderLogin(true, '#assertion=abc')).toBe(true)
-  })
-
-  it('lets the step-up popup through', () => {
-    // The popup shares the session cookie, so it is authenticated the instant
-    // it opens. Bounced, it never posts the assertion back and the dialog that
-    // opened it waits for a message nobody sends.
-    expect(shouldRenderLogin(true, '#assertion=abc&mode=reauth')).toBe(true)
   })
 })
 

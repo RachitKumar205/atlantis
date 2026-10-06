@@ -64,18 +64,19 @@ func TestThePageStylesheetIsAbsentWithoutTheApp(t *testing.T) {
 	}
 }
 
-// TestServerPagesDrawTheAppCard covers each server-rendered page: the reauth
-// form, the reset form, and a page() message. Each links the stylesheet, and
-// its policy admits styles from this origin and nothing that runs.
+// TestServerPagesDrawTheAppCard covers each server-rendered page: the reset
+// form, a page() message, and the answer to a console page from before step-up
+// moved into the console. Each links the stylesheet, and its policy admits
+// styles from this origin and nothing that runs.
 func TestServerPagesDrawTheAppCard(t *testing.T) {
 	f := newFixture(t)
 	f.srv.spaFS = builtAppFS()
 	session := f.member(t, "card@example.com", "acme", testConsole, identity.RoleAdmin)
 
 	for name, rec := range map[string]*httptest.ResponseRecorder{
-		"reauth":  f.authorize(t, session, "org=acme&prompt=reauth"),
-		"reset":   f.get(t, "/reset?token="+url.QueryEscape("tok")),
-		"message": f.get(t, "/verify?token=nonsense"),
+		"stale step-up": f.authorize(t, session, "org=acme&prompt=reauth"),
+		"reset":         f.get(t, "/reset?token="+url.QueryEscape("tok")),
+		"message":       f.get(t, "/verify?token=nonsense"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			body := rec.Body.String()

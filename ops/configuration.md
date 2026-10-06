@@ -322,8 +322,8 @@ could be noticed, so it is refused at startup.
 Assertions are single use. Each carries a `jti`, and the console records spent
 ones, so a captured assertion is worth nothing once the legitimate request has
 landed. The same check backs step-up: `POST /api/auth/sudo` takes a *fresh*
-assertion, which sends the user back to Cloud, so holding a session cookie is
-not enough to run a destructive action.
+step-up assertion, which only Cloud mints and only after checking a second
+factor, so holding a session cookie is not enough to run a destructive action.
 
 A Cloud outage does not sign anyone out. Cached keys keep verifying while the
 JWKS endpoint is unreachable, because the assertion is not the durable
@@ -762,11 +762,13 @@ of them.
 ### Confirming a destructive action
 
 The console's danger-zone actions need step-up, and step-up means presenting a
-second factor at Cloud — the console holds no credential of its own to re-check.
+second factor to Cloud — the console holds no credential of its own to check it.
 
-`GET /authorize?org=<name>&prompt=reauth` asks for a code even when the session
-is live, and only then mints an assertion carrying a `step_up` claim. The
-console's `POST /api/auth/sudo` requires that claim.
+The confirm dialog asks for the code itself and sends it to Cloud's
+`POST /api/orgs/<name>/step-up`. Cloud checks the code against the signed-in
+user's authenticator, and only then mints an assertion carrying a `step_up`
+claim. The console's `POST /api/auth/sudo` requires that claim, for the
+session's own user and organisation.
 
 **Why the claim rather than freshness.** Sudo used to accept any unspent
 assertion, which was strong while the only way to get one was an operator with
@@ -775,9 +777,20 @@ assertion on request and lasts twelve hours without a factor being presented.
 Single-use stops an assertion being replayed; it does nothing about one being
 re-minted. The claim is what says a factor was actually presented.
 
-The console opens that URL in a popup and takes the result through
-`postMessage`, so the dialog and the action behind it survive. If the browser
-blocks the popup, the dialog falls back to pasting the token by hand.
+**The console and Cloud must be same-site.** The dialog calls Cloud with
+`fetch`, and Cloud's session cookie is `SameSite=Lax`, so it travels only when
+both are on one site: `console.<domain>` and `platform.<domain>`, or `localhost`
+on two ports. From another site Cloud never sees the session, and the dialog
+keeps asking you to sign in to Cloud again.
+
+**The console must be opened at its registered URL.** Cloud answers a step-up
+request only when its `Origin` is a registered console URL's origin, and mints
+only when it is the organisation's own. Opened at any other address, the
+console's request gets no CORS headers, and the dialog reports that it could not
+reach Cloud or that Cloud did not accept the console's address. The preflight
+admits any origin; it carries no cookie and reads nothing.
+
+The console's `connect-src` allows `CLOUD_ISSUER`'s origin for this call.
 
 ### Cloud needs its own database role
 

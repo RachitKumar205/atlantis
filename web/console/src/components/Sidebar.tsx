@@ -154,7 +154,7 @@ export function Sidebar() {
 // membership, mints for that organisation, and redirects to *its* registered
 // console, which may be this deployment or an entirely different one. So a
 // switch is a full-page navigation and never a fetch. `me.orgs` carries a
-// server-built URL per organisation for the same reason `step_up_url` does:
+// server-built URL per organisation for the same reason `step_up_endpoint` does:
 // nothing here assembles a Cloud URL out of a name it happens to hold.
 //
 // With one organisation this renders a label and no control. A menu that

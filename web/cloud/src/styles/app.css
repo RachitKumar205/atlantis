@@ -1017,63 +1017,9 @@ body {
    defined. It was an inset shadow here while the panel bled to the window edge
    and had no border to carry it. */
 
-/* ---- OTP field ------------------------------------------------------------
+/* The OTP boxes themselves are styled by @atlantis/shared/otp.css.
  *
- * coss's shape: a row of square inputs at gap 8, centred text, the same radius
- * and lit top edge the other controls carry, and a dash between the groups of
- * three. Sizes come from the same tokens as the inputs and the button, so all
- * three agree.
- *
- * Sunk like .input rather than raised like .btn — these are fields, and the
- * well is what says so.
- */
-.datum .otp {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.datum .otp__slot {
-  width: var(--control-h);
-  height: var(--control-h);
-  min-width: 0;
-  padding: 0;
-  text-align: center;
-  font-family: var(--mono);
-  font-feature-settings: var(--feat-mono);
-  font-size: 16px;
-  color: var(--ink-0);
-  background: var(--canvas-1);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius);
-  box-shadow: inset 0 1px 2px var(--edge-lo);
-  transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
-}
-
-@media (hover: hover) {
-  .datum .otp__slot:hover:not(:focus) {
-    border-color: var(--line);
-  }
-}
-
-/* z-index so the focus ring is drawn over the neighbouring boxes rather than
-   clipped by them. */
-.datum .otp__slot:focus {
-  outline: none;
-  z-index: 1;
-  border-color: var(--accent);
-  box-shadow: inset 0 1px 2px var(--edge-lo), 0 0 0 3px var(--accent-tint-2);
-}
-
-.datum .otp__sep {
-  width: 10px;
-  height: 2px;
-  flex: none;
-  border-radius: 999px;
-  background: var(--line);
-}
-
-/* The label above the boxes is a <span>, not a <label>: it names a group of six
+ * The label above the boxes is a <span>, not a <label>: it names a group of six
    inputs and there is no single control for it to point at. The group carries
    its own name, and each box says which digit it is. */
 .datum .otp + .hint,

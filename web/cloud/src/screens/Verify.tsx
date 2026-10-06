@@ -1,6 +1,8 @@
 import { useState, type FormEvent } from 'react'
 
-import { Button, Card, Field, LinkButton, Notice, OtpField } from '@/components/ui'
+import { OtpField } from '@atlantis/shared/otp'
+
+import { Button, Card, Field, LinkButton, Notice } from '@/components/ui'
 
 export function Verify({ error, busy, onSubmit, onRestart }: {
   error: string | null

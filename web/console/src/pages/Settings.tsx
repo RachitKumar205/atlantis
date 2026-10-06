@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -15,7 +15,10 @@ import {
   Users,
   Warning,
 } from '@phosphor-icons/react'
+import { OtpField } from '@atlantis/shared/otp'
 import {
+  ApiError,
+  STEP_UP_SESSION_REQUIRED,
   api,
   queries,
   type ChangePolicyEntry,
@@ -23,7 +26,6 @@ import {
   type MeResult,
 } from '@/api/client'
 import { useMe } from '@/hooks/useAuth'
-import { STEP_UP_MESSAGE } from '@/pages/Login'
 import { PageShell } from '@/components/PageShell'
 
 // Sectioned IA: left sub-nav (General / Members / Security / Danger
@@ -266,10 +268,8 @@ function SecurityPanel({
   me,
 }: {
   onToast: (msg: string) => void
-  // Carries step_up_url, which is Cloud's address with this session's
-  // organisation on it. Passed rather than fetched again, matching
-  // MembersPanel: two useMe() calls in one page is two cache reads that can
-  // disagree mid-render.
+  // Carries cloud_url. Passed in, as for MembersPanel: two useMe() calls in one
+  // page are two cache reads that can disagree mid-render.
   me?: MeResult
 }) {
   // mTLS toggle is dormant — mTLS is always required at the gRPC layer
@@ -311,10 +311,8 @@ function SecurityPanel({
               </div>
             </div>
             <div className="setrow__control">
-              {/* step_up_url is Cloud's address with this session's org on it,
-                  which is the account the password belongs to. */}
-              {me?.step_up_url ? (
-                <a className="set-readout" href={me.step_up_url}>Manage at Atlantis Cloud</a>
+              {me?.cloud_url ? (
+                <a className="set-readout" href={me.cloud_url}>Manage at Atlantis Cloud</a>
               ) : (
                 <span className="set-readout">Managed by Atlantis Cloud</span>
               )}
@@ -937,15 +935,12 @@ function DangerPanel({
   )
 }
 
-// ── Dialogs ──────────────────────────────────────────────────────────────
-// SudoConfirmDialog — destructive-action gate that combines the
-// optional typed-phrase challenge with a required re-authentication at Cloud.
-// The submit calls /api/auth/sudo first (via the mutation wired up
-// in DangerPanel) so a stolen session cookie alone isn't enough to
-// trigger sign-out-all or revoke-all.
+// SudoConfirmDialog gates a destructive admin action behind an optional typed
+// phrase and a second factor checked by Atlantis Cloud.
 //
-// Exported so other pages with destructive admin actions can reuse
-// the same gate (PR 3 Workers tab uses it for Drain / Evict).
+// onConfirm receives the step-up assertion Cloud returns for the code, or ''
+// when the console reports step_up false. The caller's mutation must spend it
+// at /api/auth/sudo before acting.
 export function SudoConfirmDialog({
   title, icon, body, requiredText, confirmLabel, pending, error, onCancel, onConfirm,
 }: {
@@ -960,60 +955,79 @@ export function SudoConfirmDialog({
   onConfirm: (assertion: string) => void
 }) {
   const [typed, setTyped] = useState('')
-  const [assertion, setAssertion] = useState('')
-  const [waiting, setWaiting] = useState(false)
-  const [popupBlocked, setPopupBlocked] = useState(false)
-  const popup = useRef<Window | null>(null)
+  const [code, setCode] = useState('')
+  // A backup code is ten characters in XXXXX-XXXXX form and does not fit the
+  // six boxes, so it gets a plain field, as on Cloud's sign-in screen.
+  const [backup, setBackup] = useState(false)
+  const [verifying, setVerifying] = useState(false)
+  // Increments after every check of a code. The code field is keyed on it, so
+  // it remounts focused for the next code.
+  const [attempt, setAttempt] = useState(0)
+  const [codeError, setCodeError] = useState<string | null>(null)
+  const [cloudSignedOut, setCloudSignedOut] = useState(false)
   const { data: me } = useMe()
 
   const phraseOK = !requiredText || typed.trim().toLowerCase() === requiredText.toLowerCase()
-  // The server elevates on an empty assertion only when it reported step_up false.
+  // The server elevates without an assertion only when it reported step_up false.
   const stepUpOff = me?.step_up === false
-  const canSubmit = phraseOK && (stepUpOff || assertion.length > 0) && !pending
+  const codeReady = backup ? code.trim().length > 0 : code.length === 6
+  const canSubmit = phraseOK && !pending && !verifying &&
+    (stepUpOff || (codeReady && !!me?.step_up_endpoint))
 
-  // Listen for the assertion the popup hands back.
-  //
-  // Three checks before believing a message, and each closes a different door:
-  // the origin must be this console (another site can postMessage to us), the
-  // source must be the window we opened (this page may have other children),
-  // and the type must match (extensions and dev tooling post here too).
-  useEffect(() => {
-    function onMessage(e: MessageEvent) {
-      if (e.origin !== window.location.origin) return
-      if (popup.current && e.source !== popup.current) return
-      if (e.data?.type !== STEP_UP_MESSAGE || typeof e.data.assertion !== 'string') return
+  function useBackup(pasted?: string) {
+    setBackup(true)
+    setCode(pasted ?? '')
+    setCodeError(null)
+  }
 
-      setWaiting(false)
-      popup.current = null
-      // Straight through, without waiting for another click. The user has just
-      // confirmed at Cloud and the assertion is good for two minutes; asking
-      // them to press the button again would be a second confirmation of the
-      // thing they came back from confirming.
-      if (phraseOK) onConfirm(e.data.assertion)
-      else setAssertion(e.data.assertion)
-    }
-    window.addEventListener('message', onMessage)
-    return () => window.removeEventListener('message', onMessage)
-  }, [onConfirm, phraseOK])
+  function useAuthenticator() {
+    setBackup(false)
+    setCode('')
+    setCodeError(null)
+  }
 
-  function confirmAtCloud() {
-    if (!me?.step_up_url) return
-    setPopupBlocked(false)
-    const w = window.open(me.step_up_url, 'atlantis-step-up', 'width=460,height=560')
-    if (!w) {
-      // Blocked. The paste field below is the way through, and it has to stay
-      // for exactly this — a dialog whose only path is a popup is a dialog a
-      // blocked popup turns into a dead end.
-      setPopupBlocked(true)
+  async function submit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!canSubmit) return
+    if (stepUpOff) {
+      onConfirm('')
       return
     }
-    popup.current = w
-    setWaiting(true)
+    setVerifying(true)
+    setCodeError(null)
+    setCloudSignedOut(false)
+    try {
+      const { assertion } = await api.auth.stepUp(me!.step_up_endpoint, code.trim())
+      // Cloud has spent the code, so a retry after a failed action needs the
+      // next one.
+      setCode('')
+      setAttempt(a => a + 1)
+      onConfirm(assertion)
+    } catch (err) {
+      // The six boxes clear for the next code. A backup code stays, so a typo
+      // in it can be corrected.
+      if (!backup) setCode('')
+      setAttempt(a => a + 1)
+      if (err instanceof ApiError && err.code === STEP_UP_SESSION_REQUIRED) {
+        setCloudSignedOut(true)
+      } else if (err instanceof ApiError) {
+        setCodeError(err.message)
+      } else {
+        // fetch rejects without a status both when Cloud is unreachable and
+        // when it sends no CORS headers, which is its answer to a console
+        // opened at an address other than its registered URL.
+        setCodeError('Could not reach Atlantis Cloud, or it did not accept this console’s ' +
+          'address. Check your connection, and that the console is open at its registered URL.')
+      }
+    } finally {
+      setVerifying(false)
+    }
   }
 
   return (
-    <div className="overlay is-open" onMouseDown={e => { if (e.target === e.currentTarget) onCancel() }}>
-      <div className="modal" style={{ width: 440 }} role="dialog" aria-modal>
+    <div className="overlay is-open" onMouseDown={e => { if (e.target === e.currentTarget && !verifying) onCancel() }}>
+      {/* A form, so Enter in any field submits. */}
+      <form className="modal" style={{ width: 440 }} role="dialog" aria-modal onSubmit={submit}>
         <div className="modal__head">
           <div className="row" style={{ gap: 10, alignItems: 'center' }}>
             {icon}
@@ -1021,7 +1035,7 @@ export function SudoConfirmDialog({
           </div>
         </div>
         <div className="modal__body">
-          <div style={{ fontSize: 13, color: 'var(--ink-1)', lineHeight: 1.55, marginBottom: 16 }}>{body}</div>
+          <div style={{ fontSize: 13, color: 'var(--ink-1)', lineHeight: 1.55 }}>{body}</div>
 
           {requiredText && (
             <div className="field">
@@ -1041,98 +1055,71 @@ export function SudoConfirmDialog({
           )}
 
           {stepUpOff ? (
-            <div className="hint" style={{ marginBottom: 12 }}>
+            <div className="field__hint">
               Step-up is off on this local console (CONSOLE_DEV_SKIP_STEP_UP), so no
               second factor is asked for.
             </div>
-          ) : (
-          <div className="field">
-            {/*
-              Step-up sends the user back to Atlantis Cloud to present a second
-              factor — this console holds no credential to re-check. What comes
-              back is an assertion saying a factor was presented, which is a
-              stronger statement than "this token is fresh": Cloud will mint a
-              fresh one for anybody holding a twelve-hour session, and only the
-              reauth path sets the claim the server requires here.
-
-              A popup rather than a redirect. A full navigation would discard
-              this dialog, and with it the action the user is partway through
-              confirming; the popup returns through postMessage and leaves the
-              page standing.
-            */}
-            <label className="field__label">Confirm with Atlantis Cloud</label>
-            <button
-              className="btn"
-              type="button"
-              onClick={confirmAtCloud}
-              disabled={waiting || pending || !me?.step_up_url}
-            >
-              {waiting ? 'Waiting for Atlantis Cloud…' : 'Confirm with Atlantis Cloud'}
-            </button>
-            {waiting && (
-              <div className="hint" style={{ marginTop: 6 }}>
-                A window opened for you to enter your code. Close it to cancel.
-              </div>
-            )}
-          </div>
-          )}
-
-          {/*
-            The fallback, and it stays. A browser that blocks the popup would
-            otherwise leave this dialog with no way forward at all. Shown only
-            when that happens, so the ordinary path is one button.
-          */}
-          {popupBlocked && (
+          ) : backup ? (
             <div className="field">
-              <label className="field__label" htmlFor="sudo-assertion">
-                Your browser blocked the window. Open{' '}
-                {/*
-                  rel="opener", NOT the reflexive noreferrer.
-
-                  noreferrer implies noopener, so a tab opened that way has
-                  window.opener === null — and the page it lands on hands the
-                  assertion back with `window.opener?.postMessage(...)`, which
-                  then silently does nothing and closes. The documented way out
-                  of a blocked popup discarded the credential without a word,
-                  which is the exact dead end this field exists to prevent.
-
-                  Nothing is leaked by allowing the opener: both windows are
-                  this console's own origin by the time the handover happens,
-                  Cloud sets Referrer-Policy: no-referrer itself, and the
-                  postMessage names its target origin explicitly.
-                */}
-                <a href={me?.step_up_url} target="_blank" rel="opener">this link</a>{' '}
-                and paste the code it gives you.
-              </label>
+              <label className="field__label" htmlFor="sudo-backup-code">Backup code</label>
               <input
-                id="sudo-assertion"
+                key={attempt}
+                id="sudo-backup-code"
                 className="input mono"
-                type="text"
-                autoComplete="off"
+                value={code}
+                onChange={e => setCode(e.target.value)}
+                autoComplete="one-time-code"
+                autoCapitalize="characters"
                 spellCheck={false}
-                value={assertion}
-                onChange={e => setAssertion(e.target.value.trim())}
-                placeholder="eyJhbGciOi…"
-                onKeyDown={e => { if (e.key === 'Enter' && canSubmit) onConfirm(assertion) }}
+                placeholder="XXXXX-XXXXX"
+                autoFocus
               />
+              <div className="field__hint">
+                <button className="linkbtn" type="button" onClick={useAuthenticator}>
+                  Use your authenticator
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="field">
+              {/* A span: it names six inputs, and each box names its own digit. */}
+              <span className="field__label">Code from your authenticator</span>
+              <OtpField
+                key={attempt}
+                value={code}
+                onChange={setCode}
+                onOverflow={useBackup}
+                autoFocus={!requiredText || attempt > 0}
+              />
+              <div className="field__hint">
+                <button className="linkbtn" type="button" onClick={() => useBackup()}>
+                  Use a backup code
+                </button>
+              </div>
             </div>
           )}
 
-          {error && (
-            <div className="banner banner--error" style={{ marginTop: 4 }}>{error}</div>
+          {codeError && <div className="banner banner--error">{codeError}</div>}
+
+          {cloudSignedOut && (
+            <div className="banner banner--error">
+              <span>
+                Your Atlantis Cloud session has ended.{' '}
+                <a href={me?.cloud_url} target="_blank" rel="noopener noreferrer">Sign in to Atlantis Cloud</a>{' '}
+                in a new tab, then enter a new code here.
+              </span>
+            </div>
           )}
+
+          {error && <div className="banner banner--error">{error}</div>}
         </div>
         <div className="modal__foot">
-          <button className="btn btn--ghost" onClick={onCancel} disabled={pending}>Cancel</button>
-          <button
-            className="btn btn--danger"
-            onClick={() => onConfirm(assertion)}
-            disabled={!canSubmit}
-          >
-            {pending ? 'Working…' : confirmLabel}
+          <button className="btn btn--ghost" type="button" onClick={onCancel} disabled={pending || verifying}>Cancel</button>
+          <button className="btn btn--danger" type="submit" disabled={!canSubmit}>
+            {verifying ? 'Checking code…' : pending ? 'Working…' : confirmLabel}
           </button>
         </div>
-      </div>
+      </form>
     </div>
   )
 }

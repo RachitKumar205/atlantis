@@ -91,8 +91,8 @@ export function Callers() {
   // Nothing caught it because the server tests assert the route refuses
   // WITHOUT sudo, which it does, correctly. Nothing asserted that an operator
   // can obtain sudo, because until the Cloud sign-in application existed
-  // nobody could: reaching the step-up page needs a Cloud session and a
-  // confirmed second factor. So the feature was dead from the day it shipped
+  // nobody could: a step-up needs a Cloud session and a confirmed second
+  // factor. So the feature was dead from the day it shipped
   // and the suite stayed green about it.
   //
   // The working pattern was already on this page, guarding the alias save

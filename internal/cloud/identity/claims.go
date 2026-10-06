@@ -124,9 +124,9 @@ type Claims struct {
 	// from a Cloud session, and that session lasts twelve hours without a
 	// factor being presented.
 	//
-	// False on an ordinary sign-in, true only when /authorize demanded a factor
-	// and got one. Never defaulted or inferred: an assertion that does not say
-	// a factor was presented did not have one presented.
+	// False on an ordinary sign-in, true only when Cloud's step-up route checked
+	// a factor. Never defaulted or inferred: an assertion that does not say a
+	// factor was presented did not have one presented.
 	StepUp bool
 
 	// Orgs names every organisation the subject belongs to, at the moment this

@@ -122,8 +122,19 @@ make dev-token EMAIL=you@example.com ROLE=admin
 
 It prints a URL with the assertion in the fragment. Open it. The assertion is
 **single use** — a second attempt with the same one is refused as a replay, so
-run the target again for each sign-in, and again when the console asks you to
-confirm a destructive action.
+run the target again for each sign-in.
+
+A destructive action asks for an authenticator code, which the console sends
+to Cloud with this browser's Cloud session. That needs three things:
+
+- a Cloud session in the browser;
+- a Cloud on the console's own site: the Cloud on `:9500` with a console on
+  `localhost` works, the cluster's Cloud on `atl-dev.test` does not;
+- the console opened at the URL registered for the organisation. A Vite dev
+  server on `:5173` in front of a console registered as `localhost:3000` is a
+  different origin, and Cloud does not accept it.
+
+Otherwise use `CONSOLE_DEV_SKIP_STEP_UP`, below.
 
 `make dev-token`, `make dev-console` and `make dev-console-app` use the Cloud on
 `:9500` when `make dev-auth` is running, and the cluster's Cloud when it is not.
@@ -131,8 +142,8 @@ confirm a destructive action.
 line, in the environment or in `.env` is used instead.
 
 To confirm destructive actions without a second factor, start the console with
-`CONSOLE_DEV_SKIP_STEP_UP=true`. The confirm dialog then skips the popup to
-Cloud. The console accepts the setting only with `CONSOLE_COOKIE_SECURE` off and
+`CONSOLE_DEV_SKIP_STEP_UP=true`. The confirm dialog then asks for no code. The
+console accepts the setting only with `CONSOLE_COOKIE_SECURE` off and
 an `http://` loopback `CLOUD_ISSUER`, which is the Cloud on `:9500`:
 
 ```bash

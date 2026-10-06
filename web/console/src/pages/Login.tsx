@@ -4,7 +4,6 @@ import { api } from '@/api/client'
 import {
   ASSERTION_PARAM,
   DEFAULT_PATH,
-  MODE_PARAM,
   RETURN_TO_PARAM,
   safeNext,
 } from '@/lib/session'
@@ -27,19 +26,11 @@ import { markOnboardingPending } from '@/lib/onboarding'
 // before the exchange resolves, so it does not survive into history or a
 // bookmark.
 //
-// ASSERTION_PARAM and MODE_PARAM come from @/lib/session, which is also what
-// the router's guard reads the fragment with. The guard has to let this page
-// render when an assertion is present, so both must agree on what "present"
-// means; when they were two pieces of code they did not have to.
+// ASSERTION_PARAM comes from @/lib/session, which is also what the router's
+// guard reads the fragment with. The guard has to let this page render when an
+// assertion is present, so both must agree on what "present" means.
 
-// STEP_UP_MESSAGE is the postMessage type this page sends to its opener.
-//
-// Exported so the listener and the sender name the same string. Two string
-// literals in two files is one rename away from a dialog that waits forever for
-// a message nobody sends.
-export const STEP_UP_MESSAGE = 'atlantis:step-up'
-
-type Arrival = { assertion: string; stepUp: boolean; next: string }
+type Arrival = { assertion: string; next: string }
 
 function takeAssertionFromURL(): Arrival | null {
   const raw = window.location.hash.replace(/^#/, '')
@@ -54,21 +45,14 @@ function takeAssertionFromURL(): Arrival | null {
   // outside.
   const next = safeNext(params.get(RETURN_TO_PARAM))
 
-  // mode=reauth means Cloud sent this to a popup the console opened to confirm
-  // a destructive action, not to a tab signing somebody in. The assertion says
-  // a second factor was just presented; it belongs to the dialog waiting in the
-  // opener, and exchanging it here would spend it for a second session instead.
-  const stepUp = params.get(MODE_PARAM) === 'reauth'
-
   // Remove it before anything else runs. replaceState rather than assigning
   // location.hash, which would push a history entry that still contains it.
   params.delete(ASSERTION_PARAM)
-  params.delete(MODE_PARAM)
   params.delete(RETURN_TO_PARAM)
   const rest = params.toString()
   window.history.replaceState(null, '', window.location.pathname + (rest ? `#${rest}` : ''))
 
-  return { assertion, stepUp, next }
+  return { assertion, next }
 }
 
 export function Login() {
@@ -102,20 +86,6 @@ export function Login() {
   useEffect(() => {
     if (!arrival || started.current) return
     started.current = true
-
-    if (arrival.stepUp) {
-      // Hand it back and close. targetOrigin is this page's own origin rather
-      // than '*': the assertion is a credential, and '*' would deliver it to
-      // whatever document happened to open this window — including one on
-      // another site.
-      window.opener?.postMessage(
-        { type: STEP_UP_MESSAGE, assertion: arrival.assertion },
-        window.location.origin,
-      )
-      window.close()
-      return
-    }
-
     exchange.mutate(arrival.assertion)
   }, [arrival, exchange])
 

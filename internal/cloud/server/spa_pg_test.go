@@ -153,7 +153,7 @@ func TestAConfiguredProviderStillWorks(t *testing.T) {
 // Every route except the app keeps `default-src 'none'`.
 //
 // Asserted as the EXACT policy, not as a substring. `default-src 'none'` is a
-// prefix of the relaxed policy W7 gives the reset and reauth pages, so a
+// prefix of the relaxed policy W7 gives the card pages, so a
 // contains-check passes a regression — which is exactly what the existing
 // assertion in auth_pg_test.go does.
 func TestNonAppRoutesKeepTheStrictPolicy(t *testing.T) {

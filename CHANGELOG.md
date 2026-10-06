@@ -16,8 +16,8 @@ Unreleased entries describe work on `main` that has not been tagged.
 #### Step-up without a second factor on a local console
 
 `CONSOLE_DEV_SKIP_STEP_UP=true` lets a console on localhost confirm approvals,
-overrides, caller policy and the other step-up actions without the popup to
-Atlantis Cloud. The console refuses to start with it unless
+overrides, caller policy and the other step-up actions without a second
+factor. The console refuses to start with it unless
 `CONSOLE_COOKIE_SECURE` is off and `CLOUD_ISSUER` is an `http://` loopback
 address, logs a warning at startup, and records `second_factor: false` on each
 `sudo_granted` audit row.
@@ -924,6 +924,38 @@ including on a hypertable with a `ttl_field` — expiry reads the ttl column and
 the time dimension, neither of which needs a key.
 
 ### Changed
+
+#### Confirming an admin action asks for the code in the console — breaking for cross-site deployments
+
+A step-up action used to open a dialog with a "Confirm with Atlantis Cloud"
+button, which opened a popup to a plain Cloud page asking for the code. The
+dialog now asks for the code itself, in the same six boxes as Cloud's sign-in
+screen, with a link to use a backup code instead.
+
+The console sends the code to Cloud's new `POST /api/orgs/{org}/step-up`, and
+Cloud checks it and answers with the step-up assertion `/api/auth/sudo`
+requires. Removed with the popup:
+
+- `GET /authorize?prompt=reauth` and `POST /authorize/reauth`. Both now answer
+  a page telling a console page loaded before this change to reload.
+- `step_up_url` in the console's `/api/auth/me`, replaced by `step_up_endpoint`.
+
+**The console and Cloud must be same-site.** The call carries Cloud's
+`SameSite=Lax` session cookie, which a browser sends only between the same site:
+`console.<domain>` and `platform.<domain>`, or `localhost` on two ports. A
+console on another site asks the user to sign in to Cloud again on every
+attempt. Locally, the cluster's Cloud on `atl-dev.test` with a console on
+`localhost` is cross-site; use the Cloud on `:9500` or
+`CONSOLE_DEV_SKIP_STEP_UP`.
+
+Cloud answers the route only for a registered console URL's origin, checked
+before the session or the code, and mints only for the organisation's own. A
+console opened at another address cannot confirm admin actions. The console's
+`connect-src` now names `CLOUD_ISSUER`'s origin.
+
+`/api/auth/sudo` also requires the assertion to be for the session's own
+organisation, not only its own user: one console serves several organisations
+under one audience.
 
 #### Each organisation has its own atlantis, reached with its own credentials — breaking
 

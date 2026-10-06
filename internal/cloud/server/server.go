@@ -288,11 +288,19 @@ func (s *Server) routes() {
 
 	// Handing a signed-in user to an organisation's console.
 	//
-	// Reached by a browser rather than a script — from a link, or from the
-	// popup the console opens for step-up — so these answer with pages and
-	// redirects, not JSON.
+	// Reached by a browser following a link, so it answers with pages and a
+	// redirect, not JSON.
 	s.mux.HandleFunc("GET /authorize", s.handleAuthorize)
-	s.mux.HandleFunc("POST /authorize/reauth", s.handleReauth)
+
+	// A second factor typed into an organisation's console, answered with a
+	// step-up assertion. Called cross-origin by that console only; see
+	// stepup.go.
+	s.mux.HandleFunc("POST /api/orgs/{org}/step-up", s.handleStepUp)
+	s.mux.HandleFunc("OPTIONS /api/orgs/{org}/step-up", s.handleStepUpPreflight)
+
+	// The form in Cloud's step-up popup, still open in a console page from an
+	// earlier release.
+	s.mux.HandleFunc("POST /authorize/reauth", s.handleStaleStepUp)
 
 	// Reached from an email, by a person, in a browser, so these answer with
 	// server-rendered pages rather than JSON. See pages.go.

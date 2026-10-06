@@ -26,6 +26,10 @@ export class ApiError extends Error {
 // allow_insecure and is sent again.
 export const TLS_REQUIRED = 'tls_required'
 
+// STEP_UP_SESSION_REQUIRED is Cloud's code for a step-up attempted with no
+// Cloud session in this browser. No code can be checked until one exists.
+export const STEP_UP_SESSION_REQUIRED = 'session_required'
+
 // ---------------------------------------------------------------------------
 // Wire types
 // ---------------------------------------------------------------------------
@@ -53,11 +57,11 @@ export interface MeResult {
   // problem shows the dialog to nobody rather than to everybody.
   onboarded: boolean
 
-  // Where to send the browser to present a second factor before a destructive
-  // action. Built by the server from its own CLOUD_ISSUER and the session's
-  // org, so the page never assembles a URL or decides which organisation it is
-  // asking about.
-  step_up_url: string
+  // Cloud's endpoint that checks a second factor and answers with a step-up
+  // assertion, for confirming a destructive action. Built by the server from
+  // its own CLOUD_ISSUER and the session's org, so the page never assembles a
+  // URL or decides which organisation it is asking about.
+  step_up_endpoint: string
 
   // False only on a local console started with CONSOLE_DEV_SKIP_STEP_UP, where
   // confirming an admin action asks for no second factor.
@@ -93,7 +97,7 @@ export interface MeResult {
 // What the SPA reads before it holds a session.
 export interface ConfigResult {
   // Cloud's sign-in address, built by the server from its own CLOUD_ISSUER.
-  // The page assembles no part of it, as with step_up_url.
+  // The page assembles no part of it, as with step_up_endpoint.
   cloud_signin_url: string
 }
 
@@ -988,9 +992,20 @@ export const api = {
     config: (): Promise<ConfigResult> =>
       apiFetch<ConfigResult>('/api/config'),
 
-    // Step-up for destructive actions. Takes a *fresh* assertion, which means
-    // returning to Cloud — proving yourself again is the whole point, and the
-    // one already spent on sign-in is refused.
+    // Presents a second factor to Atlantis Cloud at endpoint, which answers with
+    // a step-up assertion for sudo.
+    //
+    // Cloud holds the TOTP secret and the session that names the user. Its
+    // cookie travels because the console and Cloud are same-site, and Cloud
+    // answers only the organisation's registered console origin.
+    stepUp: (endpoint: string, code: string): Promise<{ assertion: string }> =>
+      apiFetch(endpoint, {
+        method: 'POST',
+        body: JSON.stringify({ code }),
+      }),
+
+    // Step-up for destructive actions. Takes a *fresh* step-up assertion from
+    // stepUp; the one already spent on sign-in is refused.
     sudo: (assertion: string): Promise<{ ok: boolean; expires_in_seconds: number }> =>
       apiFetch('/api/auth/sudo', {
         method: 'POST',

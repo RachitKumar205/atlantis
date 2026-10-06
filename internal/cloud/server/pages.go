@@ -24,10 +24,6 @@ type cardPage struct {
 	Error string
 
 	Form *cardForm
-
-	// FormOrigin is an origin the form's response may redirect to, added to
-	// form-action. Browsers enforce form-action across the redirect chain.
-	FormOrigin string
 }
 
 type cardForm struct {
@@ -82,10 +78,6 @@ var cardTemplate = template.Must(template.New("card").Parse(`<!doctype html>
 // Nothing on the page runs. Styles, fonts and the artwork load from this
 // origin, which is all the policy allows.
 func writeCard(w http.ResponseWriter, code int, p cardPage) {
-	action := "form-action 'self'"
-	if p.FormOrigin != "" {
-		action += " " + p.FormOrigin
-	}
 	h := w.Header()
 	h.Set("Cache-Control", "no-store")
 	h.Set("Content-Security-Policy", strings.Join([]string{
@@ -93,7 +85,7 @@ func writeCard(w http.ResponseWriter, code int, p cardPage) {
 		"style-src 'self'",
 		"font-src 'self'",
 		"img-src 'self'",
-		action,
+		"form-action 'self'",
 		"base-uri 'none'",
 		"frame-ancestors 'none'",
 	}, "; "))

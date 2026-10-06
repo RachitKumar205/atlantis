@@ -17,6 +17,7 @@ import '@/styles/fonts.css'
 import '@/styles/tailwind.css'
 import '@atlantis/shared/tokens.css'
 import '@atlantis/shared/datum.css'
+import '@atlantis/shared/otp.css'
 import '@/styles/console.css'
 import '@/styles/pages.css'
 // Thin compat shim so legacy CSS-module imports still resolve while

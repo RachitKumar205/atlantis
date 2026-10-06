@@ -362,6 +362,16 @@ func (s *Store) ConsoleURL(ctx context.Context, org string) (string, error) {
 	return consoleURL, nil
 }
 
+// ConsoleURLs returns every registered console URL, once each.
+func (s *Store) ConsoleURLs(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT console_url FROM cloud.orgs WHERE console_url <> ''`)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
 // AddMember grants a user a role in an organisation, replacing any existing
 // grant. The role is validated here as well as by the database, so a caller
 // gets a message about the role rather than a constraint name.

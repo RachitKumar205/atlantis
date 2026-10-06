@@ -8,6 +8,7 @@ import ReactDOM from 'react-dom/client'
 import '@/styles/fonts.css'
 import '@atlantis/shared/tokens.css'
 import '@atlantis/shared/datum.css'
+import '@atlantis/shared/otp.css'
 import '@/styles/app.css'
 
 import { App } from '@/App'

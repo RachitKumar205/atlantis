@@ -172,7 +172,7 @@ type Grant struct {
 	Audience string
 
 	// StepUp says a second factor was presented for this assertion. Set only by
-	// the reauth path; see identity.Claims.StepUp for what rests on it.
+	// Cloud's step-up route; see identity.Claims.StepUp for what rests on it.
 	StepUp bool
 
 	// Purpose and Caller travel into the claims of the same names. Both empty

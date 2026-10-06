@@ -62,8 +62,8 @@ type Server struct {
 	loginLim *loginLimiter
 
 	// tproxy forwards browser ingestion, and eventsLim throttles it. Cloud
-	// serves the same route from the same type; the console is a separate
-	// origin, so `connect-src 'self'` reaches only this one.
+	// serves the same route from the same type; the console's page posts to
+	// this one, on its own origin.
 	tproxy    *analytics.Proxy
 	eventsLim *loginLimiter
 
@@ -871,15 +871,14 @@ func (s *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 // revoke-all — so a stolen session cookie alone cannot trigger them.
 //
 // With no local credentials, step-up means presenting an assertion that says a
-// second factor was just presented, which sends the user back to Cloud to prove
-// it there. The property is the same either way: holding the cookie is not
-// enough.
+// second factor was just presented: the page sends the code to Cloud, which
+// checks it and mints one. Holding the cookie is not enough.
 //
 // It requires the StepUp claim, not merely an unspent assertion. Single-use
 // prevents replay, not re-minting: a live Cloud session mints a fresh assertion
 // on request and lasts twelve hours without a second factor being presented.
 //
-// Cloud sets StepUp on one route, /authorize with prompt=reauth, and only after
+// Cloud sets StepUp on one route, POST /api/orgs/{org}/step-up, and only after
 // checking the code. Without the check below the claim is inert and sudo always
 // succeeds, which looks identical to a working gate on every screen and in
 // every audit row.
@@ -910,6 +909,16 @@ func (s *Server) handleSudo(w http.ResponseWriter, r *http.Request) {
 	if claims.Subject != u.Subject {
 		s.log.Warn("sudo assertion is for a different subject",
 			"session", u.Subject, "assertion", claims.Subject)
+		jsonError(w, "assertion does not match this session", http.StatusForbidden)
+		return
+	}
+
+	// And for the organisation this session acts in. One console serves several
+	// organisations under one audience, so a factor presented for one must not
+	// elevate a session in another.
+	if claims.Org != u.Org {
+		s.log.Warn("sudo assertion is for a different organisation",
+			"session", u.Org, "assertion", claims.Org)
 		jsonError(w, "assertion does not match this session", http.StatusForbidden)
 		return
 	}
@@ -953,7 +962,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // without one.
 //
 // The address comes from CloudIssuer, the same configuration handleMe builds
-// step_up_url from.
+// step_up_endpoint from.
 func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 	jsonOK(w, map[string]any{
 		"cloud_signin_url": s.cfg.CloudIssuer + "/signin",
@@ -999,16 +1008,16 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		"name":      u.Name,
 		"onboarded": onboarded,
 
-		// Where the browser goes to prove a second factor before a destructive
-		// action. Built here rather than in the SPA for two reasons: the org
-		// comes from the session rather than from anything the page holds, and
-		// the console's own configuration is where Cloud's address lives.
+		// Where the page sends a second factor before a destructive action, to
+		// get the step-up assertion /api/auth/sudo requires. Built by the server:
+		// the org comes from the session, and Cloud's address from the console's
+		// own configuration.
 		//
 		// CLOUD_ISSUER is Cloud's base URL — issuer.New documents the `iss`
 		// value as the issuer's https URL, and the console already requires it
 		// to match exactly, so there is no second value that could drift.
-		"step_up_url": s.cfg.CloudIssuer + "/authorize?org=" +
-			url.QueryEscape(u.Org) + "&prompt=reauth",
+		"step_up_endpoint": s.cfg.CloudIssuer + "/api/orgs/" +
+			url.PathEscape(u.Org) + "/step-up",
 
 		// False only under CONSOLE_DEV_SKIP_STEP_UP, where /api/auth/sudo
 		// elevates without an assertion.
@@ -1029,9 +1038,8 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		"org_display_name": u.OrgNames[u.Org],
 
 		// Every organisation this person belongs to, each with the URL that
-		// switches to it. Built here for the same two reasons as step_up_url,
-		// and one more: a name assembled into a URL by the page is a name the
-		// page could have chosen.
+		// switches to it. Built by the server, as step_up_endpoint is: a name
+		// assembled into a URL by the page is a name the page could have chosen.
 		//
 		// The URL goes to Cloud, not to the other console. Cloud re-reads the
 		// membership, mints, and redirects to wherever that organisation's
@@ -1480,6 +1488,16 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
+// cspOrigin reduces a URL to a CSP source expression of its origin, or "" when
+// it has none. A path would make the source match only URLs under it.
+func cspOrigin(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
 // withSecurityHeaders wraps a handler so every response carries a
 // hardened header set: CSP, Referrer-Policy, X-Frame-Options, etc.
 // HSTS only ships when CookieSecure (i.e. HTTPS), since HSTS on plain
@@ -1496,7 +1514,9 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 		"style-src 'self' 'unsafe-inline'",
 		"font-src 'self'",
 		"img-src 'self' data:",
-		"connect-src 'self'",
+		// Cloud's origin for the step-up call, which the sudo dialog makes
+		// with fetch.
+		strings.TrimSpace("connect-src 'self' " + cspOrigin(s.cfg.CloudIssuer)),
 		"frame-ancestors 'none'",
 		"base-uri 'self'",
 		"form-action 'self'",
