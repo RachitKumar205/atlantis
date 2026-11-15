@@ -20,7 +20,7 @@ ENV XDG_CONFIG_HOME=/tmp XDG_DATA_HOME=/tmp
 
 # The bucket the proxy fronts. Overridden at deploy time by --set-env-vars so
 # a different bucket needs no rebuild.
-ENV RELEASES_BUCKET=atlantis-releases
+ENV RELEASES_BUCKET=atlantis-511115-atlantis-releases
 
 # Numeric, matching the other images in this repository: a kubelet enforcing
 # runAsNonRoot reads image metadata and cannot resolve a name to a uid.

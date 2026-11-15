@@ -74,9 +74,10 @@ spec:
   storage:
     size: 10Gi
     storageClass: pd-csi
+  # Measured with four organisations: 10–11m CPU and 90–125Mi per instance.
   resources:
     requests:
-      cpu: 250m
+      cpu: 100m
       memory: 512Mi
     limits:
       memory: 1Gi

@@ -103,7 +103,7 @@ jobs:
       - name: Publish to the releases bucket
         if: ${{ vars.GCP_WIF_PROVIDER != '' }}
         env:
-          BUCKET: ${{ vars.GCP_RELEASES_BUCKET || 'atlantis-releases' }}
+          BUCKET: ${{ vars.GCP_RELEASES_BUCKET || 'atlantis-511115-atlantis-releases' }}
         run: |
           gcloud storage cp dist/*.tar.gz dist/checksums.txt dist/checksums.txt.sig dist/checksums.txt.pem "gs://$BUCKET/${{ github.ref_name }}/"
           gcloud storage cp scripts/install-tide.sh "gs://$BUCKET/install.sh"

@@ -9,7 +9,6 @@
 substitutions:
   _R: us-central1-docker.pkg.dev/${PROJECT_ID}/atlantis
   _TAG: dev
-  _PG_TAG: "17.11"
 options:
   logging: CLOUD_LOGGING_ONLY
   # _R's default reads ${PROJECT_ID}; a substitution referring to another is

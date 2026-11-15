@@ -517,7 +517,7 @@ docs-deploy: docs-image ## Push the docs image and deploy it to Cloud Run
 # A proxy in front of the Cloud Storage bucket, not a copy of it. The image
 # carries no artifacts, so it is deployed once and every release after that is
 # an upload — see release-publish below.
-RELEASES_BUCKET  ?= atlantis-releases
+RELEASES_BUCKET  ?= atlantis-511115-atlantis-releases
 RELEASES_SERVICE ?= atlantis-releases
 
 .PHONY: releases-image
@@ -605,17 +605,16 @@ build-server-image: ## Build the atlantis server image for the local cluster
 build-provisioner-image: ## Build the provisioner image (shares Dockerfile's proto and build stages)
 	$(CONTAINER) build --file Dockerfile --target provisioner -t atlantis-provisioner:local .
 
-# CloudNativePG's image plus Apache-2 TimescaleDB. The stock CNPG image already
-# carries pgvector and citext — pgvector being the one atlantis cannot open a
-# pool without — so this only adds the extension the product needs for
-# hypertables. See Dockerfile.pg for why it derives from CNPG rather than from
-# timescale/timescaledb-ha, and why it must be the -oss package.
+# The one image here not tagged :local; deploy/pg-image-tag.sh says why.
 #
-# The tag has to parse as a Postgres version. CNPG reads the major version out
-# of it to decide upgrade compatibility, and rejects anything else at admission
-# with `spec.imageName: Invalid value: ... invalid version tag` — so `:local`,
-# which every other image here uses, is the one tag this image cannot have.
-PG_IMAGE_TAG ?= 17.11
+# Expanded once: the bare `export` above re-expands a recursive variable for
+# every recipe line.
+ifeq ($(origin PG_IMAGE_TAG),undefined)
+PG_IMAGE_TAG := $(shell deploy/pg-image-tag.sh)
+endif
+ifeq ($(PG_IMAGE_TAG),)
+$(error PG_IMAGE_TAG is empty: deploy/pg-image-tag.sh printed no tag)
+endif
 
 .PHONY: build-pg-image
 build-pg-image: ## Build the Postgres image provisioned organisations run

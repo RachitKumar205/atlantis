@@ -1,92 +1,67 @@
 # Dockerfile.pg — the Postgres image provisioned organisations run.
 #
-# Derived from CloudNativePG's own image rather than from timescale/timescaledb-ha,
-# because CNPG requires specific things of whatever it runs: the postgres user at
-# uid 26, the pgdg binary layout, and the instance-manager entrypoint contract.
-# Starting from CNPG and adding an extension is a much smaller claim than
-# starting from Timescale and reconstructing all of that.
+# CloudNativePG's standard image with TimescaleDB added.
 #
-# What the stock image already provides, measured rather than assumed:
+# internal/storage/pg/pool.go registers pgvector types on every connection, so
+# the server fails at pool-open on a database without the vector extension.
 #
-#     citext | 1.6
-#     vector | 0.8.6
+# internal/codegen emits create_hypertable for a schema that declares a
+# hypertable, so the database needs TimescaleDB.
 #
-# pgvector is the one atlantis cannot start without — internal/storage/pg/pool.go
-# registers pgvector types in AfterConnect, so a database without the extension
-# fails at pool-open and the server never serves. That it ships in the base image
-# is why this file only has to add one thing.
-#
-# TimescaleDB is the thing it has to add. The infra migrations do not use it, but
-# the product does: create_hypertable appears throughout internal/runtime/sandbox
-# and internal/introspect, so a customer whose schema declares a hypertable would
-# otherwise be provisioned onto a database that cannot hold it.
-#
-# The -oss package, deliberately. `timescaledb-2-postgresql-17` is the Community
-# (TSL) build; `timescaledb-2-oss-postgresql-17` is Apache-2. The hosted product
-# cannot ship the TSL build, which is what ATL_REQUIRE_APACHE_TIMESCALE exists to
-# assert at boot — set it on the provisioned Deployment so a wrong image is
-# refused at startup rather than discovered in a licence review.
+# timescaledb-2-oss-postgresql-17 is the Apache-2 build. The provisioner sets
+# ATL_REQUIRE_APACHE_TIMESCALE on each organisation's server, which then refuses
+# to start against the TSL build.
 
-# The repo's signing key, fetched on a supported distro.
+# The image tag is derived from these two lines by deploy/pg-image-tag.sh.
 #
-# curl and gnupg are the only reason this image needed packages from Debian's
-# pool, and bullseye's pool no longer serves what its index advertises:
-#
-#     Err:2 .../libnghttp2-14 1.43.0-1+deb11u3  404  Not Found
-#     E: Unable to fetch some archives
-#
-# libnghttp2 is a dependency of curl, and curl is here only to fetch this key.
-# Fetching it in a stage that is not EOL takes the whole chain out of the
-# build, and nothing from deb.debian.org is installed below.
-FROM debian:bookworm-slim AS key
+# A TimescaleDB package ships only its own versioned library, and a database
+# loads the library of the extension version it was created with. An image
+# with a different TimescaleDB under the same tag breaks those databases on
+# any node that pulls it:
+#   could not access file "$libdir/timescaledb-2.30.2"
+ARG PG_VERSION=17.11
+ARG TIMESCALE_VERSION=2.30.2~debian13-1711
+
+# The packagecloud signing key, fetched in its own stage so curl and gnupg stay
+# out of the published image.
+FROM debian:trixie-slim AS key
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates curl gnupg; \
     curl -fsSL https://packagecloud.io/timescale/timescaledb/gpgkey \
         | gpg --dearmor -o /timescaledb.gpg
 
-# Pinned to a patch version, not the floating `:17`, so a rebuild cannot move
-# the database binaries under a running deployment without the tag changing.
-# Both tags resolve to the same digest today.
-#
-# This is Debian bullseye, which is out of regular support. CloudNativePG
-# publishes no bookworm or trixie build of 17.11 — `17-bookworm` is 17.6, five
-# patch releases back — so a supported distro today means older Postgres
-# binaries over data directories 17.11 initialised. Move when upstream ships
-# 17.x on a supported suite.
-FROM ghcr.io/cloudnative-pg/postgresql:17.11
+# The standard variant carries pgvector.
+FROM ghcr.io/cloudnative-pg/postgresql:${PG_VERSION}-standard-trixie
+ARG PG_VERSION
+ARG TIMESCALE_VERSION
 
-# Root only for the install; the final USER goes back to postgres. CNPG will not
-# run an image whose default user is root.
 USER root
 
 COPY --from=key /timescaledb.gpg /etc/apt/trusted.gpg.d/timescaledb.gpg
 
-# VERSION_CODENAME out of /etc/os-release, which every Debian carries, so the
-# suite is read without installing lsb-release.
+# The loader is pinned too: the extension's dependency on it is >=.
 #
-# The apt lists are removed in the same layer, so the index never reaches the
-# published image. Only the two timescaledb packages are installed, both from
-# packagecloud.
+# The apt lists and the packagecloud source are removed in the same layer, so
+# neither reaches the published image.
 RUN set -eux; \
     . /etc/os-release; \
     echo "deb https://packagecloud.io/timescale/timescaledb/debian/ ${VERSION_CODENAME} main" \
         > /etc/apt/sources.list.d/timescaledb.list; \
     apt-get update; \
-    apt-get install -y --no-install-recommends timescaledb-2-oss-postgresql-17; \
+    apt-get install -y --no-install-recommends \
+        "timescaledb-2-oss-postgresql-17=${TIMESCALE_VERSION}" \
+        "timescaledb-2-loader-postgresql-17=${TIMESCALE_VERSION}"; \
     rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/timescaledb.list
 
-# uid 26, not the name: CNPG matches on the numeric id.
-USER 26
+# The tag claims these versions. The provisioner's bootstrap SQL creates vector,
+# citext and timescaledb in every organisation's database.
+RUN set -eux; \
+    test "$(/usr/lib/postgresql/17/bin/postgres --version | awk '{print $3}')" = "$PG_VERSION"; \
+    test -f "/usr/lib/postgresql/17/lib/timescaledb-${TIMESCALE_VERSION%%~*}.so"; \
+    for ext in vector citext timescaledb; do \
+        test -f "/usr/share/postgresql/17/extension/$ext.control"; \
+    done
 
-# Tag this image with a Postgres version, not `local`. CloudNativePG reads the
-# major version out of the tag and refuses anything else at admission:
-#   spec.imageName: Invalid value: "...:local": invalid version tag
-# `make build-pg-image` uses PG_IMAGE_TAG for exactly this reason.
-#
-# TimescaleDB needs shared_preload_libraries = 'timescaledb', which is a
-# Cluster-spec setting rather than an image one — set it under
-# spec.postgresql.shared_preload_libraries. CREATE EXTENSION still has to run as
-# superuser in the Cluster's bootstrap SQL, because neither timescaledb nor
-# vector is a trusted extension and the application role is deliberately not a
-# superuser.
+# CNPG's default postgresUID.
+USER 26

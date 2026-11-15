@@ -127,10 +127,7 @@ REMOTE_IMAGES=(
 # Built by `make build-server-image` / `build-signer-image` / `build-pg-image`.
 # Absent ones are skipped with a warning rather than failing the whole run, so
 # this script is usable before every image exists.
-# atlantis-pg is tagged with a version rather than `local` because CloudNativePG
-# parses the tag for the Postgres major version and refuses anything that does
-# not look like one.
-PG_IMAGE_TAG="${PG_IMAGE_TAG:-17.11}"
+PG_IMAGE_TAG="${PG_IMAGE_TAG:-$("$(dirname "$0")/pg-image-tag.sh")}"
 LOCAL_IMAGES=(
     "atlantis-pg:${PG_IMAGE_TAG}"
     "atlantis-server:local"

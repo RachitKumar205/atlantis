@@ -12,7 +12,7 @@ set -euo pipefail
 PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 REGION="${REGION:-us-central1}"
 SHA="${SHA:-$(git rev-parse --short HEAD)}"
-PG_IMAGE_TAG="${PG_IMAGE_TAG:-17.11}"
+PG_IMAGE_TAG="${PG_IMAGE_TAG:-$("$(dirname "$0")/../pg-image-tag.sh")}"
 cd "$(dirname "$0")/../.."
 
 gcloud services enable cloudbuild.googleapis.com artifactregistry.googleapis.com --project "$PROJECT" >/dev/null

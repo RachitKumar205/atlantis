@@ -15,9 +15,7 @@ set -euo pipefail
 PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 REGION="${REGION:-us-central1}"
 REPO="${REPO:-atlantis}"
-# The Postgres tag must parse as a Postgres version: CloudNativePG reads the
-# major version out of it and refuses anything else at admission.
-PG_IMAGE_TAG="${PG_IMAGE_TAG:-17.11}"
+PG_IMAGE_TAG="${PG_IMAGE_TAG:-$("$(dirname "$0")/../pg-image-tag.sh")}"
 SHA="${SHA:-$(git rev-parse --short HEAD)}"
 
 if [ -z "$PROJECT" ] || [ "$PROJECT" = "(unset)" ]; then

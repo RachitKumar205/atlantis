@@ -19,18 +19,24 @@ set -euo pipefail
 PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 ZONE="${ZONE:-us-central1-a}"
 CLUSTER="${CLUSTER:-atlantis}"
-# E2 for the app pool, per the plan's Stage 1 sizing. E2 cannot attach
-# Hyperdisk, so every disk here is pd-balanced.
-MACHINE="${MACHINE:-e2-standard-4}"
+# E2 cannot attach Hyperdisk, so every disk here is pd-balanced.
+#
+# The autoscaler cannot remove a node that runs an organisation's primary:
+# organisations run one instance, and CNPG's PodDisruptionBudget keeps one
+# primary available.
+MACHINE="${MACHINE:-e2-standard-2}"
 NODES="${NODES:-2}"
+MAX_NODES="${MAX_NODES:-4}"
+# No workload schedules onto the sandbox pool.
 SANDBOX_MACHINE="${SANDBOX_MACHINE:-n2d-standard-4}"
-SANDBOX_NODES="${SANDBOX_NODES:-1}"
+SANDBOX_NODES="${SANDBOX_NODES:-0}"
 CNPG_VERSION="${CNPG_VERSION:-1.30.0}"
 # The Barman Cloud plugin needs cert-manager and CloudNativePG 1.26 or newer.
 CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-v1.21.1}"
 BARMAN_PLUGIN_VERSION="${BARMAN_PLUGIN_VERSION:-v0.15.0}"
 BACKUP_BUCKET="${BACKUP_BUCKET:-${PROJECT}-atlantis-backups}"
 REGION="${REGION:-${ZONE%-*}}"
+PG_IMAGE_TAG="${PG_IMAGE_TAG:-$("$(dirname "$0")/../pg-image-tag.sh")}"
 
 if [ -z "$PROJECT" ] || [ "$PROJECT" = "(unset)" ]; then
     echo "PROJECT is not set and gcloud has no project configured" >&2
@@ -51,22 +57,31 @@ gcloud services enable container.googleapis.com artifactregistry.googleapis.com 
 # Zonal, one cluster: the free tier covers exactly one cluster fee. Dataplane
 # V2 enforces the NetworkPolicies the provisioner writes; Workload Identity is
 # how the backup pods reach Cloud Storage without a key file.
+#
+# The kube-state, cAdvisor and kubelet metric packages and managed Prometheus
+# bill per sample ingested.
+#
+# 50-traffic.sh finds the nodes by the pool name default-pool.
 say "cluster $CLUSTER in $ZONE"
 if gcloud container clusters describe "$CLUSTER" --zone "$ZONE" --project "$PROJECT" >/dev/null 2>&1; then
     echo "cluster present"
 else
     gcloud container clusters create "$CLUSTER" --zone "$ZONE" --project "$PROJECT" \
         --enable-dataplane-v2 --workload-pool="$PROJECT.svc.id.goog" \
-        --num-nodes "$NODES" --machine-type "$MACHINE" --disk-type pd-balanced --disk-size 50
+        --monitoring=SYSTEM --no-enable-managed-prometheus \
+        --num-nodes "$NODES" --enable-autoscaling --min-nodes "$NODES" --max-nodes "$MAX_NODES" \
+        --machine-type "$MACHINE" --disk-type pd-balanced --disk-size 30
 fi
 
-say "sandbox node pool (spot)"
-if gcloud container node-pools describe sandbox --cluster "$CLUSTER" --zone "$ZONE" --project "$PROJECT" >/dev/null 2>&1; then
-    echo "pool present"
-else
-    gcloud container node-pools create sandbox --cluster "$CLUSTER" --zone "$ZONE" --project "$PROJECT" \
-        --spot --machine-type "$SANDBOX_MACHINE" --disk-type pd-balanced --num-nodes "$SANDBOX_NODES" \
-        --node-labels=atlantis.dev/pool=sandbox --node-taints=atlantis.dev/sandbox=true:NoSchedule
+if [ "$SANDBOX_NODES" -gt 0 ]; then
+    say "sandbox node pool (spot)"
+    if gcloud container node-pools describe sandbox --cluster "$CLUSTER" --zone "$ZONE" --project "$PROJECT" >/dev/null 2>&1; then
+        echo "pool present"
+    else
+        gcloud container node-pools create sandbox --cluster "$CLUSTER" --zone "$ZONE" --project "$PROJECT" \
+            --spot --machine-type "$SANDBOX_MACHINE" --disk-type pd-balanced --num-nodes "$SANDBOX_NODES" \
+            --node-labels=atlantis.dev/pool=sandbox --node-taints=atlantis.dev/sandbox=true:NoSchedule
+    fi
 fi
 
 gcloud container clusters get-credentials "$CLUSTER" --zone "$ZONE" --project "$PROJECT" >/dev/null
@@ -153,7 +168,7 @@ for role in cloud console; do
         k -n atlantis-system create secret generic "control-db-$role"             --type kubernetes.io/basic-auth             --from-literal=username="atlantis_$role"             --from-literal=password="$(openssl rand -base64 30 | tr -d '/+=' | cut -c1-32)" >/dev/null
     fi
 done
-PG_IMAGE="${PG_IMAGE:-${REGION}-docker.pkg.dev/${PROJECT}/atlantis/atlantis-pg:${PG_IMAGE_TAG:-17.11}}"
+PG_IMAGE="${PG_IMAGE:-${REGION}-docker.pkg.dev/${PROJECT}/atlantis/atlantis-pg:${PG_IMAGE_TAG}}"
 sed -e "s|__PROJECT__|$PROJECT|g" -e "s|__BUCKET__|$BACKUP_BUCKET|g" -e "s|__PG_IMAGE__|$PG_IMAGE|g"     20-control-db.yaml | k apply -f - >/dev/null
 echo "waiting for the control cluster (first bootstrap takes a few minutes; watch with: kubectl -n atlantis-system get cluster,pods -w)"
 for i in $(seq 1 60); do
