@@ -27,6 +27,7 @@ func setBaseEnv(t *testing.T) {
 	t.Setenv("CLOUD_MAIL_DEV", "")
 	t.Setenv("CLOUD_SMTP_ADDR", "")
 	t.Setenv("CLOUD_SMTP_FROM", "")
+	t.Setenv("CLOUD_SITE_ORIGIN", "")
 }
 
 // The inverted default: nothing configured is now a refusal.

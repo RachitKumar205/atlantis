@@ -851,6 +851,7 @@ spec:
             # logging mailer, and verification links come out of the pod log.
             - { name: CLOUD_MAIL_DEV, value: "${CLOUD_MAIL_DEV_VALUE}" }
             - { name: CLOUD_MAIL_FROM, value: "${CLOUD_MAIL_FROM:-}" }
+            - { name: CLOUD_SITE_ORIGIN, value: "${CLOUD_SITE_ORIGIN:-}" }
           ports:
             - name: http
               containerPort: 9500

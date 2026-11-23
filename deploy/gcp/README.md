@@ -51,6 +51,7 @@ Values that differ from the local cluster, from `ops/configuration.md`:
 | `CLOUD_JWKS_URL` (console) | `http://atlantis-cloud.atlantis-system.svc.cluster.local:9500/.well-known/jwks.json` |
 | `CLOUD_COOKIE_SECURE`, `CONSOLE_COOKIE_SECURE` | `true` |
 | `CLOUD_TRUST_PROXY` | `true`, behind the Gateway |
+| `CLOUD_SITE_ORIGIN` | `https://<domain>`, the marketing site |
 | `CLOUD_MAIL_DEV` | `false`; `CLOUD_RESEND_API_KEY` and `CLOUD_MAIL_FROM` set, sending domain verified at Resend |
 | `CONSOLE_ENROLL_LISTEN` | `:3443` |
 | `CONSOLE_ENROLL_PUBLIC_URL`, `PROVISIONER_ENROLL_URL` | `https://enroll.<domain>` |

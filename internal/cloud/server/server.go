@@ -46,6 +46,9 @@ type Server struct {
 	// analyticsLim throttles the ingestion route, which has no session behind
 	// it; see analytics.Proxy.
 	analyticsLim *limiter
+	// enquiryLim throttles the marketing site's form. Separate from lim, so a
+	// flood of enquiries from one address does not lock it out of signing in.
+	enquiryLim *limiter
 
 	// tproxy forwards browser ingestion. The console serves the same route
 	// from the same type, so the path allowlist and the key substitution have
@@ -106,6 +109,7 @@ func New(cfg Config, db *store.Store, iss *issuer.Issuer, spaFS fs.FS, log *slog
 		lim:          newLimiter(),
 		cliPollLim:   newLimiterWithMax(cliPollLimit, limiterMaxIPs),
 		analyticsLim: newLimiterWithMax(analytics.ProxyRateLimit, analytics.ProxyMaxAddresses),
+		enquiryLim:   newLimiter(),
 		mux:          http.NewServeMux(),
 		sleep:        realSleep,
 	}
@@ -297,6 +301,13 @@ func (s *Server) routes() {
 	// stepup.go.
 	s.mux.HandleFunc("POST /api/orgs/{org}/step-up", s.handleStepUp)
 	s.mux.HandleFunc("OPTIONS /api/orgs/{org}/step-up", s.handleStepUpPreflight)
+
+	// Messages from the marketing site's form, called cross-origin by that
+	// site only; see enquiry.go.
+	if s.cfg.SiteOrigin != "" {
+		s.mux.HandleFunc("POST /api/enquiries", s.handleEnquiry)
+		s.mux.HandleFunc("OPTIONS /api/enquiries", s.handleEnquiryPreflight)
+	}
 
 	// The form in Cloud's step-up popup, still open in a console page from an
 	// earlier release.

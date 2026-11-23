@@ -318,9 +318,16 @@ func page(w http.ResponseWriter, code int, body string) {
 	writeCard(w, code, cardPage{Title: paras[0], Lead: paras[1:]})
 }
 
-// rateLimited reports whether the request may proceed, answering it if not.
+// rateLimited reports whether the request may proceed under the account
+// routes' limiter, answering it if not.
 func (s *Server) rateLimited(w http.ResponseWriter, r *http.Request) bool {
-	ok, retry := s.lim.allow(s.clientIP(r))
+	return s.rateLimitedBy(s.lim, w, r)
+}
+
+// rateLimitedBy reports whether lim admits the request's client, answering it
+// with 429 if not.
+func (s *Server) rateLimitedBy(lim *limiter, w http.ResponseWriter, r *http.Request) bool {
+	ok, retry := lim.allow(s.clientIP(r))
 	if ok {
 		return true
 	}

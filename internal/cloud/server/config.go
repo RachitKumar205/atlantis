@@ -61,6 +61,11 @@ type Config struct {
 	// cross-site writes from anything else on the same host.
 	ExtraOrigins []string // CLOUD_EXTRA_ORIGINS — development only
 
+	// SiteOrigin is the marketing site's origin, the only origin whose pages
+	// may post to /api/enquiries. Unset, the enquiry routes are not
+	// registered and answer like any unknown /api/ path.
+	SiteOrigin string // CLOUD_SITE_ORIGIN
+
 	// Cloud refuses to start unless exactly one mail transport is completely
 	// configured, or MailDev is set. See validateMail.
 	ResendAPIKey string // CLOUD_RESEND_API_KEY
@@ -138,6 +143,7 @@ func ConfigFromEnv() (Config, error) {
 
 		OAuthRedirectBase: strings.TrimRight(os.Getenv("CLOUD_OAUTH_REDIRECT_BASE"), "/"),
 		ExtraOrigins:      splitOrigins(os.Getenv("CLOUD_EXTRA_ORIGINS")),
+		SiteOrigin:        strings.TrimRight(os.Getenv("CLOUD_SITE_ORIGIN"), "/"),
 		ResendAPIKey:      os.Getenv("CLOUD_RESEND_API_KEY"),
 		// CLOUD_SMTP_FROM is the fallback.
 		MailFrom:      envOr("CLOUD_MAIL_FROM", os.Getenv("CLOUD_SMTP_FROM")),
@@ -189,6 +195,13 @@ func ConfigFromEnv() (Config, error) {
 
 	if err := c.validateMail(); err != nil {
 		return Config{}, err
+	}
+
+	// Compared byte for byte with each request's Origin after originOf, so
+	// anything originOf would change never matches.
+	if c.SiteOrigin != "" && originOf(c.SiteOrigin) != c.SiteOrigin {
+		return Config{}, fmt.Errorf("CLOUD_SITE_ORIGIN must be a bare lowercase origin "+
+			"like https://tryatlantis.dev, with no path, got %q", c.SiteOrigin)
 	}
 
 	// Neither value set means the provider is off. Exactly one set fails at the

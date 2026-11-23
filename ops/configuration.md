@@ -424,6 +424,7 @@ Read by `cmd/cloud`, which publishes the keys consoles verify against.
 | `CLOUD_SMTP_USER`, `CLOUD_SMTP_PASSWORD` | (unset) | SMTP credentials. Sent only over an encrypted connection — Go's `PlainAuth` refuses otherwise, which is why STARTTLS is attempted unconditionally. |
 | `CLOUD_HIBP_CHECK` | `true` | Refuse passwords found in a known breach, via Have I Been Pwned's k-anonymity range API. The password never leaves the process; only the first five characters of its SHA-1 are sent. |
 | `CLOUD_TRUST_PROXY` | `false` | Read `X-Forwarded-For` when rate limiting. Leave off unless something you control terminates in front — the header is spoofable, and a limiter keyed on a spoofable value is one an attacker resets per request. |
+| `CLOUD_SITE_ORIGIN` | (unset) | The marketing site's origin, such as `https://tryatlantis.dev`, with no path. Pages on it may post to `POST /api/enquiries`, which stores the message in `cloud.enquiries`. Unset means the route is not registered: `POST` answers 404 and `OPTIONS` answers 405. |
 | `CLOUD_GITHUB_CLIENT_ID`, `CLOUD_GITHUB_CLIENT_SECRET` | (unset) | Sign in with GitHub. Both or neither — one without the other is refused at startup. Unset means the provider is not registered and its URLs answer 404. |
 | `CLOUD_GOOGLE_CLIENT_ID`, `CLOUD_GOOGLE_CLIENT_SECRET` | (unset) | Sign in with Google. Same rule. |
 

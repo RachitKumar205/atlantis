@@ -95,6 +95,9 @@ spec:
               value: "__MAIL_DEV__"
             - name: CLOUD_MAIL_FROM
               value: "__MAIL_FROM__"
+            # The marketing site at the apex, whose form posts to /api/enquiries.
+            - name: CLOUD_SITE_ORIGIN
+              value: "https://__DOMAIN__"
           ports:
             - name: http
               containerPort: 9500
