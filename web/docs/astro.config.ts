@@ -4,9 +4,9 @@ import nimbus, {
   defineConfig as defineNimbusConfig,
 } from "@cloudflare/nimbus-docs";
 import { tableScroll } from "@cloudflare/nimbus-docs/markdown";
-import { atl } from "./src/shiki/atl";
-import { tideout } from "./src/shiki/tideout";
-import { datumCodeTheme } from "./src/shiki/datum-theme";
+import { atl } from "@atlantis/shared/shiki/atl";
+import { tideout } from "@atlantis/shared/shiki/tideout";
+import { datumCodeTheme } from "@atlantis/shared/shiki/datum-theme";
 
 const nimbusConfig = defineNimbusConfig({
   // The canonical origin, with no trailing slash. Drives canonical URLs,

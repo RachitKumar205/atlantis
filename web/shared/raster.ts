@@ -12,8 +12,12 @@ import { datum, icon, mark } from "./brand";
 
 // Social cards and raster icons, drawn at build time.
 //
-// Font paths are relative to web/docs, the working directory of both
-// `astro dev` and `astro build`.
+// Font paths are relative to the building app's directory (web/docs or
+// web/site), the working directory of both `astro dev` and `astro build`.
+// Each app carries the same files in its src/assets/fonts.
+//
+// canvaskit-wasm resolves from this file's real path, which reaches only the
+// root node_modules: the docs and the site must keep one hoisted version.
 
 const require = createRequire(import.meta.url);
 

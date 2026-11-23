@@ -1,7 +1,7 @@
 import { getVisibleEntries } from "@cloudflare/nimbus-docs/runtime";
 import type { APIRoute, GetStaticPaths, InferGetStaticPropsType } from "astro";
 import { config } from "virtual:nimbus/config";
-import { renderCard } from "@/lib/raster";
+import { renderCard } from "@atlantis/shared/raster";
 
 export const prerender = true;
 

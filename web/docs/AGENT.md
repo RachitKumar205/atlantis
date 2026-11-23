@@ -15,9 +15,7 @@ src/
 ├── content.config.ts        # registers docsCollection() + partialsCollection()
 ├── layouts/                 # BaseLayout (NimbusHead), DocsLayout (sidebar/TOC/breadcrumbs)
 ├── lib/
-│   ├── brand.ts             # Datum colours and the ring mark, for generated images
-│   ├── cn.ts                # Tailwind className merger
-│   └── raster.ts            # canvaskit renderer: OG cards, raster icons, .ico packing
+│   └── cn.ts                # Tailwind className merger
 ├── pages/
 │   ├── [...slug].astro
 │   ├── [...slug]/index.md.ts   # per-page markdown alternate
@@ -66,7 +64,7 @@ Rules:
 | Feature recipe | `pnpm exec nimbus-docs add <feature-slug>`. Pipe the printed brief to your agent. |
 | Check it builds | `pnpm exec nimbus-docs check` — build-free preflight (env + structure + authoring + types). `--json` for an agent loop, `--fix` to repair what's safe. |
 | Custom page route | Add a file under `src/pages/`. |
-| Custom OG style | Edit `renderCard` in `src/lib/raster.ts`; colours live in `src/lib/brand.ts`. |
+| Custom OG style | Edit `renderCard` in `web/shared/raster.ts`; colours live in `web/shared/brand.ts`. Both are shared with web/site. |
 | Check for updates | `pnpm exec nimbus-docs outdated` — starter files behind their tag + registry components behind. |
 | Upgrade a starter file | `pnpm exec nimbus-docs diff <file>` to review, `diff --apply <file>` to pull a clean upstream change. |
 | Upgrade a registry component | `pnpm exec nimbus-docs add <slug> --overwrite`, then review with `git diff`. |

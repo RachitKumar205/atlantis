@@ -1,6 +1,6 @@
 import type { APIRoute } from "astro";
 import { config } from "virtual:nimbus/config";
-import { renderCard } from "@/lib/raster";
+import { renderCard } from "@atlantis/shared/raster";
 
 export const prerender = true;
 

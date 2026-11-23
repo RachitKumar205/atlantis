@@ -30,8 +30,8 @@ RUN npm ci --prefer-offline \
       --workspace web/docs \
       --include-workspace-root
 
-# @atlantis/shared carries the design tokens the site imports; it is a
-# workspace member rather than a published package, so its source is needed.
+# @atlantis/shared is an unpublished workspace member, so the build needs its
+# source.
 COPY web/shared/ ./web/shared/
 COPY web/docs/ ./web/docs/
 RUN npm run build --workspace web/docs

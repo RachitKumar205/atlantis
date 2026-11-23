@@ -1,5 +1,5 @@
 import type { APIRoute } from "astro";
-import { iconSvg } from "@/lib/brand";
+import { iconSvg } from "@atlantis/shared/brand";
 
 export const prerender = true;
 

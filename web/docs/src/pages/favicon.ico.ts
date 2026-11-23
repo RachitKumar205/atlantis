@@ -1,5 +1,5 @@
 import type { APIRoute } from "astro";
-import { ico, renderIcon } from "@/lib/raster";
+import { ico, renderIcon } from "@atlantis/shared/raster";
 
 export const prerender = true;
 
