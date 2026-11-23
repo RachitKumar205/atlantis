@@ -326,8 +326,7 @@
       24px 0 44px 0 rgba(0, 0, 0, 0.38);
 
     --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(0, 0, 0, 0.12) 100%);
-    --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(0, 0, 0, 0.12) 100%);
-  --primary-ring: #4A6176;
+    --primary-ring: #4A6176;
     --primary-hi: #A9BAC9;
     --primary-shade: rgba(16, 20, 26, 0.55);
 
@@ -397,6 +396,7 @@
     8px 0 16px 0 rgba(0, 0, 0, 0.44),
     24px 0 44px 0 rgba(0, 0, 0, 0.38);
 
+  --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(0, 0, 0, 0.12) 100%);
   --primary-ring: #4A6176;
   --primary-hi: #A9BAC9;
   --primary-shade: rgba(16, 20, 26, 0.55);

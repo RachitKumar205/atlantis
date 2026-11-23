@@ -1,0 +1,24 @@
+---
+import Mark from "./Mark.astro";
+import { site } from "../config";
+---
+
+<header class="header">
+  <div class="wrap header__inner">
+    <a class="brand" href="/" aria-label="Atlantis home">
+      <Mark size={26} />
+      <span class="brand__name">Atlantis</span>
+    </a>
+    <nav class="nav" aria-label="Main">
+      <a class="nav__link nav__link--wide" href={site.docs}>Docs</a>
+      <a class="nav__link" href={site.platform}>Sign in</a>
+      {
+        site.contact ? (
+          <a class="btn btn--primary btn--small" href={site.contact}>Talk to us</a>
+        ) : (
+          <a class="btn btn--primary btn--small" href={site.platform}>Sign up</a>
+        )
+      }
+    </nav>
+  </div>
+</header>

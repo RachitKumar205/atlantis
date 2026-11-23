@@ -34,13 +34,13 @@ RUN buf generate
 # Built in one stage because they are one npm workspace with one lockfile at the
 # root. `npm ci` installs the whole tree and fails if a member named in the
 # lockfile is missing, so every member's package.json has to be present — which
-# is why all four are copied before any source, and why a change to a component
-# does not invalidate the install layer.
+# is why all of them are copied before any source, and why a change to a
+# component does not invalidate the install layer.
 #
-# web/docs is the documentation site. No image serves it, and this stage does
-# not build it — its package.json is copied only so `npm ci` can resolve the
-# member the lockfile names. The install is scoped to the two members that are
-# built here, which also keeps Astro's tree out of the image.
+# web/docs and web/site build from their own Dockerfiles; their package.json
+# files are here for `npm ci` only.
+#
+# Scoping the install to console and cloud keeps Astro out of the image.
 #
 # Nothing that does not embed a SPA depends on this stage. See the note on
 # build-spa below for why that is arranged the way it is.
@@ -51,6 +51,7 @@ COPY web/console/package.json ./web/console/
 COPY web/cloud/package.json ./web/cloud/
 COPY web/shared/package.json ./web/shared/
 COPY web/docs/package.json ./web/docs/
+COPY web/site/package.json ./web/site/
 RUN npm ci --prefer-offline \
       --workspace web/console \
       --workspace web/cloud \

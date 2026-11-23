@@ -1,0 +1,23 @@
+---
+import { mark } from "@atlantis/shared/brand";
+
+interface Props {
+  size?: number;
+  class?: string;
+}
+
+const { size = 26, class: className } = Astro.props;
+const c = mark.grid / 2;
+---
+
+<svg
+  class={className}
+  width={size}
+  height={size}
+  viewBox={`0 0 ${mark.grid} ${mark.grid}`}
+  aria-hidden="true"
+>
+  <circle cx={c} cy={c} r={mark.outer.r} fill="none" stroke={mark.outer.color} stroke-width={mark.outer.stroke} />
+  <circle cx={c} cy={c} r={mark.inner.r} fill="none" stroke={mark.inner.color} stroke-width={mark.inner.stroke} />
+  <circle cx={c} cy={c} r={mark.dot.r} fill={mark.dot.color} />
+</svg>

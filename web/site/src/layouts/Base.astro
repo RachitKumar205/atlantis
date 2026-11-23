@@ -1,0 +1,75 @@
+---
+import "@atlantis/shared/datum.css";
+import "../styles/fonts.css";
+import "../styles/site.css";
+import outfit from "../assets/fonts/outfit-var-latin.woff2?url";
+import manrope from "../assets/fonts/manrope-var-latin.woff2?url";
+import plexMono from "../assets/fonts/plexmono-400-latin.woff2?url";
+import { site } from "../config";
+
+interface Props {
+  title: string;
+  description: string;
+  path?: string;
+  noindex?: boolean;
+  // The hero image, preloaded with the fonts.
+  preloadImage?: string;
+}
+
+const { title, description, path = "/", noindex = false, preloadImage } = Astro.props;
+const canonical = new URL(path, site.origin).href;
+const image = new URL("/og.png", site.origin).href;
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  name: "Atlantis",
+  applicationCategory: "DeveloperApplication",
+  operatingSystem: "macOS, Linux, Windows",
+  url: site.origin,
+  description,
+};
+---
+
+<!doctype html>
+<html lang="en" class="datum" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    {noindex && <meta name="robots" content="noindex" />}
+    <meta name="theme-color" content="#14171A" />
+
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="alternate" type="text/markdown" href="/index.md" />
+
+    <!-- The faces the first screen sets: headline, body, install command. -->
+    <link rel="preload" href={outfit} as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href={manrope} as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href={plexMono} as="font" type="font/woff2" crossorigin />
+    {preloadImage && <link rel="preload" href={preloadImage} as="image" fetchpriority="high" />}
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Atlantis" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={image} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content={site.headline} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={image} />
+
+    <script is:inline type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <slot />
+  </body>
+</html>

@@ -512,6 +512,42 @@ docs-deploy: docs-image ## Push the docs image and deploy it to Cloud Run
 	  --port 8080 \
 	  --quiet
 
+# tryatlantis.dev. Shares DOCS_PLATFORM, DOCS_REGION and the docs Artifact
+# Registry repository.
+SITE_SERVICE ?= atlantis-site
+
+.PHONY: site-image
+site-image: ## Build the tryatlantis.dev image
+	@docker version >/dev/null 2>&1 || { \
+	  echo "docker daemon is not running. Start it with:  open -a Docker"; \
+	  exit 1; \
+	}
+	docker build --platform $(DOCS_PLATFORM) --file web/site/Dockerfile -t atlantis-site:local .
+
+.PHONY: site-serve
+site-serve: site-image ## Build and serve the tryatlantis.dev image on :8098
+	docker run --rm -p 8098:8080 -e PORT=8080 atlantis-site:local
+
+.PHONY: site-deploy
+site-deploy: site-image ## Push the tryatlantis.dev image and deploy it to Cloud Run
+	@project=$$(gcloud config get-value project 2>/dev/null); \
+	if [ -z "$$project" ] || [ "$$project" = "(unset)" ]; then \
+	  echo "no gcloud project set — run: gcloud config set project <id>"; exit 1; \
+	fi; \
+	image="$(DOCS_REGION)-docker.pkg.dev/$$project/docs/atlantis-site:$$(git rev-parse --short HEAD)"; \
+	echo "deploying $$image"; \
+	gcloud auth configure-docker $(DOCS_REGION)-docker.pkg.dev --quiet && \
+	docker tag atlantis-site:local "$$image" && \
+	docker push "$$image" && \
+	gcloud run deploy $(SITE_SERVICE) \
+	  --image "$$image" \
+	  --region $(DOCS_REGION) \
+	  --platform managed \
+	  --allow-unauthenticated \
+	  --min-instances 0 \
+	  --port 8080 \
+	  --quiet
+
 # ---- release host ------------------------------------------------------------
 #
 # A proxy in front of the Cloud Storage bucket, not a copy of it. The image

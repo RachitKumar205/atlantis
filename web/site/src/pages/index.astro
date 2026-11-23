@@ -1,0 +1,379 @@
+---
+import { Code } from "astro:components";
+import { atl } from "@atlantis/shared/shiki/atl";
+import { tideout } from "@atlantis/shared/shiki/tideout";
+import { datumCodeTheme } from "@atlantis/shared/shiki/datum-theme";
+import Base from "../layouts/Base.astro";
+import Header from "../components/Header.astro";
+import HeroDemo from "../components/HeroDemo.astro";
+import Mark from "../components/Mark.astro";
+import Inline from "../components/Inline.astro";
+import city from "../assets/atlantis-city.webp";
+import { site, agentPrompt } from "../config";
+import { gitDiff, lineBlocks, marked, pins } from "../lib/terminal";
+import { loop, classes, rehearsal, api, closing, enquiry, session } from "../content";
+
+const langs = { atl, tideout };
+
+// Phosphor's regular weight, as in HeroDemo.
+const icons = {
+  check: "M229.66,77.66l-128,128a8,8,0,0,1-11.32,0l-56-56a8,8,0,0,1,11.32-11.32L96,188.69,218.34,66.34a8,8,0,0,1,11.32,11.32Z",
+  checkCircle:
+    "M173.66,98.34a8,8,0,0,1,0,11.32l-56,56a8,8,0,0,1-11.32,0l-24-24a8,8,0,0,1,11.32-11.32L112,148.69l50.34-50.35A8,8,0,0,1,173.66,98.34ZM232,128A104,104,0,1,1,128,24,104.11,104.11,0,0,1,232,128Zm-16,0a88,88,0,1,0-88,88A88.1,88.1,0,0,0,216,128Z",
+  pause:
+    "M200,32H160a16,16,0,0,0-16,16V208a16,16,0,0,0,16,16h40a16,16,0,0,0,16-16V48A16,16,0,0,0,200,32Zm0,176H160V48h40ZM96,32H56A16,16,0,0,0,40,48V208a16,16,0,0,0,16,16H96a16,16,0,0,0,16-16V48A16,16,0,0,0,96,32Zm0,176H56V48H96Z",
+  play: "M232.4,114.49,88.32,26.35a16,16,0,0,0-16.2-.3A15.86,15.86,0,0,0,64,39.87V216.13A15.94,15.94,0,0,0,80,232a16.07,16.07,0,0,0,8.36-2.35L232.4,141.51a15.81,15.81,0,0,0,0-27ZM80,215.94V40l143.83,88Z",
+  hourglass:
+    "M200,75.64V40a16,16,0,0,0-16-16H72A16,16,0,0,0,56,40V76a16.07,16.07,0,0,0,6.4,12.8L114.67,128,62.4,167.2A16.07,16.07,0,0,0,56,180v36a16,16,0,0,0,16,16H184a16,16,0,0,0,16-16V180.36a16.09,16.09,0,0,0-6.35-12.77L141.27,128l52.38-39.6A16.05,16.05,0,0,0,200,75.64ZM184,216H72V180l56-42,56,42.35Zm0-140.36L128,118,72,76V40H184Z",
+  database:
+    "M128,24C74.17,24,32,48.6,32,80v96c0,31.4,42.17,56,96,56s96-24.6,96-56V80C224,48.6,181.83,24,128,24Zm80,104c0,9.62-7.88,19.43-21.61,26.92C170.93,163.35,150.19,168,128,168s-42.93-4.65-58.39-13.08C55.88,147.43,48,137.62,48,128V111.36c17.06,15,46.23,24.64,80,24.64s62.94-9.68,80-24.64ZM69.61,53.08C85.07,44.65,105.81,40,128,40s42.93,4.65,58.39,13.08C200.12,60.57,208,70.38,208,80s-7.88,19.43-21.61,26.92C170.93,115.35,150.19,120,128,120s-42.93-4.65-58.39-13.08C55.88,99.43,48,89.62,48,80S55.88,60.57,69.61,53.08ZM186.39,202.92C170.93,211.35,150.19,216,128,216s-42.93-4.65-58.39-13.08C55.88,195.43,48,185.62,48,176V159.36c17.06,15,46.23,24.64,80,24.64s62.94-9.68,80-24.64V176C208,185.62,200.12,195.43,186.39,202.92Z",
+  plugs:
+    "M237.66,18.34a8,8,0,0,0-11.32,0l-52.4,52.41-5.37-5.38a32.05,32.05,0,0,0-45.26,0L100,88.69l-6.34-6.35A8,8,0,0,0,82.34,93.66L88.69,100,65.37,123.31a32,32,0,0,0,0,45.26l5.38,5.37-52.41,52.4a8,8,0,0,0,11.32,11.32l52.4-52.41,5.37,5.38a32,32,0,0,0,45.26,0L156,167.31l6.34,6.35a8,8,0,0,0,11.32-11.32L167.31,156l23.32-23.31a32,32,0,0,0,0-45.26l-5.38-5.37,52.41-52.4A8,8,0,0,0,237.66,18.34Zm-116.29,161a16,16,0,0,1-22.62,0L76.69,157.25a16,16,0,0,1,0-22.62L100,111.31,144.69,156Zm57.94-57.94L156,144.69,111.31,100l23.32-23.31a16,16,0,0,1,22.62,0l22.06,22A16,16,0,0,1,179.31,121.37ZM88.57,35A8,8,0,0,1,103.43,29l8,20A8,8,0,0,1,96.57,55ZM24.57,93A8,8,0,0,1,35,88.57l20,8A8,8,0,0,1,49,111.43l-20-8A8,8,0,0,1,24.57,93ZM231.43,163a8,8,0,0,1-10.4,4.46l-20-8A8,8,0,1,1,207,144.57l20,8A8,8,0,0,1,231.43,163Zm-64,58.06A8,8,0,0,1,152.57,227l-8-20A8,8,0,0,1,159.43,201Z",
+  braces:
+    "M43.18,128a29.78,29.78,0,0,1,8,10.26c4.8,9.9,4.8,22,4.8,33.74,0,24.31,1,36,24,36a8,8,0,0,1,0,16c-17.48,0-29.32-6.14-35.2-18.26-4.8-9.9-4.8-22-4.8-33.74,0-24.31-1-36-24-36a8,8,0,0,1,0-16c23,0,24-11.69,24-36,0-11.72,0-23.84,4.8-33.74C50.68,38.14,62.52,32,80,32a8,8,0,0,1,0,16C57,48,56,59.69,56,84c0,11.72,0,23.84-4.8,33.74A29.78,29.78,0,0,1,43.18,128ZM240,120c-23,0-24-11.69-24-36,0-11.72,0-23.84-4.8-33.74C205.32,38.14,193.48,32,176,32a8,8,0,0,0,0,16c23,0,24,11.69,24,36,0,11.72,0,23.84,4.8,33.74a29.78,29.78,0,0,0,8,10.26,29.78,29.78,0,0,0-8,10.26c-4.8,9.9-4.8,22-4.8,33.74,0,24.31-1,36-24,36a8,8,0,0,0,0,16c17.48,0,29.32-6.14,35.2-18.26,4.8-9.9,4.8-22,4.8-33.74,0-24.31,1-36,24-36a8,8,0,0,0,0-16Z",
+};
+
+// markParts splits line around each occurrence of mark.
+const markParts = (line: string, mark: string) =>
+  mark ? line.split(mark).flatMap((text, i) => (i === 0 ? [{ text }] : [{ text: mark, mark: true }, { text }])) : [{ text: line }];
+
+// How long each step's command runs before it prints, in ms. The rehearsal
+// clones the database, which took 38s in the sample; the demo waits 1.8s.
+const waits = [200, 600, 1800, 500];
+
+// A sample authenticator code for the approval in step 4.
+const approvalCode = ["4", "8", "2", "9", "1", "3"];
+const primary = site.contact
+  ? { href: site.contact, label: "Talk to us" }
+  : { href: site.platform, label: "Sign up" };
+const secondary = site.contact
+  ? { href: site.platform, label: "Sign up" }
+  : { href: site.docs, label: "Read the docs" };
+---
+
+<Base title={`Atlantis — ${site.headline}`} description={site.description} preloadImage={city.src}>
+  <div class="page">
+    <Header />
+
+    <main id="main" tabindex="-1">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero__scene" style={`--scene: url("${city.src}")`} aria-hidden="true"></div>
+        <div class="wrap">
+          <h1 id="hero-title" class="h1">{site.headline}</h1>
+          <p class="lead">{site.description}</p>
+          <div class="cta-row">
+            <a class="btn btn--primary" href={primary.href}>{primary.label}</a>
+            <a class="btn btn--ghost" href={secondary.href}>{secondary.label}</a>
+          </div>
+        </div>
+        <div class="wrap hero__view">
+          <HeroDemo />
+        </div>
+      </section>
+
+      <section class="band" aria-labelledby="loop-title">
+        <div class="wrap">
+          <h2 id="loop-title" class="h2">{loop.heading}</h2>
+          <p class="lead"><Inline text={loop.lead} /></p>
+          <div class="flow" data-flow>
+            <div class="flow__steps" role="tablist" aria-label="Steps">
+              {
+                loop.steps.map((s, i) => (
+                  <button
+                    class:list={["flow__step", { "is-current": i === 0 }]}
+                    type="button"
+                    role="tab"
+                    id={`flow-tab-${i}`}
+                    aria-controls={`flow-panel-${i}`}
+                    aria-selected={i === 0 ? "true" : "false"}
+                    aria-labelledby={`flow-title-${i}`}
+                    aria-describedby={`flow-text-${i}`}
+                    tabindex={i === 0 ? 0 : -1}
+                  >
+                    <span class="flow__rail" aria-hidden="true">
+                      <span class="flow__node">
+                        <span class="flow__num">{i + 1}</span>
+                        <svg class="flow__check" viewBox="0 0 256 256"><path d={icons.check} /></svg>
+                      </span>
+                    </span>
+                    <span class="flow__title" id={`flow-title-${i}`}>{s.title}</span>
+                    <span class="flow__text" id={`flow-text-${i}`}><Inline text={s.text} /></span>
+                  </button>
+                ))
+              }
+            </div>
+            <figure class="window term flow__window">
+              <div class="window__bar">
+                <span>Agent session</span>
+                <span class="flow__barend">
+                  <span class="mono">~/checkout-api</span>
+                  <button class="flow__toggle" type="button" data-flow-toggle hidden aria-label="Pause the demo">
+                    <svg class="flow__pause" viewBox="0 0 256 256" aria-hidden="true"><path d={icons.pause} /></svg>
+                    <svg class="flow__play" viewBox="0 0 256 256" aria-hidden="true"><path d={icons.play} /></svg>
+                  </button>
+                </span>
+              </div>
+              <div class="flow__panels">
+                {
+                  loop.steps.map((s, i) => (
+                    <div
+                      class:list={["flow__panel", { "is-current": i === 0 }]}
+                      role="tabpanel"
+                      id={`flow-panel-${i}`}
+                      aria-labelledby={`flow-tab-${i}`}
+                      data-wait={waits[i]}
+                    >
+                      <p class="flow__cmd">
+                        <span class="flow__prompt">$</span> <span class="flow__typed" data-command={s.command}>{s.command}</span>
+                      </p>
+                      <Code
+                        class="flow__out"
+                        code={s.code}
+                        lang={s.lang === "diff" ? "text" : (langs[s.lang as keyof typeof langs] ?? s.lang)}
+                        theme={datumCodeTheme}
+                        transformers={s.lang === "diff" ? [lineBlocks, gitDiff] : [lineBlocks]}
+                        wrap
+                      />
+                      {i === loop.steps.length - 1 && (
+                        <>
+                          <div class="flow__dialog" aria-hidden="true">
+                            <p class="flow__dialoghead">
+                              <svg viewBox="0 0 256 256"><path d={icons.checkCircle} /></svg>
+                              Approve this change
+                            </p>
+                            <div class="flow__dialogbody">
+                              <p><strong>checkout-api</strong> will be able to apply a <strong>destructive</strong> change.</p>
+                              <span class="flow__label">Code from your authenticator</span>
+                              <span class="flow__otp">
+                                {approvalCode.map((digit, d) => (
+                                  <>
+                                    {d === 3 && <span class="flow__sep" />}
+                                    <span class="flow__slot" data-digit={digit} />
+                                  </>
+                                ))}
+                              </span>
+                            </div>
+                            <p class="flow__dialogfoot">
+                              <span class="flow__btn">Cancel</span>
+                              <span class="flow__btn flow__btn--danger" data-approve>Approve</span>
+                            </p>
+                          </div>
+                          <p class="flow__toast" aria-hidden="true">
+                            <svg viewBox="0 0 256 256"><path d={icons.checkCircle} /></svg>
+                            Approved. The caller can apply it now.
+                          </p>
+                        </>
+                      )}
+                    </div>
+                  ))
+                }
+              </div>
+            </figure>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" aria-labelledby="classes-title">
+        <div class="wrap">
+          <h2 id="classes-title" class="h2">{classes.heading}</h2>
+          <p class="lead">{classes.lead}</p>
+          <div class="gate">
+            {
+              [
+                { key: "applies", icon: icons.check, rows: classes.rows.slice(0, 1) },
+                { key: "waits", icon: icons.hourglass, rows: classes.rows.slice(1) },
+              ].map((g) => (
+                <div class={`gate__group gate__group--${g.key}`}>
+                  <h3 class="gate__label">
+                    <svg viewBox="0 0 256 256" aria-hidden="true"><path d={g.icon} /></svg>
+                    {classes.groups[g.key as keyof typeof classes.groups]}
+                  </h3>
+                  <ul class="gate__frame">
+                    {g.rows.map((r) => (
+                      <li class="gate__class">
+                        <h4 class={`gate__name marker marker--${r.tone}`}>{r.name}</h4>
+                        <code class="gate__diff">
+                          {r.diff.map((line) => (
+                            <span class={line.startsWith("+") ? "is-add" : line.startsWith("-") ? "is-del" : undefined}>{line}</span>
+                          ))}
+                        </code>
+                        <p class="gate__text"><Inline text={r.text} /></p>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+      </section>
+
+      <section class="band" aria-labelledby="rehearse-title">
+        <div class="wrap split rehearse">
+          <div>
+            <h2 id="rehearse-title" class="h2">{rehearsal.heading}</h2>
+            <p class="lead">{rehearsal.lead}</p>
+            <ol class="rehearse__points">
+              {
+                rehearsal.points.map((p, i) => (
+                  <li data-pin={i + 1}>
+                    <span class="rehearse__pin" aria-hidden="true">{i + 1}</span>
+                    <div>
+                      <h3 class="rehearse__title">{p.title}</h3>
+                      <p class="rehearse__text"><Inline text={p.text} /></p>
+                    </div>
+                  </li>
+                ))
+              }
+            </ol>
+          </div>
+          <figure class="window term rehearse__term">
+            <div class="window__bar">
+              <span>Agent session</span>
+              <span class="mono">~/checkout-api</span>
+            </div>
+            <Code
+              code={session}
+              lang={tideout}
+              theme={datumCodeTheme}
+              transformers={[lineBlocks, pins(rehearsal.points.map((p) => p.pin))]}
+              wrap
+            />
+          </figure>
+        </div>
+      </section>
+
+      <section class="band" aria-labelledby="api-title">
+        <div class="wrap">
+          <h2 id="api-title" class="h2">{api.heading}</h2>
+          <p class="lead">{api.lead}</p>
+          <a class="arrow-link" href={site.install}>Read the getting-started guide →</a>
+          <figure class="gen">
+            <div class="gen__src">
+              <div class="window term">
+                <div class="window__bar"><span class="mono">{api.file}</span></div>
+                <Code code={api.schema} lang={atl} theme={datumCodeTheme} transformers={[lineBlocks, marked(api.mark)]} wrap />
+              </div>
+            </div>
+            <ul class="gen__outs">
+              {
+                api.outputs.map((o) => (
+                  <li class="gen__out">
+                    <div class="gen__head">
+                      <svg viewBox="0 0 256 256" aria-hidden="true"><path d={icons[o.icon as keyof typeof icons]} /></svg>
+                      <h3 class="gen__name">{o.name}</h3>
+                      <code class="gen__step">{o.step}</code>
+                    </div>
+                    {o.rpcs ? (
+                      <ul class="gen__rpcs" aria-label="Methods">
+                        {o.rpcs.map((r) => (
+                          <li><code>{r}</code></li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <code class="gen__code">
+                        {o.code.map((line) => (
+                          <span>
+                            {markParts(line, o.mark).map((p) => (p.mark ? <mark>{p.text}</mark> : p.text))}
+                          </span>
+                        ))}
+                      </code>
+                    )}
+                    <p class="gen__text"><Inline text={o.text} /></p>
+                  </li>
+                ))
+              }
+            </ul>
+          </figure>
+        </div>
+      </section>
+
+      <section class="band" aria-labelledby="closing-title">
+        <div class="closing__art" aria-hidden="true">
+          <svg class="closing__rings" viewBox="-480 -480 960 960">
+            {[232, 304, 376, 448].map((r) => <circle r={r} />)}
+          </svg>
+        </div>
+        <div class="wrap closing">
+          <div class="closing__start">
+            <h2 id="closing-title" class="h2">{closing.heading}</h2>
+            <p class="lead"><Inline text={closing.text} /></p>
+            <div class="command">
+              <code>{site.installCommand}</code>
+              <button class="copy" type="button" data-copy={site.installCommand}>Copy</button>
+            </div>
+            <div class="cta-row">
+              <a class="btn btn--primary" href={primary.href}>{primary.label}</a>
+              <button class="link-btn" type="button" data-copy={agentPrompt}>Copy the agent setup prompt</button>
+            </div>
+          </div>
+
+          <form class="enquiry" action={site.enquiries} method="post" aria-labelledby="enquiry-title" data-enquiry>
+            <h3 id="enquiry-title" class="enquiry__title">{enquiry.heading}</h3>
+            <p class="enquiry__text">{enquiry.text}</p>
+            <label class="enquiry__field">
+              <span class="enquiry__label">{enquiry.email}</span>
+              <input class="enquiry__input" type="email" name="email" autocomplete="email" maxlength="254" required />
+            </label>
+            <label class="enquiry__field">
+              <span class="enquiry__label">{enquiry.message}</span>
+              <textarea class="enquiry__input enquiry__input--area" name="message" rows="4" maxlength="4000" required></textarea>
+            </label>
+            <div class="enquiry__trap" aria-hidden="true">
+              <label>Website <input type="text" name="website" tabindex="-1" autocomplete="off" /></label>
+            </div>
+            <div class="enquiry__foot">
+              <button class="btn btn--primary" type="submit">{enquiry.send}</button>
+              <p class="enquiry__status" role="status" data-enquiry-status></p>
+            </div>
+          </form>
+          <noscript><style is:inline>.enquiry { display: none; }</style></noscript>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="wrap footer__inner">
+        <a class="brand" href="/" aria-label="Atlantis home">
+          <Mark size={20} />
+          <span class="brand__name">Atlantis</span>
+        </a>
+        <nav aria-label="Footer">
+          <a href={site.docs}>Docs</a>
+          <a href={site.install}>Getting started</a>
+          <a href={site.platform}>Sign in</a>
+          <a href="/index.md">This page as Markdown</a>
+        </nav>
+        <p class="muted" style="margin: 0">© 2026 Atlantis</p>
+      </div>
+    </footer>
+  </div>
+
+  <p class="sr-only" aria-live="polite" id="copy-status"></p>
+
+  <script>
+    import { initFlow } from "../scripts/flow";
+    import { initEnquiry } from "../scripts/enquiry";
+
+    for (const flow of document.querySelectorAll<HTMLElement>("[data-flow]")) initFlow(flow);
+    for (const form of document.querySelectorAll<HTMLFormElement>("[data-enquiry]")) initEnquiry(form);
+
+    const status = document.getElementById("copy-status");
+    for (const button of document.querySelectorAll<HTMLButtonElement>("[data-copy]")) {
+      const label = button.textContent;
+      button.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(button.dataset.copy ?? "");
+          button.textContent = "Copied";
+          if (status) status.textContent = "Copied to the clipboard.";
+        } catch {
+          button.textContent = "Copy failed";
+        }
+        setTimeout(() => {
+          button.textContent = label;
+          if (status) status.textContent = "";
+        }, 2000);
+      });
+    }
+  </script>
+</Base>

@@ -1,0 +1,11 @@
+---
+// Copy with `backticks` around identifiers, rendered as <code>. index.md uses
+// the same strings unchanged.
+interface Props {
+  text: string;
+}
+
+const parts = Astro.props.text.split("`");
+---
+
+{parts.map((p, i) => (i % 2 ? <code>{p}</code> : p))}

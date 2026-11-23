@@ -26,6 +26,7 @@ COPY web/console/package.json ./web/console/
 COPY web/cloud/package.json ./web/cloud/
 COPY web/shared/package.json ./web/shared/
 COPY web/docs/package.json ./web/docs/
+COPY web/site/package.json ./web/site/
 RUN npm ci --prefer-offline \
       --workspace web/docs \
       --include-workspace-root

@@ -36,10 +36,11 @@
 /web/*/node_modules/
 /web/*/.vite/
 
-# web/docs (Astro). /dist/ above is root-anchored and does not reach a member,
-# and .dev.vars carries Cloudflare secrets for `wrangler dev`.
+# /dist/ above is root-anchored and misses workspace members.
+#
+# .dev.vars holds Cloudflare secrets for `wrangler dev` in web/docs.
 /web/*/dist/
-/web/docs/.astro/
+/web/*/.astro/
 /web/docs/.wrangler/
 .dev.vars
 .dev.vars.*

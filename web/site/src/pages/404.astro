@@ -1,0 +1,20 @@
+---
+import Base from "../layouts/Base.astro";
+import Header from "../components/Header.astro";
+---
+
+<Base title="Page not found — Atlantis" description="This page does not exist." path="/404" noindex>
+  <div class="page">
+    <Header />
+    <main id="main" tabindex="-1" class="band" style="border-top: 0">
+      <div class="wrap">
+        <p class="notfound__code">404</p>
+        <h1 class="h2">This page does not exist</h1>
+        <div class="cta-row">
+          <a class="btn btn--primary" href="/">Back to the home page</a>
+          <a class="btn btn--ghost" href="https://docs.tryatlantis.dev">Read the docs</a>
+        </div>
+      </div>
+    </main>
+  </div>
+</Base>
