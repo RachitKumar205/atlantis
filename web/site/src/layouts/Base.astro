@@ -14,9 +14,11 @@ interface Props {
   noindex?: boolean;
   // The hero image, preloaded with the fonts.
   preloadImage?: string;
+  // The browser's toolbar colour: the canvas the page opens on.
+  themeColor?: string;
 }
 
-const { title, description, path = "/", noindex = false, preloadImage } = Astro.props;
+const { title, description, path = "/", noindex = false, preloadImage, themeColor = "#14171A" } = Astro.props;
 const canonical = new URL(path, site.origin).href;
 const image = new URL("/og.png", site.origin).href;
 const jsonLd = {
@@ -39,7 +41,7 @@ const jsonLd = {
     <meta name="description" content={description} />
     <link rel="canonical" href={canonical} />
     {noindex && <meta name="robots" content="noindex" />}
-    <meta name="theme-color" content="#14171A" />
+    <meta name="theme-color" content={themeColor} />
 
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />

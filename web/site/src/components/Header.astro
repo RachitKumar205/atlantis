@@ -1,9 +1,16 @@
 ---
 import Mark from "./Mark.astro";
 import { site } from "../config";
+
+interface Props {
+  // The header's theme when the page loads.
+  theme?: "light" | "dark";
+}
+
+const { theme = "dark" } = Astro.props;
 ---
 
-<header class="header">
+<header class="header datum" data-theme={theme} data-header>
   <div class="wrap header__inner">
     <a class="brand" href="/" aria-label="Atlantis home">
       <Mark size={26} />

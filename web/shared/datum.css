@@ -340,7 +340,8 @@
   }
 }
 
-:root[data-theme="dark"] .datum,
+/* A scope marked light stays light inside a dark page. */
+:root[data-theme="dark"] .datum:not([data-theme="light"]),
 .datum[data-theme="dark"] {
   color-scheme: dark;
 

@@ -31,31 +31,21 @@
 
   --window-drop: 0 8px 24px rgba(27, 32, 25, 0.10), 0 1px 2px rgba(27, 32, 25, 0.06);
   --term-ring: 0 0 #0000;
-  --scene-grade: none;
-  --scene-shade: none;
+  /* The header's 64px bar and its 1px rule. */
+  --header: 65px;
+
+  color: var(--ink-1);
 }
 
-/* The page is dark: Base.astro sets data-theme on <html>.
+/* Windows on the dark ground: the page below the hero, and the hero's product
+   view, which sits on the scene's dark water.
 
-   --code-bg is darker than --canvas-0 here, so a terminal window takes a 1px
-   ring at the code ink's 10% to keep its edge. A card's lit top edge is
-   Datum's --edge-hi, which shows only on a dark card.
-
-   The scene's sky is the brightest thing in it. The shade darkens it to the
-   ground at the top, clears over the city at 52%, and returns to the ground
-   over the water, under the product view. */
-.datum[data-theme="dark"] {
+   --code-bg is darker than the dark --canvas-0, so a terminal window takes a
+   1px ring at the code ink's 10% to keep its edge. */
+.datum[data-theme="dark"],
+.hero__view {
   --window-drop: 0 16px 40px rgba(0, 0, 0, 0.40), 0 1px 2px rgba(0, 0, 0, 0.40);
   --term-ring: 0 0 0 1px rgba(220, 227, 221, 0.10);
-  --scene-grade: brightness(0.82) saturate(0.92) contrast(1.12);
-  --scene-shade: linear-gradient(
-    to bottom,
-    color-mix(in srgb, var(--canvas-0) 82%, transparent) 0%,
-    color-mix(in srgb, var(--canvas-0) 50%, transparent) 30%,
-    color-mix(in srgb, var(--canvas-0) 12%, transparent) 52%,
-    color-mix(in srgb, var(--canvas-0) 30%, transparent) 75%,
-    color-mix(in srgb, var(--canvas-0) 55%, transparent) 100%
-  );
 }
 
 @media (max-width: 720px) {
@@ -73,7 +63,9 @@
   box-sizing: border-box;
 }
 
+/* --night is the page's dark --canvas-0, for the light hero to fade into. */
 html {
+  --night: var(--canvas-0);
   background: var(--grain), var(--canvas-0);
   background-blend-mode: overlay, normal;
   -webkit-text-size-adjust: 100%;
@@ -267,6 +259,11 @@ code,
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--line-soft);
+  transition: background-color var(--med) var(--ease), border-color var(--med) var(--ease);
+}
+
+.header .brand {
+  transition: color var(--med) var(--ease);
 }
 
 .header__inner {
@@ -383,29 +380,66 @@ code,
 }
 
 /* The hero: the city from Cloud's sign-in across the full width, the text on
-   its sky, and the product rising out of the water at the bottom. */
+   its sky, and the product rising out of the water at the bottom.
+
+   The hero is a light scope (data-theme="light" in index.astro) on a dark
+   page. The scene carries the change: its sky fades into the paper, and its
+   water, graded to dusk, into --night.
+
+   It starts under the header, so the translucent header sits on paper. */
 .hero {
   position: relative;
-  padding-top: 96px;
+  margin-top: calc(-1 * var(--header));
+  padding-top: calc(var(--header) + 96px);
   overflow: hidden;
+  background: var(--grain), var(--night);
+  background-blend-mode: overlay, normal;
+}
+
+/* The paper behind the text and the sky. It ends at 75% of the scene's
+   height, where the scene is opaque: the scene's top + 0.75 × 690/1248 of the
+   width. Vertical padding resolves against the width. */
+.hero__day {
+  position: absolute;
+  inset: 0 0 auto;
+  padding-bottom: calc(var(--header) + 240px + 41.47%);
+  background: var(--grain), var(--canvas-0);
+  background-blend-mode: overlay, normal;
+}
+
+/* The page guides in the light hairline. The page's own guides carry the dark
+   one, at 12%, which all but vanishes on paper. */
+.hero__day::before,
+.hero__day::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--line-soft);
+}
+
+.hero__day::before {
+  left: var(--guide);
+}
+
+.hero__day::after {
+  right: var(--guide);
 }
 
 /* Three masks, intersected: an ellipse of paper around the hero text, a fade
-   over the image's top edge, and the water fading into the page under the
+   over the image's top edge, and the water fading into --night under the
    product view.
 
    The ellipse centres on the headline, which runs about 600px from the
    content edge at 64px. */
 .hero__scene {
   position: absolute;
-  top: 240px;
+  top: calc(var(--header) + 240px);
   left: 0;
   right: 0;
   aspect-ratio: 1248 / 690;
-  background-image: var(--scene);
-  background-size: 100% auto;
-  background-position: center top;
-  background-repeat: no-repeat;
+  background: var(--scene) center top / 100% auto no-repeat;
   --arc: radial-gradient(56% 48% at calc(var(--edge) + 300px) 0%, transparent 45%, #000 100%);
   --top: linear-gradient(to bottom, transparent 0%, #000 14%);
   --water: linear-gradient(to bottom, #000 80%, transparent 100%);
@@ -413,15 +447,40 @@ code,
   -webkit-mask-composite: source-in;
   mask-image: var(--arc), var(--top), var(--water);
   mask-composite: intersect;
-  filter: var(--scene-grade);
   pointer-events: none;
 }
 
+/* The same picture graded to dusk, from the city down to the water. */
+.hero__scene::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: inherit;
+  filter: brightness(0.82) saturate(0.92) contrast(1.12);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 40%, #000 72%);
+  mask-image: linear-gradient(to bottom, transparent 40%, #000 72%);
+}
+
+/* The water darkens toward --night under the product view. */
 .hero__scene::after {
   content: "";
   position: absolute;
   inset: 0;
-  background: var(--scene-shade);
+  background: linear-gradient(
+    to bottom,
+    transparent 50%,
+    color-mix(in srgb, var(--night) 30%, transparent) 75%,
+    color-mix(in srgb, var(--night) 55%, transparent) 100%
+  );
+}
+
+/* The header turns dark when this line, 60% down the scene, passes under it. */
+.hero__dusk {
+  position: absolute;
+  top: 60%;
+  left: 0;
+  width: 1px;
+  height: 1px;
 }
 
 .hero__view {
@@ -429,12 +488,21 @@ code,
 }
 
 /* On a phone the headline wraps to five lines, so the scene joins the flow
-   between the actions and the product view. */
+   between the actions and the product view.
+
+   The paper fills the hero, and the scene and the product view cover its
+   lower part. The scene's shade ends in solid --night, and the product view's
+   ground continues it under the console. */
 @media (max-width: 720px) {
   .hero {
     display: flex;
     flex-direction: column;
-    padding-top: 48px;
+    padding-top: calc(var(--header) + 48px);
+  }
+
+  .hero__day {
+    inset: 0;
+    padding-bottom: 0;
   }
 
   .hero__scene {
@@ -442,12 +510,27 @@ code,
     top: auto;
     order: 2;
     margin-top: 24px;
-    -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 28%, #000 72%, transparent 100%);
-    mask-image: linear-gradient(to bottom, transparent 0%, #000 28%, #000 72%, transparent 100%);
+    -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 28%);
+    mask-image: linear-gradient(to bottom, transparent 0%, #000 28%);
+  }
+
+  .hero__scene::after {
+    background: linear-gradient(
+      to bottom,
+      transparent 45%,
+      color-mix(in srgb, var(--night) 40%, transparent) 70%,
+      var(--night) 100%
+    );
   }
 
   .hero__view {
     order: 3;
+    margin-top: 0;
+    background: var(--grain), var(--night);
+    background-blend-mode: overlay, normal;
+  }
+
+  .hero__view > :first-child {
     margin-top: -96px;
   }
 

@@ -51,13 +51,16 @@ const secondary = site.contact
   : { href: site.docs, label: "Read the docs" };
 ---
 
-<Base title={`Atlantis — ${site.headline}`} description={site.description} preloadImage={city.src}>
+<Base title={`Atlantis — ${site.headline}`} description={site.description} preloadImage={city.src} themeColor="#FAFAF8">
   <div class="page">
-    <Header />
+    <Header theme="light" />
 
     <main id="main" tabindex="-1">
-      <section class="hero" aria-labelledby="hero-title">
-        <div class="hero__scene" style={`--scene: url("${city.src}")`} aria-hidden="true"></div>
+      <section class="hero datum" data-theme="light" aria-labelledby="hero-title">
+        <div class="hero__day" aria-hidden="true"></div>
+        <div class="hero__scene" style={`--scene: url("${city.src}")`} aria-hidden="true">
+          <span class="hero__dusk" data-dusk></span>
+        </div>
         <div class="wrap">
           <h1 id="hero-title" class="h1">{site.headline}</h1>
           <p class="lead">{site.description}</p>
@@ -357,6 +360,34 @@ const secondary = site.contact
 
     for (const flow of document.querySelectorAll<HTMLElement>("[data-flow]")) initFlow(flow);
     for (const form of document.querySelectorAll<HTMLFormElement>("[data-enquiry]")) initEnquiry(form);
+
+    // The header, and the browser's toolbar colour, are light until the
+    // scene's dusk line passes under the header.
+    //
+    // The check runs on every scroll, so a jump that carries the line from
+    // below the viewport to above the header in one step, as End, a scrollbar
+    // drag or a focus move does, still lands on the right theme.
+    const header = document.querySelector<HTMLElement>("[data-header]");
+    const dusk = document.querySelector<HTMLElement>("[data-dusk]");
+    const toolbar = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+    if (header && dusk) {
+      let queued = false;
+      const update = () => {
+        queued = false;
+        const theme = dusk.getBoundingClientRect().top < header.offsetHeight ? "dark" : "light";
+        if (header.dataset.theme === theme) return;
+        header.dataset.theme = theme;
+        if (toolbar) toolbar.content = getComputedStyle(header).getPropertyValue("--canvas-0").trim();
+      };
+      const queue = () => {
+        if (queued) return;
+        queued = true;
+        requestAnimationFrame(update);
+      };
+      addEventListener("scroll", queue, { passive: true });
+      addEventListener("resize", queue);
+      update();
+    }
 
     const status = document.getElementById("copy-status");
     for (const button of document.querySelectorAll<HTMLButtonElement>("[data-copy]")) {
